@@ -586,15 +586,10 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const ContextAggregator = require('./context-aggregator');
     const { hasSchedulingIntent } = require('./sms-intent');
     const context = await ContextAggregator.getContextForCustomer(customer);
-    // Same as draftShadowReply (Codex round-20 P2): a question about an OLDER payment reaches the model with
-    // that row in the facts, not only rejected after the fact.
-    // Gate off: the v11 draft gets exactly main's rows (Codex round-33 P1).
-    if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) await require('./payment-history').surfaceReferencedPayments(context, body);
-
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt, factsBlock, reserviceBooked, zelleInvoiceId } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, paymentStatusSnapshot, factsGeneratedAt, factsBlock, reserviceBooked, zelleInvoiceId } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -644,7 +639,6 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // passes.
     if (parsed.reply) {
       if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
-        await require('./payment-history').ensureAbsenceHistory(context, parsed.reply);
         if (drafter.replyQuotesUngroundedAmount(parsed.reply, context, { inboundMessage: body })) {
           logger.warn(`[estimate-conversion-agent] LLM review draft quoted an ungrounded amount (customer=${customer.id}); using template`);
           return null;
@@ -677,7 +671,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       context,
     }).promisedLanes || null;
     return {
-      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
+      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null, paymentStatusSnapshot: paymentStatusSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
       // Pre-push audit P1 (finding 2) — see draftShadowReply's identical
@@ -818,6 +812,8 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // was built for, read back by agentDecisionSendBlockReason at send
         // time.
         ...(llmDraft?.zelleInvoiceId ? { zelle_invoice_id: llmDraft.zelleInvoiceId } : {}),
+        // payment-status sentences the reply copies, re-rendered and rechecked at send (agent-decision-send-checks)
+        ...(llmDraft?.paymentStatusSnapshot ? { payment_status_snapshot: llmDraft.paymentStatusSnapshot } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),

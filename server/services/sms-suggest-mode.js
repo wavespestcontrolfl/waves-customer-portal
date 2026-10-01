@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -685,6 +685,8 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // a saved-card charge or PI started since). null when the
             // draft was never Zelle-eligible.
             ...(zelleInvoiceId ? { zelle_invoice_id: zelleInvoiceId } : {}),
+            // the payment-status sentences the reply copies (null = none), re-rendered and rechecked at every send seam
+            ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',

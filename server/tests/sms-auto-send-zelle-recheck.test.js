@@ -29,12 +29,6 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
-  // Independent-review P1 (round 5, finding 1): dispatchClaimedSend's new
-  // amount-free status-claim recheck reads these two off the real drafter —
-  // stubbed here since this suite exercises the ZELLE recheck specifically,
-  // via its own amountFreeStatusClaimStale mock below.
-  hasAffirmativePaymentAck: jest.fn(() => false),
-  paymentStatusClaimKind: jest.fn(() => null),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
@@ -44,10 +38,9 @@ jest.mock('../services/sms-amount-recheck', () => ({
   zelleInvoiceStillEligible: jest.fn(),
   hasNegativeZelleAvailabilityClaim: jest.fn(() => false),
   zelleDenialStale: jest.fn(async () => ({ stale: false })),
-  // Independent-review P1 (round 5, finding 1): dispatchClaimedSend's own
-  // amount-free status-claim recheck, right alongside the Zelle recheck this
-  // suite exercises. Defaults clean; the dedicated describe below overrides it.
-  amountFreeStatusClaimStale: jest.fn(async () => ({ stale: false })),
+  // PR #5331: dispatchClaimedSend's payment-status recheck (real-answers replies), right alongside the Zelle recheck this suite
+  // exercises. Defaults clean; the dedicated describe below overrides it.
+  paymentStatusSendBlockReason: jest.fn(async () => null),
 }));
 
 const db = require('../models/db');
@@ -92,7 +85,7 @@ beforeEach(() => {
   amountRecheck.zelleInvoiceStillEligible.mockResolvedValue({ eligible: true });
   amountRecheck.hasNegativeZelleAvailabilityClaim.mockReturnValue(false);
   amountRecheck.zelleDenialStale.mockResolvedValue({ stale: false });
-  amountRecheck.amountFreeStatusClaimStale.mockResolvedValue({ stale: false });
+  amountRecheck.paymentStatusSendBlockReason.mockResolvedValue(null);
   sendCustomerMessage.mockResolvedValue({
     sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}`,
   });
@@ -184,42 +177,46 @@ test('no zelleInvoiceId on the claim (missing snapshot) blocks the send — fail
   expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
-// Independent-review P1 (round 5, finding 1): dispatchClaimedSend's OWN
-// amount-free payment-status recheck, right alongside the Zelle recheck
-// above — a "You're paid up" reply carries no dollar figure and no Zelle
-// mention, so it clears every OTHER guard in this file untouched.
-describe('amount-free payment-status recheck (round 5, finding 1)', () => {
-  test('a clean amount-free reply sends normally', async () => {
-    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: true });
-    expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalledWith({
-      customerId: '00000000-0000-4000-8000-000000000002', body: "You're paid up!", strict: true, inboundMessage: 'How do I pay?',
+// PR #5331 (owner ruling 2026-10-01): dispatchClaimedSend's payment-status recheck for real-answers (v12) replies, right
+// alongside the Zelle recheck above. A status sentence with no figure ("Your account has no balance due.") clears the
+// price-quote guard, so it must be re-rendered from live data before the provider is entered.
+describe('payment-status recheck (PR #5331)', () => {
+  const V12 = 'house_voice_v12_real_answers5_cf_pf';
+  const SNAP = { customer_id: '00000000-0000-4000-8000-000000000002', sentences: ['Your account has no balance due.'] };
+  test('a real-answers reply is rechecked against its snapshot and the customer inbound, and sends when clean', async () => {
+    await expect(attempt({ reply: 'Your account has no balance due.', promptVersion: V12, paymentStatusSnapshot: SNAP })).resolves.toMatchObject({ sent: true });
+    expect(amountRecheck.paymentStatusSendBlockReason).toHaveBeenCalledWith({
+      customerId: '00000000-0000-4000-8000-000000000002', body: 'Your account has no balance due.', snapshot: SNAP, inboundMessage: 'How do I pay?',
     });
     expect(sendCustomerMessage).toHaveBeenCalled();
   });
 
-  test('a stale amount-free status claim blocks the send, fails the claim, reopens parked suggestions', async () => {
-    amountRecheck.amountFreeStatusClaimStale.mockResolvedValue({ stale: true, reason: 'amount_no_longer_authorized' });
-    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: false, reason: 'amount_no_longer_authorized' });
+  test('a stale / unauthorized status blocks the send, fails the claim, reopens parked suggestions', async () => {
+    amountRecheck.paymentStatusSendBlockReason.mockResolvedValue('payment_status_changed');
+    await expect(attempt({ reply: 'Your account has no balance due.', promptVersion: V12, paymentStatusSnapshot: SNAP })).resolves.toMatchObject({ sent: false, reason: 'payment_status_changed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
     expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
+  });
+
+  test('a snapshot-less real-answers reply is still rechecked (an unsanctioned status is held by the reply guard)', async () => {
+    amountRecheck.paymentStatusSendBlockReason.mockResolvedValue('payment_status_unauthorized');
+    await expect(attempt({ reply: "You're paid up!", promptVersion: V12 })).resolves.toMatchObject({ sent: false, reason: 'payment_status_unauthorized' });
+    expect(amountRecheck.paymentStatusSendBlockReason).toHaveBeenCalledWith(expect.objectContaining({ snapshot: null }));
+  });
+
+  test('a pre-v12 (gate-off) draft is never put through it - byte-identical to main', async () => {
+    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v11' })).resolves.toMatchObject({ sent: true });
+    expect(amountRecheck.paymentStatusSendBlockReason).not.toHaveBeenCalled();
   });
 
   test('it runs even for a reply with an eligible Zelle mention (both rechecks apply)', async () => {
     amountRecheck.hasAffirmativeZelleMention.mockReturnValue(true);
     amountRecheck.outgoingZelleStale.mockReturnValue({ stale: false });
     amountRecheck.zelleInvoiceStillEligible.mockResolvedValue({ eligible: true });
-    await expect(attempt({ zelleInvoiceId: 'inv-1' })).resolves.toMatchObject({ sent: true });
-    expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalled();
+    await expect(attempt({ zelleInvoiceId: 'inv-1', promptVersion: V12 })).resolves.toMatchObject({ sent: true });
+    expect(amountRecheck.paymentStatusSendBlockReason).toHaveBeenCalled();
   });
-});
-
-// Codex round-9 P1: the auto-send status recheck receives the customer's original inbound.
-test('the amount-free status recheck is passed the original inbound message', async () => {
-  await expect(attempt({ reply: "It isn't showing on our end yet.", inboundMessage: 'Did you get my $120 Zelle payment?' })).resolves.toMatchObject({ sent: true });
-  expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalledWith(expect.objectContaining({
-    strict: true, inboundMessage: 'Did you get my $120 Zelle payment?',
-  }));
 });
 
 // Codex round-13 P1: a THROWING recheck fails closed with its own reason and
@@ -244,9 +241,9 @@ describe('a throwing recheck releases the claim (fail closed)', () => {
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
   });
 
-  test('amountFreeStatusClaimStale throws', async () => {
-    amountRecheck.amountFreeStatusClaimStale.mockRejectedValue(new Error('billing down'));
-    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: false, reason: 'amount_recheck_failed' });
+  test('paymentStatusSendBlockReason throws', async () => {
+    amountRecheck.paymentStatusSendBlockReason.mockRejectedValue(new Error('billing down'));
+    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cf_pf' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
     expect(suggest.settleReplyHoldingReservation).toHaveBeenCalled();
@@ -264,11 +261,11 @@ describe('the claim is released on every other pre-send error path', () => {
   });
 
   test('a recheck throws AND the reservation release throws => the claim is STILL failed', async () => {
-    amountRecheck.amountFreeStatusClaimStale.mockRejectedValue(new Error('billing down'));
+    amountRecheck.paymentStatusSendBlockReason.mockRejectedValue(new Error('billing down'));
     suggest.settleReplyHoldingReservation
       .mockResolvedValueOnce(true) // arm
       .mockRejectedValue(new Error('settle down')); // release
-    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: false, reason: 'amount_recheck_failed' });
+    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cf_pf' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
   });

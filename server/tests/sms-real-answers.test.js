@@ -93,7 +93,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
   // Codex round-18 P1: the `via <tender>` suffix on Recent payments is a v12-only rendering (its prompt
   // rule is gated), so gate-off facts with a payment row of KNOWN tender must equal main's rendering
   // (pinned here: "<amount> <status> <date>", no suffix).
-  test('Recent payments has NO "via <tender>" suffix gate-off, even for rows with a known tender (v11 facts unchanged)', () => {
+  test('gate off: Recent payments keeps main\'s rendering (no suffix, no sentences); gate on renders sentences instead (v11 facts unchanged)', () => {
     const context = {
       summary: 'Test customer',
       billing: {
@@ -112,10 +112,13 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
     expect(off).not.toMatch(/ via (?:card|Zelle|bank)/);
     process.env[GATE] = 'false';
     expect(buildFactsBlock(context)).toBe(off);
-    // gate on: the suffix (and its paired prompt rule) appear
+    // gate on (PR #5331): raw rows are never shown - a payment STATUS reaches the model only as a rendered sentence
     process.env[GATE] = 'true';
-    expect(buildFactsBlock(context, { now: new Date('2026-09-29T15:00:00Z') }))
-      .toContain('- Recent payments: $120.00 paid Saturday, Sep 12 via card; $45.00 processing Thursday, Sep 10 via Zelle');
+    const on = buildFactsBlock(context, { now: new Date('2026-09-29T15:00:00Z') });
+    expect(on).not.toContain('- Recent payments:');
+    expect(on).toContain('  - We received your $120.00 card payment on Sep 12, 2026.');
+    expect(on).toContain('  - Your $45.00 payment from Sep 10, 2026 is still processing.'); // a manual (Zelle) tender is never named
+    expect(on).not.toMatch(/ via (?:card|Zelle|bank)/);
   });
 
   // Codex round-16 P1: a partial refund keeps payments.status = 'paid'; gate-on facts render it, gate-off is unchanged.
@@ -127,13 +130,14 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
     clearGates();
     expect(buildFactsBlock(context).split('\n').filter((l) => l.startsWith('- Recent payments:'))).toEqual(['- Recent payments: $120.00 paid Saturday, Sep 12']);
     process.env[GATE] = 'true';
-    expect(buildFactsBlock(context, { now: new Date('2026-09-29T15:00:00Z') }))
-      .toContain('- Recent payments: $120.00 paid Saturday, Sep 12 via card (partially refunded $30.00)');
+    const on = buildFactsBlock(context, { now: new Date('2026-09-29T15:00:00Z') });
+    expect(on).not.toContain('- Recent payments:');
+    expect(on).toContain('  - We received your $120.00 card payment on Sep 12, 2026, and $30.00 of it was refunded.');
   });
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers4_cf_pf');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cf_pf');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -934,7 +938,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers4_cf_pf');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers5_cf_pf');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1388,7 +1392,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers4_cf_pf');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers5_cf_pf');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1397,7 +1401,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers4_cf_pf'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers5_cf_pf'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 
@@ -1734,7 +1738,7 @@ describe('system prompt, gate ON (Codex r3): no-appointment → OPEN TIMES; foll
     expect(prompt).toContain("no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times)");
     expect(prompt).not.toContain("no confirmed appointment is shown, do NOT name a time — say you'll confirm it");
     expect(prompt).toContain('ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions');
-    expect(prompt).toContain('state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here');
+    expect(prompt).toContain('copy the matching "Payment status sentences" line from BILLING (it carries the exact amount) and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here');
     expect(prompt).not.toContain('exact amount from BILLING or PENDING ESTIMATE');
   });
 
@@ -1790,36 +1794,37 @@ describe('fetchOpenTimesData / openTimesStillOffered forward serviceType to the 
   });
 });
 
-describe('replyQuotesUngroundedAmount — payment-history amounts authorize only a payment acknowledgement (Codex r4, gate on)', () => {
+describe('replyQuotesUngroundedAmount — a paid figure is authorized only inside a copied payment-status sentence (gate on, PR #5331)', () => {
   const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
-  const context = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95 }] } };
   const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
   beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
   afterEach(() => {
     if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
     else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
   });
-  // Independent-review P1 (round 3, PR #5331, finding 2): a receipt
-  // confirmation must also NAME the date the row was paid — dates added to
-  // both the reply and the fixture rows below where the assertion expects a
-  // grounded (false) verdict.
-  test('a FRACTIONAL amount inside the acknowledgement is still an acknowledgement ("$95.50 payment")', () => {
-    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95.5, status: 'paid', payment_date: '2026-09-12' }] } };
-    expect(replyQuotesUngroundedAmount('We received your $95.50 payment from Sep 12 — thank you!', ctx)).toBe(false);
-    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95.50 from Sep 12.', ctx)).toBe(false);
+  const paid = (amount) => ({ billing: { outstandingBalance: 0, recentPayments: [{ amount, status: 'paid', payment_date: '2026-09-12' }] } });
+  test('the rendered sentence for a FRACTIONAL payment is grounded; the same facts in any other words are not', () => {
+    const ctx = paid(95.5);
+    expect(replyQuotesUngroundedAmount('We received your $95.50 payment on Sep 12, 2026.', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $95.50 payment from Sep 12 — thank you!', ctx)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95.50 from Sep 12.', ctx)).toBe(true);
     expect(replyQuotesUngroundedAmount('Your balance is $95.50.', ctx)).toBe(true);
   });
   test('"your balance is $95" on a zero-balance account with a $95 payment → ungrounded', () => {
-    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(true);
-    expect(replyQuotesUngroundedAmount('Thanks for reaching out — your balance is $95.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95.', paid(95))).toBe(true);
+    expect(replyQuotesUngroundedAmount('Thanks for reaching out — your balance is $95.', paid(95))).toBe(true);
   });
-  test('a real acknowledgement of the $95 payment → grounded', () => {
-    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'paid', payment_date: '2026-09-12' }] } };
-    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12 — thank you!', ctx)).toBe(false);
-    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95 from Sep 12.', ctx)).toBe(false);
+  test('a real acknowledgement of the $95 payment is grounded only as the whole rendered sentence', () => {
+    const ctx = paid(95);
+    expect(replyQuotesUngroundedAmount('We received your $95.00 payment on Sep 12, 2026.', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Hi Dana, We received your $95.00 payment on Sep 12, 2026. Anything else I can help with?', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12 — thank you!', ctx)).toBe(true);
   });
-  test('the current balance is authorized on its own terms, as before', () => {
-    expect(replyQuotesUngroundedAmount('Your balance is $120.50.', { billing: { outstandingBalance: 120.5, recentPayments: [] } })).toBe(false);
+  test('the current balance is grounded as its rendered sentence (an owed figure in an owed clause stays allowed)', () => {
+    const ctx = { billing: { outstandingBalance: 120.5, recentPayments: [] } };
+    expect(replyQuotesUngroundedAmount('Your account balance is $120.50.', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('You can pay the $120.50 invoice with your pay link.', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your balance is $120.50.', ctx)).toBe(true); // a status said in other words
   });
 });
 
@@ -1912,15 +1917,13 @@ describe('replyQuotesUngroundedAmount — amounts are authorized by MEANING (Cod
   test('a $95 BALANCE does not back "your $95 payment went through" when no payment is on file', () => {
     const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
     expect(replyQuotesUngroundedAmount('Your $95 payment went through — thank you!', context)).toBe(true);
-    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(false);
-    expect(replyQuotesUngroundedAmount('You currently owe $95.', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your account balance is $95.00.', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('You currently owe $95.', context)).toBe(true); // a status in other words
   });
-  test('a reply that states both, each backed by its own fact → grounded', () => {
-    // Independent-review P1 (round 3, PR #5331, finding 2): the receipt
-    // clause must also name the date its row was paid.
+  test('a reply that copies both sentences, each backed by its own fact → grounded', () => {
     const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95, status: 'paid', payment_date: '2026-09-12' }] } };
-    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12; your remaining balance is $120.50.', context)).toBe(false);
-    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12 and your remaining balance is $120.50.', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $95.00 payment on Sep 12, 2026. Your account balance is $120.50.', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12; your remaining balance is $120.50.', context)).toBe(true);
   });
   test('the SAME two figures with their claims SWAPPED → ungrounded (each amount binds to its own clause, Codex r6)', () => {
     const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
@@ -4912,10 +4915,12 @@ describe('round-7 deterministic guards (gate on)', () => {
     const pending = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'pending', payment_date: '2026-09-12' }] } };
     const paid = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'paid', payment_date: '2026-09-12' }] } };
     expect(drafter.replyQuotesUngroundedAmount('Your $95 payment went through — thank you!', failed)).toBe(true);
-    expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', pending)).toBe(true);
-    // Independent-review P1 (round 3, PR #5331, finding 2): the receipt
-    // clause must also name the date its row was paid.
-    expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment from Sep 12.', paid)).toBe(false);
+    expect(drafter.replyQuotesUngroundedAmount('We received your $95.00 payment on Sep 12, 2026.', failed)).toBe(true); // no such sentence is rendered for a failed row
+    expect(drafter.replyQuotesUngroundedAmount('We received your $95.00 payment on Sep 12, 2026.', pending)).toBe(true);
+    expect(drafter.replyQuotesUngroundedAmount('We received your $95.00 payment on Sep 12, 2026.', paid)).toBe(false);
+    // ...and the failed / pending rows render their OWN sentences
+    expect(drafter.replyQuotesUngroundedAmount('A $95.00 payment attempt on Sep 12, 2026 did not go through.', failed)).toBe(false);
+    expect(drafter.replyQuotesUngroundedAmount('Your $95.00 payment from Sep 12, 2026 is still processing.', pending)).toBe(false);
   });
 });
 
@@ -5199,11 +5204,20 @@ describe('#5194 review rounds', () => {
   test('amount guard: an unparseable priced clause cannot ride along with a grounded figure ("balance is $95, and the fee is fifty dollars")', () => {
     const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
     const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
-    expect(replyQuotesUngroundedAmount('Your balance is $95, and the fee is fifty dollars.', context)).toBe(true);
-    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(false);
-    // r8 P1: the same clause — a readable figure cannot carry an unreadable one
-    expect(replyQuotesUngroundedAmount('Your balance is $95 plus a fee of fifty dollars.', context)).toBe(true);
-    expect(replyQuotesUngroundedAmount('Your balance is $95 and the fee is 45.', context)).toBe(true);
+    const prior = process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      // gate off keeps main's pooled rule (covered by the gate-OFF describe above); gate on:
+      // the balance rides in its rendered sentence; the unreadable price still cannot ride along (r8 P1: a readable figure cannot carry an unreadable one)
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      expect(replyQuotesUngroundedAmount('Your balance is $95, and the fee is fifty dollars.', context)).toBe(true);
+      expect(replyQuotesUngroundedAmount('Your balance is $95 plus a fee of fifty dollars.', context)).toBe(true);
+      expect(replyQuotesUngroundedAmount('Your account balance is $95.00.', context)).toBe(false);
+      expect(replyQuotesUngroundedAmount('Your account balance is $95.00. The visit fee is fifty dollars.', context)).toBe(true);
+      expect(replyQuotesUngroundedAmount('You can pay the $95.00 invoice online, and the fee is fifty dollars.', context)).toBe(true);
+      expect(replyQuotesUngroundedAmount('You can pay the $95.00 invoice online.', context)).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior;
+    }
   });
 
   test('SLA edit: the deadline follows the ORIGINAL promise — "tomorrow morning" edited to the now-current "this morning" before 9 AM still sends', () => {
@@ -5221,8 +5235,7 @@ describe('#5194 review rounds', () => {
     const context = { billing: { outstandingBalance: 0, openInvoice: { amountDue: 45.5 }, recentPayments: [{ amount: 95, status: 'paid' }, { amount: 60, status: 'failed' }, { amount: null }] } };
     const { owed, paid } = billingAmountCents(context);
     expect([...owed]).toEqual([4550]); // a zero balance is not owed; the open invoice is
-    expect([...paid].sort((a, b) => a - b)).toEqual([6000, 9500]);
-    expect([...billingAmountCents(context, { settledOnly: true }).paid]).toEqual([9500]);
+    expect([...paid].sort((a, b) => a - b)).toEqual([6000, 9500]); // main's pooled (gate-off / pre-v12) allowlist, unchanged
     expect(billingAmountCents(null)).toEqual({ owed: new Set(), paid: new Set() });
   });
 });

@@ -37,6 +37,9 @@ const { etParts } = require('../utils/datetime-et');
 // hardcoded Zelle contact). ZELLE_RECIPIENT unset ⇒ null, and the PAYMENT
 // OPTIONS fact below states card/ACH only.
 const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
+// The payment-status contract: the only way an AI draft may state a payment / invoice / refund / balance status is by copying a
+// sentence this module renders from the customer's records (owner ruling 2026-10-01).
+const paymentStatus = require('./payment-status-contract');
 
 const DRAFTER = 'house_voice';
 // v7 (06-14): FEW-SHOT VOICE GROUNDING. v6 attacked fact fabrication via data
@@ -105,15 +108,12 @@ const PROMPT_VERSION = 'house_voice_v11';
 // cancellation). generateGroundedDraft stamps this version instead of
 // PROMPT_VERSION on a draft that actually used the rewritten prompt, so
 // judge/ledger rows tell the two cohorts apart.
-// v12.3 (PR #5331, independent-review round 1) — PAYMENT FACTS: the BILLING &
-// MONEY RULES bullets and the PAYMENT OPTIONS fact are properly gated (a P1 fix,
-// not new behavior — see paymentMoneyExtra and buildFactsBlock's own comments)
-// and the payment-confirmation rule/guard are status-aware and
-// Zelle-eligibility-aware. Drafts made with them stamp the '_pf' token, so cohort
-// evidence never pools pre- and post-fix drafts under one identity, and the
-// sealed-eval suffix-token contract (sms-sealed-eval VERSION_SUFFIX_FACT_MARKERS:
-// 'pf' REQUIRES the "- Payment options:" line) keeps items frozen before the
-// section existed from grading it, and vice versa.
+// v12.3 (PR #5331) — PAYMENT FACTS: the BILLING & MONEY RULES bullets and the PAYMENT OPTIONS fact are gated, and (owner ruling
+// 2026-10-01) a payment / invoice / refund / balance STATUS reaches a customer only as a word-for-word copy of a sentence rendered
+// from the customer's records (payment-status-contract.js: the BILLING "Payment status sentences"). Drafts made with them stamp
+// the '_pf' token, so cohort evidence never pools pre- and post-contract drafts under one identity, and the sealed-eval
+// suffix-token contract (sms-sealed-eval VERSION_SUFFIX_FACT_MARKERS: 'pf' REQUIRES the "- Payment options:" line) keeps items
+// frozen before the section existed from grading it, and vice versa.
 //
 // v12 update (2026-09-29, owner ruling): a pest report ("still seeing bugs",
 // "they're back") is NOT a complaint for hand-off purposes — the PEST
@@ -138,16 +138,17 @@ const PROMPT_VERSION = 'house_voice_v11';
 // The two cohorts stay distinct: bare (pre both), '_cf' (company facts, no
 // re-service fact), '2' (re-service fact, no company facts), '2_cf' (both,
 // current of that PR). PR #5331 (payment facts) merged main's re-service change and
-// minted a FRESH identity above both sides: numeric token "4" (>= 2 → the FREE RE-SERVICE
+// minted a FRESH identity above both sides: numeric token "5" (>= 2 → the FREE RE-SERVICE
 // line, exactly like "2"; "3" is taken by PR #5334) + '_cf' + '_pf' =
-// 'house_voice_v12_real_answers4_cf_pf': 35 chars; with all four category tags ('+bclm')
-// 40 — exactly PROMPT_VERSION_COLUMN_MAX (40), pinned by a test.
-// The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', '4_cf_pf', any later
+// 'house_voice_v12_real_answers5_cf_pf': 35 chars; with all four category tags ('+bclm')
+// 40 — exactly PROMPT_VERSION_COLUMN_MAX (40), pinned by a test. ("4" was the pre-contract
+// free-text claim checker, never merged.)
+// The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', '5_cf_pf', any later
 // suffix, any '+category' tags): readers that must recognize ALL of them —
 // sms-auto-send's gratitude discovery — match this prefix, never the current
 // constant, so a suffix bump cannot orphan rows stamped under earlier versions.
 const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}4_cf_pf`;
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}5_cf_pf`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -2616,7 +2617,6 @@ function offerSpanInText(text, day, window) {
 // block did not authorize, or price grammar the extractor cannot verify.
 // Language that states what is OWED or charged on an ongoing basis.
 const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
-const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', 'upcoming', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed', 'processing', 'requires_action']);
 // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
 // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
 // unit-less numerals stay out of the deterministic guard (dates, house
@@ -2624,123 +2624,13 @@ const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', '
 // + reviewer's territory. One definition, with PAYMENT_ACK_RE, for this
 // draft-time guard and the send-time recheck (sms-amount-recheck).
 const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-// Independent-review P1 (round 1, finding 3): widened to also catch "got
-// your payment" and "your payment is all set/paid" — the "all set"/"all
-// paid" branches still require "payment" within the same 30-char window as
-// every other branch, so an unrelated "You're all set for Tuesday…"
-// scheduling confirmation (no "payment" word anywhere near it) never
-// matches. A reply that confirms receipt with NO payment word anywhere at
-// all ("Yes, you're all set!") is outside what a regex can safely
-// distinguish from a scheduling confirmation — see the whole-reply
-// settled-payment guard below, which relies on this same anchor.
-//
-// P2 (round 6, PR #5331): built from the shared receipt-verb vocabulary in
-// payment-receipt-vocabulary.js (ONE definition of "received/processed/went
-// through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
-// payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
-// than a second, independently-maintained copy of the same words.
-const { CARD_BRAND_SPOKEN, canonicalCardBrand } = require('./card-brands');
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, inboundNamesInvoice, pronounSubjectAt, unrecognizedPaymentAssertion, residualPaymentAssertion, headlessPredicateClause, isModalNonAssertive, recognizedMatchIsHypothetical, refundSubjectAt, subclauseRanges, isNonAssertivePaymentClause, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
-const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
-// Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
-// vocabulary whether or not it's negated, so a truthful denial ("we
-// haven't received your payment yet", "we don't see a payment") was
-// flagged as an ungrounded confirmation and withheld. Cues checked within
-// the SAME clause as the match (never the whole reply) so a mixed "we got
-// your March payment but not April's" still binds each half on its own —
-// the negation half never voids the affirmative one.
-const PAYMENT_NEGATION_RE = /\b(?:haven't|have not|hasn't|has not|didn't|did not|isn't|is not|wasn't|was not|weren't|were not|never|don't see|do not see|doesn't|does not|no\b|not\b|yet to)\b/i;
-// Splits on the same boundaries as the per-clause loop below (sentence
-// ends, commas, "and"/"but", dashes) so the whole-reply ack guard judges
-// one clause at a time instead of the whole reply.
-// Independent-review P2 (round 4, PR #5331): the bare ",\s" branch broke a
-// stated "Month Day, Year" apart — "September 12, 2026" split into "…
-// September 12" and "2026" as TWO clauses, so parseClaimedPaymentDate (below)
-// never saw the year the customer actually typed and bindPaidPaymentRow could
-// only ever match by month/day, silently accepting a same-month-day row from
-// the WRONG year. The comma between a 1–2 digit day and a bare 4-digit year is
-// the one comma this split must never break on; every other list/clause comma
-// ("$50, $60, and $70", "Got it, thanks") is followed by something other than
-// a bare 4-digit token and still splits exactly as before.
-// Round-12 P1: an UNSPACED em/en dash ends a clause too ("processing—does that answer…").
-const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s?[—–]\s?|\s-\s/;
-// Codex round-10 P1 (PR #5331): the ONE polarity-aware ack test. 'positive' =
-// an affirmative receipt/ack phrase; 'negated' = the same phrase under a
-// negator in the SAME clause ("wasn't processed", "didn't get"); null = no ack
-// phrase. Every ack/status DECISION goes through this (never a raw
-// PAYMENT_ACK_RE.test) so a negated ack can never bind as a positive one.
-function paymentAckPolarity(clause) {
-  const c = String(clause || '');
-  if (!PAYMENT_ACK_RE.test(c)) return null;
-  return PAYMENT_NEGATION_RE.test(c) ? 'negated' : 'positive';
-}
-function hasAffirmativePaymentAck(text) {
-  const clauses = String(text || '').split(CLAUSE_SPLIT_RE);
-  return clauses.some((clause) => paymentAckPolarity(clause) === 'positive');
-}
-
-// Independent-review P1 (round 4, PR #5331, finding 4): a phrase list keyed
-// on the VERB after "payment" ("cleared", "posted", "was successful", "went
-// through", "is complete", "paid up", "current", …) has already failed to
-// converge across four review rounds — there is always one more synonym for
-// "arrived". STRUCTURAL default-deny instead: key on the SUBJECT, a small,
-// closed, stable set of ways a reply refers to the customer's own
-// payment/balance/account STATUS ("your payment", "the payment", "we have
-// your payment", "you're paid up", "paid in full", "all paid", "your account
-// is current") — never the verb that completes it. Two families:
-//  - SETTLEMENT ("you're paid up", "paid in full", "all paid", "your account
-//    is current/up to date"): a claim that NOTHING is owed — grounded only
-//    when the account's own current owed figures are actually empty.
-//  - EVENT ("your/the payment <completed>", "we have your payment", "payment
-//    is complete"): a claim about ONE payment — grounded only when it names
-//    the amount so it can bind to a specific paid row exactly like the
-//    narrower PAYMENT_ACK_RE claims above; bare, it names no specific
-//    payment (same rule as any other amount-free ack) but the account must
-//    at least show SOME settled payment on file, never zero.
-// Excluded, so the false-positive rate stays low: a question, a negated
-// clause (PAYMENT_NEGATION_RE, shared with the narrower guard above), and a
-// how-to/instruction on WAYS to pay (never a claim that payment already
-// happened).
-// Round-12 P1: settlement phrases come from the shared SETTLEMENT_PHRASES table
-// (also feeding the prescreen); event subjects from PAYMENT_EVENT_SUBJECT so
-// "your Zelle transfer cleared" / "your charge posted" are event claims too.
-const PAYMENT_SETTLEMENT_STATUS_RE = SETTLEMENT_PHRASE_RE;
-const PAYMENT_EVENT_STATUS_RE = new RegExp(
-  `\\b${PAYMENT_EVENT_SUBJECT}\\b[^.\\n]{0,25}\\b(?:${EVENT_STATUS_VERB_PATTERN})\\b`
-  + `|\\b(?:clear(?:ed|s)?|post(?:ed|s)?)\\b[^.\\n]{0,25}\\b${PAYMENT_EVENT_SUBJECT}\\b`
-  + `|\\bwe\\s+have\\s+your\\s+${PAYMENT_EVENT_SUBJECT}\\b`,
-  'i',
-);
-const PAYMENT_HOWTO_RE = /\byou\s+can\s+pay\b|\bpay\s+link\b|\bto\s+pay\b|\bpay(?:ing)?\s+(?:via|by|with|through)\b|\bways?\s+to\s+pay\b/i;
-// null (not a status claim, or excluded by question/negation/how-to), else
-// 'settlement' | 'event'. Settlement is tested BEFORE the negation exclusion
-// (round-12): "you don't owe anything" / "no balance due" are settlement claims
-// that themselves contain a negator.
-function paymentStatusClaimKind(clause) {
-  const text = String(clause || '');
-  if (PAYMENT_HOWTO_RE.test(text)) return null;
-  const settle = PAYMENT_SETTLEMENT_STATUS_RE.exec(text);
-  if (settle && !insideQuestion(text, settle.index)) return 'settlement';
-  if (PAYMENT_NEGATION_RE.test(text)) return null;
-  const event = PAYMENT_EVENT_STATUS_RE.exec(text);
-  if (event && !insideQuestion(text, event.index)) return 'event';
-  return null;
-}
-
+// The pooled (gate-off / pre-v12) acknowledgement test - main's, unchanged. Real-answers drafts never use it: a payment STATUS
+// reaches a customer only as a copy of a rendered sentence (payment-status-contract.js).
+const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
 // The billing figures a reply may quote, in cents — one definition for this
 // draft-time guard and the send-time recheck (sms-amount-recheck): what is
 // OWED (balance, open invoice, published monthly dues) and what was PAID.
-// `settledOnly` keeps only payments that went through (Codex r7 —
-// recentPayments is attempted history and carries failed / pending /
-// overdue rows too, none of which back "your payment went through").
-// The payments rows a claim binds against: the AUTHORITATIVE history once it has been loaded (a truncated
-// 3-row window can hide same-day attempts — Codex round-27 P1), else the recent-payments window.
-function paymentRowsForBinding(context) {
-  const billing = context?.billing;
-  const hist = billing?.paymentHistory;
-  return Array.isArray(hist?.rows) ? hist.rows : (billing?.recentPayments || []);
-}
-function billingAmountCents(context, { settledOnly = false } = {}) {
+function billingAmountCents(context) {
   const billing = context?.billing || {};
   const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
   const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
@@ -2750,1246 +2640,69 @@ function billingAmountCents(context, { settledOnly = false } = {}) {
       centsOf(billing.openInvoice?.amountDue),
       ...require('./context-aggregator').authorizedDuesCents(context),
     ]),
-    paid: finiteSet(paymentRowsForBinding(context)
-      .filter((p) => !settledOnly || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
-      .map((p) => centsOf(p?.amount))),
+    paid: finiteSet((billing.recentPayments || []).map((p) => centsOf(p?.amount))),
   };
 }
-
-// Codex round-6 pre-push audit P1 (PR #5331): the account currently OWES
-// money — an open invoice with an amount due, or a positive outstanding
-// balance. Deliberately excludes published monthly dues (see
-// authorizedDuesCents), which authorize QUOTING a price, not owing it.
-// Codex round-14 P1: an OPEN obligation right now — an invoice with an amount due or a
-// positive outstanding balance. Unlike billingHasOutstandingObligation this EXCLUDES money
-// merely in flight: "this invoice is still unpaid" asserts a live demand, and a voided/
-// canceled invoice (no open invoice, zero balance, no paid row either) must not keep
-// grounding it.
-function billingHasOpenObligation(context) {
-  const billing = context?.billing || {};
-  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0;
-}
-function billingHasOutstandingObligation(context) {
-  const billing = context?.billing || {};
-  // Codex round-11 P1: money still IN FLIGHT (a processing/pending payment row,
-  // or a processing invoice the balance excludes) is unsettled too — never
-  // "paid up" / "current" while it hasn't landed.
-  const inFlight = billing.hasProcessingPayment === true
-    || (billing.recentPayments || []).some((p) => PAYMENT_STATUS_VOCABULARY.pending.rowStatuses.includes(String(p?.status || '').toLowerCase()));
-  // an own partially_paid invoice with an amount due is owed but NOT in outstandingBalance (the portal omits it): unsettled
-  // (Codex round-36 P1) — a settlement / zero-balance claim is ungrounded, never "paid up"
-  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0 || inFlight || billing.hasUncountedPartialDue === true;
-}
-
-// Independent-review P1 (round 3, PR #5331): ONE shared tender vocabulary,
-// so replyClaimedTender (what a REPLY claims — "I Zelled you", "paid by
-// Venmo") and paymentTenderLabel (below, what a PAID ROW's own columns show)
-// can only ever agree or disagree — never drift apart the way two
-// independently-maintained word lists did (replyClaimedTender's regex never
-// recognized Venmo/PayPal, so a reply claiming a genuinely paid Venmo/PayPal
-// row could never be matched back to it). `manual: true` entries are the
-// off-gateway tenders invoice-manual-payment.js's VALID_PAYMENT_METHODS can
-// record in a manual row's description (zelle/venmo/paypal/check/cash —
-// never "other", which carries no label); the rest are Stripe-derived
-// (card/bank-ACH), read from payment_method_type/card_brand/card_last_four
-// rather than the description text.
-const TENDER_VOCABULARY = [
-  { word: 'zelle', label: 'Zelle', manual: true },
-  { word: 'venmo', label: 'Venmo', manual: true },
-  { word: 'paypal', label: 'PayPal', manual: true },
-  { word: 'check', label: 'Check', manual: true },
-  // Cash App is NOT physical cash: its own (unsupported) tender, listed BEFORE
-  // 'cash' so the alternation never reads "Cash App" as Cash. No paid row is ever
-  // labelled this, so a Cash App claim can never bind (Codex round-10 P2).
-  { word: 'cash app', label: 'Cash App', manual: false },
-  { word: 'cash', label: 'Cash', manual: true },
-  // Codex round-17 P1: tenders a customer names that are NOT a card must never let a card row bind. Genuinely
-  // non-Stripe tenders (no paid-row equivalent) get their OWN labels here (like Cash App): a claim naming one can never
-  // bind, and — because they resolve to a non-card label — a card row conflicts with them. Multi-word
-  // entries come first so the alternation never reads "gift card" as card or "wire transfer" as bank.
-  { word: 'gift card', label: 'Gift card', manual: false },
-  // Apple / Google / Samsung Pay are wallets over a CARD: Stripe settles them as paymentMethod='card'
-  // (stripe-webhook.js), so a wallet-named claim has the card identity — it binds, and contradicts, card rows.
-  { word: 'apple pay', label: 'card', manual: false },
-  { word: 'google pay', label: 'card', manual: false },
-  { word: 'samsung pay', label: 'card', manual: false },
-  { word: 'wire transfer', label: 'Wire', manual: false },
-  { word: 'wire', label: 'Wire', manual: false },
-  { word: 'money order', label: 'Money order', manual: false },
-  { word: 'western union', label: 'Western Union', manual: false },
-  { word: 'moneygram', label: 'MoneyGram', manual: false },
-  { word: 'bitcoin', label: 'Crypto', manual: false },
-  { word: 'crypto', label: 'Crypto', manual: false },
-  // card brands / card kinds all read as a card
-  { word: 'credit card', label: 'card', manual: false },
-  { word: 'debit card', label: 'card', manual: false },
-  // Codex round-40 P1: a NAMED card brand is part of the claimed tender identity ('card:visa'), never flattened to 'card' — a
-  // Mastercard row must not ground "Your Visa payment cleared". A generic "card" claim still matches any card row;
-  // tenderMatches (below) is the ONE comparator every binder uses.
-  // the brand list is ONE shared table (services/card-brands.js — Codex round-42 P1): every brand a payments row can store is named here
-  ...CARD_BRAND_SPOKEN.map(({ word, id }) => ({ word, label: `card:${id}`, manual: false })),
-  { word: 'card', label: 'card', manual: false },
-  { word: 'ach', label: 'bank/ACH', manual: false },
-  { word: 'bank transfer', label: 'bank/ACH', manual: false },
-  { word: 'bank account', label: 'bank/ACH', manual: false },
-  { word: 'bank payment', label: 'bank/ACH', manual: false },
-  { word: 'bank draft', label: 'bank/ACH', manual: false },
-  // Codex round-17 P1: bare "bank" ("paid through my bank"), online banking and bill pay are the customer's
-  // bank sending money — bank/ACH. (After the multi-word bank entries so "bank transfer" wins.)
-  { word: 'online banking', label: 'bank/ACH', manual: false },
-  { word: 'online bill pay', label: 'bank/ACH', manual: false },
-  { word: 'bill pay', label: 'bank/ACH', manual: false },
-  { word: 'billpay', label: 'bank/ACH', manual: false },
-  { word: 'bank', label: 'bank/ACH', manual: false },
-];
-const MANUAL_TENDER_WORDS = new Set(TENDER_VOCABULARY.filter((t) => t.manual).map((t) => t.word));
-const tenderLabelForWord = (word) => (
-  TENDER_VOCABULARY.find((t) => t.word === String(word || '').toLowerCase().replace(/\s+/g, ' '))?.label || null
-);
-const tenderVocabPattern = (filter) => TENDER_VOCABULARY.filter(filter).map((t) => t.word.replace(/ /g, '\\s+')).join('|');
-
-// The tender a text (a REPLY clause or the customer's INBOUND message) claims,
-// canonicalized through the SAME vocabulary paymentTenderLabel (below) derives
-// labels from. Bare "bank"/"ACH"/"bank transfer"/"bank account" all read as
-// 'bank/ACH'. null when the text names no tender at all.
-//
-// Codex round-6 pre-push audit P1 (PR #5331): two structural rules.
-//  1. "check" is also an everyday VERB ("Can you check whether my Zelle
-//     payment arrived?"), so it counts as the payment TENDER only in
-//     payment-method context (CHECK_TENDER_CONTEXT_RE) — never as a bare word.
-//  2. First-match-wins silently picked one tender out of a text that named
-//     several ("sent Zelle not a check"). More than one DISTINCT tender label
-//     now returns TENDER_AMBIGUOUS, which every caller must treat as unknown:
-//     a confirmation is never bound to a guessed tender (replyQuotes-
-//     UngroundedAmount fails closed on it).
-// paymentTenderLabel's manual-row parsing is a different job (one fixed
-// token, no free text) and deliberately does NOT use this context rule.
-const TENDER_AMBIGUOUS = 'ambiguous';
-// Codex round-6 pre-push audit P1: verb forms of the peer-to-peer tenders
-// ("I Zelled you", "Zelle'd", "zelling", "Venmo'd", "PayPal'd") name the
-// tender exactly as the noun does, so they are matched too and canonicalize to
-// the same label. Adjectival use ("Zelle payment", "card payment", "cash
-// payment", "ACH payment") is already covered by the bare-word match.
-const TENDER_VERB_FORMS = [
-  { pattern: "zell(?:e'?d|ing)", word: 'zelle' },
-  { pattern: "venmo(?:'?d|ed|ing)", word: 'venmo' },
-  { pattern: "paypal(?:'?d|ed|ing)", word: 'paypal' },
-];
-const NON_CHECK_TENDER_RE = new RegExp(
-  `\\b(${tenderVocabPattern((t) => t.word !== 'check')}|${TENDER_VERB_FORMS.map((f) => f.pattern).join('|')})\\b`,
-  'gi',
-);
-const tenderWordFor = (matched) => {
-  const w = String(matched || '').toLowerCase();
-  const verb = TENDER_VERB_FORMS.find((f) => new RegExp(`^(?:${f.pattern})$`, 'i').test(w));
-  return verb ? verb.word : w;
-};
-const CHECK_TENDER_CONTEXT_RE = new RegExp([
-  // by/with/via/using/in/as [a|my|the] check
-  "\\b(?:by|with|via|using|in|as)\\s+(?:(?:a|my|the|paper|personal|business|cashier'?s?|certified)\\s+)*check\\b",
-  // a/my/your/the/paper/... [$120] check  ("your $120 check payment")
-  "\\b(?:a|my|your|our|the|paper|personal|business|cashier'?s?|certified)\\s+(?:\\$\\s?\\d[\\d,]*(?:\\.\\d+)?\\s+)?check\\b",
-  // "<amount> check payment/deposit" — an amount directly before "check" plus a payment noun
-  '\\$\\s?\\d[\\d,]*(?:\\.\\d+)?\\s+check\\s+(?:payment|deposit|transfer)\\b',
-  // check #1043 / check no. 1043 / check number 1043 / check 1043
-  '\\bcheck\\s*(?:#|no\\.?\\s*|number\\s*)\\d+',
-  '\\bcheck\\s+\\d{3,}\\b',
-  // mailed/sent/wrote/... a check
-  "\\b(?:mailed|sent|wrote|written|dropped\\s+off|deposited|cut)\\s+(?:(?:you|y'?all|them)\\s+)?(?:(?:a|my|the|paper)\\s+)?check\\b",
-].join('|'), 'i');
-function tenderLabelsIn(text) {
-  const str = String(text || '');
-  const labels = new Set();
-  for (const m of str.matchAll(NON_CHECK_TENDER_RE)) labels.add(tenderLabelForWord(tenderWordFor(m[1])));
-  if (CHECK_TENDER_CONTEXT_RE.test(str)) labels.add('Check');
-  // "Visa card" names ONE tender: the brand refines the generic word, it is not a second tender
-  if ([...labels].some((l) => l.startsWith('card:'))) labels.delete('card');
-  return labels;
-}
-// A card ROW's brand, canonicalized to the same names the vocabulary uses (Stripe: visa / mastercard / amex / discover / …).
-// null = the row carries no readable brand (a brand-specific claim then cannot be verified against it).
-function cardBrandOfRow(p) {
-  const raw = String(p?.card_brand || '').toLowerCase().replace(/[^a-z]/g, '');
-  if (!raw || raw === 'unknown') return null;
-  // a listed brand -> its canonical id (shared table); an unlisted stored brand keeps its squashed text (it can only equal itself)
-  return canonicalCardBrand(p.card_brand) || raw;
-}
-// ONE tender comparator (Codex round-40 P1 class: tender identity must be compared the same way everywhere): does this payment
-// ROW satisfy the claimed tender label? A brand-specific claim ('card:visa') needs a card row whose card_brand IS that brand
-// (a row with no brand fails closed); every other label compares by equality as before.
-function tenderMatches(claimed, row) {
-  if (!claimed) return true;
-  const label = paymentTenderLabel(row);
-  if (String(claimed).startsWith('card:')) return label === 'card' && cardBrandOfRow(row) === String(claimed).slice(5);
-  return label === claimed;
-}
-// Do a reply's tender and a tender the customer's message named describe the same payment? Equal, or the generic 'card' on
-// one side and a branded card on the other (the brand refines it).
-function tendersCompatible(a, b) {
-  if (a === b) return true;
-  const isCard = (l) => l === 'card' || String(l).startsWith('card:');
-  return isCard(a) && isCard(b) && (a === 'card' || b === 'card');
-}
-function replyClaimedTender(text) {
-  const labels = tenderLabelsIn(text);
-  if (labels.size > 1) return TENDER_AMBIGUOUS;
-  return labels.size ? [...labels][0] : null;
-}
-
-// The SETTLED ('paid') Recent payments rows backing one specific amount —
-// never the pooled owed/paid cents Sets billingAmountCents returns, which
-// throw away which ROW an amount came from and so cannot back a tender
-// check (an old paid card row and a brand-new paid Zelle row at the same
-// amount must not be interchangeable).
-function paidRowsForCents(context, cents) {
-  return (context?.billing?.recentPayments || []).filter((p) => (
-    p && String(p?.status || '').toLowerCase() === 'paid'
-      && Number.isFinite(Number(p?.amount)) && Math.round(Number(p.amount) * 100) === cents
-  ));
-}
-
-// Independent-review P1 (round 3, PR #5331, finding 2): a receipt claim must
-// bind to the SAME row the amount and tender bind to by DATE too — the prior
-// binding picked a settled row by cents alone, so "We received your $120.00
-// payment from Sep 12" would still pass against a $120 row from a totally
-// different date (or, after a refund, a DIFFERENT $120 row that happens to
-// share the amount). Recognizes the same date forms the drafter's own facts
-// block and prompt copy use ("Sep 12", "September 12", "9/12"). Year is
-// optional (most confirmations are same-year); when the reply states one, it
-// must match too.
-const MONTH_NUMBER_BY_NAME = {
-  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
-  may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8,
-  sep: 9, sept: 9, september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
-};
-const MONTH_NAME_DATE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\b/i;
-const NUMERIC_DATE_RE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/;
-function parseClaimedPaymentDate(text) {
-  const str = String(text || '');
-  const nameMatch = MONTH_NAME_DATE_RE.exec(str);
-  if (nameMatch) {
-    const month = MONTH_NUMBER_BY_NAME[nameMatch[1].toLowerCase()];
-    const day = Number(nameMatch[2]);
-    if (month && day >= 1 && day <= 31) {
-      return { month, day, year: nameMatch[3] ? Number(nameMatch[3]) : null };
-    }
-  }
-  const numMatch = NUMERIC_DATE_RE.exec(str);
-  if (numMatch) {
-    const month = Number(numMatch[1]);
-    const day = Number(numMatch[2]);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      let year = numMatch[3] ? Number(numMatch[3]) : null;
-      if (year != null && year < 100) year += 2000;
-      return { month, day, year };
-    }
-  }
-  return null;
-}
-// EVERY distinct calendar date a text names ("Sep 1 or Sep 2" => two). Codex round-35 P1: a message naming several dates has
-// no single payment identity.
-function allClaimedPaymentDates(text) {
-  const str = String(text || '');
-  const out = [];
-  const add = (d) => { if (!out.some((o) => claimedDatesAgree(o, d))) out.push(d); };
-  for (const m of str.matchAll(new RegExp(MONTH_NAME_DATE_RE.source, 'gi'))) {
-    const month = MONTH_NUMBER_BY_NAME[m[1].toLowerCase()];
-    const day = Number(m[2]);
-    if (month && day >= 1 && day <= 31) add({ month, day, year: m[3] ? Number(m[3]) : null });
-  }
-  for (const m of str.matchAll(new RegExp(NUMERIC_DATE_RE.source, 'g'))) {
-    const month = Number(m[1]);
-    const day = Number(m[2]);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      let year = m[3] ? Number(m[3]) : null;
-      if (year != null && year < 100) year += 2000;
-      add({ month, day, year });
-    }
-  }
-  return out;
-}
-// A payment row's own calendar day, in the same date-only-anchored style as
-// formatEtDate above (pg hands DATE columns over as local-midnight Date
-// objects; reparsing as an instant would read a day early in ET).
-function paymentRowDateParts(p) {
-  const value = p?.payment_date || p?.date;
-  if (!value) return null;
-  const pad = (n) => String(n).padStart(2, '0');
-  const dayString = value instanceof Date
-    ? `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
-    : String(value);
-  const dateOnly = dayString.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (dateOnly) return { year: Number(dateOnly[1]), month: Number(dateOnly[2]), day: Number(dateOnly[3]) };
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return { year: parsed.getFullYear(), month: parsed.getMonth() + 1, day: parsed.getDate() };
-}
-function paymentDateMatchesClaim(p, claimed) {
-  if (!claimed) return false;
-  const parts = paymentRowDateParts(p);
-  if (!parts) return false;
-  if (parts.month !== claimed.month || parts.day !== claimed.day) return false;
-  return claimed.year == null || parts.year === claimed.year;
-}
-// ONE shared binder for draft time (replyQuotesUngroundedAmount) AND the
-// send-time recheck (sms-amount-recheck.js's outgoingAmountsStale, which
-// re-runs replyQuotesUngroundedAmount against FRESHLY fetched context on
-// every send — so a row a refund voided since drafting no longer binds, even
-// when another paid row shares the same amount and date). Requires a claimed
-// date (from the OUTGOING clause, or — see replyQuotesUngroundedAmount —
-// from the customer's own inbound message when the outgoing clause is
-// generic); requires that date, the amount, and (when claimed) the tender to
-// all point at the SAME settled row. Returns the bound row or null.
-//
-// Independent-review P1 (round 6, PR #5331): `claimedDate` is now an
-// explicit param, resolved by the caller from EITHER the outgoing clause or
-// the inbound message, rather than re-derived here from `text` alone — the
-// caller is the one place that knows which of the two named a date/tender.
-// Codex round-8 P1 (PR #5331): paid, pending and failed claims ALL bind through
-// this ONE function — `family` selects the row statuses from
-// PAYMENT_STATUS_VOCABULARY, and the amount / date / tender / inbound /
-// ambiguity rules are identical for every family (no separate status-only
-// path: an August failed card payment must never authorize "your Sep 12 Zelle
-// payment failed"). The one per-family difference is whether a stated date is
-// REQUIRED: a paid receipt must always name its date; a processing/failed
-// status report need not (the prompt does not demand one) but, when a date is
-// stated by the reply or the customer, the row must match it. `amountCents`
-// null = an amount-free status claim (any row of the family that also agrees
-// on tender/date). Returns the bound row or null. `onAmbiguous` is what an
-// unresolvable tender ambiguity returns (null by default = "nothing bound",
-// fail closed for a claim that needs a row; the NOT-FOUND family passes a
-// truthy sentinel so an ambiguity reads as "a row may exist" = contradicted).
-// null amountCents = an amount-free claim (any row); else the row's amount in cents must equal it.
-const rowAmountMatches = (p, amountCents) => amountCents == null
-  || (Number.isFinite(Number(p.amount)) && Math.round(Number(p.amount) * 100) === amountCents);
-// Codex round-16 P1: a PARTIAL refund leaves payments.status = 'paid' and records refund_status='partial'
-// + refund_amount (stripe.js / stripe-webhook.js). Such a row is NOT a plain fully-paid payment.
-function partialRefundCents(p) {
-  if (!p || String(p.status || '').toLowerCase() !== 'paid') return 0;
-  const refunded = Math.round(Number(p.refund_amount) * 100);
-  const total = Math.round(Number(p.amount) * 100);
-  const flagged = String(p.refund_status || '').toLowerCase() === 'partial';
-  if (!Number.isFinite(refunded) || refunded <= 0) return flagged ? -1 : 0; // flagged but amount unreadable: still partial
-  return flagged || (Number.isFinite(total) && refunded < total) ? refunded : 0;
-}
-const isPartiallyRefunded = (p) => partialRefundCents(p) !== 0;
-// Rows of the family's status(es) that agree on amount (and date when claimed).
-// Codex round-15 P1: a row with NO status (legacy / imported / partially reconciled) is
-// found-but-UNKNOWN evidence. It contradicts an ABSENCE claim ("isn't showing", "not
-// received", "unpaid") — it might be the payment — and never grounds a positive one.
-// Round-16 P1: a partially-refunded paid row grounds a REFUNDED (partial) claim — by the payment's
-// amount or the refunded amount — and never a plain PAID claim ("your payment is paid" is conservative-false).
-const ABSENCE_FAMILIES = new Set(['not_found', 'not_received', 'unpaid']);
-// Round-17 P1: wording that explicitly says the refund was PARTIAL ("partially refunded", "part of your
-// payment was refunded", "$30 of your $120 payment was refunded").
-const PARTIAL_REFUND_WORDING_RE = /\b(?:partial(?:ly)?|part\s+of|portion\s+of|some\s+of)\b|\$\s?\d[\d,]*(?:\.\d+)?\s+of\s+(?:your|the|this|it|that)\b/i;
-const partialRefundWording = (text) => PARTIAL_REFUND_WORDING_RE.test(String(text || ''));
-function paymentRowCandidates({ family, amountCents, claimedDate, rows, partialWording = false, allowPartialPaid = false, refundSubject = false }) {
-  const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
-  const anyStatus = wanted.has(ANY_STATUS);
-  const unknownCounts = ABSENCE_FAMILIES.has(family);
-  const reversalFamily = family === 'refunded' || family === 'reversed';
-  return rows.filter((p) => {
-    if (!p) return false;
-    const partial = isPartiallyRefunded(p);
-    // Round-17 P1: an unqualified "was refunded" binds only FULLY refunded rows; explicitly partial wording
-    // binds only a partially refunded row (with the actual refund amount) — never the other way round.
-    const statusOk = (anyStatus || wanted.has(String(p.status || '').toLowerCase()) || (unknownCounts && !String(p.status || '').trim()))
-      && !(family === 'paid' && partial && !(typeof allowPartialPaid === 'function' ? allowPartialPaid(p) : allowPartialPaid))
-      && !(reversalFamily && partialWording);
-    // "Your $30 refund was processed": the figure of a REFUND-subject claim is the refunded amount, which is
-    // what identifies a partial refund (no partial wording needed when it equals the recorded refund amount).
-    const partialOk = partial && reversalFamily
-      && (partialWording || (refundSubject && amountCents != null && partialRefundCents(p) === amountCents));
-    if (!statusOk && !partialOk) return false;
-    const amountOk = rowAmountMatches(p, amountCents)
-      || (partialOk && amountCents != null && partialRefundCents(p) === amountCents);
-    return amountOk && (!claimedDate || paymentDateMatchesClaim(p, claimedDate));
-  });
-}
-const PRESENCE_STATUS_FAMILIES = new Set(['paid', 'pending', 'failed', 'refunded', 'disputed', 'reversed']);
-// The status FAMILY of a payments row for identity-ambiguity purposes: a partial refund keeps status
-// 'paid'; a row with no status is its own (unknown) family.
-function statusFamilyOfRow(p) {
-  const status = String(p?.status || '').toLowerCase();
-  if (!status) return 'unknown';
-  for (const family of ['pending', 'failed', 'refunded', 'disputed']) {
-    if (PAYMENT_STATUS_VOCABULARY[family].rowStatuses.includes(status)) return family;
-  }
-  return status === 'paid' ? 'paid' : status;
-}
-function identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows }) {
-  const families = new Set();
-  for (const p of rows) {
-    if (!p) continue;
-    const amountOk = amountCents == null || rowAmountMatches(p, amountCents) || partialRefundCents(p) === amountCents;
-    if (!amountOk) continue;
-    if (claimedDate && !paymentDateMatchesClaim(p, claimedDate)) continue;
-    if (claimedTender && !tenderMatches(claimedTender, p)) continue;
-    families.add(statusFamilyOfRow(p));
-  }
-  return families;
-}
-// The rows tied for the MOST RECENT payment date (rows with no readable date rank oldest; if none has a
-// date they all tie).
-function mostRecentPaymentRows(rows) {
-  const dateKey = (p) => { const d = paymentRowDateParts(p); return d ? d.year * 10000 + d.month * 100 + d.day : -1; };
-  const createdKey = (p) => { const t = new Date(p?.created_at || '').getTime(); return Number.isFinite(t) ? t : -1; };
-  const live = rows.filter(Boolean);
-  const newestDate = Math.max(-1, ...live.map(dateKey));
-  const sameDay = live.filter((p) => dateKey(p) === newestDate);
-  // Codex round-27 P1: same-day attempts order by created_at (a row without one ranks oldest; true ties stay tied)
-  const newestCreated = Math.max(-1, ...sameDay.map(createdKey));
-  return sameDay.filter((p) => createdKey(p) === newestCreated);
-}
-// Codex round-39 P2: the authoritative history is CAPPED (newest 200 rows; complete === false when more exist). A claim whose
-// identity (amount / tender / a date that is not provably inside the loaded range) could ALSO match an OMITTED older row cannot be
-// judged from the loaded rows alone (a visible failed $120 card row vs an omitted paid one) - the caller fails closed. Only an
-// identity-free claim (the NEWEST payment - always loaded, rows are newest-first) and a full-year date strictly NEWER than the oldest
-// loaded row's day are provably covered.
-function historyMayOmitIdentity(context, { hasIdentity = true, claimedDate = null } = {}) {
-  const hist = context?.billing?.paymentHistory;
-  if (!hist || hist.complete !== false) return false;
-  if (!hasIdentity && !claimedDate) return false;
-  if (!claimedDate || claimedDate.year == null) return true;
-  const key = (d) => d.year * 10000 + d.month * 100 + d.day;
-  const oldest = Math.min(...(Array.isArray(hist.rows) ? hist.rows : []).map(paymentRowDateParts).filter(Boolean).map(key));
-  if (!Number.isFinite(oldest)) return true;
-  return key(claimedDate) <= oldest; // the boundary day itself may be only partly loaded
-}
-function bindPaymentRow({
-  family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
-  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false, refundSubject = false,
-  mostRecentOnly = false,
-}) {
-  if (requireDate && !claimedDate) return null;
-  // The window was truncated and the authoritative history could not be read (null): the rows are known to be
-  // INCOMPLETE — fail closed for a presence / receipt claim (Codex round-27 P1). (Not loaded at all = a caller
-  // that never needed it, e.g. a non-truncated context.)
-  if (!rows && context?.billing?.recentPaymentsTruncated === true && context?.billing?.paymentHistory === null
-      && (family === 'paid' || PRESENCE_STATUS_FAMILIES.has(family))) return onAmbiguous;
-  // the authoritative history is CUT (more rows exist than were loaded): an identity that could match an omitted row is unjudgeable
-  if (!rows && !mostRecentOnly && (family === 'paid' || PRESENCE_STATUS_FAMILIES.has(family))
-      && historyMayOmitIdentity(context, { hasIdentity: amountCents != null || !!claimedTender, claimedDate })) return onAmbiguous;
-  const allRows = rows || paymentRowsForBinding(context);
-  // Codex round-19 P1: the identity (amount / date / tender) is matched across EVERY status FIRST. Two
-  // attempts with the same identity but different status families (a failed + a paid $120 card payment
-  // on the same day) cannot be told apart by a status claim — it needs disambiguation, so it binds to
-  // NEITHER row (filtering to the asserted family first would let "your payment failed" pick the failed one).
-  // Round-26 P1: for ANY identity — amount, date, tender or any combination (not only an amount).
-  if (!mostRecentOnly && (amountCents != null || claimedDate || claimedTender) && PRESENCE_STATUS_FAMILIES.has(family)
-      && identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows: allRows }).size > 1) return onAmbiguous;
-  // Codex round-21 P1: a status claim with NO identity at all (no amount, date or tender — clause or inbound)
-  // is about "my payment" = the customer's MOST RECENT payment. It must be true of THAT payment: rows tied
-  // for the newest date decide (conflicting status families among them => ungrounded), and an older row of
-  // another status can never back it ("Your payment is processing" with a newer paid row and an older
-  // processing row is false).
-  let scopedRows = allRows;
-  // Codex round-27 P1: a GENERIC inbound ("Did my payment go through?") names no payment, so the reply's claim
-  // is about the customer's MOST RECENT payment (date, then created_at) — and a reply identity that does not
-  // match that payment is ungrounded (it can never reach back to an older row).
-  if (mostRecentOnly && PRESENCE_STATUS_FAMILIES.has(family)) {
-    scopedRows = mostRecentPaymentRows(allRows);
-    if (new Set(scopedRows.map(statusFamilyOfRow)).size > 1) return onAmbiguous;
-  } else if (amountCents == null && !claimedDate && !claimedTender && PRESENCE_STATUS_FAMILIES.has(family)) {
-    scopedRows = mostRecentPaymentRows(allRows);
-    if (new Set(scopedRows.map(statusFamilyOfRow)).size > 1) return onAmbiguous;
-  }
-  const candidates = paymentRowCandidates({
-    family, amountCents, claimedDate, rows: scopedRows, partialWording, allowPartialPaid, refundSubject,
-  });
-  // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
-  // is about a payment but NO tender could be extracted from it or the reply,
-  // and the rows for this amount/date span more than one tender (an
-  // unreadable tender counts as its own) — a generic claim cannot say WHICH
-  // one it is about, so fail closed rather than bind to any of them.
-  if (!claimedTender && inboundNamedPayment
-      && new Set(candidates.map((p) => paymentTenderLabel(p) || 'unknown')).size > 1) return onAmbiguous;
-  const matched = claimedTender ? candidates.filter((p) => tenderMatches(claimedTender, p)) : candidates;
-  return matched[0] || null;
-}
-const bindPaidPaymentRow = (args) => bindPaymentRow({ ...args, family: 'paid' });
-
-// The tender/date/inbound context every payment claim binds with — resolved
-// ONCE for all families. The outgoing clause's own claim wins; the customer's
-// inbound message is the fallback ONLY when the clause is silent on that point.
-// null = an AMBIGUOUS tender (several distinct tenders in one text): unknown,
-// never a guess — the caller fails closed.
-function claimedDatesAgree(a, b) {
-  return a.month === b.month && a.day === b.day && (a.year == null || b.year == null || a.year === b.year);
-}
-// The binding a validator uses: paymentClaimBinding plus the AMOUNT identity — when the
-// customer named amounts, every amount the reply's claim states must be one of them
-// (Codex round-15 P1). An 'unpaid' claim states what is OWED, not the payment asked about.
-// `multiDate`: the caller RESOLVES every named date itself (bindAllTargets' `dates`), so a clause naming several dates is allowed
-// through with binding.claimedDates; every other caller gets null (several dates are several payments — ungrounded).
-function claimBinding(c, env, { multiDate = false } = {}) {
-  const binding = paymentClaimBinding(c.text, env.inboundText, { multiDate });
-  if (!binding) return null;
-  if (c.family !== 'unpaid') {
-    const asked = amountCentsIn(env.inboundText);
-    if (asked.length && (c.amounts || []).some((a) => !asked.includes(a))) return null;
-    // Codex round-35 P1: SEVERAL distinct amounts named by the customer are several payments — a reply that states no
-    // amount of its own has no single payment to be about (ambiguous => ungrounded); one that names one is explicit.
-    if (new Set(asked).size > 1 && !(c.amounts || []).length) return null;
-  }
-  return binding;
-}
-function paymentClaimBinding(clauseText, inboundText, { multiDate = false } = {}) {
-  let claimedTender = replyClaimedTender(clauseText);
-  // Codex round-15 P1: the reply's identity must AGREE with the payment the customer
-  // asked about — it never overrides it. A reply tender the inbound does not name, or a
-  // reply date that differs from the inbound's, is a different payment: reject.
-  if (claimedTender && claimedTender !== TENDER_AMBIGUOUS && inboundText) {
-    const asked = tenderLabelsIn(inboundText);
-    if (asked.size && ![...asked].some((a) => tendersCompatible(claimedTender, a))) return null;
-    // the customer named a card BRAND and the reply says only "card": the brand still constrains the payment
-    if (claimedTender === 'card') claimedTender = [...asked].find((a) => a.startsWith('card:')) || claimedTender;
-  }
-  // Codex round-41 P1: EVERY date the reply names is an asserted payment date — never "the first date". Several distinct dates
-  // ("Sep 1 through Sep 2") are several payments: only a caller that resolves each one (multiDate => bindAllTargets' `dates`)
-  // may proceed; everyone else fails closed.
-  const replyDatesRaw = allClaimedPaymentDates(clauseText);
-  if (replyDatesRaw.length > 1 && !multiDate) return null;
-  // Codex round-35 P1: SEVERAL distinct dates in the customer's message ("Sep 1 or Sep 2") are several payments. The reply
-  // must name one explicitly (and it must be one of them); silent, the identity is ambiguous — never "the first date".
-  const inboundDates = inboundText ? allClaimedPaymentDates(inboundText) : [];
-  if (inboundDates.length > 1) {
-    if (!replyDatesRaw.length || !replyDatesRaw.every((rd) => inboundDates.some((d) => claimedDatesAgree(d, rd)))) return null;
-  }
-  const inboundDate = inboundDates.length === 1 ? inboundDates[0] : null;
-  // the reply's identity must AGREE with the date the customer asked about, for EVERY date it names
-  if (inboundDate && replyDatesRaw.some((rd) => !claimedDatesAgree(rd, inboundDate))) return null;
-  // Codex round-42 P1: a YEAR the customer named is part of the payment identity. A reply that repeats only month and day agrees
-  // with it (claimedDatesAgree treats a missing year as compatible) but must not DROP it: the year is merged into the reply date,
-  // so "Sep 12, 2025" asked + "Sep 12" answered binds only a 2025 row. Two inbound years for the same month/day (Sep 12 2025 and
-  // Sep 12 2026) leave a yearless reply ambiguous => fail closed. A reply year that conflicts was rejected above.
-  const withInboundYear = (rd) => {
-    if (rd.year != null) return rd;
-    const sameDay = inboundDates.filter((d) => claimedDatesAgree(d, rd) && d.year != null);
-    const years = new Set(sameDay.map((d) => d.year));
-    if (years.size > 1) return undefined;
-    return years.size === 1 ? { ...rd, year: [...years][0] } : rd;
-  };
-  const replyDates = replyDatesRaw.map(withInboundYear);
-  if (replyDates.some((d) => d === undefined)) return null;
-  const replyDate = replyDates.length === 1 ? replyDates[0] : null;
-  if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
-  if (claimedTender === TENDER_AMBIGUOUS) return null;
-  const claimedDate = replyDate || inboundDate || null;
-  const claimedDates = replyDates.length > 1 ? replyDates : null; // claimedDate is null then: each date resolves on its own
-  // the SAME customer-message test as the classifier (charge / card / tender subjects included — Codex round-28 P1)
-  const inboundNamedPayment = !!inboundText && inboundNamesPayment(inboundText);
-  // the customer's message is about a payment but names NO amount / date / tender (Codex round-27 P1)
-  const inboundGeneric = !!inboundText && inboundNamedPayment && !amountCentsIn(inboundText).length
-    && !inboundDates.length && !tenderLabelsIn(inboundText).size;
-  return { claimedTender, claimedDate, claimedDates, inboundNamedPayment, inboundGeneric };
-}
-
-// Codex round-18 P2: the payment identity (amount / date / tender) a message names — what the customer's
-// question is ABOUT — and whether a payments row is that payment. Used to pull an older, referenced row
-// into the facts BEFORE the model answers (payment-history.surfaceReferencedPayments).
-function paymentIdentityFromText(text) {
-  const tender = replyClaimedTender(text);
-  return {
-    amounts: amountCentsIn(text),
-    date: parseClaimedPaymentDate(text),
-    dates: allClaimedPaymentDates(text), // every date named (round 35): a row matching ANY of them is referenced
-    tender: tender && tender !== TENDER_AMBIGUOUS ? tender : null,
-  };
-}
-function paymentRowMatchesIdentity(row, identity) {
-  if (!row || !identity) return false;
-  if (identity.amounts.length) {
-    const cents = Math.round(Number(row.amount) * 100);
-    if (!identity.amounts.includes(cents) && !identity.amounts.includes(partialRefundCents(row))) return false;
-  }
-  const dates = identity.dates?.length ? identity.dates : (identity.date ? [identity.date] : []);
-  if (dates.length && !dates.some((d) => paymentDateMatchesClaim(row, d))) return false;
-  if (identity.tender && !tenderMatches(identity.tender, row)) return false;
-  return true;
-}
-
-// `opts.byMeaning` pins the strict clause/status-aware rule regardless of
-// the live gate (Codex #5194 r2 P1): a v12 review card that outlives a gate
-// rollback is still a v12 draft and is rechecked as one.
-//
-// Codex round-10 (PR #5331) STRUCTURE: every clause goes through ONE
-// classifier (classifyPaymentClause -> a kind) and each kind has exactly ONE
-// validator (KIND_VALIDATORS). There is no second path a clause can take
-// around the polarity/identity rules — the class of bug where a negated or
-// amount-bearing variant slipped past a branch. A validator returns true when
-// the clause is UNGROUNDED. Behavior history (rounds 2-9) is preserved in each
-// validator's comment.
 const amountCentsIn = (t) => (String(t || '').match(AMOUNT_MASK_RE) || []).map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
 
-// Which partially refunded rows does this reply DISCLOSE as partially refunded? Per clause: partial wording
-// ("part of", "partially refunded", "$30 of your $120 …") or a refund-subject claim, plus a refund word, bound
-// to the rows its own identity (amount — payment or refunded amount — date, tender) matches. An anaphoric
-// disclosure ("…but it was partially refunded") names no row of its own: it is flagged so the antecedent row
-// (checked by validateAnaphoricClaim) carries it.
-function partialRefundDisclosures(text, context, inboundText) {
-  const rowsOut = new Set();
-  // indexes of the clauses IMMEDIATELY BEFORE an anaphoric partial-refund disclosure: that disclosure's antecedent
-  // is the payment claim made there, so only that clause may back a partially refunded row with it
-  const anaphoricAfter = new Set();
-  const rows = paymentRowsForBinding(context).filter((p) => isPartiallyRefunded(p));
-  const clauses = String(text || '').split(CLAUSE_SPLIT_RE);
-  for (let i = 0; i < clauses.length; i += 1) {
-    const clause = clauses[i];
-    const partialWording = partialRefundWording(clause);
-    const refundSubject = /\brefunds?\b/i.test(clause);
-    if (!/refund/i.test(clause) || !(partialWording || refundSubject)) continue;
-    // only an AFFIRMATIVE disclosure relaxes the plain-paid guard — "Was it partially refunded?" / "If part of it was refunded…" discloses nothing (Codex round-32 P2)
-    if (isModalNonAssertive(clause)) continue;
-    const amounts = amountCentsIn(clause);
-    if (isAnaphoricPaymentClause(clause, amounts)) { if (partialWording && i > 0) anaphoricAfter.add(i - 1); continue; }
-    const binding = paymentClaimBinding(clause, inboundText);
-    if (!binding) continue;
-    for (const a of (amounts.length ? amounts : [null])) {
-      for (const p of paymentRowCandidates({ family: 'refunded', amountCents: a, claimedDate: binding.claimedDate, rows, partialWording, refundSubject })) {
-        if (tenderMatches(binding.claimedTender, p)) rowsOut.add(p);
-      }
-    }
+// Gate on: what is left of a reply once its copied payment-status sentences are removed may still quote a dollar figure, but only
+// an OWED one (balance, open invoice, published dues) in a clause that talks about what is owed. A paid figure outside a copied
+// sentence is never authorized; neither is price grammar the extractor cannot verify (Codex #5194 r4/r8).
+function remainderAmountsUngrounded(remainder, context) {
+  const suggestMode = require('./sms-suggest-mode');
+  const text = String(remainder || '');
+  const amounts = amountCentsIn(text);
+  if (suggestMode.hasPriceQuote(text) && amounts.length === 0) return true;
+  const { owed } = billingAmountCents(context);
+  for (const clause of text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/)) {
+    const masked = String(clause || '').replace(AMOUNT_MASK_RE, ' AMT ');
+    if (suggestMode.hasPriceQuote(masked)) return true;
+    const found = amountCentsIn(clause);
+    if (found.length && (!AMOUNT_OWED_RE.test(masked) || found.some((a) => !owed.has(a)))) return true;
   }
-  return { rows: rowsOut, anaphoricAfter };
-}
-function buildGroundingEnv(reply, context, opts) {
-  const text = String(reply || '');
-  // Gate on: only payments that actually went through back an acknowledgement.
-  const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const { owed, paid } = billingAmountCents(context, { settledOnly: realAnswers });
-  const env = {
-    text,
-    context,
-    realAnswers,
-    owedCents: owed,
-    paidCents: paid,
-    // "is anything owed" (settlement claims) = an open invoice or positive
-    // balance — never the quotable-price set (round-6 audit P1).
-    hasOutstandingObligation: billingHasOutstandingObligation(context),
-    hasOpenObligation: billingHasOpenObligation(context),
-    // billing missing/unavailable is UNKNOWABLE, never an empty account
-    // (round-6 P1 + missing-context sweep).
-    billingUnavailable: !context?.billing || typeof context.billing !== 'object' || !!context.billing.unavailable,
-    // The customer's own inbound: a FALLBACK source of tender/date/amount
-    // identity, never used to relax what the clause itself states.
-    inboundText: String(opts.inboundMessage || ''),
-    trustOwedAmounts: !!opts.trustOwedAmounts,
-    // Cross-clause payment identity (Codex round-17 P1): the row bound by the previous payment clause of
-    // THIS reply (the antecedent of "...but it was refunded"), and whether an earlier clause already
-    // made a payment claim (so a bare "it failed" is read as a payment claim, not ignored).
-    antecedent: null,
-    paymentContext: false,
-    // Codex round-27 P1: a partial-refund DISCLOSURE is tracked by the payment ROW it binds to, not reply-wide.
-    // A receipt claim may back a partially refunded row only if a disclosure in this reply is bound to THAT row
-    // (or an anaphoric "…but it was partially refunded" immediately follows THAT claim — validated against the antecedent row itself).
-    ...(() => {
-      const d = partialRefundDisclosures(text, context, String(opts.inboundMessage || ''));
-      return { disclosedPartialRows: d.rows, anaphoricPartialAfter: d.anaphoricAfter, clauseIndex: -1 };
-    })(),
-    replyAmounts: amountCentsIn(text),
-    // A zero-balance claim ("Your balance is zero.") reads as price grammar but states no price — the gate is
-    // evaluated with ONLY that span blanked (anything else in the clause still trips it; Codex round-17 P1).
-    priceGrammarFires: require('./sms-suggest-mode').hasPriceQuote(withoutZeroBalanceSpan(text)),
-  };
-  // may this receipt back a PARTIALLY refunded row? Only if a disclosure is bound to that row, or an anaphoric
-  // disclosure immediately follows the clause being judged (env.clauseIndex is advanced by the clause loop).
-  env.partialPaidAllowedFor = (row) => env.disclosedPartialRows.has(row) || env.anaphoricPartialAfter.has(env.clauseIndex);
-  return env;
-}
-
-// STRUCTURAL claim enumeration (Codex round-17/18 P1). A clause can assert SEVERAL things at
-// once — a status family ("is processing"), a receipt ("we received your $120 payment"), a
-// settlement ("your account is current", "$0 balance"), an owed figure, an absence. The first
-// three review rounds each patched one PAIR of these that short-circuited each other; instead
-// EVERY detector runs, every claim it finds is validated independently by its own binder
-// (KIND_VALIDATORS), the spans of validated claims are blanked, and whatever is left must
-// itself assert nothing (else the clause fails closed). Nothing returns on the first kind.
-const globalOf = (re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-const spansOf = (re, text) => [...String(text || '').matchAll(globalOf(re))].map((m) => ({ start: m.index, end: m.index + m[0].length }));
-const spansOverlap = (a, b) => a.start < b.end && b.start < a.end;
-const familyClaimKind = (family) => {
-  if (family === 'not_found' || family === 'not_received') return 'absence';
-  return family === 'unpaid' ? 'unpaid' : 'status';
-};
-// The detectors, on ONE amount-masked clause. { claims: [{kind, family?}], spans, negated }
-function detectPaymentClaims(masked, hasAmounts, env) {
-  const text = String(masked || '');
-  const claims = [];
-  const spans = [];
-  // Amount-free, a settlement phrase OWNS its words ("you are paid up" also contains the ack form
-  // "are paid"); with a figure the same words are ALSO a receipt ("your $120 payment is all paid").
-  let settlementSpans = [];
-  const taken = (span) => spans.some((o) => spansOverlap(span, o) && (!hasAmounts || !settlementSpans.includes(o)));
-  const howTo = PAYMENT_HOWTO_RE.test(text);
-  // 1. SETTLEMENT phrases ("you're paid up", "no balance due") — tested before negation ("you don't owe anything").
-  const settle = howTo ? [] : spansOf(SETTLEMENT_PHRASE_RE, text).filter((sp) => !insideQuestion(text, sp.start) && !recognizedMatchIsHypothetical(text, sp.start));
-  if (settle.length) { claims.push({ kind: 'settlement' }); spans.push(...settle); settlementSpans = settle; }
-  // 2. STATUS families / absence / unpaid — every phrase, every family.
-  const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText) || inboundNamesInvoice(env.inboundText) || !!env.paymentContext);
-  if (negated) claims.unshift({ kind: 'negated' });
-  for (const family of [...new Set(matches.map((m) => m.family))]) {
-    claims.push({ kind: familyClaimKind(family), family, starts: matches.filter((m) => m.family === family).map((m) => m.start) });
-  }
-  for (const m of matches) spans.push({ start: m.start, end: m.end });
-  // 3. RECEIPT: completed-payment EVENTS ("your transfer cleared") and ACK phrases ("we received your payment").
-  const events = howTo || PAYMENT_NEGATION_RE.test(text) ? []
-    : spansOf(PAYMENT_EVENT_STATUS_RE, text).filter((sp) => !insideQuestion(text, sp.start) && !recognizedMatchIsHypothetical(text, sp.start) && !taken(sp));
-  spans.push(...events);
-  const acks = spansOf(PAYMENT_ACK_RE, text).filter((sp) => !recognizedMatchIsHypothetical(text, sp.start) && !taken(sp));
-  spans.push(...acks);
-  const ackPol = acks.length ? (PAYMENT_NEGATION_RE.test(text) ? 'negated' : 'positive') : null;
-  const receiptShaped = ackPol === 'positive' || events.length > 0;
-  return { claims, spans, negated, ackPol, receiptShaped, hasEvent: events.length > 0, receiptStarts: [...events, ...acks].map((sp) => sp.start) };
-}
-const REFUND_STATE_OF_FAMILY = { pending: 'pending', failed: 'failed', refunded: 'completed', not_found: 'absent', not_received: 'absent', unpaid: 'absent' };
-function enumerateMaskedClaims(masked, hasAmounts, env) {
-  const d = detectPaymentClaims(masked, hasAmounts, env);
-  const claims = [...d.claims];
-  const amountConsumed = claims.some((c) => c.kind === 'status' || c.kind === 'absence' || c.kind === 'unpaid');
-  // Codex round-20 P1: when the clause's subject is the INVOICE / BILL (no payment noun), its status words
-  // ("still processing", "failed", "is paid") are claims about the INVOICE's own status — tagged here, bound
-  // to the authoritative invoice status by validateInvoiceStatusClaim, never to a payments row.
-  const invoiceSubject = invoiceSubjectClause(masked);
-  // Codex round-41 P1: when the customer asked about an INVOICE, a bare-pronoun sub-clause ("It is still processing.") is about
-  // THAT invoice — tagged exactly like an explicit invoice subject so validateInvoiceStatusClaim resolves it from the inbound.
-  const inboundInvoice = inboundNamesInvoice(env.inboundText);
-  const invoiceAt = (st) => invoiceSubjectAt(masked, st) || (inboundInvoice && pronounSubjectAt(masked, st));
-  // Codex round-29 P1: the subject is classified PER SUB-CLAUSE, per status phrase — "Invoice #0123 is still
-  // processing because your payment is still processing" makes an INVOICE claim and a PAYMENT claim; a clause-wide
-  // "has a payment noun" veto used to drop the invoice one. A family asserted in both kinds of sub-clause is split
-  // into two claims (each validated against its own subject).
-  // Codex round-35 P2: a status phrase said of a REFUND ("Your $30 refund is pending / failed / was issued") is a claim about
-  // the refund's own state, bound to refund_status / refund_amount — never to the payment attempt's status.
-  const refundClaims = [];
-  for (let i = claims.length - 1; i >= 0; i -= 1) {
-    const c = claims[i];
-    if (!['status', 'absence', 'unpaid'].includes(c.kind) || !Array.isArray(c.starts)) continue;
-    const refundStarts = c.starts.filter((st) => refundSubjectAt(masked, st));
-    if (!refundStarts.length) continue;
-    const rest = c.starts.filter((st) => !refundSubjectAt(masked, st));
-    const state = REFUND_STATE_OF_FAMILY[c.family] || 'unsupported';
-    refundClaims.push({ kind: 'refund', state });
-    if (rest.length) claims[i] = { ...c, starts: rest }; else claims.splice(i, 1);
-  }
-  claims.push(...refundClaims);
-  const splitClaims = [];
-  for (const c of claims) {
-    if ((c.kind === 'status' || c.kind === 'unpaid') && Array.isArray(c.starts)) {
-      const inv = c.starts.filter((st) => invoiceAt(st));
-      const pay = c.starts.filter((st) => !invoiceAt(st));
-      if (inv.length) splitClaims.push({ ...c, subject: 'invoice', starts: inv });
-      if (pay.length) splitClaims.push({ ...c, starts: pay });
-    } else splitClaims.push(c);
-  }
-  claims.length = 0;
-  claims.push(...splitClaims);
-  if (d.ackPol === 'negated') {
-    claims.push({ kind: 'negated_ack' });
-  } else if (d.receiptShaped) {
-    // per SUB-CLAUSE (round 29): "Invoice #0123 is paid while your payment is processing" has an INVOICE receipt and a
-    // payment claim; a receipt phrase inside an invoice-subject sub-clause is the invoice's own status
-    const invReceipt = d.receiptStarts.some((st) => invoiceAt(st));
-    const payReceipt = d.receiptStarts.some((st) => !invoiceAt(st));
-    if (invReceipt) claims.push({ kind: 'status', family: 'paid', subject: 'invoice' }); // "Your invoice is paid"
-    if (payReceipt || !invReceipt) {
-      claims.push(hasAmounts ? classifyAmountClause(masked, d.ackPol, d.hasEvent ? 'event' : null, env) : { kind: 'ack' });
-    }
-  } else if (hasAmounts && !amountConsumed) {
-    // a figure no status/receipt claim accounts for: it must be an owed figure (or is ambiguous => rejected)
-    claims.push(classifyAmountClause(masked, null, null, env));
-  }
-  // A status / absence claim takes the clause's figures as ITS payment identity — but a figure stated
-  // as OWED in the same clause ("...haven't received your $120 payment while you owe $95") is its own
-  // claim and is validated as owed too (Codex round-18 P1).
-  if (hasAmounts && amountConsumed) claims.push({ kind: 'owed_figures' });
-  return { claims, spans: d.spans, negated: d.negated };
-}
-// The figures a masked clause explicitly states as OWED: an owed word directly before the figure
-// ("you owe AMT", "balance is AMT", "due: AMT") or directly after it ("AMT due", "AMT balance").
-const OWED_BEFORE_FIGURE_RE = /\b(?:owe[sd]?|due|balance|outstanding)\b[^.\n]{0,16}?\bAMT\b/gi;
-const OWED_AFTER_FIGURE_RE = /\bAMT\b[^.\n]{0,6}?\b(?:owed|due|outstanding|balance)\b/gi;
-function owedFigureCents(masked, amounts) {
-  const text = String(masked || '');
-  const tokens = [...text.matchAll(/\bAMT\b/g)].map((m) => m.index);
-  const owedAt = new Set();
-  for (const re of [OWED_BEFORE_FIGURE_RE, OWED_AFTER_FIGURE_RE]) {
-    for (const m of text.matchAll(re)) {
-      const at = re === OWED_BEFORE_FIGURE_RE ? m.index + m[0].lastIndexOf('AMT') : m.index;
-      const i = tokens.indexOf(at);
-      if (i >= 0 && i < amounts.length) owedAt.add(amounts[i]);
-    }
-  }
-  return [...owedAt];
-}
-// The single "primary" kind (first claim) — the view the phrase-table coverage tests use.
-function classifyPaymentClause(masked, hasAmounts, env) {
-  const { claims } = enumerateMaskedClaims(masked, hasAmounts, env);
-  return claims[0] || { kind: 'none' };
-}
-// EVERY claim a raw clause asserts (zero-balance span included) — one enumerator for the draft
-// validator AND the send-time recheck's "does this need billing?" test.
-function enumeratePaymentClaims(clause, env = {}) {
-  const e = { inboundText: '', trustOwedAmounts: false, ...env };
-  const text = String(clause || '');
-  const zero = zeroBalanceClaim(text);
-  const working = zero ? withoutZeroBalanceSpan(text) : text;
-  const amounts = amountCentsIn(working);
-  const masked = working.replace(AMOUNT_MASK_RE, ' AMT ');
-  const { claims, spans, negated } = enumerateMaskedClaims(masked, amounts.length > 0, e);
-  if (zero) claims.unshift({ kind: 'settlement', zero: true });
-  return { claims, spans, negated, amounts, masked, text };
-}
-function classifyAmountClause(masked, ackPol, statusKind, env) {
-  if (ackPol === 'negated') return { kind: 'negated_ack' };
-  // "charge" is BOTH an owed noun and a payment subject ("your charge posted",
-  // round-12): on a receipt-shaped clause it is the subject, not owed language.
-  const receiptSubject = ackPol === 'positive' || statusKind === 'event';
-  const owed = AMOUNT_OWED_RE.test(receiptSubject ? masked.replace(/\bcharges?\b/gi, ' ') : masked);
-  // trustOwedAmounts (scheduler's "a human reviewed this figure") excuses only a
-  // genuinely OWED clause — never a receipt/status assertion (round-4/6 P1:
-  // "invoice payment" reads as owed and must not skip the binder).
-  const receiptShaped = ackPol === 'positive' || statusKind === 'event';
-  if (owed && env.trustOwedAmounts && !receiptShaped) return { kind: 'trusted_owed' };
-  const ack = ackPol === 'positive' || (!owed && statusKind === 'event');
-  if (owed === ack) return { kind: 'ambiguous' };
-  return { kind: ack ? 'ack' : 'owed' };
-}
-
-// Identity (amount) of a claim: the amounts in the clause, else the amounts the
-// CUSTOMER named, else none.
-function claimTargets(amounts, env) {
-  if (amounts.length) return amounts;
-  const fromInbound = amountCentsIn(env.inboundText);
-  return fromInbound.length ? fromInbound : [null];
-}
-
-// PAID receipt: amount-free never names a payment (round-2); with amounts each
-// figure must be a settled payment AND bind to one row by date/tender/inbound.
-function validateAck(c, env) {
-  // billing UNAVAILABLE (e.g. the payer-linkage lookup failed, so ownership of the rows is unknown) => a receipt can't bind
-  // any row — same fail-closed rule as status / absence claims (Codex round-30 P1)
-  if (env.billingUnavailable) return true;
-  if (!c.amounts.length) return true;
-  if (c.amounts.some((a) => !env.paidCents.has(a))) return true;
-  const binding = claimBinding(c, env, { multiDate: true });
-  if (!binding) return true;
-  // a partially refunded row may back "received" ONLY when the same reply itself discloses the partial refund
-  return bindAllTargets(c.amounts, env, (a, d) => bindPaymentRow({
-    family: 'paid', amountCents: a, context: env.context, ...binding, ...(d ? { claimedDate: d } : {}), mostRecentOnly: binding.inboundGeneric,
-    // a partially refunded row may back "received" ONLY if a disclosure in this reply is bound to THAT row
-    allowPartialPaid: env.partialPaidAllowedFor,
-  }), binding.claimedDates);
-}
-// THE "every named figure must resolve" chokepoint (Codex round-35/39/40 P1 — ONE class that kept resurfacing per row kind:
-// payments, refunds, invoices). A clause that names several figures asserts about EACH of them, so each figure must resolve on
-// its OWN to a row of the account: `rowsFor(figure)` -> the candidate rows. No row for a figure, or several rows for it (unless
-// `sameOutcome(rows)` says every one of them would give the SAME verdict, e.g. two pending refunds of one amount), makes the
-// whole claim unresolved — a figure is never dropped because a sibling figure matched. Returns the distinct resolved rows in
-// figure order, or null when ANY figure fails to resolve. Callers then check their claim against EVERY resolved row.
-function resolveEveryFigure(figures, rowsFor, { sameOutcome = null } = {}) {
-  const resolved = [];
-  for (const f of figures) {
-    const hit = rowsFor(f) || [];
-    if (!hit.length) return null;
-    if (hit.length > 1 && !(typeof sameOutcome === 'function' && sameOutcome(hit))) return null;
-    for (const r of hit) if (!resolved.includes(r)) resolved.push(r);
-  }
-  return resolved;
-}
-// Every target must bind (resolveEveryFigure, one row per target); the FIRST bound row becomes the clause's payment identity for a
-// later anaphoric clause ("...but it was refunded") — Codex round-17 P1. true = ungrounded.
-//
-// Codex round-41 P1: the same chokepoint resolves every named DATE (`dates`, >= 2 distinct dates the clause names): each date must
-// bind a row of its own (bind(figure, date)), and every figure must bind under SOME date — "payments from Sep 1 through Sep 2 are
-// pending" is never grounded by a Sep 1 row alone. (Tenders: replyClaimedTender already yields TENDER_AMBIGUOUS for several, which
-// paymentClaimBinding rejects.)
-function bindAllTargets(targets, env, bind, dates = null) {
-  let rows;
-  if (Array.isArray(dates) && dates.length > 1) {
-    const byDate = resolveEveryFigure(dates, (d) => targets.map((a) => bind(a, d)).filter(Boolean));
-    const byFigure = byDate && resolveEveryFigure(targets, (a) => dates.map((d) => bind(a, d)).filter(Boolean), { sameOutcome: () => true });
-    rows = byFigure ? byDate : null;
-  } else rows = resolveEveryFigure(targets, (a) => { const row = bind(a); return row ? [row] : []; });
-  if (!rows) return true;
-  env.antecedent = rows[0] || null;
   return false;
 }
-// Processing / failed / refunded / disputed / reversed: each needs a CURRENT
-// row of the family's status matching the same identity rules as a receipt.
-function validateStatusClaim(c, env) {
-  if (env.billingUnavailable) return true;
-  const binding = claimBinding(c, env, { multiDate: true });
-  if (!binding) return true;
-  const partialWording = partialRefundWording(c.text);
-  return bindAllTargets(claimTargets(c.amounts, env), env, (a, d) => bindPaymentRow({
-    family: c.family, amountCents: a, context: env.context, ...binding, ...(d ? { claimedDate: d } : {}), requireDate: false, partialWording, mostRecentOnly: binding.inboundGeneric,
-    refundSubject: /\brefunds?\b/i.test(c.text),
-  }), binding.claimedDates);
-}
-// Absence ("isn't showing", "haven't received"): judged against the
-// AUTHORITATIVE history (billing.paymentHistory — every own payment, any
-// status), not the 3-row window (round-10 P1). Unknown completeness fails closed.
-function absenceHistoryUnknown(env, vague) {
-  const billing = env.context?.billing;
-  const shown = billing?.recentPayments || [];
-  const hist = billing?.paymentHistory;
-  if (hist === null) return true;
-  // Not loaded: the 3-row window is the whole history ONLY when the aggregator
-  // says it wasn't truncated (a legacy/mocked context carries no flag = whole).
-  if (!hist) return billing?.recentPaymentsTruncated === true;
-  return vague && (hist.complete === false || hist.rows.length > shown.length);
-}
-function validateAbsenceClaim(c, env) {
-  if (env.billingUnavailable) return true;
-  const binding = claimBinding(c, env, { multiDate: true });
-  if (!binding) return true;
-  const targets = claimTargets(c.amounts, env);
-  const vague = targets.every((a) => a == null) && !binding.claimedTender && !binding.claimedDate && !binding.claimedDates;
-  if (absenceHistoryUnknown(env, vague)) return true;
-  const hist = env.context?.billing?.paymentHistory;
-  const rows = !vague && hist ? hist.rows : null;
-  // several named dates: a row matching ANY of them contradicts the denial
-  const contradicted = targets.some((a) => (binding.claimedDates || [null]).some((d) => bindPaymentRow({
-    family: c.family, amountCents: a, context: env.context, ...binding, ...(d ? { claimedDate: d } : {}), requireDate: false, onAmbiguous: { ambiguous: true }, rows,
-  })));
-  // An identified absence with the read bound hit and nothing found in what WAS
-  // read: completeness unknown => reject rather than deny.
-  return contradicted || (!vague && !!hist && hist.complete === false);
-}
 
-// "is unpaid" (Codex round-14 P1): contradicted by a PAID row like any absence claim; being
-// owed-shaped, any figure it states must itself be owed; and it asserts a LIVE demand, so it
-// must bind to a CURRENT open invoice or outstanding balance — a voided/canceled invoice
-// (no paid row, nothing open) never grounds it, at draft time or at the send-time recheck.
-function validateUnpaidClaim(c, env) {
-  if (env.billingUnavailable || !env.hasOpenObligation) return true;
-  return validateAbsenceClaim(c, env) || c.amounts.some((a) => !env.owedCents.has(a));
-}
-const PRESENCE_FAMILIES = new Set(['pending', 'failed', 'refunded', 'disputed', 'reversed']);
-// Each kind's ONE validator: true = ungrounded.
-// Codex round-35 P2: the state of a payments row's REFUND, from refund_status (Stripe's pending / requires_action /
-// succeeded / failed / canceled, or this system's 'full' / 'partial') and the payment status. null = no refund activity.
-function refundStateOfRow(p) {
-  if (!p) return null;
-  const rs = String(p.refund_status || '').toLowerCase();
-  const st = String(p.status || '').toLowerCase();
-  if (rs === 'pending' || rs === 'requires_action') return 'pending';
-  if (rs === 'failed' || rs === 'canceled' || rs === 'cancelled') return 'failed';
-  if (rs === 'succeeded' || rs === 'full' || rs === 'partial' || st === 'refunded') return 'completed';
-  if (rs) return 'unknown';
-  const amt = Number(p.refund_amount);
-  return Number.isFinite(amt) && amt > 0 ? 'completed' : null;
-}
-function refundedCentsOfRow(p) {
-  const ra = Math.round(Number(p.refund_amount) * 100);
-  if (Number.isFinite(ra) && ra > 0) return ra;
-  const total = Math.round(Number(p.amount) * 100);
-  return String(p.status || '').toLowerCase() === 'refunded' && Number.isFinite(total) ? total : null;
-}
-// A claim about a REFUND ("Your $30 refund is pending") is true only if a matching refund on record is in THAT state:
-// every refund row matching the named amount / date must be in the claimed state; none => ungrounded (an 'absent' claim
-// is the reverse: grounded only when NO refund matches). Truncated, unreadable history fails closed.
-function validateRefundClaim(claim, env) {
-  // billing UNAVAILABLE => no row is trustworthy: neither a refund claim nor a "no refund is showing" denial can be judged (Codex round-37 P1)
-  if (env.billingUnavailable) return true;
-  const ctx = env.context;
-  if (claim.state === 'unsupported' || claim.state === 'unknown') return true;
-  if (ctx?.billing?.recentPaymentsTruncated === true && ctx?.billing?.paymentHistory === null) return true;
-  // Codex round-36 P1: the SAME identity rules as the payment-status binder — the reply's own amount / date / tender win; the
-  // customer's message is the fallback where the reply is silent (a reply identity the customer did not ask about, several
-  // distinct dates / amounts in the message, or an ambiguous tender => ungrounded); and a refund claim with NO identity from
-  // either side is about the customer's MOST RECENT refund, never "any refund on the account".
-  const binding = claimBinding({ family: 'refunded', text: claim.text, amounts: claim.amounts || [] }, env);
-  if (!binding) return true;
-  const askedAmounts = [...new Set(amountCentsIn(env.inboundText))];
-  const figures = (claim.amounts || []).length ? claim.amounts : askedAmounts;
-  const { claimedDate, claimedTender } = binding;
-  // the loaded history is CUT: an identity an omitted older refund could also match - and any "no refund" denial - is unjudgeable (round 39)
-  if (historyMayOmitIdentity(ctx, { hasIdentity: claim.state === 'absent' || figures.length > 0 || !!claimedTender, claimedDate })) return true;
-  // the rows a refund claim can be about, before the per-figure test: a refund exists, the claimed tender / date agree
-  const refundRows = paymentRowsForBinding(ctx).filter((p) => (
-    refundStateOfRow(p) !== null
-    && tenderMatches(claimedTender, p)
-    && (!claimedDate || paymentDateMatchesClaim(p, claimedDate))
-  ));
-  // the figure is the REFUNDED amount: a partial refund matches its refund amount only, a full one its total too
-  const rowsForFigure = (f) => refundRows.filter((p) => {
-    const partial = partialRefundCents(p) !== 0; // a paid row with only part of it refunded
-    return f === refundedCentsOfRow(p) || (!partial && f === Math.round(Number(p.amount) * 100));
-  });
-  let candidates;
-  if (!figures.length) {
-    candidates = refundRows.filter((p) => !(partialRefundCents(p) !== 0 && claim.state === 'completed' && !partialRefundWording(claim.text))); // an unqualified "your refund was issued" is a FULL refund; a partial one needs partial wording or its amount
-  } else if (claim.state === 'absent') {
-    candidates = refundRows.filter((p) => figures.some((f) => rowsForFigure(f).includes(p))); // a refund matching ANY named figure contradicts "no refund"
-  } else {
-    // Codex round-40 P1: EVERY named refund amount resolves on its own (resolveEveryFigure) — "The $30/$40 refunds are pending" is
-    // never grounded by a pending $30 alone; several rows for one amount are fine only when they share one refund state
-    candidates = resolveEveryFigure(figures, rowsForFigure, { sameOutcome: (rows) => new Set(rows.map(refundStateOfRow)).size === 1 });
-    if (!candidates) return true;
-  }
-  if (claim.state === 'absent') return candidates.length > 0;
-  if (!figures.length && !claimedDate && !claimedTender) candidates = mostRecentPaymentRows(candidates); // identity-free: the newest refund
-  if (!candidates.length) return true;
-  return candidates.some((p) => refundStateOfRow(p) !== claim.state);
-}
-
-const KIND_VALIDATORS = {
-  refund: (c, env) => validateRefundClaim(c, env),
-  negated: () => true, // a negated presence claim is not judgeable (round-9)
-  ambiguous: () => true, // reads as both or neither of owed/receipt (round-5/6)
-  status: validateStatusClaim,
-  absence: validateAbsenceClaim,
-  // "is unpaid": see validateUnpaidClaim (paid-row contradiction + owed figure + a CURRENT open obligation).
-  unpaid: validateUnpaidClaim,
-  ack: validateAck,
-  // a negated ack ("wasn't processed") with a figure is never a binding claim;
-  // amount-free it is a truthful denial and untouched (round-10 P1 polarity).
-  // Codex round-15 P1: amount-free, it is a denial of RECEIPT ("wasn't processed") and is judged
-  // by the not_received/absence binder like any other — a matching paid row makes it false,
-  // and unavailable history blocks. (Amount-bearing negated acks stay rejected outright.)
-  negated_ack: (c, env) => c.amounts.length > 0 || validateAbsenceClaim({ ...c, family: 'not_received' }, env),
-  settlement: (c, env) => env.hasOutstandingObligation || env.billingUnavailable,
-  owed: (c, env) => env.billingUnavailable || c.amounts.some((a) => !env.owedCents.has(a)),
-  trusted_owed: () => false,
-  // figures explicitly stated as OWED inside a clause that also makes a status / absence claim (round-18)
-  owed_figures: (c, env) => !env.trustOwedAmounts && c.amounts.some((a) => !env.owedCents.has(a)),
-  none: () => false,
-};
-
-// Codex round-17 P1: a clause whose payment SUBJECT is a pronoun / anaphor ("it was refunded", "that
-// failed", "the payment was refunded") carries no payment identity of its own — no figure, date, tender
-// or possessive payment noun. It INHERITS the row the previous payment clause of the reply bound to, and
-// must be true of THAT row; with no antecedent it is ungrounded. (So "We received your $120 payment from
-// Sep 12, but it was refunded" needs ONE row that is both — never any unrelated refunded row.)
-const ANAPHOR_SUBJECT_RE = /\b(?:it|they)\b|\b(?:that|this)(?:\s+one)?\s+(?:was|is|has|had|failed|went|got|did|still|isn't|wasn't|hasn't|didn't)\b|\bthe\s+(?:payment|charge|transfer|deposit|funds|money)\b/i;
-const OWN_PAYMENT_NOUN_RE = /\b(?:your|our|my)\s+(?:[\w$.,']+\s+){0,2}(?:payments?|charges?|transfers?|deposits?|funds|money|checks?|refunds?)\b/i;
-const ANAPHORIC_KINDS = new Set(['status', 'ack', 'absence', 'unpaid', 'negated_ack']);
-function isAnaphoricPaymentClause(text, amounts) {
-  if (amounts.length) return false;
-  if (parseClaimedPaymentDate(text)) return false;
-  if (tenderLabelsIn(text).size) return false;
-  if (OWN_PAYMENT_NOUN_RE.test(text)) return false;
-  return ANAPHOR_SUBJECT_RE.test(text);
-}
-function validateAnaphoricClaim(claim, text, env) {
-  if (env.billingUnavailable) return true; // an inherited row is a billing row too (round 37)
-  const row = env.antecedent;
-  if (!row) return true;
-  if (claim.kind === 'status') {
-    return paymentRowCandidates({ family: claim.family, amountCents: null, claimedDate: null, rows: [row], partialWording: partialRefundWording(text) }).length === 0;
-  }
-  if (claim.kind === 'ack') return paymentRowCandidates({ family: 'paid', amountCents: null, claimedDate: null, rows: [row] }).length === 0;
-  return true; // absence / unpaid / negated ack cannot be asserted about an inherited row
-}
-// Codex round-20 P1: an invoice / bill STATUS statement ("Your invoice is still processing", "your bill is
-// paid") is judged against the authoritative INVOICE status (billing.invoiceStatuses), never a payments row.
-// The invoice is identified by the number named in the clause or the customer's message, then by an amount
-// (the invoice total or amount due); with nothing to go on it must be the ONLY recent invoice. Unknown
-// invoice state, no match, or several candidates all fail closed.
-// the SAME status list as the aggregator's collectible-own-invoice predicate (invoice-helpers)
-// (plus partially_paid: an unpaid claim about THAT invoice still binds through its status although the portal balance omits it)
-const INVOICE_COLLECTIBLE_STATUSES = new Set([...require('./invoice-helpers').OWN_COLLECTIBLE_INVOICE_STATUSES, require('./invoice-helpers').PARTIALLY_PAID_STATUS]);
-const INVOICE_STATUS_FAMILY = { paid: 'paid', prepaid: 'paid', processing: 'pending', refunded: 'refunded' };
-function validateInvoiceStatusClaim(claim, text, amounts, env) {
-  claim.matchedInvoice = null;
-  claim.matchedInvoices = [];
-  const list = env.context?.billing?.invoiceStatuses;
-  if (env.billingUnavailable || !Array.isArray(list)) return true; // invoice state unavailable => fail closed
-  const { invoiceNumbersNamed } = require('./zelle-target-invoice');
-  const strip0 = (x) => String(x).replace(/^0+/, '') || '0';
-  const named = [text, env.inboundText].map(invoiceNumbersNamed);
-  // Codex round-25 P1: the reply's invoice identity must AGREE with the invoice the customer asked about (like
-  // the payment-row binder): a number the reply names that the inbound's numbers don't include, or a reply
-  // amount the inbound didn't name, is a DIFFERENT invoice — ungrounded, never resolved to a separate one.
-  // Codex round-36 P1: a FULL reference (WPC-2025-0123) is compared as a full identifier — never reduced to its tail, or it would
-  // match WPC-2026-0123. A tail is compared only against a tail-only reference the customer supplied (or the tail of a full one).
-  const tailOf = (f) => strip0(String(f).split('-').pop());
-  const refAgrees = (ref, asked) => (ref.kind === 'full'
-    ? asked.full.includes(ref.value) || asked.tail.map(strip0).includes(tailOf(ref.value))
-    : asked.tail.map(strip0).includes(strip0(ref.value)) || asked.full.some((f) => tailOf(f) === strip0(ref.value)));
-  const replyRefs = [...named[0].full.map((value) => ({ kind: 'full', value })), ...named[0].tail.map((value) => ({ kind: 'tail', value }))];
-  const askedHasRefs = named[1].full.length > 0 || named[1].tail.length > 0;
-  if (replyRefs.length && askedHasRefs && !replyRefs.every((ref) => refAgrees(ref, named[1]))) return true;
-  const askedAmounts = amountCentsIn(env.inboundText);
-  if (askedAmounts.length && amounts.length && amounts.some((a) => !askedAmounts.includes(a))) return true;
-  // Codex round-35 P1: EVERY invoice number named must resolve to exactly ONE invoice of the account, and EVERY one must
-  // satisfy the claim. The reply's own numbers decide what the claim is about; with none in the reply, the customer's
-  // numbers do ("is it paid?" after asking about two invoices is about both). A number missing from the list, or one that
-  // matches several invoices, is ungrounded — it is never silently dropped.
-  const strip = (x) => String(x).replace(/^0+/, '') || '0';
-  const resolveNumber = (kind, value) => list.filter((inv) => {
-    const num = String(inv.invoiceNumber || '').toUpperCase();
-    if (!num) return false;
-    return kind === 'full' ? num === String(value).toUpperCase() : strip(value) === strip(num.split('-').pop());
-  });
-  const source = (named[0].full.length || named[0].tail.length) ? named[0] : named[1];
-  // a tail-only reply reference to the invoice the customer named IN FULL means that full invoice (same tail, e.g. year 2025)
-  // a tail (#0123) that is just the tail of a named full number is the same invoice, not a second one
-  const fullTails = new Set(source.full.map((f) => strip(String(f).split('-').pop())));
-  // Codex round-38 P1: the tail must match exactly ONE distinct full reference the customer named - two full numbers sharing a tail
-  // (WPC-2025-0123 / WPC-2026-0123) make "#0123" ambiguous, which is ungrounded, never arbitrarily the first one.
-  let ambiguousTail = false;
-  const promoted = source === named[0]
-    ? named[0].tail.map((t) => {
-      const hits = [...new Set(named[1].full)].filter((f) => String(f).split('-').pop().replace(/^0+/, '') === String(t).replace(/^0+/, ''));
-      if (hits.length > 1 && !fullTails.has(strip(t))) ambiguousTail = true;
-      return hits.length === 1 ? hits[0] : null;
-    })
-    : [];
-  if (ambiguousTail) return true;
-  const refs = [
-    ...source.full.map((v) => ['full', v]),
-    ...source.tail.map((v, i) => [v, i]).filter(([v]) => !fullTails.has(strip(v))).map(([v, i]) => (promoted[i] ? ['full', promoted[i]] : ['tail', v])),
-  ];
-  let invoices;
-  if (refs.length) {
-    invoices = [];
-    for (const [kind, value] of refs) {
-      if (kind === 'tail' && env.context?.billing?.invoiceStatusesTruncated) return true; // a bare tail cannot be resolved against a CUT list (round 37)
-      const hit = resolveNumber(kind, value);
-      if (hit.length !== 1) return true; // missing or ambiguous
-      if (!invoices.includes(hit[0])) invoices.push(hit[0]);
-    }
-  } else {
-    const figures = [...new Set(amounts.length ? amounts : amountCentsIn(env.inboundText))];
-    if (figures.length) {
-      // Codex round-39 P1: EVERY named figure resolves on its own to exactly ONE invoice (total or amount due) - a figure with no
-      // matching row, or matching several, makes the claim ungrounded; it is never dropped because a sibling figure matched.
-      invoices = resolveEveryFigure(figures, (f) => list.filter((inv) => f === Math.round(Number(inv.total) * 100) || f === Math.round(Number(inv.amountDue) * 100)));
-      if (!invoices) return true; // a figure with no matching invoice, or several: ungrounded
-    } else {
-      if (list.length !== 1) return true; // no figure and not the only recent invoice
-      invoices = [list[0]];
-    }
-  }
-  claim.matchedInvoices = invoices;
-  claim.matchedInvoice = invoices[0];
-  // "Invoice #0123 is still unpaid" (Codex round-22 P1): true of THAT invoice only when it is COLLECTIBLE
-  // (open / sent / viewed / overdue / partially paid) with an amount due; a paid / void / canceled /
-  // uncollectible / refunded / processing invoice contradicts it — whatever OTHER invoices are open.
-  return invoices.some((inv) => {
-    const status = String(inv.status).toLowerCase();
-    if (claim.family === 'unpaid') return !(INVOICE_COLLECTIBLE_STATUSES.has(status) && Number(inv.amountDue) > 0);
-    return INVOICE_STATUS_FAMILY[status] !== claim.family;
-  });
-}
-// Codex round-33 P1: "Invoice #0123 is paid with your card" makes TWO claims — the invoice's status (above) AND how it was
-// paid, a payment claim. The tender must match the row(s) that settled THAT invoice (linked by metadata.invoice_id /
-// alias, or the "Invoice <n> —" description): every settling row must carry the claimed tender, and a tender that
-// cannot be read, rows that cannot be found, or an ambiguous tender wording are all ungrounded.
-function invoiceTenderUngrounded(claim, text, env) {
-  // the rows that back the invoice's CLAIMED status: settling rows for paid, in-flight rows for processing (Codex round-34)
-  if (!claim.matchedInvoice || !['paid', 'pending', 'refunded'].includes(claim.family)) return false;
-  if (env.billingUnavailable) return true; // the backing rows cannot be trusted (round 37)
-  // judge the sub-clause(s) asserting the paid status (the whole clause for a receipt-shaped invoice claim); a how-to /
-  // offer sub-clause ("pay by card next time") names no past payment
-  const ranges = subclauseRanges(text);
-  const scoped = Array.isArray(claim.starts) && claim.starts.length
-    ? claim.starts.map((st) => ranges.find((r) => st >= r.start && st <= r.end)?.text || text)
-    : ranges.map((r) => r.text);
-  const claimedTexts = scoped.filter((t) => !isNonAssertivePaymentClause(t) && !PAYMENT_HOWTO_RE.test(t));
-  const claimed = replyClaimedTender(claimedTexts.join(' . '));
-  if (!claimed) return false;
-  if (claimed === TENDER_AMBIGUOUS) return true;
-  const { invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf } = require('./payer-linkage');
-  // EVERY invoice the claim resolved to must have its own backing row(s) of the claimed tender
-  return (claim.matchedInvoices?.length ? claim.matchedInvoices : [claim.matchedInvoice]).some((inv) => {
-    const num = String(inv.invoiceNumber || '').toUpperCase();
-    const settling = paymentRowsForBinding(env.context).filter((p) => {
-      if (!p || statusFamilyOfRow(p) !== claim.family) return false;
-      const linked = invoiceIdOf(p) || aliasInvoiceIdOf(p);
-      if (linked && String(linked) === String(inv.id)) return true;
-      const dn = descriptionInvoiceNumberOf(p);
-      return !!(num && dn && String(dn).toUpperCase() === num);
-    });
-    if (!settling.length) return true; // no row on record backs the status => the tender is unverifiable
-    return settling.some((p) => !tenderMatches(claimed, p));
-  });
-}
-// Does this clause need the payment validation at all? EXACTLY the two ways clauseUngrounded can reject it:
-// the enumerator found a claim to bind, or it is an UNRECOGNIZED payment assertion (round-22 fail-closed rule).
-// The send-time recheck gates its billing read on this same function (Codex round-24 P1), so draft and send
-// can never disagree about whether a clause is judged.
-function paymentClauseNeedsValidation(clause, env = {}) {
-  return enumeratePaymentClaims(clause, env).claims.length > 0 || unrecognizedPaymentAssertion(clause, paymentScope(env));
-}
-// The payment ENVIRONMENT of a clause (Codex round-30 P1): the customer's message is about a payment, or an earlier
-// clause of the reply already made a payment claim — so a pronoun-subject clause ("It settled.") is payment-scoped.
-function paymentScope(env = {}) {
-  return { paymentContext: !!env.paymentContext || inboundNamesPayment(String(env.inboundText || '')) || inboundNamesInvoice(String(env.inboundText || '')) };
-}
-function clauseUngrounded(clause, env) {
-  const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
-  // Price grammar left once readable figures (and any zero-balance span) are masked is a price the
-  // extractor cannot verify ("fifty dollars"): fail closed (#5194 r4/r8).
-  if (require('./sms-suggest-mode').hasPriceQuote(masked)) return true;
-  // Codex round-22 P1 (the CLASS, not one phrasing): the payment prescreen fired but the enumerator found NO
-  // claim => an unrecognized payment assertion ("we have yet to receive…", whatever comes next). Fail closed,
-  // unless the clause is clearly non-assertive (question, conditional, offer/instruction, payment-options
-  // reference). Draft and send share this path.
-  if (!claims.length) {
-    if (unrecognizedPaymentAssertion(text, paymentScope(env))) return true;
-    // Codex round-41 P1: a subject-less predicate IMMEDIATELY after a clause that made a payment claim ("...is pending, [it is] now
-    // reconciled") continues that claim's subject — an assertion no phrase classifies, so it cannot hide behind the clause split.
-    return env.paymentClaimClause === env.clauseIndex - 1 && !isNonAssertivePaymentClause(text) && headlessPredicateClause(text);
-  }
-  // Every claim validates on its own binder; ANY ungrounded claim fails the clause.
-  const presence = [];
-  const anaphoric = isAnaphoricPaymentClause(text, amounts);
-  for (const claim of claims) {
-    if (claim.kind === 'negated') return true;
-    // an INVOICE-subject claim (explicit, or a pronoun carrying the customer's invoice — round 41) is judged against the invoice
-    // itself, before the payment-row anaphora rule (there is no antecedent payment row for it to inherit)
-    if (claim.subject === 'invoice') {
-      if (validateInvoiceStatusClaim(claim, text, amounts, env)) return true;
-      if (invoiceTenderUngrounded(claim, masked, env)) return true; // masked: the claim's span offsets are in the amount-masked clause
-      continue;
-    }
-    if (anaphoric && ANAPHORIC_KINDS.has(claim.kind)) {
-      if (validateAnaphoricClaim(claim, text, env)) return true;
-      continue;
-    }
-    const figures = claim.kind === 'owed_figures' ? owedFigureCents(masked, amounts) : null;
-    if (KIND_VALIDATORS[claim.kind]({ ...claim, text, amounts: claim.zero ? [] : (figures || amounts) }, env)) return true;
-    if (claim.kind === 'status' && PRESENCE_FAMILIES.has(claim.family)) presence.push(claim.family);
-    if (claim.kind === 'ack') presence.push('paid'); // "received" is itself a row-status claim (Codex round-18 P1)
-  }
-  // Presence claims (receipt = paid, plus "refunded", "failed", "disputed", "pending") describe ONE payment's
-  // status, so they must share at least one row status — "refunded after it failed" and "received ... while
-  // it is processing" are never a single row.
-  if (presence.length > 1) {
-    // a partial refund keeps status 'paid', so partial refund wording is a claim about a PAID row
-    const partial = partialRefundWording(text);
-    const sets = presence.map((f) => new Set(partial && (f === 'refunded' || f === 'reversed') ? ['paid'] : PAYMENT_STATUS_VOCABULARY[f].rowStatuses));
-    if (![...sets[0]].some((st) => sets.every((set) => set.has(st)))) return true;
-  }
-  env.paymentContext = true;
-  env.paymentClaimClause = env.clauseIndex;
-  // Blank every validated span: the remainder must assert nothing more, else fail closed.
-  if (negated) return true;
-  let remainder = masked;
-  for (const sp of [...spans].sort((x, y) => y.start - x.start)) remainder = `${remainder.slice(0, sp.start)} ${remainder.slice(sp.end)}`;
-  if (enumerateMaskedClaims(remainder, false, env).claims.length > 0) return true;
-  // Codex round-41 P1: whatever the vocabulary cannot classify must not hide behind a recognized claim ("pending yet already settled")
-  return residualPaymentAssertion(remainder, paymentScope(env));
-}
-
+// `opts.byMeaning` pins the strict (real-answers) rule regardless of the live gate (Codex #5194 r2 P1): a v12 review card that
+// outlives a gate rollback is still a v12 draft and is rechecked as one. Gate off: main's pooled allowlist, unchanged.
+// Gate on (PR #5331, owner ruling 2026-10-01): a payment / invoice / refund / balance STATUS is allowed only as a word-for-word
+// copy of a sentence rendered from the customer's records (payment-status-contract.js); any other status assertion is
+// ungrounded, and the rest of the reply is held to the owed-figure rule above.
 function replyQuotesUngroundedAmount(reply, context, opts = {}) {
-  const env = buildGroundingEnv(reply, context, opts);
-  // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8).
-  if (env.priceGrammarFires && env.replyAmounts.length === 0) return true;
-  // Gate OFF: the original pooled allowlist — any authoritative figure passes.
-  if (!env.realAnswers) return env.replyAmounts.some((a) => !env.owedCents.has(a) && !env.paidCents.has(a));
-  // In order, one shared env: earlier clauses set the payment identity later (anaphoric) clauses inherit.
-  const clauseList = env.text.split(CLAUSE_SPLIT_RE);
-  for (let i = 0; i < clauseList.length; i += 1) {
-    env.clauseIndex = i; // which clause is being judged (an anaphoric disclosure backs ONLY the clause just before it)
-    if (clauseUngrounded(clauseList[i], env)) return true;
+  const suggestMode = require('./sms-suggest-mode');
+  const text = String(reply || '');
+  const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  if (!realAnswers) {
+    const { owed, paid } = billingAmountCents(context);
+    const replyAmounts = amountCentsIn(text);
+    // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8).
+    if (suggestMode.hasPriceQuote(text) && replyAmounts.length === 0) return true;
+    return replyAmounts.some((a) => !owed.has(a) && !paid.has(a));
   }
-  return false;
+  const verdict = paymentStatus.checkPaymentStatusReply({
+    reply: text,
+    sentences: paymentStatus.renderPaymentStatusSentences(context),
+    inboundText: opts.inboundMessage == null ? null : String(opts.inboundMessage),
+  });
+  return !verdict.ok || remainderAmountsUngrounded(verdict.remainder, context);
+}
+
+// The reply guard inside the verify/revise loop: the facts block the model saw is the only source of copyable sentences (a frozen
+// replay reads its own). A violation feeds the same revise loop as every other deterministic check.
+function validatePaymentStatus({ reply, factsBlock, inboundMessage }) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !reply) return { ok: true, violations: [] };
+  const verdict = paymentStatus.checkPaymentStatusReply({
+    reply, sentences: paymentStatus.sentencesFromFactsBlock(factsBlock), inboundText: inboundMessage == null ? null : String(inboundMessage),
+  });
+  return verdict.ok ? { ok: true, violations: [] } : { ok: false, violations: [PAYMENT_STATUS_VIOLATION] };
+}
+const PAYMENT_STATUS_VIOLATION = 'the reply states a payment, invoice, refund or balance status that is not a word-for-word copy of one "Payment status sentences" line in BILLING - copy the single sentence that answers the question exactly (the whole sentence, unchanged), or state no status at all and say a teammate will confirm and follow up';
+
+// The sentences the final reply copied, persisted next to open_times_snapshot so every send path can re-render them from live
+// data (sms-amount-recheck.paymentStatusSendBlockReason). null when the reply copies none.
+function computePaymentStatusSnapshot({ customerId, reply, factsBlock }) {
+  if (!reply) return null;
+  return paymentStatus.paymentStatusSnapshotFor({ customerId, sentences: paymentStatus.sentencesFromFactsBlock(factsBlock), reply });
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
@@ -4165,7 +2878,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
-    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
+    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, copy the matching "Payment status sentences" line from BILLING (it carries the exact amount) and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
     : "When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.";
   // Codex r3: the v11 "do NOT name a time" branch and the v12 "offer OPEN
   // TIMES" rule both fired on "when can you come?", and the more specific
@@ -4195,7 +2908,7 @@ COMPANY FACTS:
   const paymentMoneyExtra = realAnswersOn
     ? `
 - Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. ${paymentStatusPromptLine()} A line marked failed means it did NOT go through — never say it was received. A line marked refunded or disputed WAS received and then reversed — say refunded for a refunded line and disputed for a disputed line, never that it failed and never that it is still paid. A paid line tagged "(partially refunded $X)" is NOT fully paid — say $X of it was refunded; never call it simply paid or received in full. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
+- PAYMENT STATUS ("did you get my payment", "is my invoice paid", "was I refunded", "do I owe anything", an amount or balance question): BILLING carries "Payment status sentences". State a payment, invoice, refund or balance status ONLY by copying one of those sentences word for word, as a whole sentence (nothing added to it, put inside it or cut from it), and only a sentence that is about the payment or invoice the customer asked about. If none fits - or BILLING says none is on file - do NOT state, imply or deny any status ("you're all set", "paid up", "we got it", "it's processing", "it failed", "it isn't showing", "you owe nothing" are all forbidden unless copied from a sentence): say a teammate will confirm, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}. Never name how a payment was made unless a copied sentence does.`
     : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
@@ -4341,60 +3054,6 @@ function monthlyChargeNote(dues) {
   // Fail closed on any state we did not positively resolve.
   return MONTHLY_CHARGE_NOTES[dues.basis]
     || '. Whether these dues are currently collecting could not be confirmed, so state the dues and never a charge total';
-}
-
-// Independent-review P2 (finding 5, PR #5331): "did you get my Zelle
-// payment?" needs enough evidence to match the CLAIMED tender, not just the
-// amount — Recent payments otherwise shows only amount/status/date, so a
-// $95 Zelle and a $95 card charge look identical to the model. Derived from
-// existing snapshot columns only (payments.payment_method_type/card_brand/
-// card_last_four for a card/Stripe payment — see the 20260924000032
-// migration; a manual off-gateway row's description, e.g.
-// "Invoice INV-1 — zelle", per invoice-manual-payment.js's VALID_PAYMENT_
-// METHODS). NEVER the raw description or any reference/memo text (PII) —
-// only ONE of the fixed tender words below, or null when it can't be
-// reliably told apart. Drawn from the SAME shared TENDER_VOCABULARY as
-// replyClaimedTender above (independent-review P1, round 3, PR #5331).
-//
-// Independent-review P2 (round 6, PR #5331): the OLD regex scanned the
-// WHOLE description, including the operator's free-text reference
-// (invoice-manual-payment.js writes `Invoice <number> — <method>
-// (<reference>)`, ~330-358) — a reference of "Cash App transfer" on an
-// "other" payment matched the bare word "Cash", and a reference of "not
-// Zelle, paid in person" matched "Zelle", either way fabricating a tender
-// the operator never selected. Parse ONLY the fixed method token in the
-// EXACT position that description format writes it: right after the "— "
-// separator, ending at the optional " (<reference>)" suffix or end of
-// string. The reference text itself is never inspected.
-const MANUAL_TENDER_FIELD_RE = /—\s*([a-z]+)\s*(?:\(|$)/i;
-function paymentTenderLabel(p) {
-  if (!p) return null;
-  const type = String(p.payment_method_type || '').toLowerCase();
-  if (type.includes('bank') || type === 'us_bank_account' || type === 'ach') return 'bank/ACH';
-  if (type === 'card') return 'card';
-  // Codex round-8 P1 (PR #5331): card_last_four ALONE proves nothing — an ACH
-  // payment (stripe.js) stores its BANK last4 in card_last_four with no
-  // payment_method_type. Read the method the row actually persisted: the
-  // Stripe-resolved metadata.payment_method (written on every gateway payment
-  // row: 'card' | 'us_bank_account' | …), then card_brand (set only for a card
-  // charge). Nothing readable -> null (an unknown tender the binder treats as
-  // its own, fail-closed).
-  const meta = (() => {
-    if (p.metadata && typeof p.metadata === 'object') return p.metadata;
-    try { return JSON.parse(p.metadata || 'null') || {}; } catch { return {}; }
-  })();
-  const metaMethod = String(meta.payment_method || '').toLowerCase();
-  if (metaMethod.includes('bank') || metaMethod === 'ach') return 'bank/ACH';
-  if (metaMethod === 'card') return 'card';
-  // Codex round-18 P1: the annual-prepay and account-credit writers (admin-customers.js) persist their
-  // VALIDATED tender as metadata.method — an allowlist (cash / check / zelle / venmo / paypal /
-  // card_present / other). Resolve it through the same vocabulary; "other" names no tender.
-  const writerMethod = String(meta.method || '').trim().toLowerCase();
-  if (writerMethod === 'card_present') return 'card';
-  if (MANUAL_TENDER_WORDS.has(writerMethod)) return tenderLabelForWord(writerMethod);
-  if (p.card_brand) return 'card';
-  const m = MANUAL_TENDER_FIELD_RE.exec(String(p.description || '').trim());
-  return m ? tenderLabelForWord(m[1]) : null;
 }
 
 /**
@@ -4569,8 +3228,8 @@ function buildFactsBlock(context, extras = {}) {
   // ledger) so it renders whether or not BILLING itself is known. Zelle has
   // no webhook into this system (same file's comment) — a Zelle payment
   // still needs the office to match and record it before it is a fact here,
-  // which is why "did you get my payment" is answered from Recent payments
-  // below, never assumed from having quoted this line.
+  // which is why "did you get my payment" is answered from the Payment status
+  // sentences below, never assumed from having quoted this line.
   // Gate off must stay byte-identical to v11 (v11 never had a Payment
   // options fact at all) — independent-review P1, same contract as
   // paymentMoneyExtra above, which is the only prompt text that references
@@ -4612,22 +3271,16 @@ function buildFactsBlock(context, extras = {}) {
         ? '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; Zelle is not available for this account right now, so do not offer it'
         : '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; no Zelle recipient is configured right now, so do not offer Zelle');
   }
-  const pays = billingKnown ? (context.billing?.recentPayments || []).filter((p) => p && p.amount != null) : [];
-  if (pays.length) {
-    billingLines.push(`- Recent payments: ${pays.map((p) => {
-      const tender = paymentTenderLabel(p);
-      const base = `$${Number(p.amount).toFixed(2)} ${p.status || ''} ${formatEtDate(p.payment_date || p.date)}`.replace(/\s+/g, ' ').trim();
-      // No suffix at all when the tender can't be reliably told apart — its
-      // absence IS the signal (paired with the prompt rule below: confirm
-      // only amount/date then, never guess the method).
-      // Gate-off (v11) facts are byte-identical to before this revision: the suffix (and the prompt
-      // rule that pairs with it) exist only under GATE_SMS_REAL_ANSWERS — the prompt identity (_pf).
-      if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return base;
-      // Round-16 P1: a partial refund keeps status 'paid'; render it so the row is never read as plain paid.
-      const refunded = partialRefundCents(p);
-      const refundNote = refunded ? ` (partially refunded${refunded > 0 ? ` $${(refunded / 100).toFixed(2)}` : ''})` : '';
-      return `${base}${tender ? ` via ${tender}` : ''}${refundNote}`;
-    }).join('; ')}`);
+  if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+    // PAYMENT STATUS (owner ruling 2026-10-01): payments, invoices, refunds and the balance reach the model ONLY as finished
+    // sentences rendered from the records (payment-status-contract) - never as raw rows it could paraphrase. Gate off keeps
+    // main's "Recent payments" line byte for byte.
+    billingLines.push(...paymentStatus.renderPaymentStatusLines(paymentStatus.renderPaymentStatusSentences(context)));
+  } else {
+    const pays = billingKnown ? (context.billing?.recentPayments || []).filter((p) => p && p.amount != null) : [];
+    if (pays.length) {
+      billingLines.push(`- Recent payments: ${pays.map((p) => `$${Number(p.amount).toFixed(2)} ${p.status || ''} ${formatEtDate(p.payment_date || p.date)}`.replace(/\s+/g, ' ').trim()).join('; ')}`);
+    }
   }
   const card = context.billing?.cardOnFile;
   if (card) {
@@ -5305,6 +3958,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     return {
       parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked,
       openTimesSnapshot: null,
+      paymentStatusSnapshot: null,
     };
   }
   if (!VERIFY_ENABLED) {
@@ -5327,6 +3981,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       return {
         parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked,
         openTimesSnapshot: null,
+        paymentStatusSnapshot: null,
       };
     }
     return {
@@ -5334,6 +3989,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
+      paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock }),
     };
   }
 
@@ -5359,7 +4015,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    for (const check of [reserviceCheck, complianceCheck]) {
+    // Payment status (owner ruling 2026-10-01): only a word-for-word copy of a rendered "Payment status sentences" line may state one.
+    const paymentStatusCheck = realAnswersApplied ? validatePaymentStatus({ reply: parsed.reply, factsBlock, inboundMessage }) : { ok: true, violations: [] };
+    for (const check of [reserviceCheck, complianceCheck, paymentStatusCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -5429,6 +4087,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     openTimesSnapshot: computeOpenTimesSnapshot({
       openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
+    // The payment-status sentences the FINAL reply copies (null = none): re-rendered from live data before any send.
+    paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock }),
   };
 }
 
@@ -5541,11 +4201,6 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const context = customer
       ? await ContextAggregator.getContextForCustomer(customer)
       : await ContextAggregator.getFullCustomerContext(fromPhone);
-    // A question about an OLDER payment (4th or earlier) must reach the model WITH that row in the facts,
-    // not only be rejected after the fact (Codex round-18 P2). Reads history only when the window is truncated.
-    // Gate off (v11) drafts from EXACTLY the rows main gave it — no surfaced extras (Codex round-33 P1).
-    if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) await require('./payment-history').surfaceReferencedPayments(context, inboundMessage);
-
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -5554,7 +4209,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot, factsGeneratedAt, zelleInvoiceId, reserviceBooked,
+      openTimesSnapshot, paymentStatusSnapshot, factsGeneratedAt, zelleInvoiceId, reserviceBooked,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
     });
@@ -5653,6 +4308,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // auto-send publish creates, so every send path can re-verify
           // without re-deriving it from facts_block text.
           open_times_snapshot: openTimesSnapshot ?? null,
+          // The payment-status sentences the reply copies (null = none), re-rendered and rechecked at send.
+          ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
           ...(gratitudeCandidate ? {
             gratitude: {
               source: 'live_webhook',
@@ -5697,9 +4354,6 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // inbound wording through so a confirmation binds to the tender/date the
     // customer actually asked about, not just what the drafted reply itself
     // restates.
-    // Absence claims read the authoritative history (loaded lazily, only for such a reply).
-    // (gate on only: the gate-off check is main's amount-only rule and needs no history read)
-    if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) await require('./payment-history').ensureAbsenceHistory(context, parsed.reply);
     const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context, { inboundMessage });
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
@@ -5752,6 +4406,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // TIMES at send time — dispatchClaimedSend re-fetches and refuses
           // to send if a quoted window is no longer offered.
           openTimesSnapshot,
+          paymentStatusSnapshot,
           // Codex #5194 P2: the instant the drafter rendered the SLA phrase
           // into factsBlock — claimAutoSend persists it on the decision's
           // input_snapshot so slaDraftedAt can anchor the deadline to it
@@ -5799,6 +4454,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               promptVersion,
               lintFailures: lint.failures,
               openTimesSnapshot,
+              paymentStatusSnapshot,
               intendedActions: parsed.intended_actions,
               // Codex #5194 P2 — see the maybeAutoSend call's comment above.
               factsGeneratedAt,
@@ -5856,6 +4512,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             promptVersion,
             lintFailures: lint.failures,
             openTimesSnapshot,
+            paymentStatusSnapshot,
             intendedActions: parsed.intended_actions,
             // Codex #5194 P2 — see the maybeAutoSend call's comment above.
             factsGeneratedAt,
@@ -5910,7 +4567,6 @@ module.exports = {
   buildUserPrompt,
   buildUserPromptFromFacts,
   buildFactsBlock,
-  paymentTenderLabel,
   formatExemplarBlock,
   exemplarLooksClean,
   fetchVoiceExemplars,
@@ -5942,27 +4598,13 @@ module.exports = {
   replyPromisesFollowup: followupSla.replyPromisesFollowup,
   slaPhraseStatus: followupSla.slaPhraseStatus,
   replyQuotesUngroundedAmount,
+  remainderAmountsUngrounded,
+  validatePaymentStatus,
+  computePaymentStatusSnapshot,
   fetchZelleEligibility,
   billingAmountCents,
-  hasAffirmativePaymentAck,
-  paymentAckPolarity,
-  classifyPaymentClause,
-  enumeratePaymentClaims,
-  paymentClauseNeedsValidation,
-  paymentIdentityFromText,
-  paymentRowMatchesIdentity,
-  paymentStatusClaimKind,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
-  replyClaimedTender,
-  tenderMatches,
-  cardBrandOfRow,
-  resolveEveryFigure,
-  TENDER_AMBIGUOUS,
-  bindPaidPaymentRow,
-  bindPaymentRow,
-  parseClaimedPaymentDate,
-  TENDER_VOCABULARY,
   replyBindsDeclaredDays,
   liveServiceType,
   serviceIdentityFor,

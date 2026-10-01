@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments } = require('./payer-linkage');
+const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments, LIVE_SCAN_MAX_RESOLUTIONS } = require('./payer-linkage');
 const { loadFailedPaymentFacts, standaloneFailedTotal, excludeNeverAttemptedDeferrals } = require('./failed-payments');
 // the payments display read over-fetches so payer-linked rows can be dropped without starving the window
 const PAYMENT_OVERFETCH = 40;
@@ -678,7 +678,7 @@ class ContextAggregator {
     let liveOwnedIds = new Set();
     if (!billingUnavailable) {
       const judgeable = invoiceRows.filter((inv) => isFaceOwn(inv) && (String(inv.status) !== 'draft' || feedsBalance(inv)));
-      const { ownedIds, unverifiable } = await require('./invoice-payer-ownership').liveInvoiceOwnership(customer.id, judgeable, undefined, { ownLimit: 9, alwaysJudge: feedsBalance }); // 8 listed + 1 to know the list is cut
+      const { ownedIds, unverifiable } = await require('./invoice-payer-ownership').liveInvoiceOwnership(customer.id, judgeable, undefined, { ownLimit: 9, alwaysJudge: feedsBalance, maxResolutions: LIVE_SCAN_MAX_RESOLUTIONS }); // 8 listed + 1 to know the list is cut
       if (unverifiable) { billingUnavailable = true; invoiceRows = []; } else liveOwnedIds = ownedIds;
     }
     const liveOwned = (inv) => liveOwnedIds.has(String(inv.id));
@@ -862,10 +862,8 @@ class ContextAggregator {
         // completed/attempted history only (Codex r5): 'upcoming' autopay
         // rows are FUTURE charges, not payments the customer made.
         recentPayments: ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').slice(0, 3),
-        // Codex round-11 P1: recentPayments is a 3-row DISPLAY window. True when
-        // the window may hide more history (the 5-row read was full, or own rows
-        // exceed 3) — an absence claim then needs the authoritative history,
-        // loaded lazily by payment-history.js ONLY when a reply makes one.
+        // recentPayments is a 3-row DISPLAY window. recentPaymentsTruncated = the window may hide more history (the 5-row read
+        // was full, or own rows exceed 3): the payment-status contract then renders no "no payments" sentence.
         recentPaymentsTruncated: ownPaymentsAll.length >= 5 || payments.length >= PAYMENT_OVERFETCH
           || ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').length > 3,
         // Codex round-11 P1: a payment or invoice still PROCESSING is unsettled

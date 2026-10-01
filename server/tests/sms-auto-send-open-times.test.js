@@ -28,12 +28,6 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
-  // Independent-review P1 (round 5, finding 1): dispatchClaimedSend's new
-  // amount-free status-claim recheck reads these two off the real drafter —
-  // stubbed here since this suite's replies never carry a payment-status
-  // claim (its scenarios are about OPEN TIMES rechecking).
-  hasAffirmativePaymentAck: jest.fn(() => false),
-  paymentStatusClaimKind: jest.fn(() => null),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));

@@ -272,48 +272,24 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
   });
 
-  // Codex round-20 P2: same as draftShadowReply — the referenced OLDER payment is surfaced into the facts
-  // BEFORE the grounded draft is generated.
-  test('gate off: the v11 draft gets exactly main\'s rows — nothing is surfaced (Codex round-33 P1)', async () => {
-    const paymentHistory = require('../services/payment-history');
-    const context = { summary: 'ctx', flags: [], billing: { recentPayments: [] } };
-    ContextAggregator.getContextForCustomer.mockResolvedValue(context);
-    const spy = jest.spyOn(paymentHistory, 'surfaceReferencedPayments').mockImplementation(async (ctx) => ctx);
-    generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v11' });
-    try {
-      delete process.env.GATE_SMS_REAL_ANSWERS;
-      await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Did you get my $120 payment from June 12?', decision: { intent: 'general_customer_sms_needs_review', confidence: 0.9 }, estimate: null });
-      expect(spy).not.toHaveBeenCalled();
-    } finally { spy.mockRestore(); }
-  });
+  // PR #5331 (owner ruling 2026-10-01): the payment-status sentences the reply copied ride the decision's input_snapshot so every
+  // send seam can re-render them from live data (agent-decision-send-checks / the scheduler).
+  test('persists the drafter\'s payment_status_snapshot on the decision, and omits it when the reply copied no sentence', async () => {
+    seedActiveSchedulingThread();
+    const snap = { customer_id: 'cust-1', sentences: ['Your account has no balance due.'] };
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Your account has no balance due.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers5_cf_pf', paymentStatusSnapshot: snap,
+    });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Do I owe anything?', smsLogId: 'sms-in-12' });
+    expect(JSON.parse(lastDecisionInsert().input_snapshot).payment_status_snapshot).toEqual(snap);
 
-  test('surfaces the payment the customer asked about into the context before generateGroundedDraft', async () => {
-    process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    const paymentHistory = require('../services/payment-history');
-    const older = { id: 'p-old', amount: 120, status: 'paid', payment_date: '2026-06-12' };
-    const context = { summary: 'ctx', flags: [], billing: { recentPayments: [] } };
-    ContextAggregator.getContextForCustomer.mockResolvedValue(context);
-    const spy = jest.spyOn(paymentHistory, 'surfaceReferencedPayments').mockImplementation(async (ctx) => {
-      ctx.billing.recentPayments.push(older);
-      return ctx;
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Happy to help.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers5_cf_pf', paymentStatusSnapshot: null,
     });
-    let seenAtDraft = null;
-    generateGroundedDraft.mockImplementation(async (args) => {
-      seenAtDraft = args.context.billing.recentPayments.map((p) => p.id);
-      return { parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v8' };
-    });
-    try {
-      await _test.generateLlmReviewDraft({
-        customer: CUSTOMER,
-        body: 'Did you get my $120 payment from June 12?',
-        decision: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
-        estimate: null,
-      });
-      expect(spy).toHaveBeenCalledWith(context, 'Did you get my $120 payment from June 12?');
-      expect(seenAtDraft).toEqual(['p-old']); // the row was in the context the drafter received
-    } finally {
-      spy.mockRestore();
-    }
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Hello what happened this morning', smsLogId: 'sms-in-13' });
+    expect(JSON.parse(lastDecisionInsert().input_snapshot)).not.toHaveProperty('payment_status_snapshot');
   });
 
   test('no estimate resolved: estimateId is null, not undefined or omitted', async () => {

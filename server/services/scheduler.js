@@ -25,6 +25,10 @@ const AMOUNT_BLOCK_NOTES = {
   amount_recheck_failed: 'The payment/amount recheck for this scheduled reply could not be completed',
   amount_unverifiable: 'This scheduled reply states an amount that cannot be verified',
   amount_no_longer_authorized: 'This scheduled reply states an amount or payment status that no longer matches the account',
+  payment_status_unauthorized: 'This scheduled reply states a payment, invoice, refund or balance status that is not a word-for-word copy of the account sentence the draft was written from',
+  payment_status_changed: 'The payment status this scheduled reply states no longer matches the account',
+  payment_status_recheck_no_customer: 'This scheduled reply states a payment status but the customer could not be loaded',
+  payment_status_recheck_failed: 'The payment-status recheck for this scheduled reply could not be completed',
 };
 // The fire-time amount / Zelle / payment-status recheck for one claimed
 // scheduled reply (extracted from the send loop so the pre-screen and the
@@ -49,15 +53,12 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
       // authored reply with no snapshot — the recheck resolves the CURRENT
       // open invoice itself).
       zelleInvoiceId: snapshot?.zelle_invoice_id || null,
-      // The customer's own inbound (draft-time snapshot) so a confirmation
-      // still binds to the tender/date they named (round-6).
+      // The customer's own inbound (draft-time snapshot): scopes the payment-status detector and names the Zelle invoice.
       inboundMessage: snapshot?.sms?.body || null,
-      // A human edit trusts only the OWED-amount half, never a Zelle offer or
-      // receipt claim (round-4 finding 3).
+      // The payment-status sentences the draft copied: the only status wording this body may carry, each re-rendered from live data.
+      paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+      // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
       trustOwedAmounts: claimMeta.human_authored === true,
-      // every body bodyNeedsPaymentRecheck selected gets the clause-aware status / receipt check, whatever prompt
-      // version drafted it (Codex round-30 P1): a pre-v12 "Your payment failed" must not skip it.
-      strictStatusClaims: true,
     });
     return { stale: !!verdict.stale, reason: verdict.stale ? (verdict.reason || 'amount_recheck_failed') : null };
   } catch (err) {

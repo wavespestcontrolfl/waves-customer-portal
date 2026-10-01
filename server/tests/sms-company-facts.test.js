@@ -89,9 +89,9 @@ describe('gate on', () => {
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
-    // '_cf' = COMPANY FACTS, '_pf' = PAYMENT FACTS (PR #5331), numeric token 4 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3: one suffix token per fact section.
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers4_cf_pf');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers4_cf_pf');
+    // '_cf' = COMPANY FACTS, '_pf' = PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (4 was the pre-contract claim checker, never merged): one suffix token per fact section.
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cf_pf');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cf_pf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');

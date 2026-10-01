@@ -18,9 +18,9 @@ function parseInputSnapshot(inputSnapshot) {
   }
 }
 
-// The customer's own inbound wording for this decision (independent-review
-// P1, round 6, PR #5331) — the thing a confirmation's claimed tender/date
-// must be checked against. `decision.inbound_message` is the linked
+// The customer's own inbound wording for this decision - what scopes the
+// payment-status detector and names the invoice a Zelle offer is about.
+// `decision.inbound_message` is the linked
 // sms_log row's body (verifyAgentDecisionForSend's own select, joined at
 // query time); input_snapshot's `sms.body` is the same text stashed at
 // draft time and covers a decision the caller selected without that join.
@@ -73,9 +73,13 @@ function followupBlock({ decision, outgoingBody }) {
   return reason ? `follow-up promise unsendable (${reason})` : null;
 }
 
-// AMOUNTS: a real-answers card may carry exact billing figures and can wait
-// through a payment; re-read billing now, same check the scheduler runs at
-// fire time. Older-prompt decisions are untouched for the AMOUNT half.
+// AMOUNTS + PAYMENT STATUS: a real-answers card may carry exact billing figures and payment-status sentences and can wait
+// through a payment; re-read billing now, same check the scheduler runs at fire time. Older-prompt decisions are untouched for
+// both halves.
+//
+// PAYMENT STATUS (owner ruling 2026-10-01): the FINAL body of every real-answers decision may state a payment / invoice / refund /
+// balance status only by copying, verbatim, a sentence its payment_status_snapshot recorded - and each copied sentence must still
+// be one the records render now. An edited sentence, a status typed in, or a status on a decision that copied none is held.
 //
 // Independent-review P1 (round 6, PR #5331): the Zelle recipient-plus-
 // invoice-eligibility half must NOT stay gated behind `realAnswers &&
@@ -91,32 +95,28 @@ function followupBlock({ decision, outgoingBody }) {
 // fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
   const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
-  const { outgoingAmountsStale, hasAffirmativeZelleMention, bodyNeedsPaymentRecheck, bodyMakesPaymentClaim } = require('./sms-amount-recheck');
-  const hasZelleOffer = hasAffirmativeZelleMention(outgoingBody);
-  // Codex round-23 P2: the SAME gate the scheduler's fire-time seam uses (bodyNeedsPaymentRecheck: an amount, an
-  // affirmative Zelle offer, a payment-status claim, price grammar — AND a negative Zelle availability claim),
-  // so an edited pre-v12 body carrying a Zelle DENIAL is rechecked too. v12 decisions always run the recheck.
-  const needsRecheck = realAnswers || bodyNeedsPaymentRecheck(outgoingBody);
-  if (!needsRecheck) return null;
+  const { outgoingAmountsStale, hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
+  // Codex round-23 P2: a Zelle OFFER or DENIAL is rechecked for every decision (an edited pre-v12 body too); v12 decisions always
+  // run the whole recheck.
+  const zelleClaim = hasAffirmativeZelleMention(outgoingBody) || hasNegativeZelleAvailabilityClaim(outgoingBody);
+  if (!realAnswers && !zelleClaim) return null;
   if (!decision.customer_id) {
-    // Codex round-28 P2: with no customer to re-read billing for, ANY body the recheck gate selects (an amount, a
-    // Zelle offer or DENIAL, a payment-status claim, price grammar) cannot be verified — fail closed, not just Zelle offers.
-    // PRECISE classifier (round 29): the broad prescreen would block benign copy like "Your invoice is attached"
-    return (hasZelleOffer || bodyMakesPaymentClaim(outgoingBody, { inboundMessage: resolveInboundMessage(decision) })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+    // With no customer to re-read billing for, ANY body the recheck would judge (an amount, a Zelle claim, a payment-status
+    // assertion, price grammar) cannot be verified - fail closed. Benign copy ("Your invoice is attached") needs no billing.
+    return (zelleClaim || bodyNeedsPaymentRecheck(outgoingBody, { inboundMessage: resolveInboundMessage(decision) })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
   }
   // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
   // built for, so a body carrying a Zelle contact is rechecked against that
   // SAME invoice's CURRENT eligibility, not just its recipient.
-  const zelleInvoiceId = parseInputSnapshot(decision.input_snapshot)?.zelle_invoice_id || null;
+  const snapshot = parseInputSnapshot(decision.input_snapshot);
   const amounts = await outgoingAmountsStale({
     customerId: decision.customer_id,
     body: outgoingBody,
     promptVersion: decision.prompt_version,
-    zelleInvoiceId,
+    zelleInvoiceId: snapshot?.zelle_invoice_id || null,
     inboundMessage: resolveInboundMessage(decision),
-    // A pre-v12 decision reaches here ONLY for its Zelle offer (above): its
-    // amount rules stay untouched (trustOwedAmounts on the pooled rule is a
-    // no-op after the Zelle check, same as the scheduler's human-authored path).
+    paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
     trustOwedAmounts: !realAnswers,
   });
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;

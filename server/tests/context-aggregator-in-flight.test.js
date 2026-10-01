@@ -45,6 +45,9 @@ const build = async () => {
   return ctx.billing;
 };
 
+// The status sentences the records support (payment-status-contract): the ONLY payment status a draft may state.
+const sentenceTexts = (billing) => require('../services/payment-status-contract').renderPaymentStatusSentences({ billing }).map((x) => x.text);
+
 describe('hasProcessingPayment comes from the existence query, not the display window', () => {
   test('5 newer PAID rows in the window + an older processing row elsewhere => true', async () => {
     hasInFlightMoney.mockResolvedValue(true);
@@ -103,18 +106,15 @@ describe('collectible own invoices (sent / viewed / overdue; partially_paid flag
     expect(billing.hasUncountedPartialDue).toBe(true);
     expect(billing.invoiceStatuses.map((x) => x.status)).toEqual(['partially_paid']);
   });
-  test('settlement / zero-balance claims are ungrounded while a partially_paid invoice has an amount due; an unpaid claim about THAT invoice still binds', async () => {
-    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  test('no balance / settlement sentence is rendered while a partially_paid invoice has an amount due; that invoice\'s own sentence is', async () => {
     const billing = await billingFor([inv('i3', 'WPC-2026-0003', 'partially_paid', 100)]);
-    for (const claim of ["You're paid up.", 'Your account is current.', 'You have a $0 balance.', "You don't owe anything."]) {
-      expect({ claim, ungrounded: replyQuotesUngroundedAmount(claim, { billing }, { byMeaning: true }) }).toEqual({ claim, ungrounded: true });
-    }
-    // "Invoice #0003 is still unpaid" binds through the invoice status (partially paid with an amount due => true of it)
-    expect(replyQuotesUngroundedAmount('Invoice #0003 is still unpaid.', { billing }, { byMeaning: true, inboundMessage: 'Is invoice 0003 unpaid?' })).toBe(false);
-    // ...and a paid invoice (no uncounted partial) still grounds "paid up"
+    const texts = sentenceTexts(billing);
+    expect(texts).toContain('Invoice WPC-2026-0003 is partially paid, with $100.00 still due.');
+    expect(texts.filter((t) => /account balance|no balance due/.test(t))).toEqual([]);
+    // ...and a paid invoice (no uncounted partial) renders the settlement sentence
     const clean = await billingFor([inv('i3', 'WPC-2026-0003', 'paid', 100)]);
     expect(clean.hasUncountedPartialDue).toBe(false);
-    expect(replyQuotesUngroundedAmount("You're paid up.", { billing: clean }, { byMeaning: true })).toBe(false);
+    expect(sentenceTexts(clean)).toEqual(expect.arrayContaining(['Invoice WPC-2026-0003 for $100.00 is paid.', 'Your account has no balance due.']));
   });
   test('a sent invoice alongside a partially_paid one: the balance is the sent one only (the portal number)', async () => {
     const billing = await billingFor([inv('i2', 'WPC-2026-0002', 'sent', 95), inv('i3', 'WPC-2026-0003', 'partially_paid', 100)]);
@@ -138,14 +138,13 @@ describe('collectible own invoices (sent / viewed / overdue; partially_paid flag
     expect(billing.invoiceStatuses.map((x) => x.id)).toEqual(['i2']); // never "Invoice #0123 is still unpaid"
     expect(billing.payerBilledInvoice).toBe(true); // ...and it flags the payer-billed fact
   });
-  test('the Zelle target resolver never picks a withdrawn invoice, and Invoice #0123 is still unpaid is ungrounded (not in the list)', async () => {
+  test('the Zelle target resolver never picks a withdrawn invoice, and no status sentence is rendered for it', async () => {
     const { resolveZelleTargetInvoice } = require('../services/zelle-target-invoice');
-    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
     const billing = await billingFor([inv('i4', 'WPC-2026-0123', 'sent', 250, { scheduled_send_error: 'payer_billed:payer-1:hold' }), inv('i2', 'WPC-2026-0456', 'sent', 95)]);
     expect(resolveZelleTargetInvoice(billing, 'Can I Zelle invoice WPC-2026-0123?').invoiceId).toBeNull(); // named, but not one of the homeowner's open invoices
     expect(resolveZelleTargetInvoice(billing, 'Can I pay by Zelle?').invoiceId).toBe('i2');
-    expect(replyQuotesUngroundedAmount('Invoice #0123 is still unpaid.', { billing }, { byMeaning: true })).toBe(true);
-    expect(replyQuotesUngroundedAmount('Invoice #0456 is still unpaid.', { billing }, { byMeaning: true })).toBe(false);
+    expect(sentenceTexts(billing).filter((t) => t.includes('0123'))).toEqual([]); // the withdrawn invoice has no sentence
+    expect(sentenceTexts(billing)).toContain('Invoice WPC-2026-0456 has $95.00 due.');
   });
   test('drafts, void and payer-billed rows never count', async () => {
     const billing = await billingFor([inv('i1', 'A-1', 'draft', 50), inv('i2', 'A-2', 'void', 60), inv('i3', 'A-3', 'sent', 70, { payer_id: 'p1' })]);
@@ -161,20 +160,18 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
   const inv = (id, number, status, total, over = {}) => ({ id, invoice_number: number, status, total, credit_applied: 0, payer_id: null, scheduled_send_error: null, scheduled_service_id: null, due_date: null, created_at: `2026-09-2${id.slice(-1)}`, ...over });
   afterEach(() => { delete db.__rows; mockResolveForInvoice.mockReset(); mockResolveForInvoice.mockResolvedValue({ payerId: null }); });
   const billingFor = async (rows) => { db.__rows = { invoices: rows, payments: [] }; hasInFlightMoney.mockResolvedValue(false); return build(); };
-  test('a payer assigned via the scheduled service AFTER minting (payer_id still NULL) drops that invoice from the status list', async () => {
+  test('a payer assigned via the scheduled service AFTER minting (payer_id still NULL) drops that invoice from the status list and its sentences', async () => {
     mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));
     const billing = await billingFor([inv('i2', 'WPC-2026-0123', 'sent', 250, { scheduled_service_id: 'ss-ap' }), inv('i1', 'WPC-2026-0456', 'sent', 95, { scheduled_service_id: 'ss-own' })]);
     expect(billing.invoiceStatuses.map((x) => x.id)).toEqual(['i1']);
-    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
-    expect(replyQuotesUngroundedAmount('Invoice #0123 is still unpaid.', { billing }, { byMeaning: true })).toBe(true);
-    expect(replyQuotesUngroundedAmount('Invoice #0456 is still unpaid.', { billing }, { byMeaning: true })).toBe(false);
+    expect(sentenceTexts(billing).filter((t) => t.includes('0123'))).toEqual([]);
+    expect(sentenceTexts(billing)).toContain('Invoice WPC-2026-0456 has $95.00 due.');
   });
   test('an unverifiable ownership lookup makes the whole status list unknown (null) - fail closed', async () => {
     mockResolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
     const billing = await billingFor([inv('i1', 'WPC-2026-0456', 'sent', 95)]);
     expect(billing.invoiceStatuses).toBeNull();
-    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
-    expect(replyQuotesUngroundedAmount('Invoice #0456 is still unpaid.', { billing }, { byMeaning: true })).toBe(true);
+    expect(sentenceTexts(billing)).toEqual([]); // billing unknown renders NO status sentence at all
   });
   // Codex round-40 P1: the SAME live verdict feeds the owed BALANCE, the open invoice, the Zelle-target list and the flags - not just the status list
   test('a live-resolved payer invoice is excluded from the balance, open invoice, open-invoice list and flagged payer-billed (not just the status list)', async () => {
@@ -324,11 +321,10 @@ describe('standalone failed payments behind the display window still count as ow
     const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
     expect(replyQuotesUngroundedAmount("You're paid up.", { billing: overdue }, { byMeaning: true })).toBe(true);
   });
-  test('no failure => zero owed and "your account is current" is grounded', async () => {
+  test('no failure => zero owed and the "no balance due" sentence is rendered', async () => {
     const billing = await billingFor([]);
     expect(billing.outstandingBalance).toBe(0);
-    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
-    expect(replyQuotesUngroundedAmount('Your account is current.', { billing }, { byMeaning: true })).toBe(false);
+    expect(sentenceTexts(billing)).toContain('Your account has no balance due.');
   });
   test('the canonical exclusions hold: a never-attempted lock-contention deferral and a payer-linked failure are not owed', async () => {
     const deferral = failed('def', 55, { stripe_payment_intent_id: null, retry_count: 0, next_retry_at: '2026-10-05', metadata: { deferred_reason: 'lock_contention' } });

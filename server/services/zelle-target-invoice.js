@@ -103,6 +103,10 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   // Codex round-31 P2: an amount the customer ties to an INVOICE / BILL ("my $200 invoice") identifies the target; a bare
   // amount elsewhere in the message ("…did you receive my $100 payment?") does not. Scoped amounts win; bare amounts
   // are the fallback ONLY when the message has no invoice-scoped amount.
+  // Codex round-43 P2: the open list was CUT, so a unique-looking amount match proves nothing (an omitted invoice may carry the
+  // same amount due): an amount-only identity NEVER resolves from a truncated list - the target stays unresolved.
+  const bareAmountsNamed = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
+  if (billing?.openInvoicesTruncated && (namedAmounts.length || bareAmountsNamed.length)) return { invoiceId: null, reason: 'open_list_truncated' };
   if (namedAmounts.length) {
     // Codex round-39 P2: EVERY invoice-scoped amount must resolve to an open invoice - one that matches nothing is an unresolved
     // explicit target, never ignored because a sibling amount matched.

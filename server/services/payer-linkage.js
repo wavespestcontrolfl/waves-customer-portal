@@ -76,6 +76,10 @@ async function loadPayerLinkage(customerId, dbh = db) {
 // into the linkage, so authoritative payment history and the in-flight probe judge a payment exactly like the invoice facts do.
 // Unverifiable ownership (a lookup / resolver failure) => `failed` (callers fail closed). `liveOwnedIds` = invoice ids the live
 // resolver named (payer_id NULL, not stamped), so SQL can drop their payments BEFORE a row cap.
+// Codex round-43 P1: the scan is BOUNDED. At most LIVE_SCAN_MAX_INVOICES unstamped invoices are read (newest first) and at most
+// LIVE_SCAN_MAX_RESOLUTIONS live resolver lookups are made; an account with more is UNVERIFIABLE (`failed`, callers fail closed).
+const LIVE_SCAN_MAX_INVOICES = 120;
+const LIVE_SCAN_MAX_RESOLUTIONS = 30;
 async function loadLivePayerLinkage(customerId, dbh = db) {
   const base = await loadPayerLinkage(customerId, dbh);
   if (base.failed) return { ...base, liveOwnedIds: new Set(), liveOwnedRows: [] };
@@ -88,11 +92,14 @@ async function loadLivePayerLinkage(customerId, dbh = db) {
       this.whereNull('scheduled_send_error').orWhere('scheduled_send_error', 'not like', 'payer_billed:%');
     })
     .select('id', 'customer_id', 'scheduled_service_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
+    .orderBy('created_at', 'desc')
+    .limit(LIVE_SCAN_MAX_INVOICES + 1)
     .catch(() => { failed = true; return []; });
+  if (rows.length > LIVE_SCAN_MAX_INVOICES) failed = true; // more history than the bounded scan can judge => unknown
   if (failed) return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
   let verdict;
   try {
-    verdict = await require('./invoice-payer-ownership').liveInvoiceOwnership(customerId, rows, dbh);
+    verdict = await require('./invoice-payer-ownership').liveInvoiceOwnership(customerId, rows, dbh, { maxResolutions: LIVE_SCAN_MAX_RESOLUTIONS });
   } catch {
     return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
   }
@@ -126,6 +133,6 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
 }
 
 module.exports = {
-  uuidFromMetadata, excludeLiveOwnedPayerPayments,
+  LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
   invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
 };

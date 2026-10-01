@@ -112,9 +112,9 @@ describe('every failed-payment consumer applies the shared predicate', () => {
     expect(src).toContain('collections/collection-hold');
   });
 
-  // The SMS payment-history readers need EVERY never-attempted placeholder kind (collection_hold AND lock_contention), so they ride the
+  // The SMS recent-payments window needs EVERY never-attempted placeholder kind (collection_hold AND lock_contention), so it rides the
   // composed SQL twin in services/failed-payments.js, which itself applies the collection_hold twin (Codex round-38 P1).
-  test.each(['services/context-aggregator.js', 'services/payment-history.js'])('%s uses the composed excludeNeverAttemptedDeferrals', (file) => {
+  test.each(['services/context-aggregator.js'])('%s uses the composed excludeNeverAttemptedDeferrals', (file) => {
     const src = fs.readFileSync(path.join(root, file), 'utf8');
     expect(src).toMatch(/excludeNeverAttemptedDeferrals\(/);
     expect(src).toContain("require('./failed-payments')");

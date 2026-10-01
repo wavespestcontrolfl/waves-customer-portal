@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, paymentStatusSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -255,6 +255,8 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // revalidate quoted OPEN TIMES windows at dispatch, threaded from
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          // the payment-status sentences the reply copies, re-rendered and rechecked before provider entry (dispatchClaimedSend)
+          ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
           // Codex round-43 P2: the already-booked re-service callback(s) the drafted reply may refer to ({ lane: { date, windowStart } }) —
           // rechecked live before provider entry (reserviceBookedHandoffCheck), same snapshot the manual / scheduled seams read.
           ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
@@ -309,7 +311,9 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
     return {
-      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, reserviceBookedSnapshot,
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, reserviceBookedSnapshot, paymentStatusSnapshot,
+      // which prompt family the reply was drafted under: real-answers (v12) replies run the payment-status recheck
+      promptVersion: promptVersion || null,
       // Pre-push audit P1 (finding 2): threaded to the pre-send Zelle
       // eligibility recheck in dispatchClaimedSend.
       zelleInvoiceId,
@@ -531,8 +535,8 @@ async function maybeAutoSend(params = {}) {
       intent: params.intent,
       reply: gratitudeLane ? claim.reply : params.reply,
       customerId: gratitudeLane ? claim.customerId : ready.customerId,
-      // Codex round-9 P1: the customer's original inbound (amount/tender/date
-      // identity for the status recheck). A gratitude reply is never a payment
+      // Codex round-9 P1: the customer's original inbound (scopes the payment-status
+      // recheck). A gratitude reply is never a payment
       // claim and carries none.
       inboundMessage: gratitudeLane ? null : (params.inboundMessage || null),
     });
@@ -935,28 +939,26 @@ async function dispatchClaimedSend({
         return outcome;
       }
     }
-    // Amount-free payment-status recheck (independent-review P1, round 5,
-    // finding 1): (3.7) above already refuses any DOLLAR-bearing reply
-    // before the claim, but a payment-status/receipt claim with no dollar
-    // figure at all ("You're paid up.", "We have your payment.") carries no
-    // price-quote grammar and clears that guard too — reaching the provider
-    // with no recheck against CURRENT billing. Auto-send is the fully
-    // autonomous lane, so this always runs at its strictest (`strict: true`)
-    // regardless of prompt version. Same supersede-via-failClaim mechanism
-    // as the other two rechecks above.
-    const { amountFreeStatusClaimStale } = require('./sms-amount-recheck');
-    let statusClaimCheck;
-    try {
-      statusClaimCheck = await amountFreeStatusClaimStale({ customerId, body: reply, strict: true, inboundMessage });
-    } catch (err) {
-      logger.warn(`[sms-auto-send] status-claim recheck threw (decision ${claim.decisionId}): ${err.message}`);
-      statusClaimCheck = { stale: true, reason: 'amount_recheck_failed' };
-    }
-    if (statusClaimCheck.stale) {
-      logger.warn(`[sms-auto-send] amount-free status claim stale (decision ${claim.decisionId}): ${statusClaimCheck.reason}`);
-      const outcome = await notSent(statusClaimCheck.reason);
-      await reopenParked('Auto-send held: a payment status statement is no longer accurate — suggestion reopened.');
-      return outcome;
+    // PAYMENT STATUS recheck (owner ruling 2026-10-01): (3.7) above refuses any DOLLAR-bearing reply before the claim, but a status
+    // sentence with no figure ("Your account has no balance due.") clears that guard and would reach the provider unchecked.
+    // A real-answers reply may state a payment / invoice / refund / balance status only by copying a sentence its snapshot
+    // recorded, and every copied sentence must still be one the records render NOW; anything else is held. Same
+    // supersede-via-failClaim mechanism as the rechecks above.
+    if (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12')) {
+      const { paymentStatusSendBlockReason } = require('./sms-amount-recheck');
+      let statusReason;
+      try {
+        statusReason = await paymentStatusSendBlockReason({ customerId, body: reply, snapshot: claim.paymentStatusSnapshot || null, inboundMessage });
+      } catch (err) {
+        logger.warn(`[sms-auto-send] payment-status recheck threw (decision ${claim.decisionId}): ${err.message}`);
+        statusReason = 'payment_status_recheck_failed';
+      }
+      if (statusReason) {
+        logger.warn(`[sms-auto-send] payment status held (decision ${claim.decisionId}): ${statusReason}`);
+        const outcome = await notSent(statusReason);
+        await reopenParked('Auto-send held: a payment status statement is no longer accurate — suggestion reopened.');
+        return outcome;
+      }
     }
     // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
     // the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.

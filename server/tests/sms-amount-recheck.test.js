@@ -1,38 +1,34 @@
 /**
- * sms-amount-recheck — the send-time amount revalidation shared by the
- * scheduler's fire-time path and the immediate Agent Review send (PR #5119
- * follow-up #2). Fresh context, current obligations only, payment history
- * only for an acknowledgement, fail closed on any error.
+ * sms-amount-recheck - the send-time revalidation shared by the scheduler's fire-time path and the immediate Agent Review send
+ * (PR #5119 follow-up #2), plus (PR #5331) the PAYMENT STATUS contract at send time and the Zelle recheck: fresh context,
+ * current obligations only, fail closed on any error.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/context-aggregator', () => ({
   getContextForCustomer: jest.fn(),
   authorizedDuesCents: jest.fn(() => []),
 }));
-// the clause-aware guard is stubbed; the shared billing figures are the real ones
-jest.mock('../services/sms-shadow-drafter', () => ({
-  ...jest.requireActual('../services/sms-shadow-drafter'),
-  replyQuotesUngroundedAmount: jest.fn(() => false),
-}));
+// the shared billing figures + the owed-figure rule are the drafter's real ones
 jest.mock('../services/sms-followup-sla', () => ({ realAnswersGateOn: jest.fn(() => false) }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasPriceQuote: jest.fn((t) => /\b(?:fifty|forty|twenty|hundred)\s+dollars\b|\d+\s?\/\s?mo\b|\$\s?\d/i.test(String(t || ''))) }));
 jest.mock('../routes/pay-v2', () => ({ payPageZelleVisibility: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
-const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
 const { realAnswersGateOn } = require('../services/sms-followup-sla');
 const ContextAggregator = require('../services/context-aggregator');
 const { payPageZelleVisibility } = require('../routes/pay-v2');
 const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, classifyZelleClause, amountFreeStatusClaimStale,
+  hasAffirmativeZelleMention, classifyZelleClause, paymentStatusSendBlockReason, bodyNeedsPaymentRecheck,
 } = require('../services/sms-amount-recheck');
+
+const V12 = 'house_voice_v12_real_answers5_cf_pf';
 
 function dbWithCustomer(row) {
   return () => ({ where: () => ({ first: async () => row }) });
 }
 
-// Distinguishes by table name, unlike dbWithCustomer above — needed once a
+// Distinguishes by table name, unlike dbWithCustomer above - needed once a
 // test exercises BOTH the invoices lookup (Zelle eligibility) and the
 // customers lookup (the amount-grounding path) in the same call.
 function dbWithTables(map) {
@@ -50,42 +46,9 @@ function dbWithTables(map) {
 beforeEach(() => {
   ContextAggregator.getContextForCustomer.mockReset();
   ContextAggregator.authorizedDuesCents.mockReset().mockReturnValue([]);
-  replyQuotesUngroundedAmount.mockReset().mockReturnValue(false);
   realAnswersGateOn.mockReset().mockReturnValue(false);
   payPageZelleVisibility.mockReset();
   assertInvoiceDepositSettlementReady.mockReset().mockImplementation(async () => {});
-});
-
-test('gate ON: the drafter\'s clause-aware guard is the stricter authority (a reversed payment no longer backs an acknowledgement)', async () => {
-  realAnswersGateOn.mockReturnValue(true);
-  const ctx = { billing: { outstandingBalance: 95, recentPayments: [{ amount: 95, status: 'failed' }] } };
-  ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
-  replyQuotesUngroundedAmount.mockReturnValue(true);
-  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment — thank you!', ctx, { byMeaning: true, trustOwedAmounts: false, inboundMessage: null });
-  replyQuotesUngroundedAmount.mockReturnValue(false);
-  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
-});
-
-test('a v12 decision is rechecked strictly even after a gate rollback (prompt version wins over the live gate)', async () => {
-  realAnswersGateOn.mockReturnValue(false);
-  ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 95, recentPayments: [{ amount: 95, status: 'failed' }] } });
-  replyQuotesUngroundedAmount.mockReturnValue(true);
-  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment.', promptVersion: 'house_voice_v12_real_answers', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toMatchObject({ stale: true });
-  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment.', expect.any(Object), { byMeaning: true, trustOwedAmounts: false, inboundMessage: null });
-  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is fifty dollars.', promptVersion: 'house_voice_v12_real_answers', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
-  // an older-prompt decision under a gate that is ON stays on the legacy rule
-  realAnswersGateOn.mockReturnValue(true);
-  replyQuotesUngroundedAmount.mockClear();
-  ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 120.5, recentPayments: [] } });
-  await outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $120.50.', promptVersion: 'house_voice_v11', dbh: dbWithCustomer({ id: 'c1' }) });
-  expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
-});
-
-test('gate OFF: the guard is not consulted', async () => {
-  ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 120.5, recentPayments: [] } });
-  await outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $120.50.', dbh: dbWithCustomer({ id: 'c1' }) });
-  expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
 });
 
 test('bodyAmountCents extracts every priced form in cents', () => {
@@ -95,6 +58,7 @@ test('bodyAmountCents extracts every priced form in cents', () => {
 
 // Independent-review P1 (finding 4): ZELLE_RECIPIENT is a live env var that
 // can change or be unset between a card's draft time and its send.
+
 describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still be the CURRENT one at send time', () => {
   let priorZelle;
   beforeEach(() => {
@@ -135,14 +99,23 @@ describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still 
     expect(outgoingZelleStale('We received your Zelle payment. Use pay@example.com for the rest.')).toEqual(stale);
   });
 
-  test('no over-trigger: receipt-only, a portal instruction, or negated Zelle stay clean', () => {
+  test('no over-trigger: a portal instruction or negated Zelle stay clean', () => {
     process.env.ZELLE_RECIPIENT = 'new-recipient@wavespestcontrol.com';
     for (const body of [
-      'We received your $120 Zelle payment from Sep 12.',
-      'We received your Zelle payment. You can pay the rest at the portal link.',
       "We don't take Zelle. Pay online at the portal.",
       'Thanks! Send the rest through the invoice page.',
     ]) expect({ body, mention: hasAffirmativeZelleMention(body) }).toEqual({ body, mention: false });
+  });
+
+  // PR #5331: a rendered payment-status sentence never names a manual tender, so ANY affirmative Zelle clause is a live
+  // instruction/offer (recipient + invoice rechecked) - there is no separate "Zelle receipt" kind to exempt.
+  test('a Zelle clause is an offer unless negated; a receipt-shaped Zelle clause is NOT exempt (fail closed)', () => {
+    expect(classifyZelleClause('We received your $120 Zelle payment from Sep 12.')).toBe('offer');
+    expect(hasAffirmativeZelleMention('We received your $120 Zelle payment from Sep 12.')).toBe(true);
+    expect(classifyZelleClause("We don't take Zelle anymore")).toBeNull();
+    expect(classifyZelleClause('see you Tuesday')).toBeNull();
+    expect(classifyZelleClause('Zelle works great for that')).toBe('offer');
+    expect(classifyZelleClause('you can Zelle us anytime')).toBe('offer');
   });
 
   test('recipient reconfigured since draft ⇒ stale', () => {
@@ -388,7 +361,7 @@ test('fails closed: no customer id, a missing customer row, or a lookup error', 
 
 test('gate ON: price grammar with no numeric amount ("fifty dollars", "45/mo") is unverifiable → stale, billing never read', async () => {
   realAnswersGateOn.mockReturnValue(true);
-  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is fifty dollars.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'The monthly fee is fifty dollars.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your plan is 45/mo.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
   expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
 });
@@ -402,77 +375,6 @@ test('a settled DECIMAL payment that cleared the balance still backs its acknowl
   ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [{ amount: 95.5, status: 'paid' }] } });
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95.50 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Thank you for your payment of $95.50.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
-});
-
-describe('Codex round 4 P1 (finding 1): a Zelle RECEIPT clause never runs the recipient/eligibility recheck', () => {
-  let priorZelle;
-  beforeEach(() => {
-    priorZelle = process.env.ZELLE_RECIPIENT;
-    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-  });
-  afterEach(() => {
-    if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
-    else process.env.ZELLE_RECIPIENT = priorZelle;
-  });
-
-  test('classifyZelleClause: offer wording', () => {
-    expect(classifyZelleClause('you can Zelle us anytime')).toBe('offer');
-    expect(classifyZelleClause('Zelle to payments@wavespestcontrol.com')).toBe('offer');
-    expect(classifyZelleClause('we accept Zelle')).toBe('offer');
-    expect(classifyZelleClause('you can pay via Zelle')).toBe('offer');
-  });
-
-  test('classifyZelleClause: historical receipt wording', () => {
-    expect(classifyZelleClause('We received your $120 Zelle payment from Sep 12')).toBe('receipt');
-    expect(classifyZelleClause('we got your Zelle payment')).toBe('receipt');
-    expect(classifyZelleClause('your Zelle payment cleared')).toBe('receipt');
-  });
-
-  test('classifyZelleClause: negation and no-mention', () => {
-    expect(classifyZelleClause('we don\'t take Zelle anymore')).toBe(null);
-    expect(classifyZelleClause('see you Tuesday')).toBe(null);
-  });
-
-  test('classifyZelleClause: an ambiguous affirmative mention fails closed as an offer', () => {
-    expect(classifyZelleClause('Zelle works great for that')).toBe('offer');
-  });
-
-  test('hasAffirmativeZelleMention: false for a receipt-only body (the reported P1 bug)', () => {
-    expect(hasAffirmativeZelleMention('We received your $120 Zelle payment from Sep 12.')).toBe(false);
-  });
-
-  test('hasAffirmativeZelleMention: true for an offer clause', () => {
-    expect(hasAffirmativeZelleMention('You can Zelle the rest to payments@wavespestcontrol.com.')).toBe(true);
-  });
-
-  test('hasAffirmativeZelleMention: true for a MIXED body (one receipt clause, one offer clause)', () => {
-    expect(hasAffirmativeZelleMention('We got your Zelle payment, and you can Zelle the rest to payments@wavespestcontrol.com.')).toBe(true);
-  });
-
-  test('outgoingZelleStale: a pure receipt confirmation is never stale even after the invoice settles (zelleInvoiceId null)', () => {
-    expect(outgoingZelleStale('We received your $120 Zelle payment from Sep 12.')).toEqual({ stale: false });
-  });
-
-  test('outgoingAmountsStale: a receipt-only body never runs the invoice-eligibility recheck, and reaches the amount binder instead', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
-    await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'We received your $120 Zelle payment from Sep 12.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }),
-    })).resolves.toEqual({ stale: false }); // replyQuotesUngroundedAmount is mocked to return false
-    expect(payPageZelleVisibility).not.toHaveBeenCalled();
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
-  });
-
-  test('outgoingAmountsStale: a mixed body still runs the offer\'s eligibility recheck (receipt clause alongside it does not exempt it)', async () => {
-    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'paid' };
-    await expect(outgoingAmountsStale({
-      customerId: 'c1',
-      body: 'We got your Zelle payment, and you can Zelle the rest to payments@wavespestcontrol.com.',
-      zelleInvoiceId: 'inv-1',
-      dbh: dbWithTables({ invoices: invoiceRow }),
-    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
-  });
 });
 
 describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\'s CURRENT open invoice when no drafted snapshot names one', () => {
@@ -523,176 +425,19 @@ describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\
 
   // Codex round-13 P1: a human-edited PRE-v12 reply no longer skips everything —
   // the clause-aware binder runs with trustOwedAmounts (owed clauses excused, receipts not).
-  test('trustOwedAmounts on a pre-v12 prompt runs the clause-aware binder with the owed-only trust (no early skip)', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
-    replyQuotesUngroundedAmount.mockReturnValue(false);
-    await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'Your balance is $9,999.00.', dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true,
-    })).resolves.toEqual({ stale: false });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('Your balance is $9,999.00.', expect.any(Object), { byMeaning: true, trustOwedAmounts: true, inboundMessage: null });
-  });
 
-  test('a human-edited pre-v12 receipt claim that the binder rejects is stale', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
-    replyQuotesUngroundedAmount.mockReturnValue(true);
-    await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'We received your $500 payment.', dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true,
-    })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-  });
-
-  test('an amount-free receipt/status claim on a human-edited pre-v12 reply is rechecked too', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
-    replyQuotesUngroundedAmount.mockReturnValue(true);
-    await expect(outgoingAmountsStale({
-      customerId: 'c1', body: "You're paid up!", dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true,
-    })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-  });
-
-  test('without trustOwedAmounts, the same ungrounded balance is still blocked (regression guard)', async () => {
+  test('without trustOwedAmounts, the same ungrounded balance is still blocked (regression guard, pre-v12 pooled rule)', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'Your balance is $9,999.00.', dbh: dbWithCustomer({ id: 'c1' }),
     })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
 
-  test('the strict (real-answers) path passes trustOwedAmounts through to the clause-aware binder', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    replyQuotesUngroundedAmount.mockReturnValue(false);
+  test('trustOwedAmounts (a human reviewed the figure) skips the OWED-figure half only - main\'s scheduler behavior', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
-    await outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $9,999.00.', dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('Your balance is $9,999.00.', expect.any(Object), { byMeaning: true, trustOwedAmounts: true, inboundMessage: null });
-  });
-});
-
-describe('Codex round 5 (finding 1): an amount-free payment-status claim still re-fetches billing before send', () => {
-  test('strict + a settlement claim ⇒ billing is fetched fresh and the binder decides', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    const ctx = { billing: { outstandingBalance: 0, recentPayments: [] } };
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
-    replyQuotesUngroundedAmount.mockReturnValue(false);
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "You're paid up!", dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: false });
-    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalled();
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith("You're paid up!", ctx, { byMeaning: true, trustOwedAmounts: false, inboundMessage: null });
-  });
-
-  test('strict + the claim no longer grounds against CURRENT billing ⇒ stale', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 40, recentPayments: [] } });
-    replyQuotesUngroundedAmount.mockReturnValue(true);
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "You're paid up!", dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-  });
-
-  test('strict + a body with no payment-status claim at all ⇒ clean, no billing fetch', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'See you Tuesday!', dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: false });
-    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
-  });
-
-  // Codex round-6 (PR #5331): CI regression on the gratitude auto-send lane —
-  // a body naming no payment/paid/account word is skipped BEFORE the drafter is
-  // touched, so a stubbed/absent drafter export can never turn thank-you copy
-  // into a send_error.
-  test('strict + gratitude copy never reaches the drafter or billing (pre-screen)', async () => {
-    const drafter = require('../services/sms-shadow-drafter');
-    const saved = drafter.hasAffirmativePaymentAck;
-    drafter.hasAffirmativePaymentAck = undefined;
-    try {
-      await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "You're welcome, Dana! Glad we could help.", strict: true, dbh: dbWithCustomer({ id: 'c1' }) }))
-        .resolves.toEqual({ stale: false });
-    } finally {
-      drafter.hasAffirmativePaymentAck = saved;
-    }
-    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
-  });
-
-  test('not strict (legacy prompt / gate off) ⇒ the original amount-free fast path, no billing fetch', async () => {
-    realAnswersGateOn.mockReturnValue(false);
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "You're paid up!", dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: false });
-    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
-  });
-
-  test('strict + no customerId ⇒ fails closed without a lookup', async () => {
-    await expect(amountFreeStatusClaimStale({ customerId: null, body: "You're paid up!", strict: true }))
-      .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
-  });
-
-  test('a billing lookup error fails closed rather than throwing', async () => {
-    ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('boom'));
-    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'We have your payment.', strict: true, dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: true, reason: 'amount_recheck_failed' });
-  });
-});
-
-describe('Codex round 5 (finding 2): a Zelle clause needs an explicit past-tense verb to read as a receipt', () => {
-  // The reported case: an INSTRUCTION with no offer verb ("use X") and no
-  // completed-payment verb was previously matched by the old, purely
-  // structural "your … Zelle … payment" alternative and misclassified as a
-  // receipt, bypassing the offer rechecks entirely.
-  test('classifyZelleClause: an instruction naming a contact is never a receipt', () => {
-    expect(classifyZelleClause('For your Zelle payment, use old@example.com')).toBe('offer');
-    expect(classifyZelleClause('For your Zelle payment use old@example.com')).toBe('offer');
-    expect(hasAffirmativeZelleMention('For your Zelle payment, use old@example.com')).toBe(true);
-  });
-
-  test('classifyZelleClause: "your Zelle payment" alone, with no verb at all, fails closed as an offer', () => {
-    expect(classifyZelleClause('Your Zelle payment is due')).toBe('offer');
-  });
-
-  test('classifyZelleClause: a genuine past-tense receipt is unaffected', () => {
-    expect(classifyZelleClause('your Zelle payment cleared')).toBe('receipt');
-    expect(classifyZelleClause('We received your $120 Zelle payment from Sep 12')).toBe('receipt');
-  });
-
-  test('outgoingAmountsStale: the instruction-with-no-verb example still runs the recipient/eligibility recheck', async () => {
     await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'For your Zelle payment, use old@example.com.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }),
-    })).resolves.toEqual({ stale: true, reason: 'zelle_recipient_stale' });
-  });
-});
-
-describe('P2 (round 6, PR #5331): thank-you wording reads as a historical Zelle receipt', () => {
-  test('classifyZelleClause: "thanks/thank you for the Zelle payment" is a receipt with no other verb needed', () => {
-    expect(classifyZelleClause('Thanks for the Zelle payment!')).toBe('receipt');
-    expect(classifyZelleClause('Thank you for your Zelle payment.')).toBe('receipt');
-  });
-
-  test('classifyZelleClause: a contact token still forces "offer" even alongside thank-you wording', () => {
-    expect(classifyZelleClause('Thanks for your Zelle payment, please send the rest to old@example.com')).toBe('offer');
-  });
-
-  test('hasAffirmativeZelleMention: a thank-you-only receipt body is NOT an affirmative offer (never re-runs the recipient recheck)', () => {
-    expect(hasAffirmativeZelleMention('Thanks for the Zelle payment!')).toBe(false);
-  });
-});
-
-describe('P1 (round 6, PR #5331): the customer\'s inbound wording threads through to the clause-aware binder', () => {
-  test('outgoingAmountsStale passes inboundMessage through to replyQuotesUngroundedAmount (strict path)', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid' }] } });
-    await outgoingAmountsStale({
-      customerId: 'c1', body: 'We received your $120.00 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'Did you get my $120 Zelle payment?',
-    });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith(
-      'We received your $120.00 payment — thank you!',
-      expect.any(Object),
-      { byMeaning: true, trustOwedAmounts: false, inboundMessage: 'Did you get my $120 Zelle payment?' },
-    );
-  });
-
-  test('amountFreeStatusClaimStale passes inboundMessage through too', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
-    await amountFreeStatusClaimStale({
-      customerId: 'c1', body: "You're paid up!", strict: true, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'Did I pay in full?',
-    });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith(
-      "You're paid up!",
-      expect.any(Object),
-      { byMeaning: true, trustOwedAmounts: false, inboundMessage: 'Did I pay in full?' },
-    );
+      customerId: 'c1', body: 'Your balance is $9,999.00.', dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true,
+    })).resolves.toEqual({ stale: false });
   });
 });
 
@@ -735,149 +480,6 @@ describe('Codex round-6 pre-push audit P1: negation is scoped to the Zelle offer
   });
 });
 
-describe('Codex round-6 pre-push audit P1: a missing customer row / context is not an empty account', () => {
-  test('amount-free settlement claim with NO customer row ⇒ stale (fail closed), drafter never asked', async () => {
-    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "You're paid up!", strict: true, dbh: dbWithCustomer(null) }))
-      .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
-    expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
-  });
-
-  test('a customer row whose context comes back empty ⇒ stale too', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue(null);
-    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "You're paid up!", strict: true, dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
-  });
-
-  test('outgoingAmountsStale (strict, amounts) with no customer row ⇒ stale', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $95.', dbh: dbWithCustomer(null) }))
-      .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
-  });
-});
-
-describe('Codex round-7 P1 #3: receipt wording must identify an actual past payment', () => {
-  test('"Yes, we\'ve got Zelle" / "we have Zelle" / "we take Zelle" are OFFERS (recipient + invoice rechecked)', () => {
-    for (const c of ["Yes, we've got Zelle", 'We have Zelle', 'Yes, we got Zelle set up', 'We take Zelle']) {
-      expect(classifyZelleClause(c)).toBe('offer');
-      expect(hasAffirmativeZelleMention(c)).toBe(true);
-    }
-    delete process.env.ZELLE_RECIPIENT;
-    expect(outgoingZelleStale("Yes, we've got Zelle")).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
-  });
-
-  test('real receipt wording still classifies as a receipt', () => {
-    for (const c of ['We got your Zelle payment.', 'We received your $120 Zelle from Sep 12.', "We've got your Zelle transfer.", 'Got your Zelle payment - thanks!']) {
-      expect(classifyZelleClause(c)).toBe('receipt');
-    }
-  });
-
-  test('a status phrase with no dollar figure ("still processing") reaches the strict binder at send time', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid' }] } };
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
-    replyQuotesUngroundedAmount.mockReturnValue(true);
-    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your payment is still processing.', strict: true, dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
-  });
-});
-
-describe('Codex round-8 P1 #2: a Zelle payment STATUS report is not a new transfer offer', () => {
-  test('"still processing" / "failed" / "didn\'t go through" about a past Zelle payment classify as status (not offer)', () => {
-    for (const c of [
-      'Your Zelle payment is still processing.', 'Your Zelle payment failed.', "Your $120 Zelle payment didn't go through.",
-      'Your Zelle payment from Sep 12 is being processed.',
-    ]) {
-      expect(classifyZelleClause(c)).toBe('receipt');
-      expect(hasAffirmativeZelleMention(c)).toBe(false);
-    }
-  });
-
-  test('send-time: with Zelle disabled and no eligible invoice a truthful status report is NOT rejected by the Zelle checks', async () => {
-    delete process.env.ZELLE_RECIPIENT;
-    expect(outgoingZelleStale('Your Zelle payment is still processing.')).toEqual({ stale: false });
-    realAnswersGateOn.mockReturnValue(true);
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
-    const out = await outgoingAmountsStale({ customerId: 'c1', body: 'Your Zelle payment failed.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }) });
-    expect(out.reason).not.toBe('zelle_invoice_unresolved');
-    expect(out.reason).not.toBe('zelle_recipient_stale');
-    expect(payPageZelleVisibility).not.toHaveBeenCalled();
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalled(); // status grounding, not offer checks
-  });
-
-  test('reverse cases: a contact or an instruction keeps it an OFFER', () => {
-    expect(classifyZelleClause('Your Zelle payment failed - please send it again to old@example.com.')).toBe('offer');
-    expect(classifyZelleClause('Your Zelle payment failed, use old@example.com')).toBe('offer');
-    expect(classifyZelleClause('Your Zelle payment failed, please send it again.')).toBe('offer');
-    expect(classifyZelleClause('Yes, you can use Zelle')).toBe('offer');
-    expect(classifyZelleClause("Yes, we've got Zelle")).toBe('offer');
-  });
-});
-
-describe('Codex round-8 P1 #3: absence claims ("isn\'t showing") get a send-time billing read', () => {
-  const stubbedRows = { billing: { outstandingBalance: 0, recentPayments: [] } };
-  test('"Your payment isn\'t showing on our end yet." reaches the strict binder at send time (immediate + scheduled share this path)', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    ContextAggregator.getContextForCustomer.mockResolvedValue(stubbedRows);
-    replyQuotesUngroundedAmount.mockReturnValue(true);
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Your payment isn't showing on our end yet.", dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalled();
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith("Your payment isn't showing on our end yet.", stubbedRows, expect.objectContaining({ byMeaning: true }));
-  });
-
-  test('a bare "it isn\'t showing yet" is checked when the customer\'s message is about a payment, and skipped otherwise', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    ContextAggregator.getContextForCustomer.mockResolvedValue(stubbedRows);
-    replyQuotesUngroundedAmount.mockReturnValue(false);
-    await amountFreeStatusClaimStale({ customerId: 'c1', body: "It isn't showing on our end yet.", strict: true, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'Did you get my Zelle payment?' });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledTimes(1);
-    replyQuotesUngroundedAmount.mockClear();
-    await amountFreeStatusClaimStale({ customerId: 'c1', body: "It isn't showing on our end yet.", strict: true, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'What time are you coming?' });
-    expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
-  });
-
-  test('a refunded/disputed report is a status claim too', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    ContextAggregator.getContextForCustomer.mockResolvedValue(stubbedRows);
-    replyQuotesUngroundedAmount.mockReturnValue(false);
-    await amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your payment was refunded.', strict: true, dbh: dbWithCustomer({ id: 'c1' }) });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
-  });
-});
-
-describe('Codex round-11 P1: absence claims load authoritative history lazily at send time', () => {
-  test('an absence reply over a possibly-truncated window attaches paymentHistory (null when the read fails) before the binder runs', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    const ctx = { customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: [], recentPaymentsTruncated: true } };
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
-    replyQuotesUngroundedAmount.mockReturnValue(false);
-    await outgoingAmountsStale({ customerId: 'c1', body: "Your payment isn't showing on our end yet.", dbh: dbWithCustomer({ id: 'c1' }) });
-    expect(ctx.billing.paymentHistory).toBeNull(); // the fake dbh cannot run the history query => unknown => fail closed downstream
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
-  });
-
-  test('a reply that makes no payment claim never triggers the history read', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    const ctx = { customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: [], recentPaymentsTruncated: true } };
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
-    replyQuotesUngroundedAmount.mockReturnValue(false);
-    await outgoingAmountsStale({ customerId: 'c1', body: 'Your visit is Tuesday, see you then.', dbh: dbWithCustomer({ id: 'c1' }) });
-    expect(ctx.billing.paymentHistory).toBeUndefined();
-  });
-
-  // Codex round-27 P1: a RECEIPT / status claim over a truncated window loads the history too (hidden same-day attempts).
-  test('a receipt claim over a truncated window loads the history before the binder runs', async () => {
-    realAnswersGateOn.mockReturnValue(true);
-    const ctx = { customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: [], recentPaymentsTruncated: true } };
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
-    replyQuotesUngroundedAmount.mockReturnValue(false);
-    await outgoingAmountsStale({ customerId: 'c1', body: 'We received your $120.00 payment from Sep 12.', dbh: dbWithCustomer({ id: 'c1' }) });
-    expect(ctx.billing.paymentHistory).toBeNull(); // the fake dbh cannot run the history query => unknown => fail closed downstream
-  });
-});
-
-// Codex round-18 P2: a DENIAL of Zelle availability is a live claim — rechecked at send time.
 describe('negative Zelle availability claims are revalidated before sending', () => {
   const { hasNegativeZelleAvailabilityClaim, zelleDenialStale, bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
   let priorZelle;
@@ -1043,5 +645,135 @@ describe('copular Zelle denials classify as denials, not offers', () => {
     "We aren't accepting Zelle at pay@example.com.", // a transfer contact is always a live instruction
   ])('an offer stays an offer: %s', (t) => {
     expect(hasAffirmativeZelleMention(t)).toBe(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PAYMENT STATUS at send time (PR #5331, owner ruling 2026-10-01). The decision's payment_status_snapshot names the sentences
+// the draft copied; they are the only authorized status wording, and each must STILL be rendered from the records.
+// ---------------------------------------------------------------------------------------------------------------------
+describe('paymentStatusSendBlockReason - the send-time half of the fixed-sentence contract', () => {
+  const RECEIVED = 'We received your $120.00 card payment on Sep 12, 2026.';
+  const NO_BALANCE = 'Your account has no balance due.';
+  const SNAP = { customer_id: 'c1', sentences: [RECEIVED] };
+  const paidCtx = (over = {}) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [{ id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }], recentPaymentsTruncated: false, ...over } });
+  const run = (body, extra = {}) => paymentStatusSendBlockReason({ customerId: 'c1', body, snapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), ...extra });
+
+  test('a verbatim copy of a snapshotted sentence that the records STILL render goes out', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(paidCtx());
+    await expect(run(RECEIVED)).resolves.toBeNull();
+    await expect(run(`Hi Jane, ${RECEIVED} A teammate will follow up within the hour.`)).resolves.toBeNull();
+  });
+
+  test('stale-at-send: the row was refunded / reversed / re-dated since the draft => payment_status_changed', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(paidCtx({ recentPayments: [{ id: 'p1', amount: 120, status: 'refunded', refund_status: 'full', refund_amount: 120, payment_date: '2026-09-12', payment_method_type: 'card' }] }));
+    await expect(run(RECEIVED)).resolves.toBe('payment_status_changed');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(paidCtx({ recentPayments: [{ id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-13', payment_method_type: 'card' }] }));
+    await expect(run(RECEIVED)).resolves.toBe('payment_status_changed');
+  });
+
+  test('a paraphrase, an edited sentence or a status typed in by hand is unauthorized - no billing read needed', async () => {
+    for (const body of [
+      'We got your $120.00 card payment on Sep 12, 2026.',
+      'We received your $120.00 card payment on Sep 12, 2026!',
+      'We received your $125.00 card payment on Sep 12, 2026.',
+      "You're all paid up.",
+      `${RECEIVED} It will post tomorrow.`,
+      'We received your $120.00 card payment on Sep 12, 2026, but it was refunded.',
+    ]) {
+      expect({ body, r: await run(body) }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('a sentence that was never snapshotted is unauthorized even if it is rendered right now', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(paidCtx());
+    await expect(run(NO_BALANCE)).resolves.toBe('payment_status_unauthorized');
+    await expect(paymentStatusSendBlockReason({ customerId: 'c1', body: NO_BALANCE, snapshot: null, dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toBe('payment_status_unauthorized');
+  });
+
+  test('a body that states no status and copies nothing needs no billing read at all', async () => {
+    await expect(run('Sounds good, see you Tuesday! You can pay online with your pay link.')).resolves.toBeNull();
+    await expect(paymentStatusSendBlockReason({ customerId: null, body: 'Here is your pay link.', snapshot: null })).resolves.toBeNull();
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('the customer\'s inbound scopes the detector: a bare pronoun clause is a status only in a payment conversation', async () => {
+    await expect(run('It settled.', { snapshot: null, inboundMessage: 'Did my payment go through?' })).resolves.toBe('payment_status_unauthorized');
+    await expect(run('It settled.', { snapshot: null, inboundMessage: 'What time is my visit Tuesday?' })).resolves.toBeNull();
+  });
+
+  test('fail closed: no customer, another customer\'s snapshot, no customer row, or a lookup error', async () => {
+    await expect(paymentStatusSendBlockReason({ customerId: null, body: RECEIVED, snapshot: SNAP })).resolves.toBe('payment_status_recheck_no_customer');
+    await expect(paymentStatusSendBlockReason({ customerId: 'c2', body: RECEIVED, snapshot: SNAP, dbh: dbWithCustomer({ id: 'c2' }) })).resolves.toBe('payment_status_changed');
+    await expect(run(RECEIVED, { dbh: dbWithCustomer(null) })).resolves.toBe('payment_status_recheck_failed');
+    ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('boom'));
+    await expect(run(RECEIVED)).resolves.toBe('payment_status_recheck_failed');
+  });
+
+  test('billing that is unavailable renders nothing, so every copied sentence is stale', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { unavailable: true } });
+    await expect(run(RECEIVED)).resolves.toBe('payment_status_changed');
+  });
+});
+
+describe('outgoingAmountsStale - real-answers (strict) decisions run the status contract; the rest is main\'s', () => {
+  const RECEIVED = 'We received your $120.00 card payment on Sep 12, 2026.';
+  const SNAP = { customer_id: 'c1', sentences: [RECEIVED] };
+  const ctxWith = (over = {}) => ({ billing: { outstandingBalance: 95, openInvoice: { amountDue: 95 }, hasProcessingPayment: false, recentPayments: [{ id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }], ...over } });
+  const args = (body, over = {}) => ({ customerId: 'c1', body, promptVersion: V12, paymentStatusSnapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), ...over });
+
+  test('a copied sentence\'s own figure is not judged against the owed figures (it was just re-rendered); a stray paid figure is', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith());
+    await expect(outgoingAmountsStale(args(`${RECEIVED} Your balance is $95.00.`))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' }); // "balance" is a status word: copy the sentence or hand off
+    await expect(outgoingAmountsStale(args(`${RECEIVED} You can pay the $95.00 invoice with your pay link.`))).resolves.toEqual({ stale: false }); // an OWED figure in an owed clause
+    await expect(outgoingAmountsStale(args(`${RECEIVED} You can pay the $120.00 invoice with your pay link.`))).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+
+  test('stale sentence => the status reason comes back before any amount rule', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith({ recentPayments: [] }));
+    await expect(outgoingAmountsStale(args(RECEIVED))).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
+  });
+
+  test('an unsanctioned status on a real-answers decision is held even with no figure and no customer lookup', async () => {
+    await expect(outgoingAmountsStale(args("You're paid up!", { paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('the live gate decides when the decision carries no prompt version', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    await expect(outgoingAmountsStale(args("You're paid up!", { promptVersion: null, paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+  });
+
+  test('gate-off / pre-v12 identity: no status check, main\'s pooled amount rule', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith());
+    await expect(outgoingAmountsStale(args("You're paid up!", { promptVersion: 'house_voice_v11', paymentStatusSnapshot: null }))).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale(args('We received your $120 payment — thank you!', { promptVersion: 'house_voice_v11', paymentStatusSnapshot: null }))).resolves.toEqual({ stale: false }); // pooled: a paid figure backs an ack
+    await expect(outgoingAmountsStale(args('Your balance is $9,999.00.', { promptVersion: 'house_voice_v11', paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+
+  test('trustOwedAmounts (a reviewed edit) skips the owed-figure rule but never the status contract or the Zelle recheck', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith());
+    await expect(outgoingAmountsStale(args('You can pay the $9,999.00 invoice with your pay link.', { trustOwedAmounts: true }))).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale(args("You're paid up!", { trustOwedAmounts: true, paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+  });
+
+  test('price grammar the extractor cannot verify stays unverifiable on a strict decision', async () => {
+    await expect(outgoingAmountsStale(args('The fee is fifty dollars.', { paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
+  });
+});
+
+describe('bodyNeedsPaymentRecheck - the read-free pre-screen', () => {
+  test.each(['You owe $5.', "You're paid up.", 'We received your $120.00 card payment on Sep 12, 2026.', 'You can Zelle us.', "Zelle isn't available right now.", 'Your balance is fifty dollars.'])('selects: %s', (body) => {
+    expect(bodyNeedsPaymentRecheck(body)).toBe(true);
+  });
+  test.each(['Sounds good, see you Tuesday!', 'Your invoice is attached.', 'Here is your pay link.', 'You can pay by card or bank account through your pay link.', ''])('leaves alone: %s', (body) => {
+    expect(bodyNeedsPaymentRecheck(body)).toBe(false);
+  });
+  test('the customer\'s message scopes a bare pronoun clause', () => {
+    expect(bodyNeedsPaymentRecheck('It settled.')).toBe(true); // unknown inbound reads as payment-scoped
+    expect(bodyNeedsPaymentRecheck('It settled.', { inboundMessage: 'Did my payment go through?' })).toBe(true);
+    expect(bodyNeedsPaymentRecheck('It settled.', { inboundMessage: 'What time is my visit?' })).toBe(false);
   });
 });

@@ -77,15 +77,13 @@ describe('verifier — prompt contract', () => {
     expect(p).toMatch(/Payment options line in BILLING/i);
   });
 
-  // Independent-review P1 (finding 5, PR #5331): HOW-TO-PAY claims and
-  // RECEIPT confirmations ground on DIFFERENT facts — a receipt naming a
-  // tender only Recent payments shows (e.g. a manual Check entry) must not
-  // be rejected just because Payment options never lists it.
-  test('real answers on: a RECEIPT confirmation tender grounds on the bound Recent-payments row, never on Payment options alone', () => {
+  // A payment / invoice / refund / balance STATUS is grounded only on a verbatim "Payment status sentences" copy.
+  test('real answers on: a payment / invoice / refund / balance STATUS grounds only on a verbatim "Payment status sentences" copy', () => {
     const p = buildVerifierSystemPrompt({ realAnswers: true });
-    expect(p).toMatch(/RECEIPT confirmation/i);
-    expect(p).toMatch(/"via <tender>" tag/i);
-    expect(p).toMatch(/never the Payment options line/i);
+    expect(p).toMatch(/STATUS \(.*"you're all paid up"/i);
+    expect(p).toMatch(/word-for-word copy of one "Payment status sentences" line in BILLING/);
+    expect(p).toMatch(/adds a method, date, amount or reason the sentence does not state, is a fabrication/);
+    expect(p).not.toMatch(/Recent payments/);
   });
 
   // Codex round-18 P1: COMPANY FACTS ("Paying: technicians accept cards at the visit, never cash. Checks are

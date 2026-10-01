@@ -47,15 +47,20 @@ describe('recheckScheduledSmsAmounts', () => {
     expect(recheck.outgoingAmountsStale).toHaveBeenCalledTimes(3);
   });
 
-  // Codex round-30 P1: every scheduled body the gate selects gets the clause-aware status / receipt check, any prompt version.
-  test('the scheduler always asks for the strict status / receipt check, for pre-v12 non-human decisions too', async () => {
-    dbReturning({ prompt_version: 'house_voice_v11', input_snapshot: null });
+  // PR #5331: the scheduler hands the recheck the decision's prompt version (which selects the strict rule), the customer's
+  // inbound, and the payment-status sentences the draft copied; there is no separate "strict for every version" switch.
+  test('the scheduler passes the decision\'s prompt version, inbound and payment_status_snapshot to the recheck', async () => {
+    const snap = { customer_id: 'c1', sentences: ['Your account has no balance due.'] };
+    dbReturning({ prompt_version: 'house_voice_v12_real_answers5_cf_pf', input_snapshot: JSON.stringify({ sms: { body: 'Do I owe anything?' }, payment_status_snapshot: snap }) });
     recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
-    await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your payment failed.' }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
-    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ promptVersion: 'house_voice_v11', trustOwedAmounts: false, strictStatusClaims: true }));
+    await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your account has no balance due.' }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({
+      promptVersion: 'house_voice_v12_real_answers5_cf_pf', trustOwedAmounts: false, inboundMessage: 'Do I owe anything?', paymentStatusSnapshot: snap,
+    }));
+    expect(recheck.outgoingAmountsStale.mock.calls[0][0]).not.toHaveProperty('strictStatusClaims');
     recheck.outgoingAmountsStale.mockClear();
     await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your balance is $95.' }, claimMeta }); // human edit
-    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ trustOwedAmounts: true, strictStatusClaims: true }));
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ trustOwedAmounts: true }));
   });
 
   test('a row with NO customer_id falls back to the linked decision\'s customer', async () => {
@@ -65,26 +70,34 @@ describe('recheckScheduledSmsAmounts', () => {
     expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c-from-decision' }));
   });
 
-  test('no customer anywhere: a Zelle offer / payment claim fails closed with a specific reason; a non-payment reply is untouched', async () => {
+  test('no customer anywhere: a Zelle offer fails closed with a specific reason; a pre-v12 status/figure body is main\'s (untouched); a non-payment reply is untouched', async () => {
     const { outgoingAmountsStale: real } = jest.requireActual('../services/sms-amount-recheck');
     dbReturning({ prompt_version: null, input_snapshot: null, customer_id: null });
     recheck.outgoingAmountsStale.mockImplementation(real);
     delete process.env.ZELLE_RECIPIENT;
+    delete process.env.GATE_SMS_REAL_ANSWERS;
     const zelle = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'You can Zelle us at pay@example.com.' }, claimMeta });
     expect(zelle.stale).toBe(true);
     expect(zelle.reason).toMatch(/^zelle_/);
-    const status = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta: { ...claimMeta, agent_decision_id: 'd1' } });
-    // Codex round-13: a HUMAN-edited status claim is now rechecked even pre-v12 => no customer fails closed
-    expect(status).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
-    const agentDrafted = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
-    // round 30: the clause-aware status / receipt check now runs for EVERY selected body, pre-v12 agent drafts included
-    expect(agentDrafted).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
-    const amount = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'Your balance is $95.' }, claimMeta });
-    expect(amount).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    // gate off + no prompt version: main's behavior - a human-edited status / figure is not rechecked
+    await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta })).resolves.toEqual({ stale: false, reason: null });
+    await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'Your balance is $95.' }, claimMeta })).resolves.toEqual({ stale: false, reason: null });
     db.mockClear();
     const plain = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'See you Tuesday!' }, claimMeta });
     expect(plain).toEqual({ stale: false, reason: null });
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('real answers on (live gate, no prompt version): an unsanctioned payment status is held with its specific reason - no customer needed', async () => {
+    const { outgoingAmountsStale: real } = jest.requireActual('../services/sms-amount-recheck');
+    dbReturning({ prompt_version: null, input_snapshot: null, customer_id: null });
+    recheck.outgoingAmountsStale.mockImplementation(real);
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      const out = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta });
+      expect(out).toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+      expect(amountsStaleNote(out.reason)).toMatch(/word-for-word copy/);
+    } finally { delete process.env.GATE_SMS_REAL_ANSWERS; }
   });
 
   test('a read error fails closed with a specific reason', async () => {

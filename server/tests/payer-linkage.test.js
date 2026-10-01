@@ -1,7 +1,7 @@
 /**
  * Codex round-28 P1 (PR #5331): ONE payer-linkage predicate (services/payer-linkage.js, extracted verbatim from
  * routes/billing-v2.js) decides whose money a payments row is — for the customer portal history AND the SMS
- * facts / authoritative payment history. A row is payer-linked through ANY of: metadata.invoice_id, the legacy
+ * payment facts (the aggregator's recent-payments window and the in-flight probe). A row is payer-linked through ANY of: metadata.invoice_id, the legacy
  * aliases (dispute_invoice_id / waves_invoice_id), the PaymentIntent id, the charge id, the "Invoice <n> —"
  * description, where the payer invoice is payer_id OR the payer_billed: withdrawal stamp.
  */
@@ -10,7 +10,6 @@ jest.mock('../models/db', () => jest.fn());
 // the LIVE linkage (loadLivePayerLinkage — round-41/42) also asks the shared live-ownership verdict; these cases have no live-owned invoices
 jest.mock('../services/invoice-payer-ownership', () => ({ liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })) }));
 const { buildPayerLinkage, loadPayerLinkage } = require('../services/payer-linkage');
-const { loadPaymentHistory } = require('../services/payment-history');
 
 const PAYER_INV = { id: '11111111-1111-4111-8111-111111111111', stripe_payment_intent_id: 'pi_ap', stripe_charge_id: 'ch_ap', invoice_number: 'WPC-2026-0500' };
 const linkage = buildPayerLinkage([PAYER_INV]);
@@ -70,32 +69,5 @@ describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:)
     expect(src).toMatch(/require\('\.\.\/services\/payer-linkage'\)/);
     expect(src).toMatch(/await loadPayerLinkage\(req\.customerId\)/);
     expect(src).not.toMatch(/const isPayerLinked = /);
-  });
-});
-
-describe('the authoritative payment history drops payer-linked rows through EVERY linkage', () => {
-  function history(rows, opts = {}) {
-    const q = {};
-    ['where', 'whereNot', 'whereNull', 'whereRaw', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
-    q.modify = jest.fn((fn) => { fn(q); return q; }); // excludeNeverAttemptedDeferrals / excludeLiveOwnedPayerPayments (round-37..42)
-    q.then = (res, rej) => Promise.resolve(rows).then(res, rej);
-    const inv = {};
-    ['where', 'select', 'whereNotNull', 'whereNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
-    inv.catch = (h) => (opts.linkageFails ? Promise.resolve(h(new Error('down'))) : Promise.resolve([PAYER_INV]));
-    return jest.fn((table) => (table === 'invoices' ? inv : q));
-  }
-  test.each(Object.entries(LINKED))('%s', async (name, row) => {
-    const out = await loadPaymentHistory('c1', history([{ ...row, amount: 120, status: 'paid' }, own]));
-    expect(out.rows.map((r) => r.id)).toEqual(['p-own']);
-  });
-  test('`complete` reflects the RAW read: dropping payer rows never makes a full read look whole', async () => {
-    const raw = Array.from({ length: 201 }, (_, i) => ({ id: `r${i}`, metadata: null }));
-    raw[0] = { id: 'ap', stripe_payment_intent_id: 'pi_ap', metadata: null };
-    const out = await loadPaymentHistory('c1', history(raw));
-    expect(out.complete).toBe(false);
-    expect(out.rows.some((r) => r.id === 'ap')).toBe(false);
-  });
-  test('ownership unknown (linkage lookup failed) => history unknown (null), never an unfiltered read', async () => {
-    await expect(loadPaymentHistory('c1', history([own], { linkageFails: true }))).resolves.toBeNull();
   });
 });

@@ -20,30 +20,23 @@ const MODELS = require('../config/models');
 
 // Independent-review P1 (round 3, PR #5331, finding 6): this bullet only
 // makes sense for a GATE_SMS_REAL_ANSWERS draft — the Payment options and
-// Recent payments facts it references only exist in the facts block when
+// Payment status sentences facts it references only exist in the facts block when
 // that gate is on (buildFactsBlock, sms-shadow-drafter.js). Added
 // unconditionally in round 2, it changed the gate-OFF (v11) verifier prompt
 // for every cohort, not just real-answers ones. Gated here so gate-off stays
 // byte-identical to origin/main (see the pinned-hash test in
 // sms-draft-verifier.test.js).
 //
-// Independent-review P1 (finding 5, PR #5331): scoped to the TWO claim kinds
-// that can name a payment method, each grounded against its OWN fact — a
-// HOW-TO-PAY claim ("you can Zelle us", "we take card/ACH") is grounded ONLY
-// against the Payment options line, while a RECEIPT confirmation naming a
-// tender ("we received your $120 check payment") is grounded against the
-// SPECIFIC Recent-payments row the amount (and date) already bind to — that
-// row's own tender may be one Payment options never lists (Payment options
-// is Zelle-or-Stripe only; Recent payments can carry a Check/Cash/Venmo/
-// PayPal row from a manual entry). Treating Payment options as the ONLY
-// source for a payment-method claim rejected a genuinely grounded receipt
-// tender whenever it didn't also appear on Payment options.
+// Two claim kinds, each grounded against its OWN fact: a HOW-TO-PAY claim ("you can Zelle us", "we take card/ACH") only
+// against the Payment options line, and a payment / invoice / refund / balance STATUS only as a verbatim copy of a
+// "Payment status sentences" line (owner ruling 2026-10-01 - payment-status-contract.js; the deterministic reply guard
+// enforces the same rule, this keeps the verifier from passing a paraphrase).
 // Codex round-18 P1: the gate-on facts block ALSO carries the owner-approved COMPANY FACTS "Paying:"
 // policy (sms-company-facts.js — checks are mailed to the office, technicians never take cash), so a
 // correct "You can mail us a check" / "We don't accept cash" is grounded there and must not be flagged.
 const PAYMENT_METHOD_BULLET = `
 - a payment method or contact for HOW TO PAY (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy (the "Paying:" fact: which methods are accepted or declined — e.g. checks mailed to the office, no cash — and where a check goes); a contact or method that matches one of those two sources is fine, one that appears in NEITHER is a fabrication (an unlisted method — Venmo, PayPal, a phone number, a made-up address — stays a fabrication)
-- a RECEIPT confirmation naming HOW a payment was made ("we received your $120 check payment", "your Zelle payment came through") — grounded ONLY against that SPECIFIC Recent payments row's own "via <tender>" tag (never the Payment options line, which lists how to pay NOW, not how a past payment arrived); a tender that row does not show is a fabrication`;
+- a payment, invoice, refund or balance STATUS ("we received your $120 payment", "your invoice is paid", "it was refunded", "you're all paid up", "nothing is owed") — grounded ONLY if it is a word-for-word copy of one "Payment status sentences" line in BILLING (the whole sentence, unchanged); a status said in any other words, or one that adds a method, date, amount or reason the sentence does not state, is a fabrication`;
 
 function buildVerifierSystemPrompt({ realAnswers = false } = {}) {
   return `You are a STRICT, skeptical fact-checker for Waves Pest Control SMS draft replies. Your default stance: a draft is UNSAFE unless every specific detail in it is explicitly grounded. Most drafts you see DO contain a fabrication — your job is to find it, not to give the draft the benefit of the doubt.

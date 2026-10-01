@@ -36,10 +36,13 @@ async function invoicePayerOwnership(inv, dbh = db) {
 // rows are verified self-pay (rows after that point are left unjudged — the caller only ever shows its first `ownLimit - 1`),
 // EXCEPT rows `alwaysJudge(row)` names (Codex round-40 P1: every row that can feed the owed balance must carry a live verdict
 // however far down the list it sits — the display cap is for the status LIST only).
-async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity, alwaysJudge = null } = {}) {
+// `maxResolutions` (Codex round-43 P1): a hard cap on the number of LIVE resolver lookups one call may make (distinct scheduled
+// services). Past it the verdict is UNVERIFIABLE (fail closed) - never an unbounded serial walk of a mature account's history.
+async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity, alwaysJudge = null, maxResolutions = Infinity } = {}) {
   const ownedIds = new Set();
   let unverifiable = false;
   let own = 0;
+  let resolutions = 0;
   const memo = new Map();
   for (const inv of rows) {
     if (own >= ownLimit && !(typeof alwaysJudge === 'function' && alwaysJudge(inv))) continue;
@@ -48,6 +51,8 @@ async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Inf
     let verdict;
     if (keyed && memo.has(key)) verdict = memo.get(key);
     else {
+      if (resolutions >= maxResolutions) { unverifiable = true; break; }
+      resolutions += 1;
       verdict = await invoicePayerOwnership({ ...inv, customer_id: inv.customer_id || customerId }, dbh);
       if (keyed) memo.set(key, verdict);
     }

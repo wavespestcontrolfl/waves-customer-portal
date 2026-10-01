@@ -1170,18 +1170,18 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
   });
 
   test('the current identity (4_cf_pf, PR #5331) requires SLA + FREE RE-SERVICE + COMPANY FACTS + Payment options and forbids nothing', () => {
-    for (const v of ['house_voice_v12_real_answers4_cf_pf', 'house_voice_v12_real_answers4_cf_pf+bclm']) {
+    for (const v of ['house_voice_v12_real_answers5_cf_pf', 'house_voice_v12_real_answers5_cf_pf+bclm']) {
       expect(contract(v).required).toEqual([SLA, RS, CF, PO]);
       expect(contract(v).forbidden).toEqual([]);
     }
     // 4 composes like 2/3: dropping a token re-forbids its marker
-    expect(contract('house_voice_v12_real_answers4_cf').forbidden).toEqual([PO]);
-    expect(contract('house_voice_v12_real_answers4_pf').forbidden).toEqual([CF]);
+    expect(contract('house_voice_v12_real_answers5_cf').forbidden).toEqual([PO]);
+    expect(contract('house_voice_v12_real_answers5_pf').forbidden).toEqual([CF]);
   });
 
   test('the current identity with every category tag still fits the varchar(40) column', () => {
     expect('house_voice_v12_real_answers2_cf+bclm'.length).toBeLessThanOrEqual(40);
-    expect('house_voice_v12_real_answers4_cf_pf+bclm'.length).toBe(40);
+    expect('house_voice_v12_real_answers5_cf_pf+bclm'.length).toBe(40);
   });
 });
 
