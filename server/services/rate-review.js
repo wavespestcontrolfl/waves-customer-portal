@@ -782,7 +782,8 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
 // The line's start date. Portal-sold line (its visits link an accepted
 // estimate): first completed recurring visit, else the accept date — the
 // 12-month lock runs from the first application the customer paid for.
-// Imported line (no accepted estimate in the portal): the EARLIER of
+// Imported line (no accepted estimate in the portal, a completed visit on
+// record): the EARLIER of
 // customers.member_since and the first completed visit — the portal went
 // live April 2026, so for an imported account the first visit here is a
 // lower bound on tenure, not the start (member_since is real back to 2024;
@@ -815,7 +816,11 @@ function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, acco
     if (firstVisit) { date = firstVisit; source = 'first_visit'; } else { date = accepted; source = 'estimate_accept'; }
   } else if (member && firstVisit) {
     if (member <= firstVisit && presentAtImport) { date = member; source = 'member_since'; } else { date = firstVisit; source = 'first_visit'; }
-  } else if (member) { date = member; source = 'member_since'; } else if (firstVisit) { date = firstVisit; source = 'first_visit'; }
+  } else if (firstVisit) { date = firstVisit; source = 'first_visit'; }
+  // No accepted estimate and no completed visit yet: the line's age is
+  // unknown — never the account's membership (an admin-booked program can
+  // be days old) — and the row is held (no_anniversary) until its first
+  // application dates it.
   let conflict = false;
   if (date && member && source !== 'member_since') {
     conflict = (ymdToUtcMs(date) - ymdToUtcMs(member)) / DAY_MS > 90;
@@ -1162,12 +1167,25 @@ async function syncPricingConstants(deps = {}) {
   }
 }
 
-// Server-stamped at sale, these say how rodent counted toward the tier THEN
-// (a legacy rodent bait plan qualified for nothing). The sold-mix replay —
-// the hand-picked-tier evidence — keeps them, so a Bronze that was the
-// engine's own doing replays Bronze; the current-list replay prices today's
-// rules and lets the sanitizer strip them.
+// How rodent counted toward the tier THEN (a legacy rodent bait plan
+// qualified for nothing; a new-model row froze its WaveGuard flags): the
+// sold-mix replay — the hand-picked-tier evidence — derives the two pins
+// from the SAVED RESULT (estimate_data.result / engineResult) with the
+// signal readers the authoritative recompute and the public replay use
+// (rodent-bait-legacy-replay.js; admin-estimate-persistence.js), falling
+// back to a stamp the extracted inputs may still carry, so a Bronze that
+// was the engine's own doing replays Bronze. The current-list replay prices
+// today's rules and lets the sanitizer strip them.
 const SOLD_POSTURE_KEYS = ['rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
+function soldPosturePins(data, inputs) {
+  let signals = null;
+  try { signals = require('./rodent-bait-legacy-replay'); } catch { signals = null; }
+  const stamped = (key) => (isObject(inputs[key]) ? inputs[key] : null);
+  return {
+    rodentBaitLegacyReplay: (signals && signals.rodentBaitLegacyReplaySignal(data || {})) || stamped('rodentBaitLegacyReplay'),
+    rodentWaveguardPostureReplay: (signals && signals.rodentWaveguardPostureReplaySignal(data || {})) || stamped('rodentWaveguardPostureReplay'),
+  };
+}
 
 async function replayEstimate(estimate, { familyKey, cadence, activeFamilies, soldMix = false }, deps) {
   const inputs = engineInputsFromEstimate(estimate, deps);
@@ -1178,7 +1196,10 @@ async function replayEstimate(estimate, { familyKey, cadence, activeFamilies, so
   const savedPriorQualifying = data && Array.isArray(data.priorQualifyingServices) ? data.priorQualifyingServices : null;
   try {
     const replayInputs = listReplayInputs(inputs, { familyKey, cadence, activeFamilies, savedPriorQualifying });
-    if (soldMix) for (const key of SOLD_POSTURE_KEYS) if (isObject(inputs[key])) replayInputs[key] = inputs[key];
+    if (soldMix) {
+      const pins = soldPosturePins(data, inputs);
+      for (const key of SOLD_POSTURE_KEYS) if (pins[key]) replayInputs[key] = pins[key];
+    }
     return { inputs, result: engine.generateEstimate(replayInputs) };
   } catch (err) {
     logger.warn(`[rate-review] engine replay failed for estimate ${estimate.id}: ${err.message}`);
@@ -1257,6 +1278,7 @@ async function loadActivePlanLines(dbh, { today }) {
         -- primary_line_price net of its own line discount, or NOTHING when an appointment-level
         -- discount spans the primary and the add-ons with no recorded apportionment
         CASE
+          WHEN ${COMBINED_CATALOG_SQL} THEN NULL
           WHEN NOT EXISTS (SELECT 1 FROM scheduled_service_addons a WHERE a.scheduled_service_id = s.id)
             THEN CASE WHEN s.estimated_price > 0 THEN s.estimated_price END
           WHEN COALESCE(s.discount_dollars, 0) > 0 OR s.discount_type IS NOT NULL OR s.discount_id IS NOT NULL THEN NULL
@@ -1362,6 +1384,15 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
 // payment's metadata invoice_id — there is no payments.invoice_id). A
 // combined setup/initial + first-application invoice contributes its
 // application lines only; a pure setup invoice contributes nothing.
+// The retired combined catalog identities — one scheduled row that performed
+// TWO programs (estimate-converter.js RETIRED_COMBINED_CATALOG_KEYS /
+// comboRouteFamiliesFromCatalogKey: pest + termite bait, lawn + tree & shrub)
+// with no addon row and no per-program split of its price or its minutes.
+// Historical rows survive their retirement inside the lookback: composite
+// in the completed-visit evidence, withheld in the current-rate decomposition.
+const RETIRED_COMBINED_CATALOG_KEYS = Object.freeze(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']);
+const COMBINED_CATALOG_SQL = `COALESCE(s.service_key_snapshot, sv.service_key) IN (${RETIRED_COMBINED_CATALOG_KEYS.map((k) => `'${k}'`).join(', ')})`;
+
 // A partial refund's refund_amount carries the prorated card surcharge
 // returned with it (stripe.js _refundPayment → payments.refunded_surcharge_cents)
 // while invoices.total never held the surcharge: the BASE refund is what
@@ -1406,7 +1437,7 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       s.annual_prepay_term_id,
       -- a visit that also performed add-ons (scheduled_service_addons): its minutes and its money
       -- cover more than one program, with no per-line split of either — no evidence for this line
-      EXISTS (SELECT 1 FROM scheduled_service_addons a WHERE a.scheduled_service_id = s.id) AS composite_visit,
+      (EXISTS (SELECT 1 FROM scheduled_service_addons a WHERE a.scheduled_service_id = s.id) OR ${COMBINED_CATALOG_SQL}) AS composite_visit,
       apt.coverage_visit_count AS term_visit_count,
       -- the term's COVERAGE money (prepay_amount — the invoice total may also carry a setup line), capped by what settled net of refunds
       (SELECT LEAST(apt.prepay_amount, pi.total - COALESCE((
@@ -2512,6 +2543,9 @@ module.exports = {
   batchEmailed,
   composeBatchEmail,
   _private: {
+    soldPosturePins,
+    COMBINED_CATALOG_SQL,
+    RETIRED_COMBINED_CATALOG_KEYS,
     accountFirstVisits,
     presenceWindowFor,
     IMPORT_PRESENCE_DAYS,

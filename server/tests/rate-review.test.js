@@ -927,7 +927,8 @@ describe('the review window: anniversaries 35–65 days out from the build date'
 });
 
 describe('carry-forward: an exception or skipped line comes back next month', () => {
-  const entry = (overrides = {}) => ({ customer: { id: 'c1', member_since: '2024-06-15', created_at: '2024-06-15T12:00:00Z' }, familyKey: 'pest_control', first: null, acceptedAt: null, ...overrides });
+  // an imported line: member_since on the account, its first portal visit on record (a line with no completed visit has no anniversary at all)
+  const entry = (overrides = {}) => ({ customer: { id: 'c1', member_since: '2024-06-15', created_at: '2024-06-15T12:00:00Z' }, familyKey: 'pest_control', first: { first_visit: '2026-05-10', completed_visits: 2 }, acceptedAt: null, ...overrides });
   // build 2026-11-01: window Dec 6 – Jan 5; carry floor = 2026-08-03
   const args = { from: '2026-12-06', to: '2027-01-05', now: NOW };
   test('a line whose latest earlier snapshot was an exception within 90 days is carried with its original review date', () => {
@@ -970,7 +971,7 @@ describe('carry-forward: an exception or skipped line comes back next month', ()
     const octoberAccount = fixture.customer(15, { member_since: '2024-10-20', last_name: 'Carried' }); // October anniversary
     const scenario = {
       planLines: [...book.planLines, fixture.planLine(octoberAccount.id, 'pest_control', 'quarterly', 110)],
-      customers: [...book.customerRows, octoberAccount], firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms,
+      customers: [...book.customerRows, octoberAccount], firstVisits: [...book.firstVisits, { customer_id: octoberAccount.id, line: 'pest_control', first_visit: '2026-05-05', completed_visits: 2 }], completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms,
       ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
       latestSnapshots: [{ customer_id: octoberAccount.id, family_key: 'pest_control', status: 'exception', review_date: '2026-10-20', batch_key: '2026-09', computed_at: '2026-09-01T10:20:00Z' }],
     };
@@ -1077,7 +1078,7 @@ describe('engine replay guards', () => {
     const scenario = {
       // only the per_visit accounts and the clean account share pest/bimonthly — no estimate anywhere on this cadence
       planLines: [...perVisit.map((c) => fixture.planLine(c.id, 'pest_control', 'bimonthly', 95)), fixture.planLine(clean.id, 'pest_control', 'bimonthly', 90)],
-      customers: [...perVisit, clean], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+      customers: [...perVisit, clean], firstVisits: [...perVisit, clean].map((c) => ({ customer_id: c.id, line: 'pest_control', first_visit: '2026-05-06', completed_visits: 3 })), completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
     };
     const scripted = fixture.scriptedDb(scenario);
     db.mockImplementation((table) => scripted(table));
@@ -1097,7 +1098,7 @@ describe('engine replay guards', () => {
     const clean = fixture.customer(27, { member_since: '2024-12-09', last_name: 'Residential No Estimate' });
     const scenario = {
       planLines: [...commercial.map((c) => fixture.planLine(c.id, 'pest_control', 'bimonthly', 250)), fixture.planLine(clean.id, 'pest_control', 'bimonthly', 90)],
-      customers: [...commercial, clean], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+      customers: [...commercial, clean], firstVisits: [...commercial, clean].map((c) => ({ customer_id: c.id, line: 'pest_control', first_visit: '2026-05-06', completed_visits: 3 })), completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
     };
     const scripted = fixture.scriptedDb(scenario);
     db.mockImplementation((table) => scripted(table));
@@ -1222,7 +1223,7 @@ describe('engine replay guards', () => {
   test('a composite visit (add-ons in the same stop) is no $/hr or wall-clock evidence for the line — excluded and counted, never the whole stop\'s money over the whole stop\'s clock', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
-    expect(q).toMatch(/EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) AS composite_visit/);
+    expect(q).toMatch(/\(EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) OR \$\{COMBINED_CATALOG_SQL\}\) AS composite_visit/);
     const plain = [40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 117 }));
     const composite = [75, 80].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 192, composite: true }));
     const stats = P.lineDurationStats([...plain, ...composite]);
@@ -1241,6 +1242,15 @@ describe('engine replay guards', () => {
     const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 11700, rateUnit: 'application', listRateCents: 11700, usableVisits: 3, compositeVisits: 2, facts: fixture.facts() });
     expect(row.flags).toContain('composite_visits_excluded');
     expect(row.status).not.toBe('exception');
+  });
+  test('the retired combined catalog identities (two programs in one row, no addon rows) are composites: no evidence for a line, withheld in the current rate', () => {
+    expect(P.RETIRED_COMBINED_CATALOG_KEYS).toEqual(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']); // estimate-converter.js RETIRED_COMBINED_CATALOG_KEYS
+    expect(P.COMBINED_CATALOG_SQL).toBe("COALESCE(s.service_key_snapshot, sv.service_key) IN ('pest_termite_bait_quarterly', 'lawn_tree_shrub_combo')");
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const completed = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(completed).toMatch(/\(EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) OR \$\{COMBINED_CATALOG_SQL\}\) AS composite_visit/);
+    const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
+    expect(planQuery).toMatch(/CASE\n\s+WHEN \$\{COMBINED_CATALOG_SQL\} THEN NULL\n\s+WHEN NOT EXISTS/);
   });
   test('a combined completion-packet invoice credits each member its own settled share, never its whole total to the anchor member', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
@@ -1306,6 +1316,9 @@ describe('engine replay guards', () => {
     expect(P.presenceWindowFor(null)).toBe(90);
     // no account-level evidence keeps the old rule
     expect(P.resolveAnniversary({ firstCompletedVisit: '2026-08-20', acceptedAt: null, memberSince: '2024-12-10' }).source).toBe('member_since');
+    // no accepted estimate and no completed visit yet: the line's age is unknown — never the account's membership (held as no_anniversary)
+    expect(P.resolveAnniversary({ firstCompletedVisit: null, acceptedAt: null, memberSince: '2024-12-10' })).toEqual({ date: null, source: null, conflict: false });
+    expect(P.resolveAnniversary({ firstCompletedVisit: null, acceptedAt: '2026-03-01T15:00:00Z', memberSince: '2024-12-10' })).toMatchObject({ date: '2026-03-01', source: 'estimate_accept' });
     // the batch passes the account's earliest visit and the line's cadence window
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
@@ -1347,6 +1360,20 @@ describe('engine replay guards', () => {
     expect(engine.generateEstimate.mock.calls[1][0].rodentBaitLegacyReplay).toBeUndefined();
     expect(engine.generateEstimate.mock.calls[1][0].rodentWaveguardPostureReplay).toBeUndefined();
     expect(P.SOLD_POSTURE_KEYS).toEqual(['rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay']);
+    // real saved estimates carry the posture in estimate_data.result, not in the extracted inputs: the pins come from the
+    // same signal readers the authoritative recompute uses (rodent-bait-legacy-replay.js)
+    const { rodentBaitLegacyReplaySignal, rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    const legacyData = { engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } }, result: { lineItems: [{ service: 'pest_control', annual: 468 }, { service: 'rodent_bait', mo: 29, annual: 348 }] } };
+    expect(rodentBaitLegacyReplaySignal(legacyData)).toEqual({ monthly: 29 });
+    engine.generateEstimate.mockClear();
+    await P.replayEstimate({ id: 'e-legacy', estimate_data: legacyData }, { familyKey: null, cadence: null, activeFamilies: null, soldMix: true }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[0][0].rodentBaitLegacyReplay).toEqual({ monthly: 29 });
+    const postureData = { engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } }, result: { lineItems: [{ service: 'rodent_bait', stations: 6, tierQualifier: false, excludeFromPctDiscount: true }] } };
+    expect(rodentWaveguardPostureReplaySignal(postureData)).toEqual({ tierQualifier: false, excludeFromPctDiscount: true });
+    await P.replayEstimate({ id: 'e-posture', estimate_data: postureData }, { familyKey: null, cadence: null, activeFamilies: null, soldMix: true }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[1][0].rodentWaveguardPostureReplay).toEqual({ tierQualifier: false, excludeFromPctDiscount: true });
+    expect(engine.generateEstimate.mock.calls[1][0].rodentBaitLegacyReplay).toBeUndefined(); // new-model evidence → no legacy pin
+    expect(P.soldPosturePins({}, {})).toEqual({ rodentBaitLegacyReplay: null, rodentWaveguardPostureReplay: null });
   });
   test('the whole-account dues fallback compares against every program the line carries', () => {
     expect(P.engineKeysForLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual'])).toEqual(['tree_shrub', 'palm_injection']);
@@ -1957,7 +1984,8 @@ describe('runMonthlyRateReview', () => {
     await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-11-15', anniversaryTo: '2027-01-15', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
     const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === target && r.family_key === 'tree_shrub');
     expect(row).toBeDefined();
-    expect(JSON.parse(row.flags)).toContain('multi_program_line');
+    expect(JSON.parse(row.flags)).toEqual(expect.arrayContaining(['multi_program_line', 'no_anniversary'])); // no estimate, no visit yet → its age is unknown
+    expect(row.anniversary_date).toBeNull();
     expect(row.status).toBe('exception');
   });
   test('an external recipient fails closed — the body names customers', async () => {
