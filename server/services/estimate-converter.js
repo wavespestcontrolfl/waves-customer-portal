@@ -6339,7 +6339,26 @@ const EstimateConverter = {
           );
           const reservedPlan = reservedLine
             && followUpSeedPlan(reservedStart, reservedLine, { fallbackFrequency: inferredFrequencyKey, acceptedPlanFrequency });
-          if (reservedPlan) RiderAcceptSeeding.noteLawn(riderCtx, reservedStart, reservedPlan);
+          // Only a lawn that WILL seed its series can host: the duplicate-series
+          // guard below keeps an existing active lawn series instead of seeding
+          // this one, and then there are no lawn dates to ride (fail closed —
+          // the riders walk their own cadence).
+          let reservedSeeds = false;
+          if (reservedPlan) {
+            try {
+              const existingLawn = await RecurringAppointmentSeeder.findActiveRecurringSeries(database, {
+                customerId,
+                serviceId: reservedStart.service_id || null,
+                serviceType: guardServiceTypeFor(reservedStart.service_type) || null,
+                excludeParentId: reservedStart.id,
+                serviceAddressScope: seriesAddressScope,
+              });
+              reservedSeeds = !(existingLawn && existingLawn.length);
+            } catch (guardErr) {
+              logger.warn(`[estimate-converter] rider host pre-check failed (riders walk their own cadence): ${guardErr.message}`);
+            }
+          }
+          if (reservedPlan && reservedSeeds) RiderAcceptSeeding.noteLawn(riderCtx, reservedStart, reservedPlan);
         }
         // One reserved row with a stamped price: it stands for exactly one
         // accepted line — or, when the combined route is about to rewrite it,

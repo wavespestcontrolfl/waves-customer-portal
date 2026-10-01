@@ -116,8 +116,9 @@ postgres('pest rides the lawn from accept', () => {
 
   // Slot-reserved accept: the first pest visit is already on the books, the lawn
   // line promotes as a same-trip standalone row.
-  async function reservedAccept(trx, services) {
+  async function reservedAccept(trx, services, { before } = {}) {
     const base = await customerFixture(trx);
+    if (before) await before(base);
     const estimateId = randomUUID();
     const date = weekdayAhead(21);
     await trx('estimates').insert({
@@ -244,6 +245,37 @@ postgres('pest rides the lawn from accept', () => {
         .map((r) => dateOf(r.scheduled_date));
       expect(baitDates).toEqual([f.date, addDays(f.date, 84), addDays(f.date, 168), addDays(f.date, 252)]);
       for (const d of baitDates) expect(lawnDates.has(d)).toBe(true);
+    } finally { await trx.rollback(); }
+  });
+
+  test('gate on, reserved LAWN start but the customer already has an active lawn series: the rider does not ride a lawn series that never seeds', async () => {
+    process.env[GATE] = 'true';
+    const trx = await mockPg.transaction();
+    try {
+      const lawnId = (await trx('services').where({ service_key: 'lawn_care_6week' }).first('id')).id;
+      const f = await reservedAccept(trx, [LAWN_LINE, TERMITE_BAIT_QUARTERLY], {
+        before: async (base) => {
+          const [existing] = await trx('scheduled_services').insert({
+            customer_id: base.customerId, property_id: base.propertyId, service_id: lawnId, service_type: 'Lawn Care',
+            status: 'pending', is_recurring: true, recurring_ongoing: true, recurring_pattern: 'every_6_weeks',
+            scheduled_date: weekdayAhead(5), window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+          }).returning('*');
+          await trx('scheduled_services').insert({
+            customer_id: base.customerId, property_id: base.propertyId, service_id: lawnId, service_type: 'Lawn Care',
+            status: 'pending', is_recurring: true, recurring_ongoing: true, recurring_pattern: 'every_6_weeks',
+            recurring_parent_id: existing.id, scheduled_date: addDays(weekdayAhead(5), 42),
+            window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+          });
+        },
+      });
+      const rows = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).orderBy('scheduled_date');
+      // The existing lawn series was kept: no lawn follow-ups from this accept.
+      expect(rows.filter((r) => r.recurring_parent_id === f.reserved.id)).toHaveLength(0);
+      const baitParent = rows.find((r) => !r.recurring_parent_id && /termite/i.test(r.service_type));
+      expect(baitParent).toBeDefined();
+      expect(baitParent.rides_parent_id).toBeNull();
+      const baitDates = rows.filter((r) => r.recurring_parent_id === baitParent.id).map((r) => dateOf(r.scheduled_date));
+      expect(baitDates).not.toContain(addDays(f.date, 84));
     } finally { await trx.rollback(); }
   });
 
