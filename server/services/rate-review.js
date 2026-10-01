@@ -1021,10 +1021,27 @@ function engineItemLowConfidence(item) {
   return lineRequiresReview(item) || lineHasHeuristicTurf(item) || String(item.pricingConfidence || '').toUpperCase() === 'LOW';
 }
 
-// Engine items carry their annual application count as visitsPerYear
-// (pest, tree & shrub), frequency (lawn) or visits (mosquito).
+// Engine items carry their annual application count under the persisted
+// aliases the converter's canonical resolver recognises (estimate-converter
+// visitsPerYearForRecurringService: visitsPerYear / appsPerYear / visits /
+// apps / treatmentsPerYear — pest and tree & shrub say visitsPerYear, palm
+// says appsPerYear, mosquito says visits); lawn's `frequency` is the one
+// field outside that vocabulary. The local list is the fallback if the
+// converter cannot load here — the same aliases, so never a different count.
+let visitCountResolverCached;
+function visitCountResolver() {
+  if (visitCountResolverCached === undefined) {
+    try {
+      const { visitsPerYearForRecurringService } = require('./estimate-converter');
+      visitCountResolverCached = typeof visitsPerYearForRecurringService === 'function' ? visitsPerYearForRecurringService : null;
+    } catch {
+      visitCountResolverCached = null;
+    }
+  }
+  return visitCountResolverCached || ((item) => positive(item.visitsPerYear) ?? positive(item.appsPerYear) ?? positive(item.visits) ?? positive(item.apps) ?? positive(item.treatmentsPerYear) ?? null);
+}
 function engineItemVisits(item) {
-  return positive(item.visitsPerYear) ?? positive(item.frequency) ?? positive(item.visits);
+  return positive(visitCountResolver()(item || {})) ?? positive(item.frequency);
 }
 
 // `expectedVisits`: the line's own applications per year (seasonal mosquito
@@ -1286,6 +1303,20 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
 // payment's metadata invoice_id — there is no payments.invoice_id). A
 // combined setup/initial + first-application invoice contributes its
 // application lines only; a pure setup invoice contributes nothing.
+// The deposit paid at acceptance and applied to an invoice is part of what
+// the customer paid for the application: invoices.total is the REMAINING
+// balance after the credit, and the credit survives only as the negative
+// `deposit_credit` line item (invoice.js create — there is no column).
+// Consideration = total + that credit; a fully deposit-funded application
+// (total 0) still pairs its revenue.
+function depositCreditSql(alias) {
+  return `COALESCE((
+            SELECT -sum(NULLIF(regexp_replace(dc ->> 'amount', '[^0-9.-]', '', 'g'), '')::numeric)
+            FROM jsonb_array_elements(CASE WHEN jsonb_typeof(COALESCE(${alias}.line_items::jsonb, 'null'::jsonb)) = 'array' THEN ${alias}.line_items::jsonb ELSE '[]'::jsonb END) dc
+            WHERE dc ->> 'category' = 'deposit_credit'
+          ), 0)`;
+}
+
 async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
   if (!customerIds.length) return [];
   const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
@@ -1318,7 +1349,7 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
             AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pi.stripe_payment_intent_id)
               OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = pi.stripe_charge_id)
               OR p.metadata::jsonb ->> 'invoice_id' = pi.id::text)
-        ), 0))
+        ), 0) + ${depositCreditSql('pi')})
         FROM invoices pi
         WHERE pi.id = apt.prepay_invoice_id AND pi.archived_at IS NULL
           AND (pi.paid_at IS NOT NULL OR pi.status IN ('paid', 'prepaid'))
@@ -1333,7 +1364,7 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
               AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
                 OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
                 OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
-          ), 0),
+          ), 0) + ${depositCreditSql('i')},
           -- a combined setup/initial + application invoice contributes its APPLICATION lines only
           CASE WHEN (COALESCE(i.title, '') ILIKE '%setup%' OR COALESCE(i.title, '') ILIKE '%initial%'
                      OR COALESCE(i.line_items::text, '') ILIKE '%setup%' OR COALESCE(i.line_items::text, '') ILIKE '%initial%')
@@ -1341,23 +1372,36 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
                          THEN (SELECT COALESCE(sum(NULLIF(regexp_replace(li ->> 'amount', '[^0-9.-]', '', 'g'), '')::numeric), 0)
                                FROM jsonb_array_elements(i.line_items::jsonb) li
                                WHERE NOT (COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%setup%'
-                                          OR COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%initial%'))
+                                          OR COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%initial%')
+                                 AND COALESCE(li ->> 'category', '') <> 'deposit_credit')
                          ELSE 0 END
-               ELSE i.total END
+               ELSE i.total + ${depositCreditSql('i')} END
         ) * COALESCE(share.fraction, 1))
         FROM invoices i
-        -- a combined completion-packet invoice (visit-completion-invoice.js mintPacketInvoice: ONE
-        -- invoice under billed[0].member.id, every billed member linked through
-        -- visit_completion_packet_items.invoice_id) credits each member its own share of the
-        -- settled total, pro rata by the members' visit prices — never its whole total to the anchor
+        -- an invoice shared by several visits — a completion-packet invoice (visit-completion-
+        -- invoice.js: ONE invoice under billed[0].member.id, every billed member linked through
+        -- visit_completion_packet_items.invoice_id) or a combined first-application invoice
+        -- (estimate-converter.js stampCombinedFirstApplicationInvoiceCoverage: the anchor AND each
+        -- covered sibling carry its id in first_application_invoice_id) — credits each member its
+        -- own share of the settled total, pro rata by the members' visit prices (estimated_price,
+        -- else the primary_line_price a folded sibling carries); a member with no price makes the
+        -- split unknowable and the whole invoice contributes nothing — never its total to the anchor
         LEFT JOIN LATERAL (
-          SELECT CASE WHEN sum(m.estimated_price) > 0 THEN COALESCE(s.estimated_price, 0) / sum(m.estimated_price) ELSE 1.0 / count(*) END AS fraction
-          FROM visit_completion_packet_items pm
-          JOIN scheduled_services m ON m.id = pm.scheduled_service_id
-          WHERE pm.invoice_id = i.id
+          SELECT CASE
+              WHEN count(*) FILTER (WHERE COALESCE(m.estimated_price, m.primary_line_price) > 0) < count(*) THEN 0
+              WHEN sum(COALESCE(m.estimated_price, m.primary_line_price)) > 0
+                THEN COALESCE(s.estimated_price, s.primary_line_price, 0) / sum(COALESCE(m.estimated_price, m.primary_line_price))
+              ELSE 0 END AS fraction
+          FROM (
+            SELECT pm.scheduled_service_id AS id FROM visit_completion_packet_items pm WHERE pm.invoice_id = i.id
+            UNION
+            SELECT b.id FROM scheduled_services b WHERE b.first_application_invoice_id = i.id
+          ) mem
+          JOIN scheduled_services m ON m.id = mem.id
           HAVING count(*) > 1
         ) share ON true
         WHERE (i.scheduled_service_id = s.id
+               OR s.first_application_invoice_id = i.id
                OR EXISTS (SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2.invoice_id = i.id AND pm2.scheduled_service_id = s.id))
           AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
           AND (i.paid_at IS NOT NULL OR i.status IN ('paid', 'prepaid'))
@@ -1603,7 +1647,11 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
   // that zero is authoritative (billing-lane.js hasAuthoritativeZeroPrice:
   // GATE_STAMPED_ZERO_FREE on, or a positive primary_line_price base) — it
   // is a free line, never a fee-fallback candidate for an increase.
-  const authoritativeZero = !(visitMedianCents > 0) && (planLine.zero_priced_visits || 0) > 0
+  // … and only when EVERY open visit is stamped $0: one discounted-to-zero
+  // visit beside NULL-priced ones (which bill the per-application fee,
+  // completionInvoiceAmount) is not a free line.
+  const zeroVisits = planLine.zero_priced_visits || 0;
+  const authoritativeZero = !(visitMedianCents > 0) && zeroVisits > 0 && zeroVisits === (planLine.open_visits || 0)
     && hasAuthoritativeZeroPrice(0, planLine.zero_with_base ? 1 : null);
   const fromVisits = () => {
     if (visitMedianCents > 0) return { cents: visitMedianCents, source: 'visit_median', unit: 'application' };
@@ -2351,6 +2399,8 @@ module.exports = {
   sendBatchEmail,
   composeBatchEmail,
   _private: {
+    engineItemVisits,
+    depositCreditSql,
     familySignalTouchesLine,
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,

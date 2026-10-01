@@ -531,6 +531,12 @@ describe('current rate per billing lane', () => {
       if (prior === undefined) delete process.env.GATE_STAMPED_ZERO_FREE; else process.env.GATE_STAMPED_ZERO_FREE = prior;
     }
     // a priced median always wins over zero-stamped siblings
+    // one discounted-to-zero visit beside NULL-priced ones is not a free line: the NULL-priced visits bill the per-application fee
+    const oneZero = fixture.planLine('c', 'pest_control', 'quarterly', null, { open_visits: 3, priced_visits: 0, zero_priced_visits: 1, zero_with_base: true });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application', per_application_fee: 117 }), planLine: oneZero })).toMatchObject({ cents: 11700, source: 'per_application_fee' });
+    const noFee = fixture.customer(1, { billing_mode: 'per_application', per_application_fee: null });
+    expect(P.resolveCurrentRate({ customer: noFee, planLine: oneZero })).toMatchObject({ cents: 0, source: 'none' });
+    expect(P.resolveCurrentRate({ customer: noFee, planLine: oneZero }).stampedZeroFree).toBeUndefined();
     const mixed = fixture.planLine('c', 'pest_control', 'quarterly', 117, { priced_visits: 2, zero_priced_visits: 1, zero_with_base: true });
     expect(P.resolveCurrentRate({ customer, planLine: mixed })).toMatchObject({ cents: 11700, source: 'visit_median' });
   });
@@ -727,6 +733,17 @@ describe('engine replay runs at the line\'s own cadence', () => {
     // the SQL classifies a seasonal catalog row (or pattern) as 'seasonal' before the monthly pattern rule
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src.indexOf("sv.frequency LIKE 'seasonal%'")).toBeLessThan(src.indexOf("s.recurring_pattern IN ('monthly','monthly_nth_weekday') THEN 'monthly'"));
+  });
+  test('an engine item\'s application count comes through the converter\'s alias vocabulary — the palm engine says appsPerYear', () => {
+    expect(P.engineItemVisits({ visitsPerYear: 4 })).toBe(4);
+    expect(P.engineItemVisits({ appsPerYear: 2 })).toBe(2); // pricePalmInjection's field
+    expect(P.engineItemVisits({ treatmentsPerYear: 2 })).toBe(2);
+    expect(P.engineItemVisits({ apps: 3 })).toBe(3);
+    expect(P.engineItemVisits({ visits: 9 })).toBe(9);
+    expect(P.engineItemVisits({ frequency: 6 })).toBe(6); // lawn's field, outside the converter list
+    expect(P.engineItemVisits({})).toBeNull();
+    const palm = { lineItems: [{ service: 'palm_injection', annualAfterDiscount: 300, appsPerYear: 2 }], waveGuard: { tier: 'bronze' } };
+    expect(P.listRateFromEngineResult(palm, 'tree_shrub', 'semiannual')).toMatchObject({ perAppCents: 15000, cadenceMismatch: false });
   });
   test('a standalone palm program is the tree/shrub family\'s primary item, never a rider of a missing line', () => {
     const palmOnly = { lineItems: [{ service: 'palm_injection', annualAfterDiscount: 300, visitsPerYear: 2 }], waveGuard: { tier: 'bronze' } };
@@ -1215,8 +1232,20 @@ describe('engine replay guards', () => {
     // visit-completion-invoice.js mintPacketInvoice: one invoice under billed[0].member.id, members linked via visit_completion_packet_items.invoice_id
     expect(revenue).toMatch(/OR EXISTS \(SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2\.invoice_id = i\.id AND pm2\.scheduled_service_id = s\.id\)/);
     expect(revenue).toMatch(/LEFT JOIN LATERAL \(/);
-    expect(revenue).toMatch(/COALESCE\(s\.estimated_price, 0\) \/ sum\(m\.estimated_price\)/);
+    expect(revenue).toMatch(/COALESCE\(s\.estimated_price, s\.primary_line_price, 0\) \/ sum\(COALESCE\(m\.estimated_price, m\.primary_line_price\)\)/);
     expect(revenue).toMatch(/HAVING count\(\*\) > 1/);
+    // a combined first-application invoice (estimate-converter stamps the anchor AND each covered sibling with its id) splits the same way; a member with no price makes the whole invoice unattributable
+    expect(revenue).toMatch(/OR s\.first_application_invoice_id = i\.id/);
+    expect(revenue).toMatch(/SELECT b\.id FROM scheduled_services b WHERE b\.first_application_invoice_id = i\.id/);
+    expect(revenue).toMatch(/WHEN count\(\*\) FILTER \(WHERE COALESCE\(m\.estimated_price, m\.primary_line_price\) > 0\) < count\(\*\) THEN 0/);
+    // the deposit paid at acceptance is consideration: total is the remaining balance, the credit survives as the negative deposit_credit line
+    expect(P.depositCreditSql('i')).toMatch(/WHERE dc ->> 'category' = 'deposit_credit'/);
+    expect(P.depositCreditSql('i')).toMatch(/SELECT -sum\(NULLIF\(regexp_replace\(dc ->> 'amount'/);
+    expect(revenue).toMatch(/\), 0\) \+ \$\{depositCreditSql\('i'\)\},/); // net settled consideration
+    expect(revenue).toMatch(/ELSE i\.total \+ \$\{depositCreditSql\('i'\)\} END/); // the plain-invoice cap
+    expect(revenue).toMatch(/AND COALESCE\(li ->> 'category', ''\) <> 'deposit_credit'\)/); // never netted out of the application lines
+    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(q).toMatch(/\), 0\) \+ \$\{depositCreditSql\('pi'\)\}\)/); // the prepay settlement too
     expect(revenue).toMatch(/\) \* COALESCE\(share\.fraction, 1\)\)/);
     expect(revenue).not.toMatch(/WHERE i\.scheduled_service_id = s\.id AND/);
   });
