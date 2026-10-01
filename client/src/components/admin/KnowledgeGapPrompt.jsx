@@ -22,13 +22,36 @@ export const KNOWLEDGE_GAP_MAX = 300;
 
 const normalize = (text) => String(text || "").replace(/\s+/g, " ").trim();
 
-export function gapsFromMisses(misses) {
+// A 128-bit hash (cyrb128) shaped as a UUID. Not a secret: it only has to
+// give the same key for the same saved task and miss on every load.
+export function stableGapKey(scope, miss) {
+  const str = `${scope}\u0000${miss}`;
+  let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
+  for (let i = 0; i < str.length; i++) {
+    const k = str.charCodeAt(i);
+    h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
+    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
+    h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
+    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+  h1 ^= h2 ^ h3 ^ h4; h2 ^= h1; h3 ^= h1; h4 ^= h1;
+  const hex = [h1, h2, h3, h4].map((h) => (h >>> 0).toString(16).padStart(8, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function gapsFromMisses(misses, scope = null) {
   const list = Array.isArray(misses) ? misses.filter((m) => typeof m === "string" && m.trim()) : [];
   return list.map((m) => ({
     miss: m,
     // One key per box: a retry after a lost response re-sends it, so the
     // server saves this gap once however many times the button is tapped.
-    requestKey: uuid(),
+    // A saved task's key comes from the task and the miss, so reopening the
+    // task after a page reload re-sends the same key too.
+    requestKey: scope ? stableGapKey(scope, m) : uuid(),
     draft: m.slice(0, KNOWLEDGE_GAP_MAX),
     // The text sent on the first tap. After that the box is locked: a failed
     // save may still have landed under this key, so a retry resends exactly
@@ -50,7 +73,7 @@ export function useKnowledgeGaps() {
   const load = useCallback((misses, scope = null) => {
     const sameScope = scope !== null && scope === scopeRef.current;
     scopeRef.current = scope;
-    const fresh = gapsFromMisses(misses);
+    const fresh = gapsFromMisses(misses, scope);
     setGaps((rows) => (sameScope
       ? fresh.map((f) => rows.find((r) => r.miss === f.miss) || f)
       : fresh));
@@ -75,8 +98,11 @@ function GapRow({ gap, update, save, dark }) {
     if (status === "saving" || !savable) return;
     update(requestKey, { submitted: text, status: "saving", error: "" });
     try {
-      await save(text, requestKey);
-      update(requestKey, { status: "saved" });
+      const result = await save(text, requestKey);
+      // A key saved before (e.g. before a reload) keeps its first text: show
+      // what is stored, which is what the weekly email will list.
+      const stored = typeof result?.question === "string" && result.question ? result.question : text;
+      update(requestKey, { status: "saved", submitted: stored });
     } catch (err) {
       update(requestKey, { status: "error", error: err?.message || "Could not save" });
     }
@@ -152,7 +178,7 @@ export default function KnowledgeGapPrompt({ gaps, update, save, variant = "dark
         border: `1px solid ${border}`,
         borderRadius: 8,
         fontFamily: "Roboto, Arial, sans-serif",
-        fontSize: dark ? 13 : 14,
+        fontSize: 14,
         lineHeight: 1.5,
         color: text,
       }}

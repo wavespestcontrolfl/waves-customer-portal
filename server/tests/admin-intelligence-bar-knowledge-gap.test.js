@@ -30,6 +30,7 @@ const mockOnConflict = jest.fn(() => ({ ignore: mockOnConflictIgnore }));
 // knowledge-gap save's onConflict().ignore()).
 const mockDbInsert = jest.fn(() => Object.assign(Promise.resolve(undefined), { onConflict: mockOnConflict }));
 const mockDbTable = jest.fn();
+const mockDbFirst = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
@@ -43,7 +44,7 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
 
 jest.mock('../models/db', () => jest.fn((table) => {
   mockDbTable(table);
-  return { insert: mockDbInsert };
+  return { insert: mockDbInsert, where: (...args) => ({ first: (...cols) => mockDbFirst(args, cols) }) };
 }));
 const mockLoggerError = jest.fn();
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: (...args) => mockLoggerError(...args) }));
@@ -240,7 +241,7 @@ describe('POST /knowledge-gap', () => {
     await withServer(async (baseUrl) => {
       const { status, body } = await postGap(baseUrl, { question: '  chinch bugs\n on   zoysia ', request_key: KEY.toUpperCase() });
       expect(status).toBe(200);
-      expect(body).toEqual({ success: true });
+      expect(body).toEqual({ success: true, question: 'chinch bugs on zoysia' });
       expect(knowledgeQueryInserts()).toEqual([{
         query: 'chinch bugs on zoysia',
         articles_referenced: '[]',
@@ -251,6 +252,16 @@ describe('POST /knowledge-gap', () => {
       // A retry with the same key is a no-op at the unique index.
       expect(mockOnConflict).toHaveBeenCalledWith('request_key');
       expect(mockOnConflictIgnore).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('a retry under a key already saved answers with the stored text', async () => {
+    mockDbFirst.mockResolvedValueOnce({ query: 'chinch bugs' });
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postGap(baseUrl, { question: 'Smith chinch bugs', request_key: KEY });
+      expect(status).toBe(200);
+      expect(body).toEqual({ success: true, question: 'chinch bugs' });
+      expect(mockDbFirst).toHaveBeenCalledWith([{ request_key: KEY }], ['query']);
     });
   });
 

@@ -210,8 +210,16 @@ async function runKnowledgeGapsWeekly(opts = {}) {
   return { sent: true, gaps: composed.gaps };
 }
 
+// Gaps saved from the Intelligence Bar are questions with no answer: they
+// belong in this email, not in the recent Q&A lists (admin-knowledge.js,
+// knowledge.js). Apply to a knowledge_queries query to leave them out.
+function withoutSavedGaps(q) {
+  return q.where((w) => w.whereNull('asked_by').orWhereNot('asked_by', 'intelligence_bar'));
+}
+
 module.exports = {
   questionKey,
+  withoutSavedGaps,
   runKnowledgeGapsWeekly,
   _private: { composeGapsEmail, reportWindow, questionKey, sourceLabel, loadWeek, sentThisWeek, OPS_KEY },
 };

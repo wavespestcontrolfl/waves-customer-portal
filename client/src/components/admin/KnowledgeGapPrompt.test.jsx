@@ -3,7 +3,7 @@ import React, { useEffect, useState } from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import KnowledgeGapPrompt, { useKnowledgeGaps } from "./KnowledgeGapPrompt";
+import KnowledgeGapPrompt, { stableGapKey, useKnowledgeGaps } from "./KnowledgeGapPrompt";
 
 afterEach(cleanup);
 
@@ -127,6 +127,30 @@ describe("KnowledgeGapPrompt", () => {
     await screen.findByText(/Added to Monday's knowledge-gaps email/);
     fireEvent.click(screen.getByRole("button", { name: "open other task" }));
     expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeInTheDocument();
+  });
+
+  it("a saved task's key is the same after a reload, so a retry cannot save twice", async () => {
+    const first = vi.fn(async () => { throw new Error("Network error"); });
+    render(<Harness misses={["chinch bugs"]} save={first} scope="task-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    await screen.findByRole("alert");
+    cleanup(); // page reload: all React state is gone
+    const second = vi.fn(async () => ({ success: true, question: "chinch bugs" }));
+    render(<Harness misses={["chinch bugs"]} save={second} scope="task-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    await waitFor(() => expect(second).toHaveBeenCalledTimes(1));
+    expect(second.mock.calls[0][1]).toBe(first.mock.calls[0][1]);
+    expect(first.mock.calls[0][1]).toBe(stableGapKey("task-1", "chinch bugs"));
+    expect(stableGapKey("task-1", "chinch bugs")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(stableGapKey("task-2", "chinch bugs")).not.toBe(stableGapKey("task-1", "chinch bugs"));
+    expect(stableGapKey("task-1", "fire ants")).not.toBe(stableGapKey("task-1", "chinch bugs"));
+  });
+
+  it("shows the text the server stored when the key was saved before", async () => {
+    const save = vi.fn(async () => ({ success: true, question: "chinch bugs" }));
+    render(<Harness misses={["Smith chinch bugs"]} save={save} scope="task-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    expect(await screen.findByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
   });
 
   it("disables the button for under 3 characters or no letter or number", () => {

@@ -3248,7 +3248,10 @@ router.post('/knowledge-gap', async (req, res) => {
       coverage: 'none',
       request_key: requestKey,
     }).onConflict('request_key').ignore();
-    res.json({ success: true });
+    // A retry (same key) saved nothing new: answer with the text actually
+    // stored, so the screen shows what the weekly email will list.
+    const stored = await db('knowledge_queries').where({ request_key: requestKey }).first('query');
+    res.json({ success: true, question: stored?.query ?? question });
   } catch (err) {
     // Never pass the error on: knex puts the bindings (the operator's text,
     // which can still hold customer details) in its message. Code +
