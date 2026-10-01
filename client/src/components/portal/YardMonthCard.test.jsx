@@ -184,6 +184,13 @@ describe('pest-only customer', () => {
 });
 
 describe('yardTabsFor', () => {
+  it('a yard customer with any household line (mosquito, rodent, termite) also gets Home pests', () => {
+    const base = { lawn: false, pest: false, treeShrub: false, mosquito: false, rodent: false, termite: false };
+    expect(yardTabsFor({ ...base, lawn: true, mosquito: true }).map((t) => t.key)).toEqual(['lawn', 'home', 'weeds']);
+    expect(yardTabsFor({ ...base, treeShrub: true, rodent: true }).map((t) => t.key)).toEqual(['home', 'shrubs']);
+    expect(yardTabsFor({ ...base, treeShrub: true, termite: true }).map((t) => t.key)).toEqual(['home', 'shrubs']);
+    expect(yardTabsFor({ ...base, lawn: true }).map((t) => t.key)).toEqual(['lawn', 'weeds']);
+  });
   it('lawn-only: Lawn + Weeds; tree & shrub adds Shrubs & trees; no yard line falls back to the home forecast', () => {
     const base = { lawn: false, pest: false, treeShrub: false };
     expect(yardTabsFor({ ...base, lawn: true }).map((t) => t.key)).toEqual(['lawn', 'weeds']);

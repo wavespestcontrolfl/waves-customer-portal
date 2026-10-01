@@ -129,8 +129,9 @@ function WeatherBox({ weather, city }) {
 // The plan decides what the card shows; the server decided what the plan is.
 export function yardTabsFor(plan) {
   const yardPlan = plan.lawn || plan.treeShrub;
-  // A customer with no yard line still gets the live household forecast.
-  const showHome = plan.pest || !yardPlan;
+  // Any household line (pest, mosquito, rodent, termite) shows the live
+  // forecast; a customer with no yard line still gets it too.
+  const showHome = plan.pest || plan.mosquito || plan.rodent || plan.termite || !yardPlan;
   const tabs = [];
   if (plan.lawn) tabs.push({ key: 'lawn', label: 'Lawn' });
   if (showHome) tabs.push({ key: 'home', label: 'Home pests' });
