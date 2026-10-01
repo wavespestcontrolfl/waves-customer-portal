@@ -27,6 +27,7 @@ jest.mock('../services/sms-operational-actions', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
+jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: jest.fn(async () => 1) }));
 
 const CallCommitments = require('../services/call-commitments');
 const SmsActions = require('../services/sms-operational-actions');
@@ -470,8 +471,12 @@ describe('marks that did not reach the list', () => {
   test('one office bell per visit, following the notification rule; nothing when all were saved', async () => {
     const NotificationService = require('../services/notification-service');
     const conn = (table) => ({ where: () => ({ first: async () => (table === 'customers' ? { first_name: 'Pat', last_name: 'Doe' } : null) }) });
+    const Episodes = require('../services/admin-alert-episodes');
+    // Nothing left unsaved (a resumed completion saved them): the visit's
+    // own bell, if one rang, is closed; none is raised.
     expect(await VisitPromises.alertUnsavedVisitPromiseMarks(conn, { customerId: 'cust-1', serviceId: 'svc-1', visitDate: '2026-10-01', unsaved: [] })).toBeNull();
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(Episodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, ['visit-promise-marks:svc-1'], 'promise_marks_saved', expect.objectContaining({ resolution: expect.any(String) }));
     await VisitPromises.alertUnsavedVisitPromiseMarks(conn, {
       customerId: 'cust-1', serviceId: 'svc-1', visitDate: '2026-10-01',
       unsaved: [{ id: ID(1), mark: 'done', stillLeft: null, description: 'Check under the dishwasher' }],
@@ -481,7 +486,8 @@ describe('marks that did not reach the list', () => {
       'Comms — update a promise the technician marked',
       "Marked at Pat Doe's October 1 visit, but the promise list does not show it.",
       expect.objectContaining({
-        link: '/admin/communications#tab=owed',
+        // The customer's own promise controls: call, text and email promises.
+        link: '/admin/customers?customerId=cust-1&tab=comms',
         dedupeKey: 'visit-promise-marks:svc-1',
         bell: true,
         detail: expect.stringContaining('"Check under the dishwasher": marked Done, still open.'),

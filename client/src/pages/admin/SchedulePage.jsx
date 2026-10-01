@@ -1059,6 +1059,8 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // something the report leaves out. Returns the confirm() text, or null for
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
+export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+
 export function completionPromiseMarksPrompt(error) {
   if (error?.code !== "promise_marks_changed") return null;
   const lead = String(error?.message || "").trim();
@@ -14728,6 +14730,12 @@ export function CompletionPanel({
       const entry = currentMark(promiseMarks, promise);
       return entry ? [[promise.id, entry]] : [];
     }));
+  // Marks the list has not answered for yet (still loading, or an older
+  // promise still being asked for): a report written now would leave them
+  // out while completion later applied them, so Generate and Complete wait
+  // (Codex #5516).
+  const promiseMarksPending = promiseMarksSignature(promiseMarks).length > 0
+    && (promiseCheckLoading || unlistedMarkIds.length > 0);
   // The marks as the staleness check and the report heads-up compare them.
   const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : validPromiseMarks));
 
@@ -17350,9 +17358,8 @@ export function CompletionPanel({
     }
     // Marks restored with a draft are checked against the promise list once
     // it loads; completing before then would drop them (Codex #5516).
-    if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll
-      && promiseCheckLoading && promiseMarksSignature(promiseMarks).length) {
-      alert("Still loading the promises you marked. Try again in a moment.");
+    if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
+      alert(PROMISE_MARKS_LOADING_ALERT);
       return;
     }
     // A promise mark changed after the report was written and the tech kept
@@ -19935,6 +19942,10 @@ export function CompletionPanel({
                     alert("Stop dictation and wait for the transcript to appear in your notes first.");
                     return;
                   }
+                  if (promiseMarksPending) {
+                    alert(PROMISE_MARKS_LOADING_ALERT);
+                    return;
+                  }
                   if (dictation.listening) dictation.toggle();
                   const { payload, hasReportInput } = buildAiReportPayload();
                   if (!hasReportInput) {
@@ -22380,6 +22391,10 @@ export function CompletionPanel({
                 // it. Hold the action until the transcript has landed.
                 if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
                   alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                  return;
+                }
+                if (promiseMarksPending) {
+                  alert(PROMISE_MARKS_LOADING_ALERT);
                   return;
                 }
                 if (dictation.listening) dictation.toggle();

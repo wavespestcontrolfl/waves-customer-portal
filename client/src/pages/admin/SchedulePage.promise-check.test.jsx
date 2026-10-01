@@ -212,6 +212,24 @@ describe('the promise check on the completion form', () => {
     await act(async () => { finish({}); });
   });
 
+  it('Generate waits while restored marks are still loading, so the report never leaves them out', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/promises')) return new Promise(() => {});
+      return { ok: true, json: async () => ({ customer: {}, actions: [], available: false, report: REPORT }) };
+    }));
+    localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+      serviceId: service.id,
+      savedAt: Date.now(),
+      notes: 'Ghost ants on the slider track.',
+      promiseMarks: { [PROMISES[0].id]: { mark: 'done', version: PROMISES[0].version, stillLeft: '' } },
+    }));
+    await renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: /Generate AI Service Report/i })));
+    expect(alert).toHaveBeenCalledWith('Still loading the promises you marked. Try again in a moment.');
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('generate-report'))).toBe(false);
+  });
+
   it('a restored mark on a promise beyond the newest ten is asked for by id, shown, and sent', async () => {
     const OLDER = { id: '00000000-0000-4000-8000-000000000099', description: 'Recheck the attic vent', source: 'call', madeAt: '2026-08-01T15:00:00.000Z', version: '9999999999999999' };
     vi.stubGlobal('fetch', vi.fn(async (url) => {

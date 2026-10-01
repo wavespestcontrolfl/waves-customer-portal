@@ -251,22 +251,21 @@ async function lockOwnedOpenPromise(trx, id, { customerId, source, version, lock
   if (!table || !customerId || !version) return null;
   const strength = (query) => (lock === 'update' ? query.forUpdate() : query.forShare());
   const customer = await strength(trx('customers').where({ id: customerId }).whereNull('deleted_at')).first('id');
-  if (!customer) return null;
-  const initial = await trx('call_commitments').where({ id }).first(column, 'email_customer_id');
-  if (!initial?.[column]) return null;
-  const sourceRow = await strength(trx(table).where({ id: initial[column] })).first('customer_id');
+  const initial = customer && await trx('call_commitments').where({ id }).first(column, 'email_customer_id');
+  const sourceId = initial?.[column];
+  const sourceRow = sourceId && await strength(trx(table).where({ id: sourceId })).first('customer_id');
   // An email ask follows a merge through emails.customer_id; a staff
   // promise's sent email carries none, so its own email_customer_id does
   // (the rule applySmsCommitmentUpdate applies).
-  const owner = source === 'email' ? (sourceRow?.customer_id || initial.email_customer_id) : sourceRow?.customer_id;
-  if (!sourceRow || String(owner || '') !== String(customerId)) return null;
+  const owner = sourceRow && (sourceRow.customer_id || (source === 'email' ? initial.email_customer_id : null));
+  if (String(owner || '') !== String(customerId)) return null;
   const row = await trx('call_commitments').where({ id }).forUpdate()
     .first('status', 'party', 'kind', 'description', 'human_note', 'reviewed_at', column);
-  if (!row || row.status !== 'open' || row.party !== 'waves' || !VISIT_PROMISE_KINDS.includes(row.kind)) return null;
-  if (promiseVersion(row.description, row.reviewed_at) !== version) return null;
-  // The promise still points at the source just checked.
-  if (String(row[column] || '') !== String(initial[column])) return null;
-  return row;
+  const unchanged = row?.status === 'open' && row.party === 'waves' && VISIT_PROMISE_KINDS.includes(row.kind)
+    && promiseVersion(row.description, row.reviewed_at) === version
+    // The promise still points at the source just checked.
+    && String(row[column]) === String(sourceId);
+  return unchanged ? row : null;
 }
 
 // Partly: the promise stays open and carries the technician's note, added
@@ -365,9 +364,21 @@ async function unsavedVisitPromiseMarks(conn, { customerId, marks, results = nul
 
 // The report already went out saying what the technician marked: a mark
 // that did not reach the office's list rings one bell to settle it by hand
-// (Codex #5516; docs/admin-notifications.md). Never contacts the customer.
+// (Codex #5516; docs/admin-notifications.md). It opens the customer's own
+// promise controls (Customer 360, where call, text and email promises are
+// all listed). When a later run (a resumed completion) finds nothing left
+// unsaved, it closes its own bell; the relevance sweep clears it once the
+// office settles the promises. Never contacts the customer.
 async function alertUnsavedVisitPromiseMarks(conn, { customerId, serviceId, visitDate = null, unsaved }) {
-  if (!Array.isArray(unsaved) || !unsaved.length || !serviceId) return null;
+  if (!serviceId) return null;
+  const dedupeKey = `visit-promise-marks:${serviceId}`;
+  if (!Array.isArray(unsaved) || !unsaved.length) {
+    if (!require('../../config/feature-gates').alertEpisodesLive()) return null;
+    await require('../admin-alert-episodes').closeAdminAlertKeys(conn, [dedupeKey], 'promise_marks_saved', {
+      resolution: "The technician's marks reached the promise list",
+    });
+    return null;
+  }
   const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
   const customer = customerId
     ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name').catch(() => null)
@@ -386,12 +397,12 @@ async function alertUnsavedVisitPromiseMarks(conn, { customerId, serviceId, visi
     action: count === 1 ? 'update a promise the technician marked' : `update ${count} promises the technician marked`,
     why: `Marked at ${name}'s ${day ? `${day} ` : ''}visit, but the promise list does not show ${count === 1 ? 'it' : 'them'}.`,
     severity: 'needs-you',
-    link: '/admin/communications#tab=owed',
+    link: customerId ? `/admin/customers?customerId=${encodeURIComponent(customerId)}&tab=comms` : '/admin/communications#tab=owed',
     subject: { type: 'visit', id: serviceId },
     doneWhen: 'promise_fulfilled',
     who: 'person',
   }, {
-    dedupeKey: `visit-promise-marks:${serviceId}`,
+    dedupeKey,
     bell: true,
     detail: `The visit's report already went out saying what the technician marked. Settle these on the Promises list:\n${lines.join('\n')}`,
     metadata: { customer_id: customerId || null, promise_ids: unsaved.map((entry) => entry.id) },
