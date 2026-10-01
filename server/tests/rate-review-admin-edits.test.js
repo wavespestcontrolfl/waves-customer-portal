@@ -446,6 +446,8 @@ describe('readConfig / updateConfig', () => {
     ]));
     expect(await rateReview.updateConfig({ patch: {}, dbh: db })).toMatchObject({ ok: false, errors: ['Nothing to change'] });
     expect(await rateReview.updateConfig({ patch: { min_delta_cents: 0 }, dbh: db })).toMatchObject({ ok: false, errors: ['min_delta_cents must be at least 1'] });
+    // a zero floor would let the ranking prefer an empty not-home sample over the account's home visits
+    expect(await rateReview.updateConfig({ patch: { min_usable_visits: 0 }, dbh: db })).toMatchObject({ ok: false, errors: ['min_usable_visits must be at least 1'] });
     expect(await rateReview.updateConfig({ patch: { band_b_tolerance_pct: 15 }, dbh: db })).toMatchObject({ ok: false, errors: ['Band B tolerance must not exceed the band C maximum'] });
     expect(await rateReview.updateConfig({ patch: [1], dbh: db })).toMatchObject({ ok: false });
     expect(db.tables.rate_review_config[0]).toMatchObject({ ...CONFIG_ROW });
@@ -548,13 +550,33 @@ describe('rebuild vs decisions', () => {
     expect(fake.reads.slice(start + 1).every((r) => r.inTx)).toBe(true); // slice past the digest read made here, outside
   });
 
+  test('a retried monthly tick re-delivers a batch the owner edited instead of rebuilding over the edits', async () => {
+    const edited = seed(); // built on day 1, digest not delivered, one amount edited from the screen since
+    edited.rate_review_snapshots[0].flags = JSON.stringify(['admin_edited']);
+    edited.rate_review_snapshots[0].proposed_rate_cents = 11200;
+    const fake = fakeDb(edited);
+    useModuleDb(fake);
+    const out = await rateReview.runMonthlyRateReview({ now: new Date('2027-01-05T11:20:00Z'), dbh: fake });
+    expect(out).toMatchObject({ ok: true, batchKey: '2027-01', rows: 4, rebuilt: false, emailed: true });
+    expect(db.raw).not.toHaveBeenCalled(); // no ranking query ran
+    // nothing was replaced: no lock taken, the only transaction is the digest's repeatable read
+    expect(fake.raw).not.toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', expect.anything());
+    expect(fake.transactions).toEqual([{ isolationLevel: 'repeatable read' }]);
+    expect(fake.tables.rate_review_snapshots.find((r) => r.id === ROW_A)).toMatchObject({ proposed_rate_cents: 11200, flags: JSON.stringify(['admin_edited']) });
+    expect(fake.tables.rate_review_batches[0].email_sent_at).toBeTruthy(); // the delivery was retried and stamped
+    expect(await rateReview._private.batchOwnerDecisions(fake, '2027-01')).toEqual({ decided: true, rows: 4 });
+    // a batch the ranking alone produced (no owner decision) still rebuilds on a retry
+    expect(await rateReview._private.batchOwnerDecisions(fakeDb(seed()), '2027-01')).toEqual({ decided: false, rows: 4 });
+  });
+
   test('a retried monthly tick never recomputes a batch the owner approved (the ranking\u2019s own retry keeps an unsent batch\u2019s window)', async () => {
     const approved = seed(); // the January 2027 build month's batch, approved, not yet emailed
     approved.rate_review_snapshots[0].status = 'approved';
     const fake = fakeDb(approved);
     useModuleDb(fake);
     const out = await rateReview.runMonthlyRateReview({ now: new Date('2027-01-05T11:20:00Z'), dbh: fake });
-    expect(out).toMatchObject({ skipped: 'batch_has_approved_rows', batchKey: '2027-01' });
+    // an approval is the owner's decision: the batch stands, only the digest is (re)delivered
+    expect(out).toMatchObject({ ok: true, batchKey: '2027-01', rebuilt: false, emailed: true });
     expect(db.raw).not.toHaveBeenCalled();
     expect(fake.tables.rate_review_snapshots.find((r) => r.id === ROW_A)).toMatchObject({ status: 'approved', proposed_rate_cents: 11700 });
   });

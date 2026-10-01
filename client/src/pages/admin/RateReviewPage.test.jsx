@@ -512,6 +512,31 @@ describe("RateReviewPage", () => {
     await waitFor(() => expect(batchGets).toBe(2));
   });
 
+  it("a post-save reload superseded by a switch away and back never clears the freshly loaded batch", async () => {
+    await renderLoaded();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const original = fetch;
+    let reloads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      // the post-save reload — the first GET of this batch after the render — is held back
+      if ((options.method || "GET").toUpperCase() === "GET" && /\/batches\/2027-01$/.test(String(url)) && ++reloads === 1) await gate;
+      return original(url, options);
+    }));
+    fireEvent.click(screen.getByLabelText("Include Fixture Whitfield"));
+    await waitFor(() => expect(reloads).toBe(1));
+    fireEvent.change(screen.getByLabelText("Batch"), { target: { value: "2026-12" } });
+    await screen.findByText("No accounts in this batch.");
+    fireEvent.change(screen.getByLabelText("Batch"), { target: { value: "2027-01" } });
+    await screen.findByText("Fixture Whitfield");
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    // the newer load owns the screen: the older reload's late answer clears nothing
+    expect(screen.getByText("Fixture Whitfield")).toBeInTheDocument();
+    expect(screen.queryByText("Could not read the rate review batch")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Approve batch/ })).toBeEnabled();
+  });
+
   it("a 409 on approve whose reload then fails leaves nothing stale actionable", async () => {
     await renderLoaded();
     approveStatus = 409;

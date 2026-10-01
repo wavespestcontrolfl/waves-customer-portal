@@ -1888,6 +1888,18 @@ async function batchRebuildRefusal(dbh, batchKey) {
   return Number(row && row.n) > 0 ? 'batch_has_approved_rows' : null;
 }
 
+// Flags a row carries only because the owner acted on it from the screen.
+const OWNER_DECISION_FLAGS = ['admin_edited', 'admin_skipped', 'exception_included'];
+
+// Whether the owner has decided anything on this batch: an approved row, or a
+// row edited, skipped or included from the screen. Such a batch is never
+// recomputed by the tick's own retry (updateRow / approveBatch own those rows).
+async function batchOwnerDecisions(dbh, batchKey) {
+  const rows = await dbh(SNAPSHOTS).where({ batch_key: batchKey }).select('status', 'flags');
+  const decided = rows.some((r) => r.status === 'approved' || (parseJson(r.flags) || []).some((flag) => OWNER_DECISION_FLAGS.includes(flag)));
+  return { decided, rows: rows.length };
+}
+
 async function batchRowsForDigest(dbh, batchKey) {
   return dbh(SNAPSHOTS).where({ batch_key: batchKey }).select('id', 'proposed_rate_cents', 'status');
 }
@@ -2484,7 +2496,9 @@ const CONFIG_RULES = Object.freeze({
   // A minimum of zero would make an unchanged rate a "change" (delta 0 ≥ 0)
   // and let a band-A row be approved as a notice: at least one cent.
   min_delta_cents: { kind: 'integer', min: 1, max: 100000 },
-  min_usable_visits: { kind: 'integer', min: 0, max: 100 },
+  // at least one: a zero floor would let the ranking prefer an EMPTY not-home
+  // sample over the account's populated home visits (lineDurationStats)
+  min_usable_visits: { kind: 'integer', min: 1, max: 100 },
   lock_months: { kind: 'integer', min: 0, max: 120 },
   exception_callback_days: { kind: 'integer', min: 0, max: 3650 },
   exception_manual_edit_months: { kind: 'integer', min: 0, max: 120 },
@@ -2950,12 +2964,19 @@ async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null,
   // No explicit window: buildBatch keeps an EXISTING batch's stored window;
   // a NEW batch (a day-1 build, or a retry after a day-1 build that failed
   // before persisting) is anchored on the first of the build month, so every
-  // tick of the month covers the same anniversaries.
-  const built = await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps });
+  // tick of the month covers the same anniversaries. A retry (the digest did
+  // not go out) rebuilds the unsent batch only while it carries no decision
+  // of the owner's: once a row was edited, skipped, included or approved
+  // from the screen, the batch stands and only the delivery is retried.
+  const standing = await batchOwnerDecisions(dbh, batchKey);
+  const built = standing.decided
+    ? { ok: true, batchKey, rows: standing.rows, rebuilt: false }
+    : { ...(await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps })), rebuilt: true };
   if (!built.ok) {
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
     return { skipped: built.reason, batchKey };
   }
+  if (standing.decided) logger.info(`[rate-review] ${batchKey} carries owner decisions — delivery retried without a rebuild`);
   // The batch is persisted either way. A delivery failure is RE-THROWN so
   // runExclusive records the job as failed (job_health) instead of a quiet
   // success with email_sent_at still null; the tick runs on days 1–7 and is
@@ -3008,6 +3029,7 @@ module.exports = {
   composeBatchEmail,
   _private: {
     loadReviewFacts,
+    batchOwnerDecisions,
     commitBatchRows,
     batchRowsForDigest,
     soldPosturePins,

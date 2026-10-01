@@ -226,6 +226,9 @@ const SETTING_FIELDS = [
   ["exception_manual_edit_months", "Manual edit window (months)", "int"],
 ];
 
+// Knobs whose floor is one, not zero (the server refuses 0 for both).
+const FLOOR_ONE = new Set(["min_delta_cents", "min_usable_visits"]);
+
 function settingsDraftFrom(config) {
   const draft = {};
   for (const [key, , unit] of SETTING_FIELDS) {
@@ -546,7 +549,7 @@ function SettingsCard({ open, onToggle, draft, onDraft, saving, feedback, onSave
                   type="number"
                   inputMode="decimal"
                   step={unit === "pct" ? "0.5" : "1"}
-                  min={key === "min_delta_cents" ? "1" : "0"}
+                  min={FLOOR_ONE.has(key) ? "1" : "0"}
                   disabled={saving}
                   value={draft[key]}
                   onChange={(e) => onDraft(key, e.target.value)}
@@ -707,22 +710,23 @@ export default function RateReviewPage({ embedded = false } = {}) {
     }
   }, []);
 
-  // Resolves true when THIS load installed the batch, false when it failed or
-  // a newer load superseded it (the error state is set here; callers only
-  // decide what to say about the write that preceded the reload).
+  // Resolves 'loaded' when THIS load installed the batch, 'failed' when it
+  // failed (the error state is set here), 'superseded' when a newer load
+  // took over — a later request for the same batch may well have installed
+  // it, so a superseded load is never treated as a failed one.
   const loadBatch = useCallback(async (key) => {
     const seq = ++batchSeq.current;
     setLoadingBatch(true);
     setBatchError(null);
     try {
       const data = await adminFetch(`/admin/rate-review/batches/${key}`);
-      if (batchSeq.current !== seq) return false;
+      if (batchSeq.current !== seq) return "superseded";
       setBatch(data);
-      return true;
+      return "loaded";
     } catch (e) {
-      if (batchSeq.current !== seq) return false;
+      if (batchSeq.current !== seq) return "superseded";
       setBatchError(e.message || "Could not load the batch.");
-      return false;
+      return "failed";
     } finally {
       if (batchSeq.current === seq) setLoadingBatch(false);
     }
@@ -777,11 +781,12 @@ export default function RateReviewPage({ embedded = false } = {}) {
   const dropDraft = (rowId) => setDrafts((prev) => { const next = { ...prev }; delete next[rowId]; return next; });
 
   // A reload that fails after a durable write clears the stale batch so
-  // nothing out of date stays actionable (Try again re-reads it).
+  // nothing out of date stays actionable (Try again re-reads it). A reload a
+  // newer request superseded clears nothing: that request owns the screen.
   const reloadAfterWrite = async (key) => {
-    const reloaded = await loadBatch(key);
-    if (!reloaded && stillSelected(key)) setBatch(null);
-    return reloaded;
+    const outcome = await loadBatch(key);
+    if (outcome === "failed" && stillSelected(key)) setBatch(null);
+    return outcome !== "failed";
   };
 
   // One PUT per edit; the server recomputes delta/annual/status. The whole
