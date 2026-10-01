@@ -939,23 +939,34 @@ row or bell). Recency is `extracted_data.last_requested_at`, written only by a
 submit — office edits (status, notes, assignment) never extend the dedupe
 window or the suppression. Filing a lead also stamps its
 `ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
-public lead. A booking NEVER closes a preferred-time request (owner ruling
-2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
-on both the first commit and the `txResult.existing` replay; a free re-service
-callback visit is skipped) never marks the lead won and never touches its funnel
-row — the booking's own attribution runs exactly as for any other booking.
-Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
-booked customer's open preferred-time leads (phone match) whose
-`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
-booked <service> for <date> (visit <id>) on /book — close this request if
-nothing else is needed" — deduped per (lead, visit) through
-`lead_activities.metadata`, so a replay never stacks notes; a newer request is
-new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+public lead. A booking closes a preferred-time request on its own (owner ruling
+2026-10-01, replacing the 2026-09-30 note-only rule): a completed self-booking
+(`createSelfBooking`, every service type, on both the first commit and the
+`txResult.existing` replay; a free re-service callback visit is skipped) moves
+each of the booked customer's open preferred-time leads (phone match) whose
+`last_requested_at` is at or before the booking (60 s of clock slack) to the
+terminal status `handled` — closed, neither won nor lost — through
+`closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel row
+(`handled` has no funnel mapping, so the `ad_service_attribution` stage stays
+as it is and nothing is uploaded to Google or Meta); the booking's own
+attribution runs exactly as for any other booking. Every other lead surface
+treats `handled` as closed: it is out of the open set, out of every prospect
+denominator (conversion, win and lost rates), and never re-attached by a later
+form, call, estimate or email fan-out. The close runs inside the per-(lead,
+visit) transaction that re-reads the lead `FOR UPDATE` (still
+`book_preferred_time`, open, not converted or deleted, phone still matching,
+`customer_id` null or the booker's), writes ONE `status_change` activity row
+("Closed automatically — customer booked <service> for <date> (visit <id>) on
+/book"), deduped per (lead, visit) through `lead_activities.metadata`, so a
+replay never closes twice; a newer request is new work and stays open. The office
+gets ONE admin FYI per close (area Leads, category `lead`, linked to the lead,
+deduped per (lead, visit)) and nothing else: no customer message of any kind.
+Staff can also set `handled` by hand. The lead's `first_contact_channel`
 is `booking`, so the shared customer-originated-contact allowlist
 (`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
-booking that committed while a submit was still in flight (its note ran before
-the lead was visible) is reconciled by the submit after its commit: the lead gets
-the same note and NO `new_lead` bell rings; with no live booking since the
+booking that committed while a submit was still in flight (its close ran before
+the lead was visible) is reconciled by the submit after its commit: the lead
+closes the same way (with the admin FYI) and NO `new_lead` bell rings; with no live booking since the
 request began the bell rings as usual. A repeat submit inside 24h merges only that
 request's own fields into `extracted_data`; the lead's first-touch UTM /
 referrer / landing URL are written once at creation and kept. The service line

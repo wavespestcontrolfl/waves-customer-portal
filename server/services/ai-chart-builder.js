@@ -21,7 +21,7 @@ const Y_FORMATS = ['currency', 'percent', 'count', 'hours', 'rating', 'number'];
 // has no other privileges), so a hallucinated name simply errors and is surfaced.
 const SCHEMA_DOC = `
 ai_customers(id uuid, city, state, zip, member_since date, created_at, active bool, deleted_at, pipeline_stage [active_customer|won|at_risk|churned|dormant|lost|new_lead|...], pipeline_stage_changed_at, monthly_rate numeric$/mo, waveguard_tier [Bronze|Silver|Gold|Platinum], lead_source, lead_source_area, lead_source_channel, churned_at date, churn_reason, lifetime_revenue numeric, total_services int, nearest_location_id, is_live_customer bool)
-ai_leads(id, customer_id, first_contact_at timestamptz, first_contact_channel [form|phone|email|referral], status [new|contacted|estimate_sent|estimate_viewed|won|lost|unresponsive|disqualified|duplicate], lead_source_id->ai_lead_sources.id, monthly_value numeric, service_interest, city, is_residential bool, lead_type, response_time_minutes, converted_at timestamptz, created_at)
+ai_leads(id, customer_id, first_contact_at timestamptz, first_contact_channel [form|phone|email|referral], status [new|contacted|estimate_sent|estimate_viewed|won|lost|unresponsive|disqualified|duplicate|handled], lead_source_id->ai_lead_sources.id, monthly_value numeric, service_interest, city, is_residential bool, lead_type, response_time_minutes, converted_at timestamptz, created_at)
 ai_lead_sources(id, name, source_type, channel, is_active, gbp_location_id)
 ai_invoices(id, customer_id->ai_customers.id, status [paid|unpaid|overdue|void|...], total numeric$, paid_at timestamptz, sent_at, due_date date, created_at)
 ai_payments(id, customer_id, amount numeric$, status [paid|...], payment_date timestamptz, created_at)

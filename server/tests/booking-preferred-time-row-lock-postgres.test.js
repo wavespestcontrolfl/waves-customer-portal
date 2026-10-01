@@ -15,10 +15,11 @@
  *     lead instead of writing onto the closed one;
  *   - a refresh MERGES its request fields into extracted_data (first-touch keys
  *     survive, a staff-added key survives);
- *   - a booking that committed while the submit was in flight leaves ONE note
- *     on the just-filed lead post-commit and rings no bell; the lead is never
- *     converted (owner ruling 2026-09-30), the note is deduped per (lead, visit),
- *     and a callback visit is neither noted nor silences the bell;
+ *   - a booking that committed while the submit was in flight closes the
+ *     just-filed lead post-commit as 'handled' (owner ruling 2026-10-01: closed,
+ *     neither won nor lost; never converted), writes ONE audit row, sends ONE
+ *     admin FYI and rings no new_lead bell; the close is deduped per (lead,
+ *     visit), and a callback visit neither closes nor silences the bell;
  *   - a refresh that changes the service reclassifies the linked funnel row.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -31,6 +32,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/experimentation/growthbook', () => ({ assignBookingRecoveryExperiment: jest.fn() }));
 jest.mock('../services/lead-source-resolver', () => ({ resolveLeadSource: jest.fn(async () => ({ leadSourceId: null })) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({})) }));
+const mockNotifyAdmin = jest.fn(async () => ({ id: 'n-1' }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 const mockStamp = jest.fn();
 jest.mock('../services/lead-funnel-bridge', () => ({ stampLeadFunnelRow: (...a) => mockStamp(...a) }));
 
@@ -97,6 +100,7 @@ jest.setTimeout(60000);
     await database('customers').del();
     await database('lead_activities').del();
     mockStamp.mockReset();
+    mockNotifyAdmin.mockClear();
     mockStamp.mockImplementation(async (handle, lead) => { await handle('funnel_rows').insert({ lead_id: lead.id }); return lead.id; });
   });
 
@@ -201,9 +205,9 @@ jest.setTimeout(60000);
     });
   });
 
-  const noteRows = () => database('lead_activities').where({ activity_type: 'note' });
+  const closeRows = () => database('lead_activities').where({ activity_type: 'status_change' });
 
-  test('a booking committed while the submit was in flight: the just-filed lead gets ONE note after commit, is NOT converted, and no bell rings', async () => {
+  test('a booking committed while the submit was in flight: the just-filed lead closes as handled after commit with ONE audit row and ONE admin FYI, is NOT converted, and no new_lead bell rings', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
@@ -218,37 +222,52 @@ jest.setTimeout(60000);
     slow.open();
     const out = await submit;
     expect(out.created).toBe(true);
-    const notes = await noteRows();
+    const notes = await closeRows();
     expect(notes).toHaveLength(1);
     expect(notes[0]).toMatchObject({ lead_id: out.leadId, performed_by: 'system' });
+    expect(notes[0].description).toContain('Closed automatically');
     expect(notes[0].description).toContain(`(visit ${visit[0].id}) on /book`);
-    expect(notes[0].metadata).toMatchObject({ reason: 'booking_on_preferred_request', visit_id: String(visit[0].id) });
-    expect(await database('leads').where({ id: out.leadId }).first()).toMatchObject({ status: 'new', converted_at: null });
+    expect(notes[0].metadata).toMatchObject({ reason: 'booking_on_preferred_request', visit_id: String(visit[0].id), previous_status: 'new', status: 'handled' });
+    // Closed, neither won nor lost: never converted, funnel row untouched.
+    expect(await database('leads').where({ id: out.leadId }).first()).toMatchObject({ status: 'handled', converted_at: null });
+    expect(await database('ad_service_attribution').where({ lead_id: out.leadId })).toHaveLength(0);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ link: `/admin/leads?lead=${out.leadId}`, dedupeKey: `preferred-time-auto-close:${out.leadId}:${visit[0].id}` });
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('the note is written once per (lead, visit): the booking path and the reconcile racing for the same visit write one row', async () => {
-    const { noteBookingOnPreferredLeads } = require('../services/booking-preferred-time');
+  test('the close is written once per (lead, visit): the booking path and the reconcile racing for the same visit write one row and one FYI', async () => {
+    const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
     const first = await recordPreferredTimeRequest(database, value(), { notify: false });
     const cust = randomUUID();
     await database('customers').insert({ id: cust, phone: '+19415550100' });
     const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() + 5000) }).returning(['id', 'created_at']);
     await database('scheduled_services').insert({ self_booking_id: sba[0].id });
-    const runs = await Promise.all([1, 2, 3].map(() => noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] })));
-    expect(runs.reduce((n, r) => n + r.noted, 0)).toBe(1);
-    expect(await noteRows()).toHaveLength(1);
-    expect((await noteRows())[0].lead_id).toBe(first.leadId);
-    // a request filed AFTER the booking is new work: not noted
+    const runs = await Promise.all([1, 2, 3].map(() => closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })));
+    expect(runs.reduce((n, r) => n + r.closed, 0)).toBe(1);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(await database('leads').where({ id: first.leadId }).first()).toMatchObject({ status: 'handled', converted_at: null });
+    expect(await closeRows()).toHaveLength(1);
+    expect((await closeRows())[0].lead_id).toBe(first.leadId);
+    // a request filed AFTER the booking is new work: not closed
     await database('leads').where({ id: first.leadId }).update({ status: 'lost' });
     const later = await recordPreferredTimeRequest(database, value(), { notify: false });
-    await database('leads').where({ id: later.leadId }).update({ extracted_data: database.raw("extracted_data || ?::jsonb", [JSON.stringify({ last_requested_at: new Date(Date.now() + 600000).toISOString() })]) });
-    const before = (await noteRows()).length;
-    await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
-    expect((await noteRows()).length).toBe(before);
+    // (the submit's own reconcile saw this booking as already placed and closed it; reopen it and make its request newer than the booking)
+    await database('lead_activities').where({ lead_id: later.leadId }).del();
+    await database('leads').where({ id: later.leadId }).update({
+      status: 'new',
+      extracted_data: database.raw("extracted_data || ?::jsonb", [JSON.stringify({ last_requested_at: new Date(Date.now() + 600000).toISOString() })]),
+    });
+    mockNotifyAdmin.mockClear();
+    const before = (await closeRows()).length;
+    await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect((await closeRows()).length).toBe(before);
+    expect(await database('leads').where({ id: later.leadId }).first()).toMatchObject({ status: 'new' });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('the lead is revalidated under its row lock (codex #5399 r14): staff reassigning or closing it after the open-lead query means no note', async () => {
-    const { noteBookingOnPreferredLeads } = require('../services/booking-preferred-time');
+  test('the lead is revalidated under its row lock (codex #5399 r14): staff reassigning or closing it after the open-lead query means it is not closed', async () => {
+    const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
     const first = await recordPreferredTimeRequest(database, value(), { notify: false });
     const cust = randomUUID();
     await database('customers').insert({ id: cust, phone: '+19415550100' });
@@ -263,29 +282,41 @@ jest.setTimeout(60000);
       await trx('leads').where({ id: first.leadId }).update({ phone: '+19415559999' });
     });
     await tick();
-    const note = noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    const note = closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
     const noteState = settled(note);
     await tick();
     expect(noteState.done).toBe(false); // parked on the lead row
     edit.open();
     await staff;
-    expect(await note).toEqual({ live: true, noted: 0 });
-    expect(await noteRows()).toHaveLength(0);
+    expect(await note).toEqual({ live: true, closed: 0 });
+    expect(await closeRows()).toHaveLength(0);
     // linked to another customer: no note
     await database('leads').where({ id: first.leadId }).update({ phone: '+19415550100', customer_id: randomUUID() });
-    await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
-    expect(await noteRows()).toHaveLength(0);
+    await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect(await closeRows()).toHaveLength(0);
     // closed: no note
     await database('leads').where({ id: first.leadId }).update({ customer_id: null, status: 'lost' });
-    await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
-    expect(await noteRows()).toHaveLength(0);
-    // unchanged (reopened, same phone): noted once
+    await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect(await closeRows()).toHaveLength(0);
+    // already handled (staff closed it by hand first): not closed again, no FYI
+    await database('leads').where({ id: first.leadId }).update({ status: 'handled' });
+    await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect(await closeRows()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    // unchanged (reopened, same phone): closed once
     await database('leads').where({ id: first.leadId }).update({ status: 'new' });
-    expect((await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] })).noted).toBe(1);
-    expect(await noteRows()).toHaveLength(1);
+    expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })).closed).toBe(1);
+    expect(await closeRows()).toHaveLength(1);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // staff reopen it and the same booking replays: the audit row for this visit stands, nothing closes twice, no second FYI
+    await database('leads').where({ id: first.leadId }).update({ status: 'new' });
+    expect(await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })).toEqual({ live: true, closed: 0 });
+    expect(await closeRows()).toHaveLength(1);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(await database('leads').where({ id: first.leadId }).first()).toMatchObject({ status: 'new' });
   });
 
-  test('a booking made BEFORE the request began (beyond the skew slack) is not this request\'s to reconcile: no note, the bell rings', async () => {
+  test('a booking made BEFORE the request began (beyond the skew slack) is not this request\'s to reconcile: not closed, the bell rings', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
@@ -293,11 +324,11 @@ jest.setTimeout(60000);
     const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() - 3600000) }).returning('id');
     await database('scheduled_services').insert({ self_booking_id: sba[0].id });
     await recordPreferredTimeRequest(database, value(), { notify: true });
-    expect(await noteRows()).toHaveLength(0);
+    expect(await closeRows()).toHaveLength(0);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
-  test('a callback visit is neither noted nor silences the bell; an older real booking in the same window still notes and silences it', async () => {
+  test('a callback visit neither closes the lead nor silences the bell; an older real booking in the same window still closes it and silences the bell', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
@@ -305,7 +336,7 @@ jest.setTimeout(60000);
     const cb = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
     await database('scheduled_services').insert({ self_booking_id: cb[0].id, is_callback: true });
     const out = await recordPreferredTimeRequest(database, value(), { notify: true });
-    expect(await noteRows()).toHaveLength(0);
+    expect(await closeRows()).toHaveLength(0);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     expect(out.created).toBe(true);
 
@@ -319,9 +350,10 @@ jest.setTimeout(60000);
     const cb2 = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
     await database('scheduled_services').insert({ self_booking_id: cb2[0].id, is_callback: true });
     const again = await recordPreferredTimeRequest(database, value(), { notify: true });
-    const notes = await noteRows();
+    const notes = await closeRows();
     expect(notes).toHaveLength(1);
     expect(notes[0].lead_id).toBe(again.leadId);
+    expect(await database('leads').where({ id: again.leadId }).first()).toMatchObject({ status: 'handled' });
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 

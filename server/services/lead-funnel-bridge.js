@@ -19,6 +19,10 @@
  *     isn't won (lost / unresponsive / disqualified / duplicate — the
  *     CLOSED_LEAD_STATUSES set) maps here, matching how the funnel card
  *     buckets losses (lead-funnel.js counts a single terminal 'lost' rung).
+ *   • 'handled' (a /book preferred-time request that closed itself because
+ *     the customer booked online) is deliberately ABSENT from the map below:
+ *     it is neither won nor lost, so the funnel row keeps whatever stage it
+ *     has and nothing is settled or uploaded to an ad platform for it.
  *   • lost is recoverable ONLY by a positive close: the admin convert /
  *     schedule / manual paths can legitimately move a lost lead back to won,
  *     so the 'booked' transition may advance FROM lost — which also puts the
@@ -63,7 +67,8 @@ const FUNNEL_STAGE_RANK = {
 // non-won statuses collapse to 'lost' — the staleness sweep parks stale leads
 // at 'unresponsive', and leaving those rows at an open stage would overstate
 // active/contacted leads while understating losses. Only 'new' (open, pre-
-// funnel) maps to nothing.
+// funnel) maps to nothing, and so does 'handled' (closed, neither won nor lost:
+// the row keeps its stage; see the header).
 const LEAD_STATUS_TO_FUNNEL_STAGE = {
   contacted: 'contacted',
   estimate_sent: 'estimate_sent',

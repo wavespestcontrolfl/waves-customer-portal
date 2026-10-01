@@ -2004,6 +2004,7 @@ You are on the Leads page. Virginia uses this daily to manage the sales pipeline
 PIPELINE STAGES (in order):
 new → contacted → estimate_sent → estimate_viewed → won
 Dead ends: lost, unresponsive, disqualified, duplicate
+Handled: a /book preferred-time request that closed itself when the customer booked online (not won, not lost)
 
 LEAD SOURCES: Google Ads, Google LSA, Organic, Referral, Door Knock campaigns, Nextdoor, Facebook, Walk-In, AI Agent, Voicemail, Email
 LEAD TYPES: inbound_call, inbound_sms, form_submission, chat_widget, walk_in, referral, ai_agent, voicemail, email_inquiry

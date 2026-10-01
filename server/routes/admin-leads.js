@@ -140,11 +140,15 @@ const LEAD_STATUSES = [
   'unresponsive',
   'disqualified',
   'duplicate',
+  // Closed, neither won nor lost: staff can set it by hand, and a /book
+  // preferred-time request takes it when the customer books online
+  // (booking-preferred-time.js). Never bridged to a funnel stage.
+  'handled',
 ];
 const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'won']);
 // "Open" pipeline statuses — everything still being worked (not won/lost/
-// unresponsive/disqualified/duplicate). The list route expands the virtual
+// unresponsive/disqualified/duplicate/handled). The list route expands the virtual
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
@@ -261,7 +265,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     const lost = leads.filter(l => l.status === 'lost').length;
     // unresponsive included: the daily staleness sweep assigns it at scale,
     // and an auto-closed lead must leave the active count immediately.
-    const active = leads.filter(l => !['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'].includes(l.status)).length;
+    const active = leads.filter(l => !['won', 'lost', 'unresponsive', 'disqualified', 'duplicate', 'handled'].includes(l.status)).length;
     const conversionRate = total > 0 ? Math.round(won / total * 1000) / 10 : 0;
 
     // Response time headline is the MEDIAN, not the mean: a handful of multi-day

@@ -369,7 +369,7 @@ describe('findReusableCallLead', () => {
     const lead = await findLead(database, { phone: PHONE, customerId: null, workableUnnamedLead: true });
 
     expect(lead).toEqual({ id: 'lead-7' });
-    expect(database._calls.whereNotIn).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(database._calls.whereNotIn).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate', 'handled']]);
     expect(database._calls.whereNull).toContain('deleted_at');
     expect(database._calls.whereNull).toContain('converted_at');
     // customerId is null on this path — no ownership group.

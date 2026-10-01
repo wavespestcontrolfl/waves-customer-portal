@@ -1366,7 +1366,7 @@ async function attachVoicemailPrefillLead({ body, fields, webhookStage }) {
 async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
   const query = db('leads')
     .where({ id: leadId })
-    .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+    .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'handled'])
     .whereNull('converted_at');
   if (extraWhere) extraWhere(query);
   const [attached] = await query

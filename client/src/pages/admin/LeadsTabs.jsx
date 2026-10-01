@@ -313,6 +313,7 @@ const STATUSES = [
   "unresponsive",
   "disqualified",
   "duplicate",
+  "handled",
 ];
 const CLOSED_STATUSES = [
   "won",
@@ -320,6 +321,7 @@ const CLOSED_STATUSES = [
   "unresponsive",
   "disqualified",
   "duplicate",
+  "handled",
 ];
 // Mirrors the server's expansion of the virtual `open` filter (admin-leads
 // OPEN_LEAD_STATUSES) — needed to know whether a given lead would survive
@@ -458,6 +460,7 @@ const STATUS_SELECT_CLASS = {
   unresponsive: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
   disqualified: "!bg-alert-bg !border-alert-fg/40 !text-alert-fg",
   duplicate: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
+  handled: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
 };
 const STATUS_DOT_CLASS = {
   new: "bg-zinc-900",
@@ -469,6 +472,7 @@ const STATUS_DOT_CLASS = {
   unresponsive: "bg-zinc-400",
   disqualified: "bg-alert-fg",
   duplicate: "bg-zinc-400",
+  handled: "bg-zinc-400",
 };
 function statusSelectClass(status) {
   return STATUS_SELECT_CLASS[status] || "";

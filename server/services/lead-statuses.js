@@ -4,11 +4,16 @@
 // and didn't close, and excluding them would inflate rates. Shared by the
 // dashboard KPIs (routes/admin-dashboard.js) and the alerts service
 // (services/dashboard-alerts.js) so the definitions can't drift.
-const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate'];
+// `handled` (owner ruling 2026-10-01): a /book "Can't find a time?" request
+// that closed itself because the customer then booked online. Neither won
+// nor lost, so it is out of every prospect denominator too: counting it
+// would dilute the conversion rate with a row that already converted through
+// the booking's own attribution.
+const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate', 'handled'];
 
 // Statuses still being WORKED — the Pipeline table's default view and the
 // population every "needs action" queue draws from. The inverse of the
-// closed set (won/lost/unresponsive/disqualified + non-engaged): a queue
+// closed set (won/lost/unresponsive/disqualified/handled + non-engaged): a queue
 // built as whereNotIn(closed-ish) silently re-includes any status it forgot
 // (codex P2 on the builder-warranty queue — unresponsive/disqualified leads
 // were nagging as action items). Positive membership can't drift that way.

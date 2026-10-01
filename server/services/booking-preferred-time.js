@@ -8,10 +8,12 @@
  * day and time of day they'd like. The request becomes OFFICE WORK: one lead
  * (lead_type 'book_preferred_time', status 'new', so it shows in Leads, the
  * "leads awaiting contact" dashboard alert and the new_lead admin bell) that
- * staff answer by hand.
+ * staff answer by hand — or that closes itself ('handled') when the customer
+ * then books online (closeBookedPreferredLeads below).
  *
  * NOTHING here sends to the customer — no SMS, no email, no confirmation text.
- * The only outbound side effect is the internal new_lead admin bell. To keep
+ * The only outbound side effects are internal: the new_lead admin bell, and
+ * the one admin FYI when a booking closes the request. To keep
  * the abandoned-booking recovery worker from texting the same person about the
  * slot they walked away from, every OPEN booking_intent for the same phone or
  * session is retired (suppressed) INSIDE the submit's own transaction, and
@@ -207,11 +209,11 @@ const BOOKING_SLACK_MS = 60 * 1000;
  * True when this phone's owner booked on /book at or after `since` and that
  * booking holds a LIVE, non-callback visit: the request is then moot, so the
  * caller must not ring the new_lead bell for it. A booking never converts a
- * preferred-time lead (owner ruling 2026-09-30, codex #5399 r13): this leaves
- * the same one system note noteBookingOnPreferredLeads writes on every booking
- * path and staff close the request. Runs AFTER the submit's commit: a booking
- * that commits later than this check finds the committed lead and notes it
- * itself; one that committed earlier is seen here. Never throws.
+ * preferred-time lead (codex #5399 r13): closeBookedPreferredLeads closes it
+ * as 'handled' with the one admin FYI instead (owner ruling 2026-10-01), the
+ * same close every booking path makes. Runs AFTER the submit's commit: a
+ * booking that commits later than this check finds the committed lead and
+ * closes it itself; one that committed earlier is seen here. Never throws.
  */
 async function reconcileBookingSince(db, { phone, since }) {
   try {
@@ -224,7 +226,7 @@ async function reconcileBookingSince(db, { phone, since }) {
       .limit(10)
       .select('sba.id', 'sba.customer_id', 'sba.created_at');
     for (const candidate of bookings || []) {
-      const out = await noteBookingOnPreferredLeads(db, { customerId: candidate.customer_id, booking: candidate });
+      const out = await closeBookedPreferredLeads(db, { customerId: candidate.customer_id, booking: candidate });
       if (out.live) return true;
     }
     return false;
@@ -242,7 +244,7 @@ async function reconcileBookingSince(db, { phone, since }) {
  */
 async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serviceKey = null, notify = true } = {}) {
   // Taken BEFORE the transaction: a booking that commits from here on may have
-  // run its own note step before this lead became visible (see
+  // run its own close step before this lead became visible (see
   // reconcileBookingSince below). A minute of slack absorbs app/DB clock skew;
   // a booking that close before the request is moot for it too.
   const startedAt = new Date(Date.now() - 60 * 1000);
@@ -383,10 +385,11 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     return { leadId: row.id, created: true };
   });
 
-  // A booking that won the race with this submit (its post-commit note ran
-  // before this lead was visible) is reconciled here: the lead gets the same
-  // note and an already-booked customer does not ring the bell. Best-effort:
-  // on any failure the lead simply stays open and rings.
+  // A booking that won the race with this submit (its post-commit close ran
+  // before this lead was visible) is reconciled here: the lead closes the same
+  // way (with the admin FYI) and an already-booked customer does not ring the
+  // new_lead bell. Best-effort: on any failure the lead simply stays open and
+  // rings.
   const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt });
 
   if (created && notify && !alreadyBooked) {
@@ -410,25 +413,55 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   return { created, leadId };
 }
 
+const CLOSE_REASON = 'booking_on_preferred_request';
+const CLOSED_STATUS = 'handled';
+
+// The one FYI the office gets when a request closes itself. composeAdminAlert
+// enforces docs/admin-notifications.md (headline 60, one-sentence why of 110, no
+// code-shaped tokens), so the customer-supplied name and service are tidied
+// first. Best-effort and deduped per (lead, visit): a replay never rings twice.
+async function notifyRequestClosed({ lead, customerName, service, day, visitId }) {
+  try {
+    const { raiseAdminAlert, cutAtWord } = require('./admin-alert-compose');
+    const who = clean(customerName, 40).replace(/[._]+/g, ' ').trim() || 'The customer';
+    const what = service.replace(/_/g, ' ');
+    await raiseAdminAlert('lead', {
+      area: 'Leads',
+      action: 'Request closed, customer booked online',
+      why: cutAtWord(`${who} booked ${what} for ${day}; the time request closed on its own.`, 110),
+      severity: 'fyi',
+      link: `/admin/leads?lead=${lead.id}`,
+      subject: { type: 'lead', id: String(lead.id) },
+      doneWhen: 'already_done',
+      who: 'person',
+    }, { dedupeKey: `preferred-time-auto-close:${lead.id}:${visitId}`, bell: true, fyiRow: true });
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] auto-close admin notice failed for lead=${lead.id}: ${err.message}`);
+  }
+}
+
 /**
- * A customer who books on /book after asking for a preferred time may not need
- * the office to chase that request, but a booking NEVER closes it (owner ruling
- * 2026-09-30, codex #5399 r13): no lead is marked won and no funnel row is
- * touched — the booking's own attribution runs exactly as it does for any other
- * booking. Instead each open preferred-time lead on the booked customer's phone
- * that the customer asked for at or before the booking (60 s of app/DB clock
- * slack) gets ONE system note naming the visit, deduped per (lead, visit), so
- * staff see it and close the request themselves.
+ * A customer who books on /book after asking for a preferred time no longer
+ * needs the office to chase that request, so it closes itself (owner ruling
+ * 2026-10-01, superseding the 2026-09-30 note-only rule): each open
+ * preferred-time lead on the booked customer's phone that the customer asked
+ * for at or before the booking (60 s of app/DB clock slack) moves to the
+ * terminal status 'handled' — closed, neither won nor lost. It deliberately
+ * never converts the lead and settles no funnel row (the booking's own attribution
+ * runs exactly as for any other booking; 'handled' has no funnel mapping), so
+ * no deal is counted twice and no lost-lead number moves. ONE status_change
+ * activity row is the audit trail, deduped per (lead, visit), and the office
+ * gets ONE admin FYI per close — nothing goes to the customer.
  *
  * `booking` is the self_booked_appointments row ({ id, created_at }). Only a
  * LIVE, non-callback visit counts: a free re-service callback is a warranty
  * visit and a cancelled / skipped / rescheduled one no longer holds the booking.
- * Returns { live, noted }: `live` = the booking holds such a visit (the submit's
- * reconcile keys its bell on it), `noted` = notes written by this call.
- * Best-effort; never throws into the booking.
+ * Returns { live, closed }: `live` = the booking holds such a visit (the
+ * submit's reconcile keys its new_lead bell on it), `closed` = leads closed by
+ * this call. Best-effort; never throws into the booking.
  */
-async function noteBookingOnPreferredLeads(db, { customerId, booking = null } = {}) {
-  const none = { live: false, noted: 0 };
+async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}) {
+  const none = { live: false, closed: 0 };
   if (!customerId || !booking || !booking.id) return none;
   try {
     const visit = await db('scheduled_services')
@@ -437,10 +470,10 @@ async function noteBookingOnPreferredLeads(db, { customerId, booking = null } = 
       .first();
     if (!visit || visit.is_callback) return none;
     const bookedMs = new Date(booking.created_at).getTime();
-    if (Number.isNaN(bookedMs)) return { live: true, noted: 0 };
+    if (Number.isNaN(bookedMs)) return { live: true, closed: 0 };
     const customer = await db('customers').where({ id: customerId }).first('phone');
     const ten = tenDigitPhone(customer && customer.phone);
-    if (!ten) return { live: true, noted: 0 };
+    if (!ten) return { live: true, closed: 0 };
     const open = (await tenMatch(
       db('leads')
         .where({ lead_type: LEAD_TYPE })
@@ -452,22 +485,22 @@ async function noteBookingOnPreferredLeads(db, { customerId, booking = null } = 
     ).select('id')) || [];
     const service = clean(visit.service_type, 120) || 'a service';
     const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
-    let noted = 0;
+    let closed = 0;
     for (const lead of open) {
       // Per-(lead, visit) advisory lock: the booking's own post-commit path and
       // the submit's reconcile can both arrive for the same visit.
-      const wrote = await db.transaction(async (trx) => {
+      const result = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_note:${lead.id}:${visit.id}`]);
         const seen = await trx('lead_activities')
-          .where({ lead_id: lead.id, activity_type: 'note' })
-          .whereRaw("metadata->>'reason' = 'booking_on_preferred_request' AND metadata->>'visit_id' = ?", [String(visit.id)])
+          .where({ lead_id: lead.id, activity_type: 'status_change' })
+          .whereRaw("metadata->>'reason' = ? AND metadata->>'visit_id' = ?", [CLOSE_REASON, String(visit.id)])
           .first('id');
-        if (seen) return false;
+        if (seen) return null;
         // Re-read the lead under a row lock (codex #5399 r14): staff may have
         // reassigned its phone, linked it to another customer or closed it since
-        // the open-lead query above. The advisory lock only orders note writers,
-        // so the lead's own state and phone identity are re-proven right here.
-        const current = await trx('leads').where({ id: lead.id }).forUpdate().first('lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id');
+        // the open-lead query above. The advisory lock only orders closers, so
+        // the lead's own state and phone identity are re-proven right here.
+        const current = await trx('leads').where({ id: lead.id }).forUpdate().first('lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name');
         const stillOurs = current
           && current.lead_type === LEAD_TYPE
           && OPEN_LEAD_STATUSES.includes(current.status)
@@ -475,27 +508,37 @@ async function noteBookingOnPreferredLeads(db, { customerId, booking = null } = 
           && !current.deleted_at
           && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
           && (!current.customer_id || String(current.customer_id) === String(customerId));
-        if (!stillOurs) return false;
+        if (!stillOurs) return null;
+        await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
         await trx('lead_activities').insert({
           lead_id: lead.id,
-          activity_type: 'note',
-          description: `Customer booked ${service} for ${day} (visit ${visit.id}) on /book — close this request if nothing else is needed.`,
+          activity_type: 'status_change',
+          description: `Closed automatically — customer booked ${service} for ${day} (visit ${visit.id}) on /book`,
           performed_by: 'system',
-          metadata: JSON.stringify({ reason: 'booking_on_preferred_request', visit_id: String(visit.id), booking_id: String(booking.id) }),
+          metadata: JSON.stringify({
+            reason: CLOSE_REASON,
+            visit_id: String(visit.id),
+            booking_id: String(booking.id),
+            previous_status: current.status,
+            status: CLOSED_STATUS,
+            auto: true,
+          }),
         });
-        return true;
+        return { name: [current.first_name, current.last_name].filter(Boolean).join(' ') };
       });
-      if (wrote) noted += 1;
+      if (!result) continue;
+      closed += 1;
+      await notifyRequestClosed({ lead, customerName: result.name, service, day, visitId: visit.id });
     }
-    return { live: true, noted };
+    return { live: true, closed };
   } catch (err) {
-    logger.warn(`[booking:preferred-time] booking note failed for customer=${customerId}: ${err.message}`);
+    logger.warn(`[booking:preferred-time] booking close failed for customer=${customerId}: ${err.message}`);
     return none;
   }
 }
 
 module.exports = {
-  noteBookingOnPreferredLeads,
+  closeBookedPreferredLeads,
   LEAD_TYPE,
   TIME_OF_DAY_LABELS,
   validatePreferredTimeRequest,

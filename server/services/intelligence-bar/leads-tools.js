@@ -25,7 +25,7 @@ const LEAD_STATUSES = [
 ];
 const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 const ACTIVE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
-const CLOSED_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const CLOSED_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 const LEADS_TOOLS = [
   {

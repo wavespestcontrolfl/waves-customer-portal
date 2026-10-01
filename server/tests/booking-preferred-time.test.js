@@ -95,8 +95,12 @@ const mockTriggerNotification = jest.fn(async () => ({ bellWritten: 1 }));
 const mockSendCustomerMessage = jest.fn();
 const mockSendSMS = jest.fn();
 const mockSendEmail = jest.fn();
+const mockNotifyAdmin = jest.fn(async () => ({ id: 'notif-1' }));
 
 jest.mock('../models/db', () => mockDb);
+// The admin FYI goes through the real raiseAdminAlert/composeAdminAlert (so the
+// notification rule is enforced here); only the row write is stubbed.
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: (...a) => mockTriggerNotification(...a),
@@ -193,6 +197,7 @@ beforeEach(() => {
   mockMarkConverted.mockResolvedValue(true);
   mockStampFunnel.mockClear();
   mockTriggerNotification.mockClear();
+  mockNotifyAdmin.mockClear();
   mockSendCustomerMessage.mockClear();
   mockSendSMS.mockClear();
   mockSendEmail.mockClear();
@@ -473,24 +478,27 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
   });
 
   const bookingNotes = () => mockOps.filter((o) => o.table === 'lead_activities' && o.op === 'insert');
+  const closes = () => mockOps.filter((o) => o.table === 'leads' && o.op === 'update' && o.arg.status === 'handled');
   const leadOrFunnelWrites = () => mockOps.filter((o) => (o.table === 'leads' && o.op === 'update' && !('transcript_summary' in o.arg)) || o.table === 'ad_service_attribution');
 
-  test('a booking that won the race (committed while this submit was in flight): the lead gets ONE booking note, is NOT converted, and NO bell rings', async () => {
+  test('a booking that won the race (committed while this submit was in flight): the lead closes as handled with ONE audit row and ONE admin FYI, is NOT converted, and NO new_lead bell rings', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: new Date() };
     mockCustomer = { phone: '+19415550100' };
     mockOpenLeads = [{ id: 'lead-1' }];
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
     expect(bookingNotes()).toHaveLength(1);
-    expect(bookingNotes()[0].arg).toMatchObject({ lead_id: 'lead-1', activity_type: 'note', performed_by: 'system' });
-    expect(bookingNotes()[0].arg.description).toContain('Customer booked Pest Control for Thu, Oct 8 (visit ss-1) on /book');
-    expect(JSON.parse(bookingNotes()[0].arg.metadata)).toMatchObject({ reason: 'booking_on_preferred_request', visit_id: 'ss-1' });
+    expect(bookingNotes()[0].arg).toMatchObject({ lead_id: 'lead-1', activity_type: 'status_change', performed_by: 'system' });
+    expect(bookingNotes()[0].arg.description).toBe('Closed automatically \u2014 customer booked Pest Control for Thu, Oct 8 (visit ss-1) on /book');
+    expect(JSON.parse(bookingNotes()[0].arg.metadata)).toMatchObject({ reason: 'booking_on_preferred_request', visit_id: 'ss-1', previous_status: 'new', status: 'handled' });
+    expect(closes()).toHaveLength(1);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     expect(mockMarkConverted).not.toHaveBeenCalled();
     expect(mockTriggerNotification).not.toHaveBeenCalled();
     expect(mockSendSMS).not.toHaveBeenCalled();
   });
 
-  test('a race booking never wins the lead or touches its funnel row (even with several open requests: each is noted, none converted)', async () => {
+  test('a race booking never wins the lead or touches its funnel row (even with several open requests: each closes as handled, none converted)', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: new Date() };
     mockCustomer = { phone: '+19415550100' };
     mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
@@ -499,7 +507,9 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(bookingNotes().map((o) => o.arg.lead_id).sort()).toEqual(['lead-1', 'lead-2']);
     expect(mockMarkConverted).not.toHaveBeenCalled();
     expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
-    expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update' && 'status' in o.arg)).toHaveLength(0);
+    expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update' && 'status' in o.arg && o.arg.status !== 'handled')).toHaveLength(0);
+    expect(closes()).toHaveLength(2);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
@@ -511,6 +521,8 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
     expect(bookingNotes()).toHaveLength(0);
+    expect(closes()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
 
@@ -522,6 +534,8 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
     expect(bookingNotes()).toHaveLength(0);
+    expect(closes()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockMarkConverted).not.toHaveBeenCalled();
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
@@ -737,120 +751,168 @@ describe('request recency is the customer\'s own latest submit, not lead edits',
   });
 });
 
-describe('a completed booking only NOTES the customer\'s open preferred-time request (owner ruling 2026-09-30: never a win)', () => {
-  const { noteBookingOnPreferredLeads } = require('../services/booking-preferred-time');
+describe('a completed booking closes the customer\'s open preferred-time request as handled (owner ruling 2026-10-01: closed, neither won nor lost)', () => {
+  const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
   const bookedAt = new Date('2026-09-29T15:00:00Z');
   const booking = { id: 'sba-1', created_at: bookedAt };
-  const notes = () => mockOps.filter((o) => o.table === 'lead_activities' && o.op === 'insert');
+  const activities = () => mockOps.filter((o) => o.table === 'lead_activities' && o.op === 'insert');
+  const closeWrites = () => mockOps.filter((o) => o.table === 'leads' && o.op === 'update');
   beforeEach(() => {
     mockCustomer = { phone: '+1 (941) 555-0100' };
     mockOpenLeads = [{ id: 'lead-1' }];
     mockScheduledService = { id: 'visit-7', self_booking_id: 'sba-1', service_type: 'Lawn Care', scheduled_date: '2026-10-08' };
-    mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null };
+    mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample' };
   });
 
   test.each([
     ['its phone was reassigned to someone else', { phone: '+19415559999' }],
     ['it is now linked to a different customer', { customer_id: 'cust-other' }],
     ['staff closed it (lost)', { status: 'lost' }],
+    ['staff already handled it', { status: 'handled' }],
     ['it was converted', { converted_at: new Date() }],
     ['it was deleted', { deleted_at: new Date() }],
     ['it is no longer a preferred-time lead', { lead_type: 'phone_call' }],
-  ])('revalidated under the row lock (codex #5399 r14): %s -> no note', async (_label, change) => {
+  ])('revalidated under the row lock (codex #5399 r14): %s -> not closed, no notice', async (_label, change) => {
     mockLockedLead = { ...mockLockedLead, ...change };
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
-    expect(notes()).toHaveLength(0);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0 });
+    expect(activities()).toHaveLength(0);
+    expect(closeWrites()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('a lead that vanished between the query and the lock gets no note', async () => {
+  test('a lead that vanished between the query and the lock is not closed', async () => {
     mockLockedLead = null;
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
-    expect(notes()).toHaveLength(0);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0 });
+    expect(activities()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('an unchanged lead, or one already linked to THIS customer, is still noted once', async () => {
+  test('an unchanged lead, or one already linked to THIS customer, is still closed once', async () => {
     mockLockedLead = { ...mockLockedLead, customer_id: 'cust-1', phone: '(941) 555-0100' };
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 1 });
-    expect(notes()).toHaveLength(1);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 1 });
+    expect(closeWrites()).toHaveLength(1);
   });
 
-  test('writes ONE note naming the service, day and visit; no markConverted, no lead status write, no funnel write, nothing sent', async () => {
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 1 });
-    expect(notes()).toHaveLength(1);
-    expect(notes()[0].arg).toMatchObject({
+  test('closes with status handled and ONE status_change audit row; no markConverted, no funnel write, nothing sent to the customer', async () => {
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 1 });
+    expect(closeWrites()).toHaveLength(1);
+    expect(closeWrites()[0].arg).toEqual({ status: 'handled', updated_at: 'NOW' });
+    expect(activities()).toHaveLength(1);
+    expect(activities()[0].arg).toMatchObject({
       lead_id: 'lead-1',
-      activity_type: 'note',
+      activity_type: 'status_change',
       performed_by: 'system',
-      description: 'Customer booked Lawn Care for Thu, Oct 8 (visit visit-7) on /book \u2014 close this request if nothing else is needed.',
+      description: 'Closed automatically — customer booked Lawn Care for Thu, Oct 8 (visit visit-7) on /book',
     });
-    expect(JSON.parse(notes()[0].arg.metadata)).toEqual({ reason: 'booking_on_preferred_request', visit_id: 'visit-7', booking_id: 'sba-1' });
+    expect(JSON.parse(activities()[0].arg.metadata)).toEqual({
+      reason: 'booking_on_preferred_request', visit_id: 'visit-7', booking_id: 'sba-1', previous_status: 'new', status: 'handled', auto: true,
+    });
+    // The status write and its audit row share one transaction, status first.
+    expect(mockOrder.indexOf('update:leads')).toBeLessThan(mockOrder.indexOf('insert:lead_activities'));
     expect(mockMarkConverted).not.toHaveBeenCalled();
-    expect(mockOps.filter((o) => o.table === 'leads')).toHaveLength(0);
     expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendSMS).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
-  test('written once per (lead, visit): the dedupe read runs under a per-(lead, visit) advisory lock, and a repeat finds the note and writes nothing', async () => {
-    await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+  test('the ONLY notification is one admin FYI (Leads area, 60/110 limits, link to the lead, already_done), deduped per (lead, visit)', async () => {
+    await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, headline, why, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(category).toBe('lead');
+    expect(headline).toBe('Leads — Request closed, customer booked online');
+    expect(headline.length).toBeLessThanOrEqual(60);
+    expect(why).toBe('Pat Sample booked Lawn Care for Thu, Oct 8; the time request closed on its own.');
+    expect(why.length).toBeLessThanOrEqual(110);
+    expect(opts).toMatchObject({
+      link: '/admin/leads?lead=lead-1',
+      dedupeKey: 'preferred-time-auto-close:lead-1:visit-7',
+      bell: true,
+      metadata: { area: 'Leads', severity: 'fyi', subject: { type: 'lead', id: 'lead-1' }, doneWhen: 'already_done', who: 'person' },
+    });
+    expect(opts).not.toHaveProperty('fyiRow');
+  });
+
+  test('a service type that looks like a code is read as words (the notice never breaks the notification rule)', async () => {
+    mockScheduledService = { ...mockScheduledService, service_type: 'pest_control_quarterly' };
+    await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+    expect(mockNotifyAdmin.mock.calls[0][2]).toContain('booked pest control quarterly for');
+  });
+
+  test('a failed admin notice never undoes the close or reaches the booking', async () => {
+    mockNotifyAdmin.mockRejectedValueOnce(new Error('bell down'));
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 1 });
+    expect(closeWrites()).toHaveLength(1);
+  });
+
+  test('closed once per (lead, visit): the dedupe read runs under a per-(lead, visit) advisory lock, and a replay finds the audit row, closes nothing and rings nothing', async () => {
+    await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
     expect(mockLocks.map((l) => l.bindings[0])).toEqual(['book_preferred_note:lead-1:visit-7']);
     mockOps.length = 0;
+    mockNotifyAdmin.mockClear();
     const seenDb = jest.fn((table) => {
       const b = builder(table);
       if (table === 'lead_activities') b.first = () => Promise.resolve({ id: 'act-1' });
       return b;
     });
     seenDb.fn = mockDb.fn;
-    seenDb.transaction = async (cb) => { const trx = (t) => seenDb(t); trx.raw = async () => ({ rows: [] }); return cb(trx); };
-    expect(await noteBookingOnPreferredLeads(seenDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
-    expect(notes()).toHaveLength(0);
+    seenDb.transaction = async (cb) => { const trx = (t) => seenDb(t); trx.raw = async () => ({ rows: [] }); trx.fn = mockDb.fn; return cb(trx); };
+    expect(await closeBookedPreferredLeads(seenDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0 });
+    expect(activities()).toHaveLength(0);
+    expect(closeWrites()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('every open request on the phone is noted (no ambiguity rule: nothing is being won)', async () => {
+  test('every open request on the phone is closed (no ambiguity rule: nothing is being won), one FYI each', async () => {
     mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 2 });
-    expect(notes().map((o) => o.arg.lead_id)).toEqual(['lead-1', 'lead-2']);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 2 });
+    expect(activities().map((o) => o.arg.lead_id)).toEqual(['lead-1', 'lead-2']);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
   });
 
-  test('a NEWER request is new work: the lookup is bounded to requests at or before the booking (+60 s slack), so it is not noted', async () => {
+  test('a NEWER request is new work: the lookup is bounded to requests at or before the booking (+60 s slack), so it is not closed', async () => {
     mockOpenLeadsNewerOnly = true;
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
-    expect(notes()).toHaveLength(0);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0 });
+    expect(activities()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
     const cutoff = mockRaws.find((o) => o.table === 'leads' && /<= \?/.test(o.arg));
     expect(cutoff).toBeTruthy();
     expect(cutoff.arg).toMatch(/last_requested_at/);
     expect(cutoff.vals[0]).toEqual(new Date(bookedAt.getTime() + 60 * 1000));
   });
 
-  test('a free re-service callback visit is not an acquisition: not live, no note', async () => {
+  test('a free re-service callback visit is not an acquisition: not live, nothing closed', async () => {
     mockScheduledService = { id: 'visit-7', self_booking_id: 'sba-1', is_callback: true };
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: false, noted: 0 });
-    expect(notes()).toHaveLength(0);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: false, closed: 0 });
+    expect(activities()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('a cancelled / skipped / rescheduled visit (or a booking with no visit) is not live: no note', async () => {
+  test('a cancelled / skipped / rescheduled visit (or a booking with no visit) is not live: nothing closed', async () => {
     mockDeadVisit = true;
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: false, noted: 0 });
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: false, closed: 0 });
     mockDeadVisit = false;
     mockScheduledService = null;
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: false, noted: 0 });
-    expect(notes()).toHaveLength(0);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: false, closed: 0 });
+    expect(activities()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('nothing open on the phone: nothing is noted (a closed / converted / deleted lead is never written to)', async () => {
+  test('nothing open on the phone: nothing is closed (a closed / converted / deleted lead is never written to)', async () => {
     mockOpenLeads = [];
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
-    expect(notes()).toHaveLength(0);
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0 });
+    expect(activities()).toHaveLength(0);
   });
 
   test('no customer / no booking / no phone: nothing is touched; a failure never reaches the booking', async () => {
-    expect(await noteBookingOnPreferredLeads(mockDb, {})).toEqual({ live: false, noted: 0 });
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1' })).toEqual({ live: false, noted: 0 });
+    expect(await closeBookedPreferredLeads(mockDb, {})).toEqual({ live: false, closed: 0 });
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1' })).toEqual({ live: false, closed: 0 });
     mockCustomer = { phone: null };
-    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0 });
     mockDb.mockImplementationOnce(() => { throw new Error('db down'); });
-    await expect(noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).resolves.toEqual({ live: false, noted: 0 });
+    await expect(closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).resolves.toEqual({ live: false, closed: 0 });
   });
 
   test('filing the lead stamps its funnel row (attribution present) in the lead transaction; a refresh never stamps a second', async () => {
@@ -866,15 +928,15 @@ describe('a completed booking only NOTES the customer\'s open preferred-time req
     expect(mockStampFunnel).not.toHaveBeenCalled();
   });
 
-  test('wiring: the normal commit path AND the txResult.existing replay path both call the note helper (skipped for a callback visit); a booking never converts', () => {
+  test('wiring: the normal commit path AND the txResult.existing replay path both call the close helper (skipped for a callback visit); a booking never converts', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
     const replayStart = src.indexOf('if (txResult.existing) {');
     const replayEnd = src.indexOf('const { booking, serviceRow } = txResult;');
     expect(replayStart).toBeGreaterThan(-1);
     const replaySrc = src.slice(replayStart, replayEnd);
-    expect(replaySrc).toMatch(/if \(!callbackVisit\) \{\s*await noteBookingOnPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing \}\);/);
+    expect(replaySrc).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing \}\);/);
     const normal = src.slice(replayEnd);
-    expect(normal).toMatch(/if \(!callbackVisit\) \{\s*await noteBookingOnPreferredLeads\(db, \{ customerId: custId, booking \}\);/);
+    expect(normal).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking \}\);/);
     // attribution runs exactly as on main: only the originating-lead conversion feeds it.
     expect(src).toMatch(/leadConverted: !!leadConversion\?\.converted,/);
     expect(src).not.toContain('convertPreferredTimeLeadsOnBooking');

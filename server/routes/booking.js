@@ -23,7 +23,7 @@ const {
   validatePreferredTimeRequest,
   recordPreferredTimeRequest,
   hasRecentPreferredTimeRequest,
-  noteBookingOnPreferredLeads,
+  closeBookedPreferredLeads,
 } = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -6046,11 +6046,11 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
-      // A first attempt that committed but died before its post-commit note
-      // step leaves the customer's preferred-time request without its "customer
-      // booked" note: write it (idempotent per lead + visit; never converts).
+      // A first attempt that committed but died before its post-commit close
+      // step leaves the customer's preferred-time request open: close it
+      // (idempotent per lead + visit; closes as 'handled', never converts).
       if (!callbackVisit) {
-        await noteBookingOnPreferredLeads(db, { customerId: custId, booking: txResult.existing });
+        await closeBookedPreferredLeads(db, { customerId: custId, booking: txResult.existing });
       }
       return { ok: true, body: {
         booking: txResult.existing,
@@ -6441,13 +6441,13 @@ async function createSelfBooking(payload = {}) {
     }
 
     // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
-    // customer is moot once they have booked, but a booking never closes it
-    // (owner ruling 2026-09-30): the customer's open request(s) get one system
-    // note naming this visit, and staff close them. No lead is won, no funnel
-    // row touched. Best-effort; runs whatever the gate reads (a request already
-    // filed still gets the note). The replay branch does the same.
+    // customer is moot once they have booked, so the booking closes it (owner
+    // ruling 2026-10-01): the customer's open request(s) move to the terminal
+    // status 'handled' with one audit row and one admin FYI. No lead is won or
+    // lost, no funnel row touched. Best-effort; runs whatever the gate reads (a
+    // request already filed still closes). The replay branch does the same.
     if (!callbackVisit) {
-      await noteBookingOnPreferredLeads(db, { customerId: custId, booking });
+      await closeBookedPreferredLeads(db, { customerId: custId, booking });
     }
 
     // Persist an ad-tracked self-booking's click id onto a won lead so the

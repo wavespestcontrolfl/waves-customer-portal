@@ -7,7 +7,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { bridgeLeadFunnelStage, stampLeadFunnelRow, FUNNEL_STAGE_RANK } = require('./lead-funnel-bridge');
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 
-const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
+const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate', 'handled']);
 
 // A DATE column comes back as a 'YYYY-MM-DD' string or a UTC-midnight Date — take
 // its calendar day directly, without shifting it through a timezone.
