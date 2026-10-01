@@ -7882,10 +7882,7 @@ describe('public estimate one-time breakdown', () => {
     // A monthly-billed mosquito tier: WaveGuard setup row, NO first-application amount.
     const tierEstimate = {
       status: 'sent', customerName: 'Pat Customer', address: '123 Main St', monthlyTotal: 96, annualTotal: 1152, onetimeTotal: 0, tier: 'Bronze',
-      pricingBundle: {
-        waveGuardTier: 'Bronze',
-        frequencies: [{ key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', monthly: 96, annual: 1152, billingFrequencyKey: 'monthly' }],
-      },
+      pricingFrequencies: [{ key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', monthly: 96, annual: 1152, visitsPerYear: 12, billingFrequencyKey: 'monthly' }],
     };
     const tierData = {
       result: {
@@ -7908,6 +7905,23 @@ describe('public estimate one-time breakdown', () => {
       expect(on).not.toContain('we open the $99.00 setup invoice');
       expect(on).not.toContain('Pay per application with a setup invoice after confirmation.');
       expect(on).not.toContain('<span>Invoice total</span><strong data-standard-invoice-total');
+    });
+
+    // The accept defers only onto a PRICED first visit, and a tier row's price
+    // resolves only with a known visit count — so the page must not promise
+    // first-visit billing for a tier whose count is unknown (the accept keeps
+    // the payable setup invoice for it).
+    test('monthly tier whose visit count is unknown: today\'s invoice wording even with both gates on and the card rail', () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      process.env.GATE_PAF_SETUP_FEE = 'true';
+      const noCount = {
+        ...tierEstimate,
+        pricingFrequencies: [{ key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', monthly: 96, annual: 1152, billingFrequencyKey: 'monthly' }],
+      };
+      const html = renderPage('paf-setup-nocount', noCount, tierData, null, { payAfterFirstVisitCopy: true });
+      expect(html).toContain('we send the WaveGuard setup invoice for $99.00 so you can pay before service.');
+      expect(html).toContain('const PAY_AFTER_SETUP_FEE_COPY = false;');
+      expect(html).not.toContain('The $99.00 WaveGuard setup fee is billed with your first visit.');
     });
 
     test('sub-gate OFF (master on): the setup-only card is byte-for-byte today\'s wording', () => {

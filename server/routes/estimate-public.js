@@ -3055,6 +3055,22 @@ function roundPositiveMoney(value) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 0;
 }
 
+// GATE_PAF_SETUP_FEE: the accept defers the setup-only (monthly-tier) fee onto
+// the first visit ONLY when that visit carries a billable price, and a tier
+// row's per-application price (billing-cadence perApplicationChargeAmount,
+// stamped as the converted row's estimated_price) resolves only when its visit
+// count is known. A tier plan whose count could not be read converts to an
+// UNPRICED visit that completion parks, so the accept keeps today's payable
+// setup invoice for it — and the page must not promise otherwise. True only
+// when the bundle has monthly-billed tier rows and EVERY one has a positive
+// visit count (the same field the accept reads), so the preview and the accept
+// agree on the determinable cases.
+function monthlyTierVisitCountsResolvable(frequencies) {
+  const monthlyRows = (Array.isArray(frequencies) ? frequencies : [])
+    .filter((frequency) => frequency && frequency.billingFrequencyKey === 'monthly');
+  return monthlyRows.length > 0 && monthlyRows.every((frequency) => Number(frequency.visitsPerYear) > 0);
+}
+
 function buildStandardPayPerApplicationInvoiceCopy({
   setupAmount = 0,
   firstApplicationAmount = 0,
@@ -5498,7 +5514,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     && require('../config/feature-gates').pafSetupFeeLive()
     && setupDueToday > 0
     && rodentSetupDueToday <= 0
-    && !(standardInvoiceFirstApplicationAmount > 0);
+    && !(standardInvoiceFirstApplicationAmount > 0)
+    && monthlyTierVisitCountsResolvable(pricingFrequenciesForView);
   const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
     setupAmount: standardSetupDue,
     setupLabel: standardSetupLabel,
@@ -28224,9 +28241,12 @@ async function composeEstimateDataPayload(estimate, {
         // your first visit" copy (and the after-visit consent text) only when
         // this is true AND its own selection resolves to the setup-only
         // shape (setup row, no first-visit amount, no bait-station setup row).
-        // Present only when true so every gate-off response stays byte-identical.
+        // Also requires every monthly-billed tier row to carry a visit count
+        // (the accept defers only onto a priced first visit). Present only
+        // when true so every gate-off response stays byte-identical.
         ...(require('../config/feature-gates').pafSetupFeeLive()
           && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData)
+          && monthlyTierVisitCountsResolvable(pricingBundle?.frequencies)
           ? { setupFeeAfterFirstVisit: true } : {}),
       },
       estimate: {
@@ -28949,6 +28969,7 @@ module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
 module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
+module.exports.monthlyTierVisitCountsResolvable = monthlyTierVisitCountsResolvable;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;

@@ -1341,7 +1341,11 @@ additions, each OMITTED (never `false`) unless true, so every gate-off response 
 byte-identical to before. (1) GET `/api/estimates/:token/data`
 `recurringCardPolicy.setupFeeAfterFirstVisit: true` only when BOTH gates are exactly
 `'true'` and the policy the accept would resolve puts this customer on the card rail
-(the same predicate as `payAfterFirstVisit`, plus the sub-gate). The React page applies
+(the same predicate as `payAfterFirstVisit`, plus the sub-gate) AND every monthly-billed
+tier row in the quoted pricing carries a positive visit count (the accept defers only
+onto a priced first visit, and a tier row's per-visit price resolves only with a known
+visit count; otherwise the field is omitted and the page keeps today's invoice wording).
+The React page applies
 its "setup fee billed with your first visit" copy and the `after_visit_card` consent text
 only when this is true AND its own selection resolves to the setup-only shape (monthly
 tier: a WaveGuard setup row, no first-visit amount, no bait-station setup row). A boolean

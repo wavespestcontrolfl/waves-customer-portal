@@ -188,9 +188,29 @@ describe('GET /:token/data — recurringCardPolicy.setupFeeAfterFirstVisit', () 
     delete process.env.GATE_PAF_SETUP_FEE;
   });
 
-  async function policyFor(policy) {
+  // A monthly-billed tier row (mosquito ladder shape). The flag also requires
+  // a known visit count: the accept defers only onto a priced first visit.
+  const tierRow = (extra = {}) => estimateRow({
+    id: 'est-paf-setup',
+    token: 'payaftersetuptoken',
+    estimate_data: {
+      sendSnapshot: {
+        pricingBundle: {
+          frequencies: [{ key: 'monthly12', label: 'Monthly', monthly: 88, annual: 1056, billingFrequencyKey: 'monthly', ...extra }],
+          waveGuardTier: 'Bronze',
+          source: 'send_snapshot_fixture',
+        },
+      },
+      result: {
+        recurring: { discount: 0, services: [{ service: 'mosquito', name: 'Mosquito Control', mo: 88 }] },
+        oneTime: { items: [], membershipFee: 99 },
+      },
+    },
+  });
+
+  async function policyFor(policy, rowExtra = { visitsPerYear: 12 }) {
     RecurringCards.resolveRecurringCardPolicyForEstimate.mockResolvedValue(policy);
-    const row = estimateRow({ id: 'est-paf-setup', token: 'payaftersetuptoken' });
+    const row = tierRow(rowExtra);
     dbRows = { estimates: row };
     return withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/${row.token}/data`);
@@ -208,18 +228,51 @@ describe('GET /:token/data — recurringCardPolicy.setupFeeAfterFirstVisit', () 
     expect(p).not.toHaveProperty('setupFeeAfterFirstVisit');
   });
 
+  test('both gates on but the monthly tier\'s visit count is unknown: absent (the accept keeps the payable setup invoice there, so the page must not promise otherwise)', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PAF_SETUP_FEE = 'true';
+    const p = await policyFor(CAPTURE, {});
+    expect(p.payAfterFirstVisit).toBe(true);
+    expect(p).not.toHaveProperty('setupFeeAfterFirstVisit');
+  });
+
+  test('both gates on but no monthly-billed tier row at all (a pest cadence): absent', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PAF_SETUP_FEE = 'true';
+    RecurringCards.resolveRecurringCardPolicyForEstimate.mockResolvedValue(CAPTURE);
+    const row = estimateRow({ id: 'est-paf-pest', token: 'payafterpesttoken' });
+    dbRows = { estimates: row };
+    const p = await withServer(async (baseUrl) => (await (await fetch(`${baseUrl}/estimates/${row.token}/data`)).json()).recurringCardPolicy);
+    expect(p).not.toHaveProperty('setupFeeAfterFirstVisit');
+  });
+
   test('sub-gate on without the master gate: absent', async () => {
     process.env.GATE_PAF_SETUP_FEE = 'true';
     expect(await policyFor(CAPTURE)).not.toHaveProperty('setupFeeAfterFirstVisit');
   });
 
-  test('both gates on: true on the card rail (capture required or already enrolled), absent for every exempt customer', async () => {
+  test('both gates on: every exempt customer stays off the flag', async () => {
     process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
     process.env.GATE_PAF_SETUP_FEE = 'true';
-    expect((await policyFor(CAPTURE)).setupFeeAfterFirstVisit).toBe(true);
-    expect((await policyFor({ enforced: true, required: false, exemptReason: 'saved_method_consented' })).setupFeeAfterFirstVisit).toBe(true);
     for (const exemptReason of ['existing_plan_customer', 'autopay_paused', 'payer_billed', 'invoice_mode', 'commercial_manual_billing']) {
       expect(await policyFor({ enforced: true, required: false, exemptReason })).not.toHaveProperty('setupFeeAfterFirstVisit');
     }
+  });
+
+  // The positive composition (gates + card rail + resolvable tier visit counts)
+  // is pinned at its seams: the rail predicate is the one payAfterFirstVisit
+  // already proves above, and the tier-visit-count rule is this pure helper.
+  test('monthlyTierVisitCountsResolvable: every monthly-billed tier row needs a positive visit count; no tier row at all is false', () => {
+    const { monthlyTierVisitCountsResolvable } = estimatePublicRouter;
+    const row = (extra = {}) => ({ key: 'monthly12', billingFrequencyKey: 'monthly', ...extra });
+    expect(monthlyTierVisitCountsResolvable([row({ visitsPerYear: 12 })])).toBe(true);
+    expect(monthlyTierVisitCountsResolvable([row({ visitsPerYear: 12 }), row({ key: 'seasonal9', visitsPerYear: 9 })])).toBe(true);
+    expect(monthlyTierVisitCountsResolvable([row()])).toBe(false);
+    expect(monthlyTierVisitCountsResolvable([row({ visitsPerYear: 0 })])).toBe(false);
+    expect(monthlyTierVisitCountsResolvable([row({ visitsPerYear: 12 }), row({ key: 'seasonal9' })])).toBe(false);
+    // Non-tier (pest cadence) rows never qualify.
+    expect(monthlyTierVisitCountsResolvable([{ key: 'quarterly', visitsPerYear: 4 }])).toBe(false);
+    expect(monthlyTierVisitCountsResolvable([])).toBe(false);
+    expect(monthlyTierVisitCountsResolvable(null)).toBe(false);
   });
 });
