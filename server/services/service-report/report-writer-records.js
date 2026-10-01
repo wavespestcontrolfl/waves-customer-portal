@@ -77,7 +77,7 @@ function expectationProducts(applications) {
 
 function writerExpectations({ line = null, findingsType = null, applications = [] } = {}) {
   const products = line === 'pest' ? expectationProducts(applications) : [];
-  const pestLines = products.length ? (buildWhatToExpect({ products })?.lines || []) : [];
+  const pestLines = products.length ? (buildWhatToExpect({ products, plain: true })?.lines || []) : [];
   const classes = products.length ? whatToExpectClasses({ products }) : [];
   const recorded = Array.isArray(applications) ? applications : [];
   const serviceLines = (SERVICE_EXPECTATIONS[findingsType] || SERVICE_EXPECTATIONS[line] || [])

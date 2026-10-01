@@ -269,7 +269,7 @@ describe('buildReportCopyContext — writer rules', () => {
     expect(contextText).not.toContain('No activity observed this visit');
     expect(contextText).toContain('PRIOR VISITS: this is an established customer');
     expect(contextText).toContain('EXPECTATIONS (approved wording on what the customer may see');
-    expect(contextText).toMatch(/-based non-repellent.*over the next couple of weeks/);
+    expect(contextText).toMatch(/We applied a non-repellent.*over the next couple of weeks/);
     // This fixture's EPA number matches no approved product wording, so no
     // HOW IT WORKS line: unmatched products fail closed.
     expect(contextText).not.toContain('HOW IT WORKS');
@@ -309,6 +309,6 @@ describe('buildReportCopyContext — writer rules: name-only products', () => {
       writerRules: true,
       knex,
     });
-    expect(contextText).toContain('We placed an indoxacarb gel bait as crack-and-crevice placements');
+    expect(contextText).toContain('We placed a gel bait as crack-and-crevice placements');
   });
 });

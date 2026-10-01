@@ -331,7 +331,11 @@ const TIMEFRAME_RE = new RegExp(
 // approved window can't pass shortened ("a week or two" never as "a week").
 const DURATION_PHRASE_RE = new RegExp(
   '\\b(?:(?:about|around|roughly|approximately|up\\s+to|within)\\s+)?'
-  + `(?:\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}|${DURATION_NUMBER}\\s+${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?)\\b`,
+  + `(?:\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}|${DURATION_NUMBER}\\s+${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?)\\b`
+  // A window with no number, as the approved pest lines word it ("over the
+  // next couple of weeks", "the next few weeks", "the next week or two"):
+  // the same shape TIMEFRAME_RE screens, kept whole with its range.
+  + `|\\bthe\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?\\b`,
   'gi',
 );
 function groundedTimeframePhrases(lines) {

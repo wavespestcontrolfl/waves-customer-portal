@@ -12,8 +12,11 @@ describe('writer expectations', () => {
   test('pest product classes give the approved lines and the longest closing window', () => {
     const { lines, windowDays } = writerExpectations({ line: 'pest', applications: [TAURUS, ADVION] });
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(/^We applied a fipronil-based non-repellent as a 6-foot perimeter band .*spike in ant activity for several days/);
-    expect(lines[1]).toMatch(/^We placed an indoxacarb gel bait along active foraging trails/);
+    // The writer's plain version: no active ingredient, no footage (its own
+    // owner rules), otherwise the approved customer wording.
+    expect(lines[0]).toMatch(/^We applied a non-repellent as a perimeter band .*spike in ant activity for several days/);
+    expect(lines[1]).toMatch(/^We placed a gel bait along active foraging trails/);
+    expect(lines.join(' ')).not.toMatch(/fipronil|indoxacarb|6-foot/);
     expect(windowDays).toBe(14);
   });
 

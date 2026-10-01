@@ -497,7 +497,7 @@ function activeIngredientPhrase(products) {
 const EXPECTATION_TEXT = {
   // Ant-tagged AND applied outside: the 6-foot perimeter band (owner rule:
   // a non-repellent sprayed outside is a 6-foot band).
-  non_repellent: (ai) => `We applied ${ai ? `a ${ai}-based non-repellent` : 'a non-repellent'} as a 6-foot perimeter band `
+  non_repellent: (ai, { footage = true } = {}) => `We applied ${ai ? `a ${ai}-based non-repellent` : 'a non-repellent'} as a ${footage ? '6-foot ' : ''}perimeter band `
     + 'around your foundation. Ants can\'t detect it, so foragers walk through the treated zone, pick up the active '
     + 'ingredient and transfer it to the rest of the colony at the nest. Expect a short spike in ant activity for '
     + 'several days as the colony is exposed, then a steady decline over the next couple of weeks.',
@@ -566,8 +566,13 @@ function hasExteriorApplicationEvidence(product = {}) {
   return isExteriorApplicationArea(product.applicationArea);
 }
 
-function buildWhatToExpect({ products = [] } = {}) {
+// `plain` is the AI report writer's version of the same lines: its owner
+// rules never name an active ingredient or a footage figure (report-writer-
+// rules.js rule 5 and its footage screen), so those words are left out
+// and everything else is identical.
+function buildWhatToExpect({ products = [], plain = false } = {}) {
   const byClass = new Map();
+  const ingredients = (list) => (plain ? null : activeIngredientPhrase(list));
   // Confirmed exterior evidence for ANY qualifying pyrethroid application —
   // one confirmed application is enough to earn the barrier line even if
   // another pyrethroid application this visit has unknown method/area.
@@ -594,20 +599,20 @@ function buildWhatToExpect({ products = [] } = {}) {
     .slice(0, 3)
     .map((cls) => {
       const classProducts = byClass.get(cls);
-      const ai = activeIngredientPhrase(classProducts);
+      const ai = ingredients(classProducts);
       if (cls === 'pyrethroid' && !pyrethroidExteriorConfirmed) return EXPECTATION_TEXT.pyrethroid_unconfirmed(ai);
       // The barrier sentence places the product outside, so it names only
       // the products recorded there.
       if (cls === 'pyrethroid') {
-        return EXPECTATION_TEXT.pyrethroid(activeIngredientPhrase(classProducts.filter(hasExteriorApplicationEvidence)));
+        return EXPECTATION_TEXT.pyrethroid(ingredients(classProducts.filter(hasExteriorApplicationEvidence)));
       }
       if (cls === 'non_repellent' && !nonRepellentAntBand) return EXPECTATION_TEXT.non_repellent_general(ai);
       // The band sentence places the product outside for ants, so it names
       // only the applications that earned it.
       if (cls === 'non_repellent') {
-        return EXPECTATION_TEXT.non_repellent(activeIngredientPhrase(classProducts.filter(
+        return EXPECTATION_TEXT.non_repellent(ingredients(classProducts.filter(
           (p) => hasAntTargetEvidence(p) && hasExteriorApplicationEvidence(p),
-        )));
+        )), { footage: !plain });
       }
       if (cls === 'igr') {
         const sixMonthLabel = classProducts.some((p) => IGR_SIX_MONTH_LABEL.has(normalizeProductName(p?.name)));
