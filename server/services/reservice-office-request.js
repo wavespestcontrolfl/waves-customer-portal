@@ -38,6 +38,7 @@ const SCAN_PAGE = 25;
 const OFFICE_REQUEST_SERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
 
 const CALL_COLUMNS = ['id', 'call_summary', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'processing_status', 'call_outcome', 'answered_by', 'created_at'];
+const NOT_CUSTOMER_CALL_MARKERS = new Set(['voicemail', 'spam', 'wrong_number']);
 const SMS_COLUMNS = ['id', 'message_body', 'message_type', 'created_at'];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,16 +87,14 @@ function parseExtraction(value) {
 // is never restored. No valid V2 = no call suggestion. Spam / voicemail /
 // misdial rows carry no customer words.
 function callSuggestionText(row) {
-  if (!row) return null;
-  if (['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())) return null;
+  if (!row || String(row.v2_extraction_status || '') !== 'valid') return null;
   // The voice pipeline records a voicemail in processing_status, call_outcome
-  // or answered_by, so all three are checked.
-  if (['spam', 'voicemail', 'wrong_number'].includes(String(row.call_outcome || '').toLowerCase())) return null;
-  if (String(row.answered_by || '').toLowerCase() === 'voicemail') return null;
+  // or answered_by; a misdial / spam outcome lives in call_outcome.
+  const markers = [row.processing_status, row.call_outcome, row.answered_by].map((v) => String(v || '').toLowerCase());
+  if (markers.some((m) => NOT_CUSTOMER_CALL_MARKERS.has(m))) return null;
   // Spam / misdial classifications, legacy and validated V2 (the canonical
-  // call reader's rule).
+  // call reader's rule; it also covers processing_status 'spam').
   if (ContextAggregator.isExcludedCall(row)) return null;
-  if (String(row.v2_extraction_status || '') !== 'valid') return null;
   const enriched = parseExtraction(row.ai_extraction_enriched);
   const seen = new Set();
   const quotes = [];
