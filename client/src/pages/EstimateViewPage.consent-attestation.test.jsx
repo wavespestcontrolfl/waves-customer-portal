@@ -61,6 +61,12 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/if \(body\.code === 'PAYMENT_TIMING_REFRESH'\) \{[\s\S]{0,600}setAfterVisitDeniedKey\(afterVisitSelectionKeyRef\.current\);/);
   });
 
+  it('r7: the capture surfaces and the review line disclose a first invoice sent at confirm', () => {
+    expect(src).toMatch(/const firstInvoiceNow = data\?\.recurringCardPolicy\?\.afterVisitExisting === true && paymentPreference !== 'prepay_annual'\s*&& \(afterVisitDeniedKey === afterVisitSelectionKey \|\| afterVisitInvoiceShape\.setupOnly\) && !afterVisitForced;/);
+    expect(src.match(/firstInvoiceNow=\{firstInvoiceNow\}/g)).toHaveLength(2);
+    expect(src.match(/\$\{firstInvoiceNow \? 'Your first invoice is sent when you confirm, with a link to pay it\. ' : ''\}/g).length).toBeGreaterThanOrEqual(3);
+  });
+
   it('r3 P2: the held cohorts (Auto Pay paused / explicitly off) get a save-only modal title, not "Set up Auto Pay"', () => {
     expect(src).toMatch(/\(paused \|\| autopayOff\) \? 'Save a payment method' : 'Set up Auto Pay'/);
   });

@@ -55,10 +55,14 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // autopayOff (server /data recurringCardPolicy.afterVisitAutopayOff): the
   // customer explicitly turned Auto Pay off — same held shape as paused (card
   // kept, never enrolled or charged, pay link after each service), neutral copy.
+  // firstInvoiceNow: this selection's first invoice goes out WHEN THE
+  // CUSTOMER CONFIRMS (setup-only, or the accept answered PAYMENT_TIMING_REFRESH
+  // afterVisitDeferred:false) — the copy says so instead of implying every
+  // bill follows a service.
   // savedFor: what the replayed saved method is "already saved for" —
   // "this plan" (estimate accept, default), "this visit" (one-time secure
   // appointment), "Auto Pay" (standalone link). Copy only.
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false },
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false },
   ref,
 ) {
   const held = paused || autopayOff;
@@ -286,8 +290,8 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
             ? 'When you confirm, we show your exact 12-month total and debit this bank account. Bank transfers have no added card surcharge.'
             : 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
           : (held
-            ? `${paused ? 'Your Auto Pay is paused, so we' : 'We'} keep this ${bankOffered ? 'payment method' : 'card'} on file and send you a pay link after each completed service.`
-            : (bank
+            ? `${firstInvoiceNow ? 'Your first invoice is sent when you confirm, with a link to pay it. ' : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} keep this ${bankOffered ? 'payment method' : 'card'} on file and send you a pay link after each completed service.`
+            : (firstInvoiceNow ? 'Your first invoice is sent when you confirm, with a link to pay it. ' : '') + (bank
               ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
               : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`))}
       </div>

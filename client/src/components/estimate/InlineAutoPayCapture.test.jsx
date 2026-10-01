@@ -305,6 +305,22 @@ describe('InlineAutoPayCapture afterVisit consent', () => {
     expect(queryByText(/is charged that service/)).toBeNull();
   });
 
+  it('r7: when the first invoice goes out at confirm (setup-only / timing denied), the held and Auto Pay copy say so', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const held = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} paused firstInvoiceNow />,
+    );
+    await flush();
+    expect(held.getByText(/^Your first invoice is sent when you confirm, with a link to pay it\. Your Auto Pay is paused/)).toBeInTheDocument();
+    held.unmount();
+    const plain = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} firstInvoiceNow />,
+    );
+    await flush();
+    expect(plain.getByText(/^Your first invoice is sent when you confirm, with a link to pay it\. After each completed service/)).toBeInTheDocument();
+  });
+
   it('explicit Auto Pay off: same held shape as paused with neutral wording (no "paused" claim, no automatic-charge promise)', async () => {
     const { StripeCtor } = makeStripeStub();
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
