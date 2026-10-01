@@ -1108,10 +1108,12 @@ router.post('/sms', async (req, res, next) => {
       // BILLING FACTS (amounts / payment status / Zelle) at the same boundary (Codex round-48 P1): a payment landing during those
       // awaits must not let an approved balance / status sentence reach the customer after it became false.
       ...(verifiedAgentDecision?.id ? {
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read at the same boundary.
         providerPreSendCheck: (() => {
           const checks = require('../services/agent-decision-send-checks');
           return checks.composeProviderPreSendChecks(
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
           );
         })(),

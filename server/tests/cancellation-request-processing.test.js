@@ -56,7 +56,11 @@ jest.mock('../services/appointment-reminders', () => ({
 // Churn-reason classifier (Phase 7) — mocked so tests control the outcome;
 // the default resolves unclassified (the real module's fail-closed floor).
 const mockNotifyAdmin = jest.fn().mockResolvedValue({ id: 'notif-1' });
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...args) => mockNotifyAdmin(...args),
+  // The termite retrieval supersede closes rows through the real done helpers.
+  _private: jest.requireActual('../services/notification-service')._private,
+}));
 
 jest.mock('../services/churn-classifier', () => ({
   classifyChurnReason: jest.fn().mockResolvedValue({ code: 'unclassified', source: 'none' }),

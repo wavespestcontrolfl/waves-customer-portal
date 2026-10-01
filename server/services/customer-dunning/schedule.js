@@ -298,6 +298,12 @@ async function stampMemberClaims(trx, rows, claimStamp) {
   return ids;
 }
 
+async function lockMemberInvoices(trx, customerId) {
+  const ids = [...new Set((await activeMemberRows(customerId, { database: trx })).map((r) => String(r.invoice_id)))].sort();
+  if (ids.length) await trx('invoices').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+  return new Set(ids);
+}
+
 /**
  * CLAIM (§5 step 1): one short transaction, no external work. Stamps the
  * schedule and the customer's ACTIVE member rows (null when any of them holds
@@ -317,7 +323,13 @@ async function claim(scheduleId, now = new Date(), { database = db, force = fals
     // a payment-side fence) means this customer is being contacted: do not
     // claim, exactly as promotion refuses (member_claim_fresh). The next run
     // finds the row settled.
+    // Lock the member INVOICE rows first, in id order - the invoice edit path's own order (it locks the invoice
+    // row, THEN checks for a fresh claim on its sequence): an edit that already holds the invoice makes this
+    // claim wait and then see its commit; an edit that comes after waits here and then sees the fresh claim and
+    // refuses. Either way no title / service date / due date can commit under an in-flight touch unseen.
+    const lockedInvoices = await lockMemberInvoices(trx, schedule.customer_id);
     const memberRows = await activeMemberRows(schedule.customer_id, { database: trx, forUpdate: true });
+    if (memberRows.some((r) => !lockedInvoices.has(String(r.invoice_id)))) return null; // a member joined mid-claim: next run
     if (memberRows.some((r) => claimIsFresh(r, now))) return null;
     await trx(TABLE).where({ id: scheduleId }).update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
     const memberSeqIds = await stampMemberClaims(trx, memberRows, claimStamp);
@@ -437,8 +449,11 @@ async function close(schedule, reason, now = new Date(), {
     });
     return { closed: true, landed: await releaseMembers(trx, row, now) };
   });
-  await alertPastFinal(schedule, out.landed);
-  logger.info(`[customer-dunning] schedule ${schedule.id} closed (${reason}); ${out.landed.length} member row(s) released`);
+  // Only a close that happened is reported: a refused one (claim_lost / in_flight / already closed) changed nothing.
+  if (out.closed) {
+    await alertPastFinal(schedule, out.landed);
+    logger.info(`[customer-dunning] schedule ${schedule.id} closed (${reason}); ${out.landed.length} member row(s) released`);
+  }
   return out;
 }
 

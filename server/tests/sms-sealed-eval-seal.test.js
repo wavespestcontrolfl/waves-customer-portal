@@ -62,23 +62,25 @@ const cand = (id, intent, createdAt) => ({
   inbound_at: createdAt,
 });
 
-// The version-suffix contract (COMPANY FACTS = '_cf', PAYMENT FACTS = '_pf') plus the
+// The version-suffix contract (COMPANY FACTS = '_cf', PAYMENT FACTS = '_p') plus the
 // SLA and FREE RE-SERVICE line markers. Whatever a version requires vs forbids, the
 // clauses bind in this ONE order (SLA, COMPANY FACTS, Payment options, FREE RE-SERVICE):
 // SLA and the Payment options / FREE RE-SERVICE lines are STRUCTURAL patterns (Postgres `~`,
 // PR #5331 round 9); COMPANY FACTS is the EXACT rendered section before the first BILLING:
 // line (Codex #5392 r3 P2), so its clause binds the delimiter + exact suffix.
 const {
-  BILLING_DELIMITER: D_, exactSectionSuffix: exactSuffix_,
+  BILLING_DELIMITER: D_, exactStructureRegexSource,
 } = require('../services/sms-company-facts');
-const EXACT = exactSuffix_();
+// SLA line + Payment options (structural patterns, Postgres `~`, PR #5331 round 9), COMPANY FACTS + LABEL FACTS (exact-structure regex twins of
+// hasExactCompanyFacts / hasExactLabelFacts), and FREE RE-SERVICE at its rendered position too (round-24 P2): the text before the first
+// BILLING: line minus the exact company (+ label) structure must end with the SLA line + the re-service line.
 const pattern_ = (m) => require('../services/sms-sealed-eval')._test.markerPattern(m);
-// FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
 const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
-const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
+const RS_BINDINGS = [D_, D_, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source];
 const CONTRACT_BINDINGS = [
   pattern_('FOLLOW-UP SLA RIGHT NOW:'),
-  D_, D_, EXACT.length, EXACT,
+  D_, D_, exactStructureRegexSource('optional'),
+  D_, D_, exactStructureRegexSource('required'),
   pattern_('- Payment options:'),
   ...RS_BINDINGS,
 ];
@@ -265,14 +267,16 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers_cf_pf+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers5_cfl_p+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /~ \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
+    // the current identity (5_cfl_p) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS, LABEL FACTS, Payment options
+    const CURRENT_BINDINGS = [pattern_('FOLLOW-UP SLA RIGHT NOW:'), ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required'), pattern_('- Payment options:')];
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(CONTRACT_BINDINGS);
-      expect(String(args[0])).not.toMatch(/!~ \?/); // +c: every category fact is required, none forbidden
+      expect(args[1]).toEqual(CURRENT_BINDINGS);
+      expect(String(args[0])).not.toMatch(/!~ \?/); // 5_cfl_p+c: every fact the version carries is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
@@ -367,7 +371,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 
 // #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
 // freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
-test('v12 without +c, _cf or _pf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS, Payment options and FREE RE-SERVICE lines', async () => {
+test('v12 without +c, _cf or _p: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS, Payment options and FREE RE-SERVICE lines', async () => {
   const drafter = require('../services/sms-shadow-drafter');
   const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
   try {
@@ -385,10 +389,10 @@ test('v12 without +c, _cf or _pf: the compatibility SQL requires the SLA line AN
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /~ \?/.test(String(args[0])));
     // Computed via the shared compatibleWhereRaw, so this tracks the real contract rather than a
     // frozen snapshot of its SQL shape: bare v12 requires SLA and forbids COMPANY FACTS,
-    // Payment options and FREE RE-SERVICE.
+    // LABEL FACTS, Payment options and FREE RE-SERVICE.
     const contract = require('../services/sms-sealed-eval')._test.compatibleWhereRaw(
       ['FOLLOW-UP SLA RIGHT NOW:'],
-      [require('../services/sms-company-facts').COMPANY_FACTS_HEADER, '- Payment options:', 'FREE RE-SERVICE:'],
+      [require('../services/sms-company-facts').COMPANY_FACTS_HEADER, require('../services/sms-label-facts').LABEL_FACTS_MARKER, '- Payment options:', 'FREE RE-SERVICE:'],
     );
     expect(compat[1][0]).toBe(contract.sql);
     expect(compat[1][1]).toEqual(contract.bindings);

@@ -40,7 +40,7 @@ describe('lawnWateringSmsPlan', () => {
   });
 
   test('a label mow hold on the frozen instruction never reaches the text body', () => {
-    const mowHold = { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' };
+    const mowHold = { days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.' };
     const plain = lawnWateringSmsPlan(planArgs({ instruction: HOLD }));
     const withMow = lawnWateringSmsPlan(planArgs({ instruction: { ...HOLD, mowHold } }));
     expect(withMow).toEqual(plain);

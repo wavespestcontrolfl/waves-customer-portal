@@ -386,7 +386,7 @@ export default function GrowthSection({
       </ActionFeedback>}
       {isMobile ? (
         <MobileFold
-          title="Lead Funnel by Source"
+          title="Lead Funnel"
           sub={leadFunnel?.period?.label || kpis?.periodLabel || "Month to Date"}
         >
           <div className="px-1 pt-1">
@@ -400,7 +400,7 @@ export default function GrowthSection({
       ) : (
         <div className="mt-4">
           <ChartCard
-            title="Lead funnel by source"
+            title="Lead funnel"
             sub={leadFunnel?.period?.label || kpis?.periodLabel || "Month to Date"}
           >
             <FunnelBySource

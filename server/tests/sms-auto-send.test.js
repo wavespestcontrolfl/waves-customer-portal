@@ -241,7 +241,7 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
       'house_voice_v12_real_answers', // stamped before the bump
       'house_voice_v12_real_answers+c', // the row from the finding
       'house_voice_v12_real_answers+bclm',
-      drafter.REAL_ANSWERS_PROMPT_VERSION, // 'house_voice_v12_real_answers5_cf_pf'
+      drafter.REAL_ANSWERS_PROMPT_VERSION, // 'house_voice_v12_real_answers5_cfl_p'
       `${drafter.REAL_ANSWERS_PROMPT_VERSION}+bc`,
       'house_voice_v12_real_answers_cf', // the company-facts cohort stamped before the re-service token
       'house_voice_v12_real_answers2_cf', // the re-service + company-facts cohort stamped before the LIVE ETA bump

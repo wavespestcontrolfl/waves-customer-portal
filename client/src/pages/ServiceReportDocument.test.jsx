@@ -391,7 +391,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       },
     });
     const base = { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
-    const mow = { days: 2, untilDate: '2026-10-03', untilLabel: 'Sat', line: 'Mowing: hold off until Sat, 2 days after today\'s treatment.' };
+    const mow = { days: 2, untilAt: '2026-10-03T19:00:00.000Z', untilDate: '2026-10-03', untilLabel: 'Sat 3 PM', line: 'Mowing: hold off until Sat 3 PM, 2 days after today\'s treatment.' };
     const without = render(<ServiceReportDocument data={build(base)} token="tok123" />);
     const textWithout = without.container.textContent;
     without.unmount();
@@ -1787,5 +1787,41 @@ describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPEC
       pestReportV2: { expectations: { rain: { lines: ['It\'s rained about 0.2" at your property over the past week.'] } } },
     }} token="tok123" />);
     expect(screen.queryByText(/Heavy rain right after a treatment/)).toBeNull();
+  });
+});
+
+describe('ServiceReportDocument: the four-section report', () => {
+  const sections = [
+    { key: 'whatWeFound', title: 'What we found', paragraphs: ['Light activity under the sink.'] },
+    { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We placed bait where the roaches were feeding.'] },
+    { key: 'whatToExpect', title: 'What to expect', paragraphs: ['You may see more roaches in the open for a week or two.'] },
+    { key: 'whatsNext', title: 'What’s next', paragraphs: ['Let us know if you still see them after that.'] },
+  ];
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+
+  it('prints the summary with its section titles', () => {
+    render(<ServiceReportDocument
+      data={{ ...BASE_DATA, typedReport: { ...BASE_DATA.typedReport, todaysResult: { ...BASE_DATA.typedReport.todaysResult, body } }, reportSections: sections }}
+      token="tok123"
+    />);
+    expect(screen.getByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText('We placed bait where the roaches were feeding.')).toBeInTheDocument();
+    expect(screen.queryByText(body)).toBeNull();
+  });
+
+  it('drops the separate "What to expect" block when the sections carry their own', () => {
+    const whatToExpect = { lines: ['Ants that find the bait carry it back to the colony.'] };
+    const withSections = { ...BASE_DATA, typedReport: { ...BASE_DATA.typedReport, todaysResult: { ...BASE_DATA.typedReport.todaysResult, body } }, reportSections: sections, pestReportV2: { expectations: { whatToExpect } } };
+    const { unmount } = render(<ServiceReportDocument data={withSections} token="tok123" />);
+    expect(screen.queryByText('Ants that find the bait carry it back to the colony.')).toBeNull();
+    unmount();
+    render(<ServiceReportDocument data={{ ...BASE_DATA, pestReportV2: { expectations: { whatToExpect } } }} token="tok123" />);
+    expect(screen.getByText('Ants that find the bait carry it back to the colony.')).toBeInTheDocument();
+  });
+
+  it('prints the summary as before without sections', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(screen.queryByText('What we did and why')).toBeNull();
+    expect(screen.getByText('We completed the scheduled service.')).toBeInTheDocument();
   });
 });

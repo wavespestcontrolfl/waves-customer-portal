@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null, liveEtaSnapshot = null, techNames = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null, liveEtaSnapshot = null, techNames = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -658,6 +658,7 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // OPEN TIMES without a live re-fetch at publish time — this is
             // just the snapshot, never a probe.
             ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+            ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
             // Codex round-3 P2: the re-service lane(s) this draft's reply
             // promises (validateReserviceOffer's own resolution, carried
             // from sms-shadow-drafter.js) — null/omitted for an ordinary

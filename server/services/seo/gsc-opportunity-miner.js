@@ -79,7 +79,15 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
-const { observationDate, asJsonArray, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage } = require('./aeo-measurement');
+const { observationDate, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage } = require('./aeo-measurement');
+const { rivalsOf } = require('./llm-mention-companies');
+const dataforseo = require('./dataforseo');
+const { currentSurfaces, onCurrentSurface } = require('./llm-app-scraper');
+
+// ChatGPT and Gemini have two surfaces (API probe, consumer app); only the one
+// measured now is evidence, so a retired cohort in the lookback window can
+// neither raise a gap nor suppress one (same switch the prober reads).
+const activeSurfaces = () => currentSurfaces(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured);
 const aeoBenchmark = require('../../data/aeo-benchmark-v1.json');
 const { routeIdentitySql, pinnedArticlePathSql } = require('../content/opportunity-route-sql');
 const { isEntityQuestion } = require('./aeo-entity-facts');
@@ -1275,7 +1283,7 @@ function evaluateAeoQuestionGaps(rows = [], questions = [], { minDays = 3, minEn
     e.targetCited = e.targetCited || cited;
     e.otherOwned += Number(!cited && owned.length > 0);
     e.hosts.push(...cleanUrls(r.cited_urls).filter((u) => !isOwnedUrl(u)).map(urlHost));
-    asJsonArray(r.competitors_mentioned).forEach((c) => e.competitors.add(c?.name));
+    rivalsOf(r).forEach((name) => e.competitors.add(name));
   }
   const observedByQuestion = new Map(questions.map((q) => [q.id, []]));
   for (const e of engines.values()) {
@@ -3202,7 +3210,7 @@ class GscOpportunityMiner {
         // Unmanaged/legacy rows (no query_id) have no toggle, so keep them.
         .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
         .select(
-          'm.query', 'm.check_date', 'm.competitors_mentioned', 'm.waves_cited_urls',
+          'm.query', 'm.check_date', 'm.competitors_mentioned', 'm.companies_named', 'm.waves_cited_urls',
           'm.measurement_version', 'm.answer_available', 'm.citations_complete', 'm.llm_platform', 'm.model_version',
           'q.city as q_city', 'q.service as q_service'
         );
@@ -3215,7 +3223,8 @@ class GscOpportunityMiner {
     // than for a provider in a city; their misses are identity gaps, not
     // page-coverage gaps, so they never seed a city×service opportunity.
     const groups = new Map();
-    for (const r of rows.filter(r => isMeasuredAnswer(r) && !isEntityQuestion(r.query))) {
+    const surfaces = activeSurfaces();
+    for (const r of rows.filter(r => isMeasuredAnswer(r) && !isEntityQuestion(r.query) && onCurrentSurface(r, surfaces))) {
       const city = normalizeCity(r.q_city) || inferCityFromQuery(r.query);
       const service = aeoServiceFor(r.q_service, r.query);
       if (!city || !service) continue;
@@ -3224,7 +3233,7 @@ class GscOpportunityMiner {
       if (!g) { g = { city, service, platform: r.llm_platform, model: r.model_version, days: new Set(), wavesHits: 0, competitors: new Set() }; groups.set(key, g); }
       g.days.add(observationDate(r.check_date));
       if (ownedCitations(r).length) g.wavesHits++;
-      g.competitors = new Set([...g.competitors, ...asJsonArray(r.competitors_mentioned).map(c => c?.name).filter(Boolean)]);
+      g.competitors = new Set([...g.competitors, ...rivalsOf(r)]);
     }
 
     // GSC demand per city×service (same aggregation shape as local_gap).
@@ -3562,16 +3571,18 @@ class GscOpportunityMiner {
   // admin toggle on seo_llm_mention_queries stops a question's work.
   async _loadAeoQuestionObservations(since, queries = []) {
     if (!queries.length) return [];
-    return db('seo_llm_mentions as m')
+    const surfaces = activeSurfaces();
+    const rows = await db('seo_llm_mentions as m')
       .join('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
       .where('q.active', true)
       .where('m.check_date', '>=', since)
       .whereIn('m.query', queries)
       .select(
         'm.query', 'm.check_date', 'm.llm_platform', 'm.model_version',
-        'm.waves_cited_urls', 'm.cited_urls', 'm.competitors_mentioned',
+        'm.waves_cited_urls', 'm.cited_urls', 'm.competitors_mentioned', 'm.companies_named',
         'm.measurement_version', 'm.answer_available', 'm.citations_complete'
       );
+    return rows.filter(r => onCurrentSurface(r, surfaces));
   }
 
   // Hub route identity → live sitemap URL (sitemap-manager caches it, and

@@ -140,7 +140,7 @@ describe('a Zelle offer AND a denial in one reply are both rechecked', () => {
 // main's rule (owed, plus settled payments in an acknowledgement)
 describe('staff-edited real-answers bodies: amounts judged against live billing', () => {
   const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
-  const V12 = 'house_voice_v12_real_answers5_cf_pf';
+  const V12 = 'house_voice_v12_real_answers5_cfl_p';
   const dbh = (table) => ({ where: () => ({ first: async () => (table === 'customers' ? { id: 'c1' } : null) }) });
   const live = (billing) => ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [], ...billing } });
   const staff = (body) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, humanEditedBody: true, paymentStatusSnapshot: { sentences: ['Your account balance is $95.00.'] }, dbh });

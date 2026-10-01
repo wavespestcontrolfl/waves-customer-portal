@@ -1,5 +1,15 @@
 const db = require('../models/db');
 const logger = require('./logger');
+
+// A failure log line for the notification writers carries only a fixed code /
+// constraint — never err.message: a Knex error echoes the SQL and its bound
+// values, which for a bell is the notification body (customer names and
+// addresses). Behavior (return value / throw) at every call site is unchanged.
+function safeErrorSummary(err) {
+  const bits = [err ? (err.code || err.name || 'error') : 'error'];
+  if (err && err.constraint) bits.push(`constraint=${err.constraint}`);
+  return bits.filter(Boolean).join(' ');
+}
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
@@ -56,6 +66,85 @@ function scopeAdminFeedToRole(query, role) {
 // link relies on to clear a row the feed itself can see.
 function excludeActivityOnlyFromBell(query) {
   return query.whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'");
+}
+
+// Content version of an admin row: an md5 over everything the bell shows
+// (title, body, link, detail, metadata). notifyAdmin's refreshOnDedupe can
+// rewrite a standing row in place while keeping its id and read state, so an
+// id alone cannot say WHICH text an admin saw. The bell list returns this as
+// `version`; a Done click sends it back and markAdminDone only marks the row
+// done while the content is still that version. The ONE definition: every
+// reader and the fence must agree on it. No `updated_at` column exists.
+// A JSON array, not a joined string: field boundaries and NULL-vs-empty stay
+// distinct, so two different contents never share a version.
+const NOTIFICATION_VERSION_SQL = "md5(jsonb_build_array(title, body, link, detail, metadata)::text)";
+
+// The done state (docs/admin-notifications.md section 4.3, owner ruling
+// 2026-09-30): read is not done. A done admin row leaves the bell whether a
+// person marked it or the condition it was about cleared. done_by names who
+// (an admin user id, 'claude', or a system component); resolution is one
+// plain line of what fixed it. markAdminDone is the one id-addressed writer;
+// the emitters that close a row inside their own fenced UPDATE spread
+// doneColumns into it instead. An auto-close selects rows by the condition it
+// judged and `done_at IS NULL`, never by read state (a row someone opened is
+// still open work), and passes keepExisting: done_at, resolution and read_at
+// are then COALESCEd, so a person's own read and done time stand; done_by
+// names the latest closer (see doneColumns).
+const MAX_RESOLUTION_CHARS = 200;
+const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
+
+// A PERSON closed the row: done_by is a technician/admin id (a uuid; plain
+// digits too, for legacy ids) or 'claude' (an agent acting for a person).
+// Anything else is a system component ('episodes', 'relevance', 'ops-crons',
+// 'supersede', 'dispatch', 'backfill', ...). Only a person's Done can be put
+// back: a system close leaves state behind that a reopen cannot restore (an
+// ops digest keeps metadata.resolved, its dedupeKey is dropped, ...).
+const PERSON_DONE_BY_SQL = "(done_by ~ '^[0-9]+$' OR done_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR done_by = 'claude')";
+
+function cleanResolution(text) {
+  const plain = String(stripEmoji(text) || '').replace(/\s+/g, ' ').trim();
+  return plain ? truncateAtWord(plain, MAX_RESOLUTION_CHARS) : null;
+}
+
+function doneColumns({ by, resolution = null, at = new Date(), keepExisting = false, conn = db }) {
+  const columns = { done_at: at, done_by: String(by).slice(0, 64), resolution: cleanResolution(resolution) };
+  if (!keepExisting) return columns;
+  return {
+    done_at: conn.raw('COALESCE(done_at, ?::timestamptz)', [columns.done_at]),
+    // done_by is the LATEST closer, not COALESCEd: a system close of a row a
+    // person already marked done now owns it (the condition really cleared,
+    // and its state — a resolved digest, a dropped dedupeKey — is not what a
+    // reopen could restore), so PERSON_DONE_BY_SQL refuses its reopen. The
+    // first done_at, the person's resolution and their read still stand.
+    done_by: columns.done_by,
+    resolution: conn.raw('COALESCE(resolution, ?)', [columns.resolution]),
+    read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [columns.done_at]),
+  };
+}
+
+// The JS twin of PERSON_DONE_BY_SQL, for a `by` the caller already holds.
+const UUID_DONE_BY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isPersonDoneBy(by) {
+  const text = String(by ?? '');
+  return /^[0-9]+$/.test(text) || UUID_DONE_BY_RE.test(text) || text === 'claude';
+}
+
+// The ONE row selection every SYSTEM closer uses for its closing UPDATE (a
+// closer that spreads doneColumns with keepExisting). doneColumns makes the
+// latest closer the owner, so a system close of a row a PERSON already marked
+// Done must be able to reach that row: otherwise the person's done_by survives
+// and their stale Reopen brings an obsolete alert back. Selects rows that are
+// not done, OR done by a person (the system takes ownership exactly once: a
+// row any system component already closed is left alone, so a sweep never
+// rewrites history on each run). done_by NULL on a done row is treated as
+// not-a-person (COALESCE), so it is left alone too. A closer that is itself
+// a person's action (`by` a person: markAdminDone) keeps the plain
+// done_at IS NULL, so a second Done writes nothing. Not for PROBES that ask
+// "is there still an open bell the office could act on": those stay
+// whereNull('done_at'). Columns are unqualified, like doneColumns' own.
+function openToCloser(query, by) {
+  if (isPersonDoneBy(by)) return query.whereNull('done_at');
+  return query.where((q) => q.whereNull('done_at').orWhereRaw(`COALESCE(${PERSON_DONE_BY_SQL}, false)`));
 }
 
 // `scheduledServiceId` (app property scope, PR 3): the five appointment keys
@@ -376,7 +465,7 @@ const NotificationService = {
         } catch (err) {
           // Policy failure must never break notifications — fall through
           // and insert (fail-open matches gate-off behavior).
-          logger.warn(`[notifications] bell policy check failed: ${err.message}`);
+          logger.warn(`[notifications] bell policy check failed: ${safeErrorSummary(err)}`);
         }
       }
       // A title that was ONLY emoji falls back to the original rather than
@@ -415,7 +504,7 @@ const NotificationService = {
       }).returning('*');
       return notif;
     } catch (err) {
-      logger.error(`[notifications] Create failed: ${err.message}`);
+      logger.error(`[notifications] Create failed: ${safeErrorSummary(err)}`);
       return null;
     }
   },
@@ -533,7 +622,7 @@ const NotificationService = {
             const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null } : {}) };
+              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
@@ -591,7 +680,7 @@ const NotificationService = {
       if (receipt) relayFailureCall.onCommitted?.(receipt);
       return shape(persisted);
     } catch (err) {
-      logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
+      logger.warn(`[notifications] Admin notification dedupe failed: ${safeErrorSummary(err)}`);
       return null;
     }
   },
@@ -685,7 +774,7 @@ const NotificationService = {
       } catch (err) {
         // A failed lock/read cannot safely prove this event is new. Fail closed
         // instead of risking a duplicate bell + native push.
-        logger.warn(`[notifications] Customer notification dedupe failed: ${err.message}`);
+        logger.warn(`[notifications] Customer notification dedupe failed: ${safeErrorSummary(err)}`);
         return null;
       }
     } else {
@@ -748,14 +837,59 @@ const NotificationService = {
   },
 
   // Get notifications for admin
-  async getAdminNotifications(limit = 50, offset = 0, { role } = {}) {
-    return excludeActivityOnlyFromBell(scopeAdminFeedToRole(
-      db('notifications').where({ recipient_type: 'admin' }),
+  // before ({ at, id }): keyset cursor — rows strictly after it in feed
+  // order, plain created_at DESC, id DESC (indexable: notifications_admin_open_keyset_idx).
+  // The query also selects created_at_cursor (created_at::text, microseconds
+  // and offset included) so the route can build a cursor that never rounds
+  // away the sub-millisecond part: the ::timestamptz it round-trips through
+  // is exact, so rows sharing a millisecond are never skipped or repeated.
+  async getAdminNotifications(limit = 50, offset = 0, { role, before = null } = {}) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
-    ))
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
+    ));
+    if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
+    return query
+      .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'))
+      .orderByRaw('created_at DESC, id DESC')
       .limit(limit).offset(offset);
+  },
+
+  // The current content version of one admin row (see NOTIFICATION_VERSION_SQL),
+  // or null when the row is gone. Done route: tells "changed under you" apart
+  // from "already done / not found" after a fenced markAdminDone matched nothing.
+  async getAdminNotificationState(id, { role } = {}) {
+    const row = await scopeAdminFeedToRole(
+      db('notifications').where({ id, recipient_type: 'admin' }),
+      role,
+    ).first('done_at', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`));
+    return row ? { done: row.done_at != null, version: row.version } : null;
+  },
+
+  // Recently done admin rows (the "Recently done" list, so an accidental Done
+  // can be reopened). Role-scoped like the bell list, but Activity-only rows
+  // are INCLUDED: Activity has its own Done and this is the one recovery
+  // path for an accidental one (a reopen puts it back pending in Activity).
+  // Newest done first,
+  // keyset-paged on (done_at, id) like the bell list, so every row in the
+  // window stays reachable however many closed after it. done_at_token is
+  // done_at::text at full precision: the cursor source, and the fence a
+  // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
+  async getAdminDoneNotifications({ role, limit = 20, days = 7, before = null } = {}) {
+    const query = scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
+      role,
+    )
+      .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
+    if (before) query.whereRaw('(done_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
+    return query
+      .select(
+        'id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at',
+        db.raw('done_at::text AS done_at_token'),
+        db.raw(`COALESCE(${PERSON_DONE_BY_SQL}, false) AS reopenable`),
+      )
+      .orderByRaw('done_at DESC, id DESC')
+      .limit(limit);
   },
 
   // Get unread count for admin
@@ -765,7 +899,7 @@ const NotificationService = {
   // connection while holding one.
   async getAdminUnreadCount({ role } = {}, trx = null) {
     const [{ count }] = await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
-      (trx || db)('notifications').where({ recipient_type: 'admin' }),
+      (trx || db)('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
     ))
       .whereNull('read_at')
@@ -809,6 +943,54 @@ const NotificationService = {
       role,
     ).update({ read_at: new Date() });
     return updated > 0;
+  },
+
+  // Mark admin rows done: the ONE id-addressed done writer (see doneColumns).
+  // Admin rows only, only those not already done, under the same role scope
+  // as mark-read. read_at is stamped too so every reader keyed on it agrees.
+  // `by`: an admin user id, 'claude', or a system component. Returns the
+  // number of rows marked.
+  // expectedVersion (single id only): the content version the caller saw
+  // (NOTIFICATION_VERSION_SQL). The row is marked only while it still has that
+  // version, so a refresh that rewrote the row since cannot be marked done
+  // unseen. Callers without it (Claude, system) mark whatever is standing.
+  async markAdminDone(ids, { by, resolution = null, role, expectedVersion = null } = {}, connection = db) {
+    const list = [...new Set([].concat(ids ?? []).filter(Boolean).map(String))];
+    if (!list.length || !by) return 0;
+    if (expectedVersion != null && list.length !== 1) return 0;
+    let query = scopeAdminFeedToRole(
+      connection('notifications').whereIn('id', list).where({ recipient_type: 'admin' }).whereNull('done_at'),
+      role,
+    );
+    if (expectedVersion != null) query = query.whereRaw(`${NOTIFICATION_VERSION_SQL} = ?`, [String(expectedVersion)]);
+    const updated = await query.update(doneColumns({ by, resolution, keepExisting: true, conn: connection }));
+    if (updated) logger.info(`[notifications] marked ${updated} admin notification(s) done`);
+    return updated;
+  },
+
+  // Put a done admin row back in the bell (read_at is left as it is).
+  // expectedDoneAt (required): the done_at token the Recently-done list served
+  // (done_at::text, full precision). A stale list must not clear a NEWER
+  // completion of the same row, so the row is reopened only while its done_at
+  // still equals the token. Only a row a PERSON closed can be reopened
+  // (PERSON_DONE_BY_SQL). Returns 'reopened', 'changed' (still done, but not
+  // by the close the caller saw), 'not_reopenable' (a system close) or
+  // 'not_found' (missing, or not done any more).
+  async reopenAdminDone(notificationId, { expectedDoneAt } = {}, connection = db) {
+    if (expectedDoneAt == null || expectedDoneAt === '') return 'changed';
+    const updated = await connection('notifications')
+      .where({ id: notificationId, recipient_type: 'admin' })
+      .whereNotNull('done_at')
+      .whereRaw('done_at = ?::timestamptz', [String(expectedDoneAt)])
+      .whereRaw(PERSON_DONE_BY_SQL)
+      .update(DONE_CLEARED);
+    if (updated > 0) return 'reopened';
+    const row = await connection('notifications')
+      .where({ id: notificationId, recipient_type: 'admin' })
+      .first('done_at', connection.raw('done_at = ?::timestamptz AS fence_ok', [String(expectedDoneAt)]));
+    if (!row || row.done_at == null) return 'not_found';
+    if (!row.fence_ok) return 'changed';
+    return 'not_reopenable';
   },
 
   // Mark all read for admin
@@ -875,12 +1057,11 @@ const NotificationService = {
     if (!callLogId) return 0;
     // Both triggers share the category; the caller must name which event
     // became obsolete so voicemail and booking cannot retire each other's bell.
-    return db('notifications')
+    return openToCloser(db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
-      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
-      .whereNull('read_at')
+      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey]), 'supersede')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
-      .update({ read_at: new Date() });
+      .update(doneColumns({ by: 'supersede', resolution: 'Superseded by a newer event on the same call', keepExisting: true }));
   },
 
   // Mark all read for customer
@@ -903,6 +1084,7 @@ function getCategoryIcon(category) {
 }
 
 module.exports = NotificationService;
+module.exports.safeErrorSummary = safeErrorSummary;
 module.exports._private = {
   CUSTOMER_PREFERENCE_KEYS,
   customerPreferenceEnabled,
@@ -911,6 +1093,12 @@ module.exports._private = {
   applyAdminBrevityGuard,
   normalizeAdminNotificationText,
   excludeActivityOnlyFromBell,
+  NOTIFICATION_VERSION_SQL,
+  doneColumns,
+  openToCloser,
+  isPersonDoneBy,
+  PERSON_DONE_BY_SQL,
+  DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,
   MAX_ADMIN_BODY_CHARS,
   DIGEST_CATEGORY,

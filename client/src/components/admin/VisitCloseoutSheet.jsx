@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, CheckCircle2, ClipboardList } from 'lucide-react';
 import { Button, Sheet, SheetBody, SheetFooter, SheetHeader } from '../ui';
-import { CompletionPanel, completionReconcilePrompt, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
+import { CompletionPanel, completionReconcilePrompt, completionReportRulesPrompt, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
 import { adminFetch } from '../../utils/admin-fetch';
 import { deleteCompletionDraft, deleteVisitCompletionDraft, getVisitCompletionDraft, putVisitCompletionDraft } from '../../lib/completion-resume-store';
 import { completionDraftKey } from '../../lib/completion-drafts';
@@ -128,10 +128,20 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
     } catch (err) {
       const form = candidate.forms[err.details?.serviceId];
       const prompt = completionReconcilePrompt(err);
+      // Edit heads-up on a four-section report: same confirm-and-resubmit
+      // shape as the reconciliation prompt; it never blocks.
+      const rulesPrompt = completionReportRulesPrompt(err);
       if (!packet && form && !form.body.reportReconcileConfirmed && prompt) {
         if (window.confirm(prompt)) {
           confirmedDraft = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: {
             ...form, body: { ...form.body, reportReconcileConfirmed: true },
+          } } };
+          setDraft(confirmedDraft);
+        }
+      } else if (!packet && form && !form.body.reportRulesConfirmed && rulesPrompt) {
+        if (window.confirm(rulesPrompt)) {
+          confirmedDraft = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: {
+            ...form, body: { ...form.body, reportRulesConfirmed: true },
           } } };
           setDraft(confirmedDraft);
         }

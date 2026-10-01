@@ -346,7 +346,12 @@ async function commitVoiceBooking({
         .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
         .where((q) => q
           .where('window_start', windowStart)
-          .orWhere('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION))
+          // An unconfirmed street-level address hold (a call-pipeline booking that rides the
+          // voice_agent source action) behaves like any other pipeline booking here: it
+          // blocks only a matching start, not the whole day (owner ruling 2026-09-30).
+          .orWhere((q2) => q2
+            .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
+            .whereNotExists(function () { require('../street-level-hold').heldVisitSubquery(this, 'scheduled_services'); })))
         .first('id');
       if (existing) return { status: 'duplicate' };
 

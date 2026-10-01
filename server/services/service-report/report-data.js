@@ -5,7 +5,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -22,6 +22,9 @@ const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
+const {
+  PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
+} = require('./same-line-visit');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
@@ -2084,6 +2087,30 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
   return pest ? { city: nearYouCity, pest } : null;
 }
 
+// A frozen card's four-section body (stamped bodyFormat 'four_section' at
+// completion) shows only while GATE_REPORT_WRITER_RULES is on: with it off
+// (the kill switch) the card keeps its headline and drops that body
+// (Codex #5500).
+function withoutDarkFourSectionBody(snapshot) {
+  const result = snapshot?.todaysResult;
+  if (!result || result.bodyFormat !== 'four_section' || featureGates.reportWriterRulesLive()) return snapshot;
+  const { body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, ...rest } = result;
+  return { ...snapshot, todaysResult: rest };
+}
+
+// The report's next-appointment shape for a scheduled_services row.
+function nextAppointmentFields(row) {
+  if (!row || !row.scheduled_date) return null;
+  const rawDate = row.scheduled_date;
+  return {
+    serviceType: row.service_type || null,
+    scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
+    // window_start only — the customer-facing arrival window is always
+    // window_start + 2 hours (window_end is the internal job block).
+    windowStart: row.window_start || null,
+  };
+}
+
 // LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
 // place: cached PDFs / static renders are content-key-insensitive snapshots,
 // and a reschedule after render would leave a stale appointment fossilized in
@@ -2094,6 +2121,7 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.nextSameServiceAppointment;
   delete data.upcomingVisitsCard;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
@@ -2555,7 +2583,11 @@ class PinnedAssessmentUnavailable extends Error {
 // p7: GATE_LAWN_WATERING_RULE — the report can carry a product-instruction
 // aftercare, a top-of-report banner payload and a hold "not before" plan
 // overlay; PDFs rendered before the watering instruction existed must re-key.
-const LAWN_RENDER_STRATEGY = 'p7-watering-instruction-20260929';
+// p8: the unrendered snapshot.mainWatch / top-level seasonalNote keys left the
+// payload and the stock "No additional observations" photoSummary now collapses
+// to null, so the photo strip (web) and the PDF no longer print that sentence.
+// Cached lawn PDFs and renders that carry it must re-key.
+const LAWN_RENDER_STRATEGY = 'p8-lawn-dead-fields-20261001';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
@@ -3922,7 +3954,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const typedSnapshot = serviceData.typedReportSnapshot
     && typeof serviceData.typedReportSnapshot === 'object'
     && serviceData.typedReportSnapshot.type
-    ? serviceData.typedReportSnapshot
+    ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
     : null;
 
   const scheduledServicePromise = service.scheduled_service_id
@@ -4322,7 +4354,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // bad history must not take down the report.
   const staffViewer = opts.staffViewer === true;
   const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type)
+    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(withoutDarkFourSectionBody)
     : [];
   const companionReports = await Promise.all(
     companionSnapshots
@@ -5520,6 +5552,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
   let nextAppointment = null;
   let sameLineNextAppointment = null;
+  // The candidate rows the next-appointment pick read, kept for the
+  // four-section report's property-scoped "What's next" visit below.
+  let upcomingVisitRows = null;
   // Live-view only (stripLiveOnlyScheduleFields), termite line only.
   let termiteNextMonitoringVisit = null;
   // Live-view only, cockroach typed primaries only (cockroach-report-v2.js):
@@ -5560,76 +5595,24 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       .orderBy('window_start', 'asc')
       .limit(200)
       .catch(() => null); // null = the query FAILED (not "no visits") — consumers that need the distinction check Array.isArray
-    // A rodent report's "next visit" spans the whole rodent program —
-    // trapping, exclusion, sanitation, proofing — including service names
-    // that carry no rodent token ("Exclusion Service" alone falls to the
-    // pest default). Owner 2026-07-27: the rodent report shows the next
-    // service date if and only if it is rodent-related. The widened match
-    // only claims names NO other line detects (the 'pest' fallback) — a
-    // "Mosquito Trap Service" still detects as mosquito and stays out —
-    // and isRodentAdjacentServiceType's negative guard keeps non-rodent
-    // trapping ("Wildlife Trapping") out too. Other report lines keep the
-    // strict same-line match.
-    // Name shape alone is NOT rodent evidence (codex round-4/5 P2): a
-    // generic "Sanitation & Cleanup" booking that has nothing to do with
-    // the rodent program would satisfy the regex. The catalog is the
-    // authority: a candidate whose scheduled_services.service_id points at
-    // a services row with category 'rodent' is rodent-related regardless
-    // of its (possibly customized/renamed) service_type label; unlinked
-    // legacy rows fall back to exact catalog-NAME matching plus the
-    // adjacent-shape regex. Best-effort: an unavailable catalog just keeps
-    // the strict same-line match.
-    let serviceCategoryById = null;
-    let rodentCatalogNames = null;
-    if (rodentReportRefresh) {
-      try {
-        const catalogRows = await knex('services').select('id', 'name', 'category');
-        serviceCategoryById = new Map((Array.isArray(catalogRows) ? catalogRows : [])
-          .filter((row) => row && row.id)
-          .map((row) => [String(row.id), String(row.category || '')]));
-        rodentCatalogNames = new Set((Array.isArray(catalogRows) ? catalogRows : [])
-          .filter((row) => String(row?.category || '') === 'rodent')
-          .map((row) => String(row.name || '').trim().toLowerCase())
-          .filter(Boolean));
-      } catch { serviceCategoryById = null; rodentCatalogNames = null; }
-    }
+    upcomingVisitRows = Array.isArray(upcomingRows) ? upcomingRows : null;
+    // The next visit on this report's own line: one rule, shared with the
+    // report writer's NEXT VISIT record (same-line-visit.js), including the
+    // rodent program's catalog-aware match under GATE_RODENT_REPORT_REFRESH.
+    const { serviceCategoryById, rodentCatalogNames } = rodentReportRefresh
+      ? await loadRodentCatalogIndex(knex)
+      : { serviceCategoryById: null, rodentCatalogNames: null };
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
-      .find((row) => {
-        // A resolvable catalog link is authoritative in BOTH directions
-        // (codex round-8 P2): it admits a rodent-category visit under any
-        // label AND vetoes a rodent-sounding label linked to a non-rodent
-        // service. Label matching only ever judges unlinked/unresolvable
-        // rows.
-        const linkedCategory = rodentReportRefresh && serviceCategoryById && row.service_id
-          ? serviceCategoryById.get(String(row.service_id)) || null
-          : null;
-        if (linkedCategory) return linkedCategory === 'rodent';
-        const rowLine = detectServiceLine(row.service_type);
-        if (rowLine === serviceLine) return true;
-        if (!rodentReportRefresh) return false;
-        // unlinked legacy rows: exact rodent-catalog name + adjacent shape
-        return rowLine === 'pest'
-          && isRodentAdjacentServiceType(row.service_type)
-          && !!rodentCatalogNames
-          && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
-      }) || null;
+      .find((row) => isSameLineVisit(row, {
+        serviceLine, rodentReportRefresh, serviceCategoryById, rodentCatalogNames,
+      })) || null;
     // No upcoming visit on THIS report's service line → fall back to the
     // customer's next visit of any line (owner 2026-08-27). The rendered
     // label always carries the service name, so a pest visit on a termite
     // report reads unambiguously ("Quarterly Pest Control · Wed, Nov 18").
     // Same disclosable-status pool; the strict same-line pick above still
     // wins whenever it exists.
-    const toNextAppointment = (row) => {
-      if (!row || !row.scheduled_date) return null;
-      const rawDate = row.scheduled_date;
-      return {
-        serviceType: row.service_type || null,
-        scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
-        // window_start only — the customer-facing arrival window is always
-        // window_start + 2 hours (window_end is the internal job block).
-        windowStart: row.window_start || null,
-      };
-    };
+    const toNextAppointment = nextAppointmentFields;
     // The narrative builders below were written under the same-line
     // invariant (they keep only the date/window), so they receive the
     // strict same-line pick ONLY; the hero cell gets the cross-line
@@ -6162,6 +6145,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
+  // The four-section report's screened sections (GATE_REPORT_WRITER_RULES),
+  // set only when that report is the summary; surfaces render them where
+  // they would print exactly that text.
+  let reportSections = null;
   // Tech-reviewed AI report copy ("Generate AI report" → notes, parsed by
   // its WHAT WE DID / WHAT WE FOUND shape and banned-copy-screened) is the
   // fullest customer-facing account of the visit — it beats the SMS-style
@@ -6265,6 +6252,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (drivesSummary) {
       visitSummary = technicianReport.body;
       visitSummarySource = 'technician_report';
+      reportSections = Array.isArray(technicianReport.sections) ? technicianReport.sections : null;
     }
   }
   if (
@@ -6490,6 +6478,26 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const callbackNonPerformed = Boolean(reserviceReportBlock)
     && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
 
+  // The four-section report's "What's next" visit: the next booking on this
+  // report's own line AT this report's property (same-line-visit.js; a
+  // booking at another of the customer's properties never counts, and an
+  // unresolvable property shows nothing). Only for that report.
+  let nextSameServiceAppointment = null;
+  if (opts.mode === 'live' && reportSections && visitSummarySource === 'technician_report'
+    && upcomingVisitRows && service.scheduled_service_id) {
+    try {
+      const reportVisit = await knex('scheduled_services')
+        .where({ id: service.scheduled_service_id })
+        .first(...PROPERTY_SCOPE_COLUMNS);
+      const next = await nextSameLineVisitAtProperty({
+        knex, rows: upcomingVisitRows, reportVisit, serviceLine,
+      });
+      if (next.state === 'scheduled') nextSameServiceAppointment = nextAppointmentFields(next.row);
+    } catch {
+      nextSameServiceAppointment = null;
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -6621,6 +6629,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // Present only for the four-section report (see reportSections above).
+    ...(reportSections && visitSummarySource === 'technician_report' ? { reportSections } : {}),
     // Customer concern captured at completion — feeds the pest V2 "what you
     // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
     // tree & shrub already consume it inside their own V2 builders.
@@ -6700,6 +6710,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    // The next visit on THIS report's own service line at THIS property, for
+    // the four-section report's "What's next" line (owner 2026-10-01: same
+    // service only). Live view only, like nextAppointment
+    // (stripLiveOnlyScheduleFields).
+    ...(nextSameServiceAppointment ? { nextSameServiceAppointment } : {}),
     // "Your upcoming visits" card (GATE_REPORT_UPCOMING_VISITS) — live-view
     // only, stripped for pdf/static by stripLiveOnlyScheduleFields below,
     // same as nextAppointment. The KEY itself (not just its value) is

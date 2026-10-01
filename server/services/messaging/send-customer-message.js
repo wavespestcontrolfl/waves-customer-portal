@@ -105,6 +105,34 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// Street-level address hold (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL, owner ruling
+// 2026-10-01): NO customer text, email or app message about a visit that is a live
+// unconfirmed street-level hold goes out until the office confirms the address. This is the
+// shared send step every visit-scoped customer message passes (appointmentId is the visit);
+// appointment-email.js enforces the same predicate for the email sender. Fail closed: a
+// lookup error holds the send (retryable — the hold clears when the office confirms).
+const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
+  code: 'STREET_LEVEL_HOLD',
+  reason: 'Visit is an address hold awaiting the office confirm',
+});
+// The visit a send is about: appointmentId, or (callers that thread only metadata, e.g. the
+// card request) metadata.scheduled_service_id / scheduledServiceId. metadata.visit_id is a visit
+// GROUP id and is not used.
+function heldVisitIdOf(input) {
+  return input.appointmentId || input.metadata?.scheduled_service_id || input.metadata?.scheduledServiceId || null;
+}
+async function streetLevelHoldBlocksSend(input) {
+  const visitId = heldVisitIdOf(input);
+  if (!visitId || input.audience !== 'customer') return false;
+  // The card-on-file invitation the office-confirm hook itself sends (and its lazy-activation twin)
+  // is part of releasing the hold: the hook runs before the confirmed stamp lands, and only after
+  // the office approved the address (the activation guards refuse a hold otherwise).
+  if (input.purpose === 'card_request' && input.metadata?.trigger === 'outbound_review_confirm') return false;
+  // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
+  // stops NEW holds but never releases the customer messages of holds already open.
+  return require('../street-level-hold').isStreetLevelHoldVisit(String(visitId));
+}
+
 // callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
 // round 6 on PR #4807, structural). Rounds 2–5 keyed it on the visit
 // (appointmentId / metadata.scheduled_service_id / metadata.visit_id), and
@@ -846,6 +874,37 @@ async function sendCustomerMessageCore(input) {
       ...(blockedBy.retryable ? { retryable: true } : {}),
       ...(blockedBy.deferred ? { deferred: true } : {}),
       ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
+      // A deferred hold is requeued by its caller: hand back the transformed
+      // body (link wrap included) so the queued row is the text that goes out.
+      ...(blockedBy.deferred ? { sentBody: sendInput.body } : {}),
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  // 6.35 Street-level address hold (see streetLevelHoldBlocksSend above): nothing about
+  //      a held visit reaches the customer before the office confirms the address.
+  if (await streetLevelHoldBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput)} is a street-level address hold (${sendInput.purpose})`);
+    const blocked = { code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['street_level_hold'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
+      retryable: true,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
@@ -1077,6 +1136,14 @@ async function sendCustomerMessageCore(input) {
         'move_hold_boundary',
       );
     }
+    // Street-level address hold boundary re-check: a promotion that commits during the provider's
+    // own awaits must still hold the send (the same retryable deferral as the move hold).
+    if (await streetLevelHoldBlocksSend(sendInput)) {
+      return rememberBoundaryBlock(
+        { ok: false, code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason, retryable: true },
+        'street_level_hold_boundary',
+      );
+    }
     // callback_number_needed boundary re-check (codex round-6 P1): step
     // 6.45 ran before preDispatchCheck and the provider's own async
     // preparation — a hold committed in between (the call pipeline's
@@ -1302,6 +1369,8 @@ async function sendCustomerMessageCore(input) {
     });
   } catch (auditErr) {
     auditErr.providerOutcome = providerOutcome;
+    // Accepted-but-unaudited callers still need the body that went out.
+    auditErr.sentBody = sendInput.body;
     throw auditErr;
   }
 
@@ -1389,6 +1458,9 @@ async function sendCustomerMessageCore(input) {
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
+    // The audited body after every transform above (withheld-link rewrite,
+    // GATE_SMS_LINK_WRAP short links): what the provider was handed.
+    sentBody: sendInput.body,
     ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
       ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
       : {}),

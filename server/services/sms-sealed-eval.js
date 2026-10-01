@@ -41,8 +41,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const {
-  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffix, hasExactCompanyFacts,
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
 } = require('./sms-company-facts');
+const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -126,7 +127,7 @@ const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
 // PR #5331: the PAYMENT OPTIONS fact is properly gated (see
 // sms-shadow-drafter.js buildFactsBlock's own comment) and renders on every
 // gate-on facts block of the payment-facts revision. It is a VERSION-SUFFIX
-// fact ('pf' in VERSION_SUFFIX_FACT_MARKERS below), NOT a base v12 marker:
+// fact ('p' in VERSION_SUFFIX_FACT_MARKERS below), NOT a base v12 marker:
 // every real-answers identity before that revision (bare, '_cf') never
 // carried it, so their historical sealed-eval contracts FORBID it.
 const V12_PAYMENT_OPTIONS_MARKER = '- Payment options:';
@@ -157,18 +158,24 @@ function isV12PromptVersion(promptVersion) {
 const CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
 // Version-SUFFIX fact contract (Codex #5392 r1 P1): the real-answers base
 // identity carries a suffix token for every per-draft fact section a later
-// revision added ('_cf' = COMPANY FACTS; a numeric token >= 2 = the
-// unconditional FREE RE-SERVICE line). A suffix token REQUIRES its marker,
-// and — since the contract is exact — versions without the token FORBID it,
-// so items frozen before the section existed never grade a suffixed version
-// and suffixed items never grade an older one. A future fact section is one
-// more row here plus its suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
+// revision added ('_cf' = COMPANY FACTS, '_cfl' = COMPANY FACTS + LABEL FACTS; a
+// numeric token >= 2 = the unconditional FREE RE-SERVICE line). A suffix token
+// REQUIRES its marker, and — since the contract is exact — versions without the
+// token FORBID it, so items frozen before the section existed never grade a
+// suffixed version and suffixed items never grade an older one. A future fact
+// section is one more row here plus its suffix in the drafter's
+// REAL_ANSWERS_PROMPT_VERSION. A suffix is CUMULATIVE: '_cfl' (LABEL FACTS)
+// carries the COMPANY FACTS section too. LABEL FACTS can be a required marker
+// because the drafter ALWAYS renders its header gate-on ("none on file" when
+// the last visit has no verified label timing), so its absence always means
+// "frozen before the section existed".
 const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
-// 'pf' = PAYMENT FACTS (PR #5331): the gate-on BILLING section's "- Payment options:" line.
-const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER, pf: V12_PAYMENT_OPTIONS_MARKER });
-function suffixTokenMarker(token) {
-  if (/^\d+$/.test(token)) return Number(token) >= 2 ? RESERVICE_FACTS_MARKER : null;
-  return VERSION_SUFFIX_FACT_MARKERS[token] || null;
+// 'p' = PAYMENT FACTS (PR #5331): the gate-on BILLING section's "- Payment options:" line.
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: [COMPANY_FACTS_HEADER], cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER], p: [V12_PAYMENT_OPTIONS_MARKER] });
+// the markers one suffix token requires (a list)
+function suffixTokenMarkers(token) {
+  if (/^\d+$/.test(token)) return Number(token) >= 2 ? [RESERVICE_FACTS_MARKER] : [];
+  return VERSION_SUFFIX_FACT_MARKERS[token] || [];
 }
 function versionSuffixTokens(promptVersion) {
   const base = String(promptVersion).split('+')[0];
@@ -181,15 +188,18 @@ function requiredFactMarkers(promptVersion) {
   const tags = String(promptVersion).split('+')[1] || '';
   return [...new Set([
     V12_FACTS_MARKER,
-    ...versionSuffixTokens(promptVersion).map(suffixTokenMarker).filter(Boolean),
+    ...versionSuffixTokens(promptVersion).flatMap(suffixTokenMarkers),
     ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
   ])];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
-// carry must be ABSENT too. Every version has one (Codex #5194 r7 P1): a v11
-// exam after the gate is rolled back must not replay items frozen with the
-// v12 SLA, re-service or company-facts lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([...new Set([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS), ...Object.values(CATEGORY_FACT_MARKERS)])]);
+// carry must be ABSENT too — an item frozen while complaints were on carries
+// FREE RE-SERVICE, which live gate-off drafts never receive, so it must not
+// grade the plain v12 prompt after a rollback or switch. Every version has
+// one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
+// replay items frozen with the v12 SLA, re-service, company-facts or label
+// lines either.
+const CONTRACT_FACT_MARKERS = Object.freeze([...new Set([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS).flat(), RESERVICE_FACTS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)])]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));
@@ -211,6 +221,7 @@ function contractLabel(promptVersion) {
 //     FOLLOW-UP SLA RIGHT NOW: <phrase>          (gate on)
 //     FREE RE-SERVICE: <lanes>                   (gate on; numeric token >= 2 or the 'c' tag)
 //     COMPANY FACTS (...):  + "- <fact>" lines   ('_cf' cohort; matched by main's exact-render test)
+//     LABEL FACTS (...):  ('_cfl' cohort; matched by main's exact-render test, sms-label-facts)
 //     BILLING:
 //     - <billing lines…>  (incl. "- Payment options: …")
 //     PENDING ESTIMATE: …
@@ -221,12 +232,12 @@ function contractLabel(promptVersion) {
 //   SLA           a column-0 line immediately before [FREE RE-SERVICE:] BILLING:
 //   FREE RE-SERVICE  main's exact-render test (hasRenderedReserviceFact): SLA line + this line end the text before BILLING:
 //   Payment options  a column-0 line INSIDE the BILLING section (before PENDING ESTIMATE:)
-// COMPANY FACTS is the one marker that is NOT structural here: it keeps main's exact-render
-// test (hasExactCompanyFacts / exactSectionSuffix), and the optional section below lets the SLA
-// and FREE RE-SERVICE anchors sit in front of it.
+// COMPANY FACTS and LABEL FACTS are the markers that are NOT structural here: they keep main's exact-render
+// tests (hasExactCompanyFacts / hasExactLabelFacts, sms-company-facts), and the optional sections below let the SLA
+// and FREE RE-SERVICE anchors sit in front of them.
 // The pattern source below is valid for BOTH JS RegExp and PostgreSQL ARE (`~`),
 // so itemCompatibleWith and the SQL twin (compatibleWhereRaw) cannot drift.
-const COMPANY_FACTS_OPTIONAL = `(?:${COMPANY_FACTS_HEADER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n(?:- [^\\n]*\\n)*)?`;
+const COMPANY_FACTS_OPTIONAL = `(?:${COMPANY_FACTS_HEADER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n(?:- [^\\n]*\\n)*)?(?:${LABEL_SECTION_REGEX_SRC}\\n)?`;
 const MARKER_STRUCTURE = Object.freeze({
   [V12_FACTS_MARKER]: `(?:^|\\n)FOLLOW-UP SLA RIGHT NOW: [^\\n]*\\n(?:FREE RE-SERVICE:[^\\n]*\\n)?${COMPANY_FACTS_OPTIONAL}BILLING:\\n`,
   [V12_PAYMENT_OPTIONS_MARKER]: '\\nBILLING:\\n(?:(?!PENDING ESTIMATE:|RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:)[^\\n]*\\n)*?- Payment options:',
@@ -257,14 +268,15 @@ function hasRenderedReserviceFact(factsBlock) {
   const facts = String(factsBlock || '');
   const at = facts.indexOf(BILLING_DELIMITER);
   if (at < 0) return false;
-  const before = facts.slice(0, at);
-  const exact = exactSectionSuffix();
-  return RESERVICE_SECTION_RE.test(before.endsWith(exact) ? before.slice(0, -exact.length) : before);
+  // the exact company (+ label) structure, when the block ends with it, is peeled off; the re-service line sits directly above it
+  const before = facts.slice(0, at).replace(new RegExp(exactStructureRegexSource('optional')), '');
+  return RESERVICE_SECTION_RE.test(before);
 }
 function factsHasMarker(factsBlock, marker) {
   const facts = String(factsBlock || '');
   // COMPANY FACTS keeps main's exact-render trust test (a header typed into a multi-line SMS proves nothing).
   if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
+  if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
   if (marker === RESERVICE_FACTS_MARKER) return hasRenderedReserviceFact(facts);
   return markerRegex(marker).test(facts);
 }
@@ -282,17 +294,16 @@ function compatibleWhereRaw(markers, forbidden = []) {
   const clauses = [];
   const bindings = [];
   const add = (marker, negate) => {
-    if (marker === COMPANY_FACTS_HEADER) {
-      const exact = exactSectionSuffix();
-      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
-      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);
+    if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
+      // Exact-structure twin of hasExactCompanyFacts / hasExactLabelFacts: the
+      // text before the first BILLING: line matches the same regex source.
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND split_part(${col}, ?::text, 1) ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource(marker === LABEL_FACTS_MARKER ? 'required' : 'optional'));
     } else if (marker === RESERVICE_FACTS_MARKER) {
-      // the twin of hasRenderedReserviceFact: text before the first BILLING: line, minus the exact company
-      // render when it ends with it, must end with the SLA line + the re-service line
-      const exact = exactSectionSuffix();
-      const head = `split_part(${col}, ?::text, 1)`;
-      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND (CASE WHEN right(${head}, ?::int) = ?::text THEN left(${head}, length(${head}) - ?::int) ELSE ${head} END) ~ ?::text)`);
-      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact, BILLING_DELIMITER, BILLING_DELIMITER, exact.length, BILLING_DELIMITER, RESERVICE_SECTION_RE.source);
+      // the twin of hasRenderedReserviceFact: text before the first BILLING: line, minus the exact company (+ label)
+      // structure when it ends with it, must end with the SLA line + the re-service line
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND regexp_replace(split_part(${col}, ?::text, 1), ?::text, '') ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source);
     } else {
       clauses.push(`${col} ${negate ? '!~' : '~'} ?`);
       bindings.push(markerPattern(marker));

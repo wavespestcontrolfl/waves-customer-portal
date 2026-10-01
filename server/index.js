@@ -958,6 +958,7 @@ app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
+app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));

@@ -18,6 +18,9 @@ function parseInputSnapshot(inputSnapshot) {
   }
 }
 
+// Real-answers drafts (prompt family house_voice_v12*) are the ones whose facts
+// carry billing amounts and LABEL FACTS; older drafts are left as they were.
+const isRealAnswersDecision = (decision) => typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
 // Owner ruling 2026-10-01: a STAFF EDIT is the staff member's own wording, so the payment-status contract does not judge it. Edited =
 // the outgoing body differs (whitespace-normalized) from the AI draft stored on the decision. No stored draft => the body is treated as
 // the AI's: STRICT. Auto-send never carries an edit and never passes this.
@@ -103,7 +106,7 @@ function followupBlock({ decision, outgoingBody }) {
 // customer_id on the decision can never be checked against a real invoice —
 // fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
-  const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
+  const realAnswers = isRealAnswersDecision(decision);
   const { outgoingAmountsStale, hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
   // Codex round-23 P2: a Zelle OFFER or DENIAL is rechecked for every decision (an edited pre-v12 body too); v12 decisions always
   // run the whole recheck.
@@ -137,6 +140,34 @@ async function amountsBlock({ decision, outgoingBody }) {
     decision.zelle_boundary_denial = amounts.zelleDenial || null;
   }
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
+}
+
+// LABEL FACTS: the reply guard runs on the FINAL body of every real-answers
+// decision, whatever the reviewer did to it (an edited label sentence, a time
+// typed in, and a body on a decision that copied no sentence all read the same
+// way: label timing is allowed only as a verbatim sentence from the decision's
+// own snapshot). A draft that copied a sentence also persists which visit it
+// came from; that timing must still be the customer's current latest performed
+// visit (a newer visit, a visit today or a changed label refuses). Older-prompt
+// decisions without a snapshot are untouched.
+async function labelFactsBlockReason({ decision, outgoingBody, dbh }) {
+  const input = parseInputSnapshot(decision.input_snapshot);
+  const snapshot = input?.label_facts_snapshot || null;
+  if (!snapshot && !isRealAnswersDecision(decision)) return null;
+  // The customer's own text (stored on the decision) says which label kind was asked, so a bare "yes" /
+  // "it's okay" is held even when the draft copied no sentence; without it only answer-shaped bodies are held.
+  return require('./sms-label-facts').labelFactsSendBlockReason({ snapshot, body: outgoingBody, inbound: input?.sms?.body, ...(dbh ? { conn: dbh } : {}) });
+}
+async function labelFactsBlock({ decision, outgoingBody }) {
+  const reason = await labelFactsBlockReason({ decision, outgoingBody });
+  return reason ? `label timing no longer current (${reason})` : null;
+}
+
+// The scheduled-send version of the same check: the scheduler reads the decision row itself, and a row it cannot read (missing,
+// or not yet visible) must never mean "no snapshot, so send" - the reply guard cannot run without the decision, so it refuses.
+async function scheduledLabelFactsBlock({ decision, outgoingBody }) {
+  if (!decision) return 'label timing could not be checked (the agent decision was not found)';
+  return labelFactsBlock({ decision, outgoingBody });
 }
 
 // LIVE ETA (independent review + Codex round-1 finding, PR #5334): a
@@ -281,6 +312,56 @@ function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, te
   return markRepeatable(check);
 }
 
+// LABEL FACTS at the TRUE provider boundary (Codex #5416 P1, after #5334's boundary predicates landed): the
+// send-time label recheck runs before the handoff, policy and recipient awaits, so a newer visit completed
+// during them could still let the previous visit's timing reach the provider. The same recheck re-reads the
+// customer's latest performed visit through the handoff's connection (`dbi`) immediately before the request.
+// A recheck that could not READ the visit rides the bounded retry rail; every other refusal is terminal.
+function labelFactsBoundaryVerdict(reason) {
+  if (reason == null) return { ok: true };
+  const retryable = reason === 'label_facts_recheck_failed';
+  return {
+    ok: false,
+    code: retryable ? 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' : 'LABEL_FACTS_STALE_AT_BOUNDARY',
+    reason: `label timing no longer current (${reason})`,
+    ...(retryable ? { retryable: true } : {}),
+  };
+}
+function labelFactsProviderPreSendCheck({ decisionId, getBody }) {
+  const check = async ({ dbi } = {}) => {
+    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
+    let reason;
+    try {
+      const conn = dbi || require('../models/db');
+      const decision = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version');
+      // a decision row that cannot be read never means "no snapshot, so send"
+      reason = decision ? await labelFactsBlockReason({ decision, outgoingBody, dbh: dbi }) : 'label_facts_decision_not_found';
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed for decision ${decisionId}: ${err.message}; blocking send`);
+      reason = 'label_facts_recheck_failed';
+    }
+    return labelFactsBoundaryVerdict(reason);
+  };
+  return markRepeatable(check);
+}
+// Snapshot-carrying variant for the auto-send executor's claim (no row read): the same rule the executor's
+// own recheck applies - every real-answers draft runs the reply guard, an older-prompt draft only with a snapshot.
+function labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot = null, inboundMessage = null, promptVersion = null, getBody }) {
+  if (!labelFactsSnapshot && !(typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12'))) return undefined;
+  const check = async ({ dbi } = {}) => {
+    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
+    let reason;
+    try {
+      reason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: labelFactsSnapshot, body: outgoingBody, inbound: inboundMessage, ...(dbi ? { conn: dbi } : {}) });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed: ${err.message}; blocking send`);
+      reason = 'label_facts_recheck_failed';
+    }
+    return labelFactsBoundaryVerdict(reason);
+  };
+  return markRepeatable(check);
+}
+
 // A predicate that is a pure, idempotent state read declares itself safe to run AGAIN after
 // the sender's durable attempt marker (twilio.js re-runs `afterMarker` right before the SDK
 // request and undoes the marker on refusal, Codex round-43 P2). Non-flagged predicates keep
@@ -345,6 +426,7 @@ async function reserviceBlock({ decision, outgoingBody }) {
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
     || followupBlock({ decision, outgoingBody })
+    || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
     || (await etaBlock({ decision, outgoingBody }));
@@ -379,4 +461,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable };

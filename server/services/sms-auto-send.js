@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, paymentStatusSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -257,6 +257,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
           // the payment-status sentences the reply copies, re-rendered and rechecked before provider entry (dispatchClaimedSend)
           ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
+          ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
           // Codex round-43 P2: the already-booked re-service callback(s) the drafted reply may refer to ({ lane: { date, windowStart } }) —
           // rechecked live before provider entry (reserviceBookedHandoffCheck), same snapshot the manual / scheduled seams read.
           ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
@@ -315,7 +316,9 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
     return {
-      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, reserviceBookedSnapshot, paymentStatusSnapshot,
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot, reserviceBookedSnapshot, paymentStatusSnapshot,
+      // what the LABEL FACTS send-time check needs to read the question: the customer's own text and the prompt family
+      inboundMessage,
       // Pre-push audit P1 (finding 2): threaded to the pre-send Zelle
       // eligibility recheck in dispatchClaimedSend.
       zelleInvoiceId,
@@ -827,9 +830,12 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // gratitude handoff) LAST, so no other state can change after the final guard and before
     // the provider request; the repeatable parts re-run in the same order after the marker.
     providerPreSendCheck: (() => {
-      const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read here too, so a visit completed after the
+        // executor's own recheck cannot let the previous visit's timing through.
+        labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
         // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection)
         billingFingerprint !== undefined
           ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelleInvoiceId: claim.zelleInvoiceId || null, zelleDenial, getBody: () => reply })
@@ -1023,6 +1029,21 @@ async function dispatchClaimedSend({
           await reopenParked('Auto-send held: a quoted appointment time is no longer open — suggestion reopened.');
           return outcome;
         }
+      }
+    }
+    // LABEL FACTS send-time recheck: a reply that copies a label sentence
+    // must still be backed by the customer's CURRENT latest performed visit
+    // (a newer visit, a visit today, a changed label all refuse). Same
+    // supersede-via-failClaim refusal as the open-times recheck above.
+    // Every real-answers dispatch runs the reply guard (snapshot or not: "Yes, they can go out." copies no sentence and still
+    // answers a label question); older-prompt drafts run it only when they carry a snapshot.
+    if (claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12'))) {
+      const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
+      if (labelReason) {
+        logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
+        const outcome = await notSent(labelReason);
+        await reopenParked('Auto-send held: the label timing in the draft is no longer current — suggestion reopened.');
+        return outcome;
       }
     }
     // LIVE ETA send-time recheck (independent review + Codex round-1

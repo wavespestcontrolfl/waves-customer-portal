@@ -195,7 +195,7 @@ test('no zelleInvoiceId on the claim (missing snapshot) blocks the send — fail
 // alongside the Zelle recheck above. A status sentence with no figure ("Your account has no balance due.") clears the
 // price-quote guard, so it must be re-rendered from live data before the provider is entered.
 describe('payment-status recheck (PR #5331)', () => {
-  const V12 = 'house_voice_v12_real_answers5_cf_pf';
+  const V12 = 'house_voice_v12_real_answers5_cfl_p';
   const SNAP = { customer_id: '00000000-0000-4000-8000-000000000002', sentences: ['Your account has no balance due.'] };
   test('a real-answers reply is rechecked against its snapshot and the customer inbound, and sends when clean', async () => {
     await expect(attempt({ reply: 'Your account has no balance due.', promptVersion: V12, paymentStatusSnapshot: SNAP })).resolves.toMatchObject({ sent: true });
@@ -257,7 +257,7 @@ describe('a throwing recheck releases the claim (fail closed)', () => {
 
   test('paymentStatusSendBlockReason throws', async () => {
     amountRecheck.paymentStatusSendBlockReason.mockRejectedValue(new Error('billing down'));
-    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cf_pf' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
+    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cfl_p' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
     expect(suggest.settleReplyHoldingReservation).toHaveBeenCalled();
@@ -279,7 +279,7 @@ describe('the claim is released on every other pre-send error path', () => {
     suggest.settleReplyHoldingReservation
       .mockResolvedValueOnce(true) // arm
       .mockRejectedValue(new Error('settle down')); // release
-    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cf_pf' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
+    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cfl_p' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
   });

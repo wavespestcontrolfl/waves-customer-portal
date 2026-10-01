@@ -122,7 +122,10 @@ describe('deferred completion texts keep their template key through the morning 
   test('the enqueue stores template_key and the scheduler replay forwards it', () => {
     const css = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const deferred = css.slice(css.indexOf("entry_point: 'dispatch_completion_deferred'"));
-    expect(deferred.slice(0, 400)).toMatch(/template_key: sentSmsType/);
+    // The re-service fixed recap freezes its own template row; every other
+    // completion text keeps the sent SMS type as its key.
+    expect(deferred.slice(0, 700)).toMatch(/template_key: ReserviceFixedRecap\.TEMPLATE_KEY/);
+    expect(deferred.slice(0, 700)).toMatch(/template_key: sentSmsType/);
     const sched = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(sched).toMatch(/claimMeta\.template_key \? \{ templateKey: String\(claimMeta\.template_key\) \}/);
   });
