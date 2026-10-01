@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const {
-  findSamePremises,
+  samePremisesRows,
   ensurePrimaryProperty,
   recordCallProperty,
 } = require('./customer-properties');
@@ -552,9 +552,11 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
       if (!propertyId) {
         // Address already on file — resolve the existing row with the same
         // same-house match recordCallProperty deduped against.
+        // Two matching rows is ambiguous: leave the estimate unlinked rather
+        // than guess (same guard as the call-booking resolver).
         const rows = await database('customer_properties').where({ customer_id: customerId, active: true });
-        const matched = findSamePremises(rows, { address_line1: parts.address_line1, address_line2: parts.address_line2 || null, city: parts.city, zip: parts.zip });
-        propertyId = matched ? matched.id : null;
+        const matches = samePremisesRows(rows, { address_line1: parts.address_line1, address_line2: parts.address_line2 || null, city: parts.city, zip: parts.zip });
+        propertyId = matches.length === 1 ? matches[0].id : null;
       }
     }
     if (!propertyId) return null;

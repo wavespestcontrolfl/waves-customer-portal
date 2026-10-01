@@ -146,26 +146,40 @@ const PREMISES_SUFFIX_CANON = {
 };
 
 /**
- * Same-house key for the duplicate check: street + unit + 5-digit ZIP,
- * suffix-canonical with the extra USPS forms above. City is left out on
- * purpose: one ZIP carries several mailing names (Parrish / Duette 34219,
- * Bradenton / Lakewood Ranch 34211), so the same house arrives under either.
+ * Same-house street + unit key for the duplicate check, suffix-canonical with
+ * the extra USPS forms above. Only the STREET words are suffix-mapped; the
+ * unit keeps its own normalization (unitKey), so a unit "PT" or "Cove" is
+ * never rewritten. Locality (ZIP or city) is compared by samePremisesRows.
  */
-function premisesKey({ address_line1, address_line2, zip } = {}) {
-  const streetUnit = stripUnitDesignators([address_line1, address_line2].filter(Boolean).join(' '));
-  return canonicalizeAddress([streetUnit, normalizeZip(zip)].filter(Boolean).join(' '))
+function premisesStreetUnitKey({ address_line1, address_line2 } = {}) {
+  const street = canonicalizeAddress(stripTrailingUnit(address_line1))
     .split(' ').map((w) => PREMISES_SUFFIX_CANON[w] || w).join('')
     .replace(/[^a-z0-9]/g, '');
+  const unit = unitKey(address_line2) || streetEmbeddedUnitKey(address_line1);
+  return street ? `${street}|${unit}` : '';
+}
+
+const normCity = (c) => String(c || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// Same locality: both ZIPs present → the ZIPs decide, and the city is left out
+// on purpose (one ZIP carries several mailing names: Parrish / Duette 34219,
+// Bradenton / Lakewood Ranch 34211). Exactly one ZIP missing → the cities
+// must match. No ZIP on either side → only the exact full key counts.
+function sameLocality(a, b) {
+  const za = normalizeZip(a.zip);
+  const zb = normalizeZip(b.zip);
+  if (za && zb) return za === zb;
+  if (za || zb) return !!normCity(a.city) && normCity(a.city) === normCity(b.city);
+  return false;
 }
 
 /**
  * Rows in `existingProps` that are the same house as `candidate`: the exact
- * full-address-key matches when there are any, else the street + unit + ZIP
- * (premisesKey) matches. Without a ZIP on the candidate the city is the only
- * locality evidence, so only the full key counts. Callers resolving the row
- * recordCallProperty declined to insert use this, so they see exactly what
- * the dedupe matched; a caller that needs one row keeps its own ambiguity
- * guard on the length (pure).
+ * full-address-key matches when there are any, else the same street + unit
+ * (suffix forms above) in the same locality (sameLocality). Callers
+ * resolving the row recordCallProperty declined to insert use this, so they
+ * see exactly what the dedupe matched; a caller that needs one row keeps its
+ * own ambiguity guard on the length (pure).
  */
 function samePremisesRows(existingProps, candidate = {}) {
   const key = addressKey(candidate);
@@ -173,10 +187,9 @@ function samePremisesRows(existingProps, candidate = {}) {
   const rows = existingProps || [];
   const exact = rows.filter((p) => addressKey(p) === key);
   if (exact.length) return exact;
-  const zip = normalizeZip(candidate.zip);
-  if (!zip) return [];
-  const premises = premisesKey(candidate);
-  return rows.filter((p) => normalizeZip(p.zip) === zip && premisesKey(p) === premises);
+  const premises = premisesStreetUnitKey(candidate);
+  if (!premises) return [];
+  return rows.filter((p) => sameLocality(p, candidate) && premisesStreetUnitKey(p) === premises);
 }
 
 /** The first same-house row (see samePremisesRows), or null (pure). */

@@ -133,6 +133,17 @@ describe('customer-properties pure helpers', () => {
     const exactGlen = { id: 'c', address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' };
     expect(samePremisesRows([glen, exactGlen], { address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' })).toEqual([exactGlen]);
   });
+
+  test('same-house match: a missing ZIP on one side falls back to the city; unit ids are never suffix-mapped', () => {
+    const noZip = { id: 'n', address_line1: '600 Sample Cv', city: 'Venice', zip: null };
+    expect(findSamePremises([noZip], { address_line1: '600 Sample Cove', city: 'Venice', zip: '34285' })).toBe(noZip);
+    expect(findSamePremises([noZip], { address_line1: '600 Sample Cove', city: 'Nokomis', zip: '34275' })).toBeNull();
+    expect(findSamePremises([{ address_line1: '600 Sample Cv', city: 'Venice', zip: '34285' }], { address_line1: '600 Sample Cove', city: 'Venice' })).not.toBeNull();
+    expect(findSamePremises([{ address_line1: '600 Sample Cv' }], { address_line1: '600 Sample Cove' })).toBeNull();
+    // "Pt" is a street suffix (Point), not a unit: units PT and POINT stay distinct
+    expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit PT', zip: '34219' }], { address_line1: '700 Demo Glen', address_line2: 'Unit Point', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit 4', zip: '34219' }], { address_line1: '700 Demo Glen Apt 4', zip: '34219' })).toBe(false);
+  });
 });
 
 describe('syncPrimaryAddress explicit line 2 intent', () => {
