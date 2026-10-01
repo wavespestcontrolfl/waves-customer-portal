@@ -2374,10 +2374,15 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
 describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', () => {
   const RecurringCards = require('../services/recurring-card-on-file');
   const { AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
-  const TOKEN = 'tok-pafb-r2-x0123456789';
+  // The accept route rate-limits per token — a fresh token per seed keeps
+  // each case independent of how many accepts the earlier ones sent.
+  let TOKEN = 'tok-pafb-r2-x0123456789';
+  let tokenSeq = 0;
   let resolverSpy;
 
   function seed() {
+    tokenSeq += 1;
+    TOKEN = `tok-pafb-r2-${tokenSeq}-x0123456789`;
     resetStore(recurringPestEstimate({ id: 'est-pafb-r2', token: TOKEN }));
   }
   function livePolicy(policy) {
@@ -2448,18 +2453,56 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     expect(storedEstimate().status).toBe('accepted');
   });
 
-  test('pre-push P0: 409 stale -> reload -> accept on a no-capture path durably marks the accept so the webhook can never enroll the discarded intent', async () => {
+  function acceptedData() {
+    const raw = storedEstimate().estimate_data;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  }
+
+  test('pre-push P0: PAF 409 stale -> reload -> accept on a no-capture path durably marks the accept so the webhook can never enroll the discarded intent', async () => {
     seed();
-    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    // Tab 1 captured under the after-visit flow; another tab then saved a
+    // consented method, so the live policy is the PAF saved-method cohort.
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
     const stale = await putAccept(TOKEN, CAPTURED);
     expect(stale.status).toBe(409);
     expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
-    // The reloaded tab accepts without the (dropped) intent.
+    // The reloaded tab accepts without the (dropped) intent; the locked-row
+    // eligibility recheck is a DB read this in-memory store does not model.
+    const driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
     conversionOk();
     const res = await putAccept(TOKEN, {});
     expect(res.status).toBe(200);
-    const data = typeof storedEstimate().estimate_data === 'string' ? JSON.parse(storedEstimate().estimate_data) : storedEstimate().estimate_data;
-    expect(data.acceptedRecurringCardSetupIntentId).toBe(RecurringCards.ACCEPTED_NO_CAPTURE_MARKER);
+    driftSpy.mockRestore();
+    expect(acceptedData().acceptedRecurringCardSetupIntentId).toBe(RecurringCards.ACCEPTED_NO_CAPTURE_MARKER);
+  });
+
+  test('r3 P1: a gate-off no-capture accept writes NO marker (byte-identical to pre-PR-B)', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  test.each([
+    ['payer_billed', { enforced: true, required: false, exemptReason: 'payer_billed' }],
+    ['autopay_already_active', { enforced: true, required: false, exemptReason: 'autopay_already_active' }],
+    ['commercial_manual_billing', { enforced: true, required: false, exemptReason: 'commercial_manual_billing' }],
+    ['payer_check_uncertain', { enforced: true, required: false, exemptReason: 'payer_check_uncertain' }],
+    ['existing_plan_customer', { enforced: true, required: false, exemptReason: 'existing_plan_customer' }],
+    ['saved_method_consented (non-PAF)', {
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1',
+    }],
+  ])('r3 P1: exempt cohort %s writes NO marker — a legacy recovery stays exactly as before', async (_name, policy) => {
+    seed();
+    livePolicy(policy);
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
   });
 
   test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {

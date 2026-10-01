@@ -1904,8 +1904,20 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
 // recovered/enrolled for it by the setup_intent.succeeded webhook.
 const ACCEPTED_NO_CAPTURE_MARKER = 'no_capture_at_accept';
 
+// True when a no-capture accept must stamp the marker above: the policy is the
+// PR-B existing-customer cohort (afterVisitCard is set only while
+// GATE_PAF_EXISTING_CUSTOMERS is live, never for prepay, and is cleared by the
+// commercial manual-billing exemption), so a tab could have captured an intent
+// under the after-visit flow that this accept did not bind. Every other policy
+// (gate-off, payer_billed, autopay_already_active, commercial, one-time,
+// invoice-mode) keeps estimate_data exactly as it was before PR-B.
+function acceptDiscardsBindableCapture(policy) {
+  return !!policy && policy.afterVisitCard === true;
+}
+
 module.exports = {
   ACCEPTED_NO_CAPTURE_MARKER,
+  acceptDiscardsBindableCapture,
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   payAfterFirstVisitCardRail,

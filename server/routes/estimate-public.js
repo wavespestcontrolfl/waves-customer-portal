@@ -11124,15 +11124,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
 
       // GitHub Codex #5481 r2 pre-push P0: an accept that commits WITHOUT a
-      // verified capture must say so durably. A SetupIntent a tab captured and
-      // the accept then refused (CONSENT_VARIANT_STALE: gate flipped, another
-      // tab saved a method, opt-out) stays succeeded in Stripe; after the
-      // reload the customer accepts on a no-capture path (no intent stamp) and
-      // the setup_intent.succeeded retry would read the unstamped accept as a
+      // verified capture must say so durably WHEN a PR-B capture could have
+      // been bound to it. A SetupIntent a tab captured and the accept then
+      // refused (CONSENT_VARIANT_STALE: gate flipped, another tab saved a
+      // method, opt-out) stays succeeded in Stripe; after the reload the
+      // customer accepts on a no-capture path (no intent stamp) and the
+      // setup_intent.succeeded retry would read the unstamped accept as a
       // LEGACY one and enroll that discarded card (undoing an opt-out, base
-      // consent). The marker makes every intent for this estimate "superseded"
-      // to the recovery. One-time / invoice-mode accepts never enroll anyway.
-      if (!(recurringCardVerification?.ok && recurringCardVerification.setupIntentId)
+      // consent). The marker makes every intent for this estimate
+      // "superseded" to the recovery.
+      // Narrowed (r3 pre-push P1): only the PR-B cohort is marked
+      // (recurringCardPolicy.afterVisitCard, set only while the
+      // GATE_PAF_EXISTING_CUSTOMERS sub-gate is live and cleared by the
+      // commercial exemption). Gate-off accepts and every exempt cohort
+      // (payer_billed, autopay_already_active, commercial_manual_billing,
+      // one-time / invoice-mode) leave estimate_data untouched, so a legacy
+      // recovery for them is exactly what it was before PR-B. A capture the
+      // accept REJECTED never reaches here (409 before commit).
+      if (RecurringCards.acceptDiscardsBindableCapture(recurringCardPolicy)
+        && !(recurringCardVerification?.ok && recurringCardVerification.setupIntentId)
         && !treatAsOneTime && !billByInvoice) {
         await trx('estimates').where({ id: estimate.id }).update({
           estimate_data: trx.raw(
