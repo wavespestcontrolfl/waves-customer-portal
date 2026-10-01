@@ -190,6 +190,7 @@ describe('run', () => {
 });
 
 describe('cited-page pitches', () => {
+  const ARTICLE = 'Our picks for the best pest control companies in Sarasota, with notes on service area, pricing and reviews. '.repeat(6);
   const citedPage = (o = {}) => ({
     key: 'floridist.com/best-pest-control-sarasota', host: 'floridist.com', url: 'https://floridist.com/best-pest-control-sarasota',
     listPage: true, tier: 1, rank: 1, currentMisses: 2,
@@ -227,7 +228,7 @@ describe('cited-page pitches', () => {
 
   test('run reads the cited page (not the homepage), drafts with the angle, and notes the page on the report', async () => {
     claims([cited]);
-    const fetchPageFn = jest.fn(async () => ({ title: 'Best Pest Control in Sarasota', snippet: 'Our picks', text: 'Our picks: Acme Pest, Gulf Bugs' }));
+    const fetchPageFn = jest.fn(async () => ({ title: 'Best Pest Control in Sarasota', snippet: 'Our picks', text: ARTICLE }));
     const create = jest.fn(async () => ({ content: [{ type: 'text', text: '{"subject":"Your Sarasota list","body":"Hi"}' }] }));
     const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn, citedPagesFn: async () => ({ pages: [citedPage()] }) });
     expect(r.drafted).toBe(1);
@@ -239,7 +240,7 @@ describe('cited-page pitches', () => {
   test('a cited page that already names Waves is skipped, never pitched', async () => {
     claims([cited]);
     const create = jest.fn();
-    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', text: 'Top picks … 3. Waves Pest Control (Lakewood Ranch)' }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', text: `${ARTICLE} 3. Waves Pest Control (Lakewood Ranch)` }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
     expect(create).not.toHaveBeenCalled();
     expect(r.skipped).toBe(1);
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', notes: expect.stringMatching(/Waves already on the cited page/) }));
@@ -268,12 +269,15 @@ describe('cited-page pitches', () => {
     expect(r.failed).toBe(1);
   });
 
-  test('an empty extracted page (script-rendered shell) fails; a redirect to another page skips', () => {
+  test('an empty, title-only or bot-challenge page fails; a redirect to another page skips', () => {
     const c = citedPage();
-    expect(citedPageVerdict({ text: '   ', finalUrl: c.url }, c)).toEqual({ fail: expect.stringMatching(/could not be read in full/) });
-    expect(citedPageVerdict({ text: 'Our picks', finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects to https:\/\/floridist\.com\//) });
-    expect(citedPageVerdict({ text: 'Our picks', finalUrl: 'https://www.floridist.com/best-pest-control-sarasota/' }, c)).toBeNull();
-    expect(citedPageVerdict({ text: 'Our picks' }, c)).toBeNull();
+    const unread = { fail: expect.stringMatching(/could not be read in full/) };
+    expect(citedPageVerdict({ text: '   ', finalUrl: c.url }, c)).toEqual(unread);
+    expect(citedPageVerdict({ title: 'Best Pest Control in Sarasota', text: 'Best Pest Control in Sarasota' }, c)).toEqual(unread);
+    expect(citedPageVerdict({ title: 'Just a moment...', text: `Just a moment... Verify you are human. ${ARTICLE}` }, c)).toEqual(unread);
+    expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects to https:\/\/floridist\.com\//) });
+    expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://www.floridist.com/best-pest-control-sarasota/' }, c)).toBeNull();
+    expect(citedPageVerdict({ text: ARTICLE }, c)).toBeNull();
   });
 
   test('a page that is not itself a list never carries the angle, whatever question cited it', () => {

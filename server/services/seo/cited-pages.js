@@ -155,12 +155,14 @@ function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
   return {
     ...p,
     url: displayUrl(topUrl),
-    // evidence about the PAGE, not the question that cited it: a best / top /
-    // rated / near-me page, the roundup an editor can add Waves to. Not a
-    // directory (a business profile is one company, and a directory is joined
-    // by signing up, not by a pitch), not a listicle candidate on a place name
-    // alone, and not a cost guide cited for "who should I hire".
-    listPage: hasBestToken(topUrl),
+    // evidence about the PAGE, not the question that cited it: an editorial
+    // best / top / rated / near-me page (read with tracking parameters
+    // stripped, so ?utm_campaign=best proves nothing), the roundup an editor
+    // can add Waves to. Never a directory (a /biz/ profile is one company, and
+    // a directory is joined by signing up, not by a pitch), never a listicle
+    // candidate on a place name alone, never a cost guide cited for "who
+    // should I hire".
+    listPage: p.category === 'editorial' && hasBestToken(displayUrl(topUrl)),
     tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
     priorityCity: questions.some((q) => isPriorityCity(q.city)),
     engines: [...p.engines].sort(),

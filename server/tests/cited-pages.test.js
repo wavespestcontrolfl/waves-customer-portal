@@ -126,6 +126,9 @@ describe('rankCitedPages', () => {
     const byHost = Object.fromEntries(rankCitedPages(rows, []).map((p) => [p.host, p.listPage]));
     // a directory business profile is one company, not a list to be added to
     expect(byHost).toEqual({ 'bobvila.com': false, 'floridist.com': true, 'yelp.com': false });
+    // a /biz/ profile with "best" in its slug is still one company; a tracking-only "best" proves nothing
+    const more = rankCitedPages([row({ query: Q1, urls: ['https://www.yelp.com/biz/best-pest-control-sarasota', 'https://www.bobvila.com/articles/pest-control-cost/?utm_campaign=best'] })], []);
+    expect(more.map((p) => p.listPage)).toEqual([false, false]);
     // a heuristic listicle candidate on a place name alone is not proof of a list
     const [guide] = rankCitedPages([row({ query: Q1, urls: ['https://someblog.example/sarasota-pest-guide'] })], []);
     expect(guide).toMatchObject({ subtype: 'listicle_candidate', listPage: false });

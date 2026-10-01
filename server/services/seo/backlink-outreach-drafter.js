@@ -247,13 +247,25 @@ function buildUserPrompt(prospect, profile, loc, page, cited = null) {
 
 /**
  * citedPageVerdict(page, cited) → null (pitch it) | { fail } | { skip }.
- * Unreadable, cut short or empty (a script-rendered shell): whether Waves is
- * on it cannot be known, so the lease fails and retries. Redirected to a
+ * Unreadable, cut short, empty, title-only (a script-rendered shell) or a bot
+ * challenge: whether Waves is on it cannot be known, so the lease fails and
+ * retries. Redirected to a
  * different page (the article is gone, often to the homepage): skipped. A
  * page that already names Waves: skipped.
  */
+// A body this short once the title is taken out, or one that reads as a bot
+// challenge or a "turn on JavaScript" shell, is not the article.
+const MIN_ARTICLE_CHARS = 400;
+const UNREADABLE_PAGE_RE = /\b(verify you are (a )?human|just a moment\.\.\.|checking your browser|enable javascript|access denied|are you a robot|captcha)\b/i;
+
+function readableArticle(page) {
+  if (!page || typeof page.text !== 'string') return false;
+  const body = page.title ? page.text.split(page.title).join(' ') : page.text;
+  return body.trim().length >= MIN_ARTICLE_CHARS && !UNREADABLE_PAGE_RE.test(page.text);
+}
+
 function citedPageVerdict(page, cited) {
-  if (!page || typeof page.text !== 'string' || !page.text.trim()) return { fail: `cited page could not be read in full: ${cited.url}` };
+  if (!readableArticle(page)) return { fail: `cited page could not be read in full: ${cited.url}` };
   if (page.finalUrl && pageKey(page.finalUrl) !== cited.key) return { skip: `cited page ${cited.url} now redirects to ${page.finalUrl}` };
   if (WAVES_LISTED_RE.test(page.text)) return { skip: `Waves already on the cited page ${cited.url}` };
   return null;
