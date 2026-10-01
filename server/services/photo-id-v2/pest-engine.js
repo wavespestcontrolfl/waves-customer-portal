@@ -201,13 +201,30 @@ function clausesFor(entry) {
 // does not set the warning. Any supporting read that is not a catalog entry
 // (an off-catalog name) could be anything under the node, so the node's
 // whole membership applies, as it does when nothing supports the node.
+// Look-alike pairs are authored one way (little fire ant lists pharaoh ant,
+// not the reverse), so the triage reads both directions.
+const LOOK_ALIKES_EITHER_WAY = (() => {
+  const edges = new Map();
+  const link = (a, b) => {
+    if (!edges.has(a)) edges.set(a, new Set());
+    edges.get(a).add(b);
+  };
+  for (const entry of catalog.listEntries()) {
+    for (const la of entry.look_alikes || []) {
+      link(entry.slug, la.slug);
+      link(la.slug, entry.slug);
+    }
+  }
+  return edges;
+})();
+
 function safetyMembersFor(nodeId, supporting = []) {
   const all = NODE_MEMBERS.get(nodeId) || [];
   if (!supporting.length || supporting.some((c) => !c.entry)) return all;
   const slugs = new Set();
   for (const c of supporting) {
     slugs.add(c.entry.slug);
-    for (const la of catalog.lookAlikes(c.entry.slug)) slugs.add(la.slug);
+    for (const slug of LOOK_ALIKES_EITHER_WAY.get(c.entry.slug) || []) slugs.add(slug);
   }
   return [...slugs].map((slug) => catalog.getEntry(slug)).filter(Boolean);
 }

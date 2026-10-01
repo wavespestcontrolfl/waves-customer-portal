@@ -119,6 +119,16 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.vector);
   });
 
+  // Pre-push Codex P1: pairs are authored one way. Little fire ant lists
+  // pharaoh ant (not the reverse), so a pharaoh ant climb keeps the little
+  // fire ant's allergen and pet clauses.
+  test('a reverse catalog look-alike still sets the warning', () => {
+    const built = answerFor('pharaoh-ant', { approved: false });
+    expect(built.entry).toBeNull();
+    expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.allergen);
+    expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.pets);
+  });
+
   test('an off-catalog read under the node still triages for every member', () => {
     const offCatalog = {
       slug: null, offCatalogName: 'unlisted bug', groupId: 'true-bugs', confidence: 0.3, entry: null,
