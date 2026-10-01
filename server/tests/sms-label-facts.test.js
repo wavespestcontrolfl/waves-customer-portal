@@ -3346,6 +3346,10 @@ describe('follow-up 2 (#5520 r5 + the 2026-10-01 prod sweep): the inbound langua
   test('effectiveness wording must share a sentence with the watering (r5 P2); "times" is not a visit (r5 P2)', () => {
     expect(labelFactsLib.askedLabelKinds('My sprinkler is broken. Separately, is the ant bait less effective in winter?')).toEqual([]);
     expect(labelFactsLib.askedLabelKinds('Will the sprinklers make it less effective?')).toEqual(['rain']);
+    // a following sentence that points back at the watering still counts, and the reply guard then holds a bare answer
+    const asked = labelFactsLib.askedLabelKinds('The sprinklers ran. Will that make it less effective?');
+    expect(asked).toEqual(['rain']);
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming('No, it will not.', '', asked)).toBe(true);
     expect(labelFactsLib.inboundRefersToOtherVisit("I asked two times before; for yesterday's treatment, when can the kids go out?", '2026-09-30', '2026-10-01')).toBe(false);
     expect(labelFactsLib.inboundRefersToOtherVisit('two treatments back, can the kids go out?', '2026-09-30', '2026-10-01')).toBe(true);
   });
