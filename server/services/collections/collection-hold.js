@@ -399,6 +399,9 @@ function holdDeferOutcome(held = { reason: 'hold' }) {
 // retryable error (QUEUE_INVOICE_NOT_SETTLED): every caller owes the invoice a
 // retry, a durable alert or a deferral, never a finalized hand-off.
 const QUEUE_NOT_SETTLED_CODE = 'QUEUE_INVOICE_NOT_SETTLED';
+// The scheduled-invoice sender's attempt cap (processScheduledSends / claimDueScheduledInvoiceForSend
+// select only rows with scheduled_send_attempts < 5).
+const SCHEDULED_SEND_ATTEMPT_CAP = 5;
 const HANDLED_INVOICE_STATUSES = new Set(['scheduled', 'sent', 'viewed', 'overdue', 'paid', 'prepaid', 'void', 'voided', 'refunded', 'canceled', 'cancelled', 'processing']);
 async function queueHeldInvoiceForSender(invoiceId, database = db) {
   if (!invoiceId) return { queued: false };
@@ -412,6 +415,23 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
       scheduled_send_error: null, updated_at: database.fn.now(),
     });
   if (Number(n) > 0) return { queued: true };
+  // Codex #5424 r16 P2: a row that is ALREADY 'scheduled' is the sender's own only while it stays
+  // runnable. processScheduledSends skips a row at its attempt cap (scheduled_send_attempts >= 5), so a
+  // handoff that called it "settled" would record the sender as the pay link's owner and the release would
+  // never deliver it. Re-arm such an exhausted, still-undelivered self-pay row: a hold deferral spends no
+  // attempt, so the cap was reached by earlier definite failures and the hold gives it a fresh budget. A
+  // live claim is never touched: a claimed row is 'sending' (the compare-and-set needs status 'scheduled'),
+  // and the sender's own claim needs attempts < 5, so no claimer can hold an exhausted row.
+  const rearmed = await database('invoices')
+    .where({ id: invoiceId, status: 'scheduled' })
+    .where('scheduled_send_attempts', '>=', SCHEDULED_SEND_ATTEMPT_CAP)
+    .whereNull('payer_id').whereNull('payer_statement_id')
+    .whereNull('paid_at').whereNull('sent_at').whereNull('sms_sent_at').whereNull('email_sent_at')
+    .update({
+      scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
+      scheduled_send_error: null, updated_at: database.fn.now(),
+    });
+  if (Number(rearmed) > 0) return { queued: true, rearmed: true };
   const row = await database('invoices').where({ id: invoiceId })
     .first('status', 'payer_id', 'payer_statement_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at', 'scheduled_send_error');
   const status = String(row?.status || '').toLowerCase();

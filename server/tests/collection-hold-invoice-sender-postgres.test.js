@@ -195,6 +195,56 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(await Hold.queueHeldInvoiceForSender(sending)).toEqual({ queued: true });
     });
 
+    // Codex #5424 r16 P2: an already-'scheduled' invoice at the sender's attempt cap is NOT runnable
+    // (processScheduledSends selects scheduled_send_attempts < 5), so the handoff must not call it settled.
+    test('a scheduled invoice that exhausted its attempts is RE-ARMED by the hold handoff (fresh budget, due now) and sends after the release; a runnable one, a delivered one and a live claim are left alone', async () => {
+      const c = await newCustomer();
+      const past = new Date(Date.now() - 3600 * 1000);
+      const exhausted = await newInvoice(c, { status: 'scheduled', scheduled_send_at: past, scheduled_send_attempts: 5, scheduled_send_error: 'sms: synthetic carrier failure' });
+      const runnable = await newInvoice(c, { status: 'scheduled', scheduled_send_at: past, scheduled_send_attempts: 4, scheduled_send_error: 'sms: synthetic carrier failure' });
+      const exhaustedDelivered = await newInvoice(c, { status: 'scheduled', scheduled_send_at: past, scheduled_send_attempts: 5, sms_sent_at: db.fn.now() });
+      const liveClaim = await newInvoice(c, { status: 'sending', scheduled_send_attempts: 5, send_claim_token: randomUUID() });
+
+      expect(await Hold.queueHeldInvoiceForSender(exhausted)).toEqual({ queued: true, rearmed: true });
+      expect(await invoice(exhausted)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, scheduled_send_error: null, send_claim_token: null });
+      expect((await invoice(exhausted)).scheduled_send_at.getTime()).toBeGreaterThan(past.getTime());
+
+      // runnable: the sender still owns it as-is (untouched: attempts and time kept)
+      expect(await Hold.queueHeldInvoiceForSender(runnable)).toMatchObject({ queued: false, settled: true });
+      expect(await invoice(runnable)).toMatchObject({ scheduled_send_attempts: 4, scheduled_send_error: 'sms: synthetic carrier failure' });
+      expect((await invoice(runnable)).scheduled_send_at.getTime()).toBe(past.getTime());
+      // delivered on a channel already: not re-armed
+      expect(await Hold.queueHeldInvoiceForSender(exhaustedDelivered)).toMatchObject({ queued: false, settled: true });
+      expect((await invoice(exhaustedDelivered)).scheduled_send_attempts).toBe(5);
+      // a live claim is never reset: still the transient-sending refusal, claim token and attempts intact
+      const before = await invoice(liveClaim);
+      await expect(Hold.queueHeldInvoiceForSender(liveClaim)).rejects.toMatchObject({ code: 'QUEUE_INVOICE_NOT_SETTLED', retryable: true });
+      expect(await invoice(liveClaim)).toMatchObject({ status: 'sending', scheduled_send_attempts: 5, send_claim_token: before.send_claim_token });
+      // idempotent: the re-armed row is now runnable, so a second handoff is settled and changes nothing
+      const rearmedAt = (await invoice(exhausted)).scheduled_send_at.getTime();
+      expect(await Hold.queueHeldInvoiceForSender(exhausted)).toMatchObject({ queued: false, settled: true });
+      expect((await invoice(exhausted)).scheduled_send_at.getTime()).toBe(rearmedAt);
+    });
+
+    test('end to end: a completion hand-over (handOverHeldInvoiceToSender) of an exhausted scheduled invoice records the sender as owner AND the invoice is delivered by the first tick after the release', async () => {
+      const Deferred = require('../services/dispatch-completion-deferred');
+      const c = await newCustomer();
+      const holdId = await placeHold(c);
+      const inv = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000), scheduled_send_attempts: 5 });
+      const [rec] = await db('service_records').insert({ customer_id: c, service_date: '2040-03-04', service_type: 'Pest Control', status: 'completed' }).returning('id');
+      expect(await Deferred.handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: rec.id })).toMatchObject({ queued: true, rearmed: true });
+      expect((await db('service_records').where({ id: rec.id }).first()).structured_notes).toMatchObject({ invoiceSenderOwnsPayLinkFor: String(inv) });
+      // under the hold the tick defers it (no attempt spent) ...
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).not.toContain(inv);
+      expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
+      // ... and the release delivers it
+      await db('collections_flags').where({ id: holdId }).update({ released_at: db.fn.now() });
+      await makeDueNow(inv);
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).toContain(inv);
+    });
+
     test('idempotent and race-safe: however many callers, the invoice is queued once', async () => {
       const c = await newCustomer();
       const draft = await newInvoice(c);
@@ -366,6 +416,63 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
         expect(await invoice(pkt)).toMatchObject({ status: 'draft', send_claim_token: null });
       });
 
+      // Codex #5424 r15 P2: a direct send that took its Bill-To-fenced claim and then found a hold handed the claim
+      // back and IGNORED a failed restore, returning the ordinary retryable hold defer for an invoice left in
+      // 'sending' (ten minutes on, stale-claim recovery parks it with no scheduled send time).
+      describe('a hold found after the Bill-To-fenced claim whose restore FAILS (Codex #5424 r15 P2)', () => {
+        const notifications = () => require('../services/notification-service');
+        // The claim is lost between the claim and its hand-back: the token no longer matches, so the token-scoped restore fails.
+        function stealClaimBeforeRestore(inv) {
+          const real = Hold.messagingHeldByCollectionHold;
+          return jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async (...args) => {
+            await db('invoices').where({ id: inv, status: 'sending' }).update({ send_claim_token: randomUUID() });
+            return real(...args);
+          });
+        }
+
+        test('both direct sender entries return a distinct held + manual-recovery outcome (not the ordinary defer) and raise a durable office alert', async () => {
+          const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+          try {
+            const c = await newCustomer();
+            await placeHold(c);
+            const { inv: viaWrapper } = await packetInvoiceFor(c);
+            const spy = stealClaimBeforeRestore(viaWrapper);
+            let out;
+            try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(viaWrapper, {})); } finally { spy.mockRestore(); }
+            expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_CLAIM_STRANDED', held: true, manualRecovery: true, retryable: false, deferred: false, deliveryOutcome: 'not_sent' });
+            expect(out.code).not.toBe('COLLECTION_HOLD_DEFER');
+            expect(out.sms).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_CLAIM_STRANDED' });
+            expect(out.nextAllowedAt).toBeUndefined();
+            expect(await invoice(viaWrapper)).toMatchObject({ status: 'sending' }); // stranded, exactly what the alert says
+            expect(notify).toHaveBeenCalledTimes(1);
+            expect(notify).toHaveBeenCalledWith('alert', expect.stringMatching(/^Billing/), expect.any(String),
+              expect.objectContaining({ dedupeKey: `hold-claim-stranded:${viaWrapper}`, link: `/admin/invoices?invoice=${viaWrapper}` }));
+
+            const { inv: viaSms } = await packetInvoiceFor(c);
+            const spy2 = stealClaimBeforeRestore(viaSms);
+            let smsOut;
+            try { smsOut = await Invoices.sendViaSMS(viaSms, {}); } finally { spy2.mockRestore(); }
+            expect(smsOut).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_CLAIM_STRANDED', held: true, manualRecovery: true, retryable: false, deferred: false });
+            expect(notify).toHaveBeenCalledTimes(2);
+            expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: `hold-claim-stranded:${viaSms}` }));
+          } finally { notify.mockRestore(); }
+        });
+
+        test('control: a restore that lands keeps the ordinary retryable hold defer and raises no alert', async () => {
+          const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+          try {
+            const c = await newCustomer();
+            await placeHold(c);
+            const { inv } = await packetInvoiceFor(c);
+            const out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {}));
+            expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true });
+            expect(out.manualRecovery).toBeUndefined();
+            expect(await invoice(inv)).toMatchObject({ status: 'draft', send_claim_token: null });
+            expect(notify).not.toHaveBeenCalled();
+          } finally { notify.mockRestore(); }
+        });
+      });
+
       // Codex #5424 r13 P2: claimBillToFencedSend used to call withRenewalSendClearance without the
       // trusted exemption, so the admin Send / a customer-requested link threw collectionHoldDeferral for
       // a renewal invoice under a DISPUTE hold. The exemption is now threaded in (dispute only).
@@ -531,6 +638,43 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const rows = await db('invoices').whereIn('id', heldIds);
       expect(rows.every((r) => r.status === 'scheduled' && r.scheduled_send_attempts === 0 && r.send_claim_token === null)).toBe(true);
       expect(rows.every((r) => r.hold_bill_to_checked_at !== null)).toBe(true);
+    });
+
+    test('the packet Bill-To fence ITSELF confirms a held self-pay packet row (Codex #5424 r15): 26 held packet rows plus 1 ordinary invoice over two ticks - every held row is stamped, retimed a hold tick out with no attempt spent, and no stamped row is claimed again', async () => {
+      const held = await newCustomer();
+      const clear = await newCustomer();
+      await placeHold(held);
+      const heldIds = [];
+      for (let i = 0; i < 26; i += 1) {
+        const { inv } = await packetInvoiceFor(held);
+        await db('invoices').where({ id: inv }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 2 * 3600 * 1000 - i * 1000) });
+        heldIds.push(inv);
+      }
+      const ordinary = await newInvoice(clear, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000) });
+      const rows = () => db('invoices').whereIn('id', heldIds).select('id', 'status', 'scheduled_send_at', 'scheduled_send_attempts', 'send_claim_token', 'hold_bill_to_checked_at', 'updated_at');
+
+      // Tick 1: the page is 25 rows - the ordinary invoice, then the 24 oldest held packet rows.
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).toContain(ordinary);
+      const afterFirst = await rows();
+      const stampedFirst = afterFirst.filter((r) => r.hold_bill_to_checked_at !== null);
+      expect(stampedFirst).toHaveLength(24);
+      for (const r of stampedFirst) {
+        expect(r).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+        expect(r.scheduled_send_at.getTime()).toBeGreaterThan(Date.now());
+      }
+      // Tick 2: every held row is due again. The 24 stamped rows are invisible to the due query (untouched); the
+      // 2 the first page never reached are fenced now and stamped, so the cohort has left the sender page.
+      await db('invoices').whereIn('id', heldIds).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+      const beforeSecond = Object.fromEntries((await rows()).map((r) => [r.id, r]));
+      await Invoices.processScheduledSends({ limit: 25 });
+      const afterSecond = await rows();
+      expect(afterSecond.every((r) => r.hold_bill_to_checked_at !== null)).toBe(true);
+      for (const r of afterSecond) {
+        expect(r).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+        if (beforeSecond[r.id].hold_bill_to_checked_at !== null) expect(r.updated_at.getTime()).toBe(beforeSecond[r.id].updated_at.getTime());
+      }
+      for (const id of heldIds) expect(sentIds()).not.toContain(id);
     });
 
     test('a confirmed-held packet row with a fresh stamp is invisible to the due query: 26 of them plus 1 ordinary invoice - the ordinary one sends on the FIRST tick, nothing held is claimed', async () => {

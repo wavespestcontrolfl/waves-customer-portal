@@ -131,6 +131,18 @@ function jsonbMerge(extra) {
   return db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(extra)]);
 }
 
+// Durable pre-provider phase marker (Codex #5424 r15 P2). dispatchRecoveryMessage stamps
+// metadata.dispatch_started_at on the ledger row right BEFORE sendgrid.sendOne is called. A stale
+// 'resent' row without it never reached the provider call, so the sweep may safely re-drive it; a row
+// WITH it but no provider_message_id is ambiguous (the provider may have accepted the email before the
+// worker died), so it is settled as uncertain and the office is told - it is never re-sent. A flow that
+// parks again without a provider request (a hold) or starts a fresh attempt clears the marker.
+const DISPATCH_STARTED_KEY = 'dispatch_started_at';
+const RESEND_UNCERTAIN_STATUS = 'resend_uncertain';
+function jsonbMergeClearingDispatchMarker(extra = {}) {
+  return db.raw("(COALESCE(metadata, '{}'::jsonb) - ?::text) || ?::jsonb", [DISPATCH_STARTED_KEY, JSON.stringify(extra)]);
+}
+
 // The recovery ledger id we stamped into the recovery message's payload snapshot.
 // Used as a fallback to resolve the ledger when recovery_message_id has not been
 // linked yet (a fast delivery webhook racing the post-send ledger link).
@@ -548,6 +560,10 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // the link in the stored body), so an unparseable trigger can never
       // send a garbage value into the estimates query and loop as transient.
       const sourceEstimateId = guardEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
+      // The phase marker is durable BEFORE the provider is contacted; a failed write must not let the
+      // send proceed unmarked (the throw lands in this function's catch: a failed, alerted recovery).
+      await db('email_bounce_recoveries').where({ recovery_message_id: message.id })
+        .update({ updated_at: new Date(), metadata: jsonbMerge({ [DISPATCH_STARTED_KEY]: new Date().toISOString() }) });
       try {
         result = Object.assign({
           html: bouncedMessage.html_snapshot,
@@ -637,12 +653,20 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           },
         },
       );
-      // Bounce recovery is one-shot and excluded from provider retries. An
-      // unavailable authority must reach its existing manual-failure alert.
-      if (handoff.retryable) throw new Error(handoff.reason);
-      // The replay contract always supplies a reason for a refusal. An allowed
-      // handoff has already populated result, so an absent reason is ignored.
-      authorityRefusal = handoff.reason;
+      if (handoff.retryable && handoff.code === require('./collections/collection-hold').HOLD_DEFER_CODE) {
+        // A collections hold on the stored billing notice (Codex #5424 r15 P2) is the same WAIT the
+        // other gated templates take: park the recovery retryable below (corrected address staged,
+        // recovery row kept) rather than throwing it as a one-shot failure (send_failed would burn the
+        // unique original_message_id and block the delivery after the release).
+        heldRecovery = { held: true, reason: /lookup failed/i.test(String(handoff.reason || '')) ? 'lookup_failed' : 'hold' };
+      } else {
+        // Bounce recovery is one-shot and excluded from provider retries. An
+        // unavailable authority must reach its existing manual-failure alert.
+        if (handoff.retryable) throw new Error(handoff.reason);
+        // The replay contract always supplies a reason for a refusal. An allowed
+        // handoff has already populated result, so an absent reason is ignored.
+        authorityRefusal = handoff.reason;
+      }
     } else if ((await require('./collections/collection-hold').storedLifecycleEmailHeld(bouncedMessage)).held) {
       // Collections DISPUTE hold (owner ruling 2026-09-30): a stored payment.failed /
       // payment.retry_notice / payment.method_expiring copy carries a pay or update-card link, so
@@ -818,6 +842,8 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     ...baseUpdate,
     status: 'resent',
     recovery_message_id: built.message.id,
+    // A fresh attempt: any marker a parked earlier attempt left is stale (it parked with no provider request).
+    metadata: jsonbMergeClearingDispatchMarker(),
   });
 
   const sendResult = await dispatchRecoveryMessage({
@@ -835,7 +861,9 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     await db('email_bounce_recoveries').where({ id: recoveryId }).update({
       status: HELD_RECOVERY_STATUS,
       updated_at: new Date(),
-      metadata: jsonbMerge({
+      // No provider request was made (the boundary check refused it), so the pre-provider marker
+      // stamped for this attempt is cleared with the park.
+      metadata: jsonbMergeClearingDispatchMarker({
         hold_deferred_at: new Date().toISOString(),
         hold_retry_at: new Date(Date.now() + require('./collections/collection-hold').HOLD_DEFER_MS).toISOString(),
         hold_reason: sendResult.holdReason || 'hold',
@@ -891,17 +919,43 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
   // dispatchRecoveryMessage, so a worker lost in that interval leaves the recovery message queued
   // with NO provider id. That reads as unsettled only while the recovery email is still 'queued' with
   // no provider_message_id; an accepted send (provider id published) is settled and never reclaimed.
+  // Codex #5424 r15 P2: and only when the durable pre-provider marker (metadata.dispatch_started_at) is
+  // ABSENT - a row that stamped it may have been accepted by SendGrid before the worker died (null
+  // provider id describes that window too), so it is settled as uncertain below, never re-sent.
+  const unsentRecoveryMessage = function unsentRecoveryMessage() {
+    this.select(1).from('email_messages as m')
+      .whereRaw('m.id = email_bounce_recoveries.recovery_message_id')
+      .whereNull('m.provider_message_id')
+      .where('m.status', 'queued');
+  };
+  // Ambiguous = stale 'resent' row whose provider call started (marker set) more than the claim window
+  // ago and whose recovery email still has no provider id.
+  const ambiguousRows = () => db('email_bounce_recoveries')
+    .where({ status: 'resent' })
+    .whereRaw("(metadata->>'dispatch_started_at') IS NOT NULL AND (metadata->>'dispatch_started_at')::timestamptz <= ?", [staleCutoff])
+    .whereExists(unsentRecoveryMessage);
   const eligible = (q) => q
     .where((held) => held.where({ status: HELD_RECOVERY_STATUS })
       .whereRaw("COALESCE((metadata->>'hold_retry_at')::timestamptz, now()) <= now()"))
     .orWhere((stale) => stale.where({ status: 'pending' }).whereRaw(staleClaimSql, [staleCutoff]))
     .orWhere((unsettled) => unsettled.where({ status: 'resent' }).whereRaw(staleClaimSql, [staleCutoff])
-      .whereExists(function unsentRecoveryMessage() {
-        this.select(1).from('email_messages as m')
-          .whereRaw('m.id = email_bounce_recoveries.recovery_message_id')
-          .whereNull('m.provider_message_id')
-          .where('m.status', 'queued');
-      }));
+      .whereRaw("(metadata->>'dispatch_started_at') IS NULL")
+      .whereExists(unsentRecoveryMessage));
+  // Settle the ambiguous rows first: compare-and-swap resent -> resend_uncertain (a second worker's
+  // identical swap finds nothing), then one office alert each. A late delivery webhook still commits the
+  // correction (commitRecoveryOnDelivery resolves the ledger by recovery_message_id, whatever its status).
+  let uncertain = 0;
+  const ambiguous = await ambiguousRows().select('id', 'original_message_id', 'customer_id', 'corrected_email').limit(limit);
+  for (const row of ambiguous) {
+    const settled = await ambiguousRows().where({ id: row.id }).update({
+      status: RESEND_UNCERTAIN_STATUS, updated_at: new Date(),
+      metadata: jsonbMerge({ resend_outcome: 'uncertain', resend_uncertain_at: new Date().toISOString() }),
+    });
+    if (!Number(settled)) continue;
+    uncertain += 1;
+    logger.warn(`[bounce-recovery] recovery ${row.id} reached the provider call but no outcome was recorded - settled as uncertain, not re-sent`);
+    await alertRecoveryResendUncertain(row);
+  }
   const due = await db('email_bounce_recoveries')
     .where(eligible)
     .orderBy('updated_at', 'asc')
@@ -935,7 +989,31 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
       }
     }
   }
-  return { claimed };
+  return { claimed, uncertain };
+}
+
+// A recovery re-send reached the provider call and the worker died before its outcome was recorded:
+// SendGrid may or may not have accepted it. The recovery is settled (never re-sent, which could deliver the
+// same notice twice) and the office confirms with the customer or the SendGrid activity feed.
+async function alertRecoveryResendUncertain(row) {
+  try {
+    await require('./admin-alert-compose').raiseAdminAlert('alert', {
+      area: 'Comms',
+      action: 'check a re-sent email that may not have gone',
+      why: 'A corrected-address re-send stopped mid-send, so it was not tried again.',
+      severity: 'needs-you',
+      link: row.customer_id ? `/admin/customers?customerId=${row.customer_id}` : '/admin/communications',
+      subject: row.customer_id ? { type: 'customer', id: String(row.customer_id) } : { type: 'check', id: String(row.id) },
+      doneWhen: 'resend_outcome_confirmed',
+      who: 'person',
+    }, {
+      detail: `Bounce recovery ${row.id} (original email ${row.original_message_id}): the worker died after starting the provider send to the corrected address, with no outcome recorded. Check whether the customer received it; the system will not re-send it, so send it by hand if it did not arrive.`,
+      dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
+      metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
+    });
+  } catch (err) {
+    logger.error(`[bounce-recovery] uncertain-resend alert failed for ${row.id}: ${err.message}`);
+  }
 }
 
 /**
@@ -1472,6 +1550,7 @@ module.exports = {
   handleRecoveryBounce,
   // exported for tests
   dispatchRecoveryMessage,
+  RESEND_UNCERTAIN_STATUS,
   resolveCustomerEmailField,
   correctedAddressSuppressed,
   correctedAddressOwnedByOther,

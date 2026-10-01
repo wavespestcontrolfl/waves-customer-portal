@@ -276,7 +276,8 @@ describe('attemptRecovery codex-fix behaviors', () => {
       { event: 'bounce', type: 'bounce' },
     );
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(sends);
-    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data).toMatchObject({ status: finalStatus });
+    // the last ledger write that SETS a status (the pre-provider marker stamp is a metadata-only write)
+    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries' && c.data && 'status' in c.data).pop().data).toMatchObject({ status: finalStatus });
     if (fence.ownershipBusy) {
       expect(res).toEqual({ error: 'Email ownership assignment in progress' });
       expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({

@@ -3532,9 +3532,52 @@ async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExem
   if (!holdRefusal) return null;
   if (fenced?.claim?.claimed) {
     const { previousStatus, consumedQueuedSendRows = [], invoice } = fenced.claim;
-    await restoreSendClaim(invoiceId, previousStatus, fenced.claim.claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+    const restored = await restoreSendClaim(invoiceId, previousStatus, fenced.claim.claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+    // Codex #5424 r15: a restore that did not land (database error, claim token no longer ours) leaves
+    // the invoice in 'sending' - ten minutes on, stale-claim recovery parks it with NO scheduled send
+    // time, so the ordinary "waits, then sends after the release" defer would be a lie. Never return
+    // it: surface a distinct held + manual-recovery outcome and raise a durable office alert.
+    if (!restored) {
+      await alertHoldClaimStranded(invoiceId, row);
+      return holdClaimStrandedOutcome();
+    }
   }
   return holdRefusal;
+}
+
+const HOLD_CLAIM_STRANDED_CODE = "COLLECTION_HOLD_CLAIM_STRANDED";
+// NOT the retryable hold defer: the invoice is stuck in 'sending' and will not be retried by the sender.
+function holdClaimStrandedOutcome() {
+  return {
+    code: HOLD_CLAIM_STRANDED_CODE,
+    reason: "Customer has an active collections hold, and the invoice's send claim could not be handed back; it needs manual recovery",
+    held: true,
+    manualRecovery: true,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "not_sent",
+  };
+}
+
+async function alertHoldClaimStranded(invoiceId, row) {
+  try {
+    await require("./admin-alert-compose").raiseAdminAlert("alert", {
+      area: "Billing",
+      action: "recover the invoice stuck behind a customer hold",
+      why: "A hold stopped the send, and the invoice could not be handed back to the queue.",
+      severity: "needs-you",
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: "invoice", id: String(invoiceId) },
+      doneWhen: "invoice_claim_recovered",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
+      dedupeKey: `hold-claim-stranded:${invoiceId}`,
+      metadata: { invoice_id: invoiceId, customer_id: row?.customer_id ?? null },
+    });
+  } catch (err) {
+    logger.error(`[invoice] hold-claim-stranded alert failed for ${invoiceId}: ${err.message}`);
+  }
 }
 
 // A renewal's own clearance (termite-annual-renewal-charge withRenewalSendClearance) parks a self-pay
@@ -8035,6 +8078,9 @@ const InvoiceService = {
         }
       }
       let claimed = null;
+      // True once claimPacketInvoiceForSend's Bill-To fence has run to completion and found the
+      // packet invoice still self-pay (Codex #5424 r15): the held-row stamp below needs this.
+      let packetFenceConfirmed = false;
       // A combined-visit invoice re-resolves live Bill-To ownership under
       // held rows before its queue claim; a payer means the homeowner send is
       // withdrawn for good, not retried.
@@ -8054,6 +8100,7 @@ const InvoiceService = {
         }
         if (!fenced.claim?.claimed) continue;
         claimed = fenced.claim.invoice;
+        packetFenceConfirmed = true;
       } else {
         claimed = await claimDueScheduledInvoiceForSend(db, inv.id);
       }
@@ -8099,7 +8146,7 @@ const InvoiceService = {
           // The Bill-To fence has now CONFIRMED this held row is self-pay (a packet row's fence ran
           // above, a renewal's just now; a fence that errored leaves no stamp and retries next tick):
           // stamp it so the due query stops re-admitting it every tick (Codex #5424 r14).
-          const billToConfirmed = renewalFenceRan;
+          const billToConfirmed = renewalFenceRan || packetFenceConfirmed;
           const deferredRows = await restoreClaimedInvoice({
             status: "scheduled", scheduled_send_at: deferUntil, updated_at: new Date(),
             ...(billToConfirmed ? { hold_bill_to_checked_at: new Date() } : {}),
