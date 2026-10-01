@@ -25,7 +25,6 @@ const {
   hasRecentPreferredTimeRequest,
   closeBookedPreferredLeads,
   dropSupersededPreferredFunnelRows,
-  estimateIdWithOpenPreferredLead,
 } = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -5839,32 +5838,6 @@ async function createSelfBooking(payload = {}) {
       // The genuine lead(s) this replay's own conversion converted (lineage for the
       // closed preferred-time request's funnel-row cleanup).
       let replayConvertedLeadIds = [];
-      // The estimate-linked preferred-time request (codex #5477 r5/r6), resolved
-      // ONCE before any replay conversion: a request staff worked into the
-      // booking's verified, customer-owned estimate converts through that
-      // estimate's tier. Every replay conversion carries it, and only one
-      // conversion runs per replay (as on the primary path), so one booking
-      // never wins both a generic lead and the request. A replay matches the
-      // existing booking only by customer, date and start, so the estimate must
-      // also be the one that booking was made from (its visit's
-      // source_estimate_id, the binding the series replay checks too): a handoff
-      // for another estimate never wins its request against this booking.
-      let replayPreferredEstimateId = null;
-      let replayConversionRan = false;
-      if (pricing_estimate_id && !callbackVisit) {
-        try {
-          const { verifyEstimateHandoffToken: verifyPreferredHandoff } = require('../utils/estimate-handoff-token');
-          const replayBookedFromEstimate = verifyPreferredHandoff(pricing_estimate_id, estimate_token)
-            && !!(await db('scheduled_services')
-              .where({ self_booking_id: txResult.existing.id, source_estimate_id: String(pricing_estimate_id) })
-              .first('id'));
-          replayPreferredEstimateId = replayBookedFromEstimate
-            ? await estimateIdWithOpenPreferredLead(db, pricing_estimate_id, { customerId: custId })
-            : null;
-        } catch (err) {
-          logger.warn(`[booking:confirm] replay estimate-linked request check failed for ${txResult.existing.id}: ${err.message}`);
-        }
-      }
       await markBookingIntentsConverted(txResult.existing.id);
       // Replay heal (codex #3282 audit P1): if the original request crashed
       // between the booking commit and its promotion savepoint, the retry
@@ -6001,7 +5974,6 @@ async function createSelfBooking(payload = {}) {
           // idempotent call the primary path makes (enforceOriginating;
           // an already-won lead no-ops).
           if (replaySeriesActivated) {
-            replayConversionRan = true;
             try {
               const { convertLeadFromEvent } = require('../services/lead-estimate-link');
               const replayConversion = await convertLeadFromEvent({
@@ -6010,7 +5982,6 @@ async function createSelfBooking(payload = {}) {
                 enforceOriginating: true,
                 excludeCallbackRequests: true,
                 bookingId: txResult.existing.id,
-                ...(replayPreferredEstimateId ? { estimateId: replayPreferredEstimateId } : {}),
               });
               if (replayConversion?.converted) replayConvertedLeadIds = replayConversion.leadIds || [];
             } catch (leadErr) {
@@ -6086,27 +6057,6 @@ async function createSelfBooking(payload = {}) {
       // step leaves the customer's preferred-time request open: close it
       // (idempotent per lead + visit; closes as 'handled', never converts).
       if (!callbackVisit) {
-        // The estimate-linked request's conversion for a first attempt that died
-        // before reaching it, when the series conversion above did not already
-        // run with the estimate: idempotent (an already-won lead is no longer
-        // open). If it fails, the closer below leaves the request open (it never
-        // closes an estimate-linked request).
-        if (replayPreferredEstimateId && !replayConversionRan) {
-          try {
-            const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-            const replayEstimateConversion = await convertLeadFromEvent({
-              source: 'self_booking_estimate',
-              customerId: custId,
-              enforceOriginating: true,
-              excludeCallbackRequests: true,
-              bookingId: txResult.existing.id,
-              estimateId: replayPreferredEstimateId,
-            });
-            if (replayEstimateConversion?.converted) replayConvertedLeadIds = replayEstimateConversion.leadIds || [];
-          } catch (err) {
-            logger.warn(`[booking:confirm] replay estimate-linked request conversion failed for ${txResult.existing.id} (non-blocking): ${err.message}`);
-          }
-        }
         await closeBookedPreferredLeads(db, { customerId: custId, booking: txResult.existing, convertedLeadIds: replayConvertedLeadIds });
         // The first attempt's own attribution row may already exist: if so, the
         // request this booking closed no longer needs its funnel row.
@@ -6487,23 +6437,7 @@ async function createSelfBooking(payload = {}) {
         logger.warn(`[lead-trigger] handoff lead derivation failed for customer=${custId}: ${err.message}`);
       }
     }
-    // A preferred-time request staff worked into the estimate this booking was
-    // made from is a real sale (codex #5477 r5): convert it as won through the
-    // authoritative estimate tier rather than let the close below mark it
-    // 'handled'. Only when the VERIFIED handoff estimate carries an open request,
-    // so every other booking converts exactly as before.
-    let preferredEstimateId = null;
-    if (pricing_estimate_id && !callbackVisit) {
-      try {
-        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
-        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
-          preferredEstimateId = await estimateIdWithOpenPreferredLead(db, pricing_estimate_id, { customerId: custId });
-        }
-      } catch (err) {
-        logger.warn(`[lead-trigger] estimate-linked request check failed for customer=${custId}: ${err.message}`);
-      }
-    }
-    if (followUpRows.length > 0 || leadTrigger || preferredEstimateId) {
+    if (followUpRows.length > 0 || leadTrigger) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
         leadConversion = await convertLeadFromEvent({
@@ -6511,7 +6445,6 @@ async function createSelfBooking(payload = {}) {
           customerId: custId,
           enforceOriginating: true,
           bookingId: booking?.id || null,
-          ...(preferredEstimateId ? { estimateId: preferredEstimateId } : {}),
           // The customer's own /book booking closes a preferred-time request as
           // 'handled' (closeBookedPreferredLeads below) — never wins it here.
           excludeCallbackRequests: true,

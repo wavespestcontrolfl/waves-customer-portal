@@ -87,8 +87,18 @@ const { randomUUID } = require('crypto');
     expect(await rows(other.id)).toHaveLength(0);
   });
 
-  test('a close (handled, lost, spam) restores nothing', async () => {
-    for (const status of ['handled', 'lost', 'spam', 'duplicate']) {
+  test('staff reclassify a handled request as a loss: re-stamped and settled at lost, so the funnels count the loss the lead reports count (codex #5477 r7)', async () => {
+    for (const status of ['lost', 'unresponsive', 'disqualified']) {
+      const l = await lead({ status });
+      await bridge.bridgeLeadFunnelStage(l.id, status, database);
+      const r = await rows(l.id);
+      expect(r).toHaveLength(1);
+      expect(r[0]).toMatchObject({ funnel_stage: 'lost' });
+    }
+  });
+
+  test('a non-prospect status (handled, spam, duplicate, cancelled) restores nothing', async () => {
+    for (const status of ['handled', 'spam', 'duplicate', 'cancelled']) {
       const l = await lead({ status });
       await bridge.bridgeLeadFunnelStage(l.id, status, database);
       expect(await rows(l.id)).toHaveLength(0);

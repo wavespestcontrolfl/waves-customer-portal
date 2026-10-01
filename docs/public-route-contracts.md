@@ -951,14 +951,10 @@ corroborates the booked customer (`corroboratesBookedCustomer`): it is linked
 to that customer, or its email matches the customer's non-blank email, or its
 first AND last name both match. A phone match alone never closes a request (a
 shared household or reassigned number). A request staff attached an estimate
-to (`leads.estimate_id` set) is never closed: when the booking came from that
-estimate's verified handoff and the estimate belongs to the booking customer's
-account, the booking's conversion passes the estimate id so the request
-converts as won through the estimate tier (one conversion call per attempt,
-on the primary and replay paths alike; a replay converts only when the
-existing booking's visit carries that estimate as its `source_estimate_id`);
-otherwise, or if that conversion
-fails, the request stays open for the office. `handled` means closed, neither
+to (`leads.estimate_id` set) is never closed and never converted by the
+booking: it stays open, as before this change, and converts the way any
+estimate-linked lead does (the estimate's acceptance,
+`markLinkedLeadEstimateAccepted`) or by staff. `handled` means closed, neither
 won nor lost, and is set through
 `closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel row
 (`handled` has no funnel mapping, so the `ad_service_attribution` stage stays

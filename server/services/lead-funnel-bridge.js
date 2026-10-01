@@ -45,6 +45,7 @@
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 
 // The click ids a lead row stores (routes/lead-webhook.js, public-quote.js).
 // The ambient _fbp cookie is never paid evidence — Meta sets it on every
@@ -127,9 +128,11 @@ function runStageUpdate(db, target, scopeRows) {
   return run(db);
 }
 
-// Statuses that put a lead back among the prospects a funnel row counts: the open
-// statuses and won. Reaching one of them is what restores a missing row below.
-const RESTAMP_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'won'];
+// A lead counts among the prospects (scopeToProspects) in every status except the
+// non-engaged ones, 'handled' included. Reaching any prospect status (reopened,
+// won, OR lost / unresponsive / disqualified, codex #5477 r7) is what restores a
+// missing row below, so the funnels count every lead the lead reports count.
+const isProspectStatus = (status) => !!status && !NON_ENGAGED_LEAD_STATUSES.includes(status);
 
 /**
  * A /book preferred-time request that closed itself as 'handled' gives up its
@@ -138,13 +141,13 @@ const RESTAMP_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'
  * bridge UPDATE cannot create one. This is the ONE place every status writer
  * already calls (admin Leads route, Intelligence Bar single and bulk, the won
  * settlement), so it re-stamps the row from the lead's stored first-touch fields
- * when a preferred-time request that has none reaches an open or won status.
+ * when a preferred-time request that has none reaches a prospect status.
  * Only that lead type: every other lead without a row has none on purpose.
  * Best-effort; its own transaction (a savepoint inside a caller's), lead row locked.
  */
 async function restampMissingPreferredRows(db, leadIds, leadStatus) {
   const ids = (leadIds || []).filter(Boolean);
-  if (!ids.length || !RESTAMP_STATUSES.includes(leadStatus)) return 0;
+  if (!ids.length || !isProspectStatus(leadStatus)) return 0;
   // The caller's `leadStatus` is only a hint (the status writers call the bridge AFTER
   // their commit): eligibility is judged here on the lead's CURRENT status, with the
   // row locked, so a booking that closed the request meanwhile (status 'handled',
@@ -153,7 +156,7 @@ async function restampMissingPreferredRows(db, leadIds, leadStatus) {
   const run = async (trx) => {
     const rows = await trx('leads').whereIn('id', ids)
       .where({ lead_type: 'book_preferred_time' }).whereNull('deleted_at')
-      .whereIn('status', RESTAMP_STATUSES)
+      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
       .whereNotExists(function hasRow() { this.select(1).from('ad_service_attribution').whereRaw('ad_service_attribution.lead_id = leads.id'); })
       .forUpdate();
     let stamped = 0;

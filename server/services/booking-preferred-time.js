@@ -563,9 +563,10 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         .whereNull('deleted_at')
         .whereIn('status', OPEN_LEAD_STATUSES)
         .whereNull('converted_at')
-        // A request staff worked into an estimate is that estimate's sale, never
-        // 'handled' (codex #5477 r6): the booking's estimate-tier conversion wins
-        // it, and if that conversion fails it stays open for the office.
+        // A request staff worked into an estimate is that estimate's deal, never
+        // 'handled' (codex #5477 r5/r6): it stays open, exactly as on main, and
+        // converts the way any estimate-linked lead does (the estimate's
+        // acceptance, markLinkedLeadEstimateAccepted) or by staff.
         .whereNull('estimate_id')
         .whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [new Date(bookedMs + BOOKING_SLACK_MS)]),
       ten,
@@ -736,41 +737,8 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
   }
 }
 
-/**
- * A request staff worked into an estimate is a real sale when the customer
- * books from that estimate (codex #5477 r5): it must convert as WON through the
- * estimate tier, not close as 'handled'. Returns the estimate id when the
- * booking's VERIFIED handoff estimate carries an open preferred-time lead
- * (leads.estimate_id), else null. The caller verifies the handoff token; a
- * valid token proves the estimate id, not who owns it, so the estimate must also
- * belong to the booking customer's account (codex #5477 r6): a forwarded handoff
- * never converts another account's request. This only answers whether the
- * estimate tier has a request to convert, so a booking with no such request
- * keeps main's conversion behavior byte for byte.
- * Best-effort; a failed read answers null.
- */
-async function estimateIdWithOpenPreferredLead(db, estimateId, { customerId = null } = {}) {
-  if (!estimateId || !customerId) return null;
-  try {
-    const estimate = await db('estimates').where({ id: estimateId }).first('id', 'customer_id');
-    const { estimateBelongsToCustomerAccount } = require('./customer-account-ownership');
-    if (!estimate || !(await estimateBelongsToCustomerAccount(db, estimate, customerId))) return null;
-    const row = await db('leads')
-      .where({ estimate_id: estimateId, lead_type: LEAD_TYPE })
-      .whereNull('deleted_at')
-      .whereIn('status', OPEN_LEAD_STATUSES)
-      .whereNull('converted_at')
-      .first('id');
-    return row ? estimateId : null;
-  } catch (err) {
-    logger.warn(`[booking:preferred-time] estimate-linked request lookup failed for estimate=${estimateId}: ${err.message}`);
-    return null;
-  }
-}
-
 module.exports = {
   closeBookedPreferredLeads,
-  estimateIdWithOpenPreferredLead,
   dropSupersededPreferredFunnelRows,
   reconcileBookingSince,
   LEAD_TYPE,

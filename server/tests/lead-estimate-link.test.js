@@ -1064,7 +1064,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       // Each call's argument object runs to the first line that closes it ("});"),
       // so a spread like ...(x ? { estimateId } : {}) inside the call is kept.
       const calls = src.match(/convertLeadFromEvent\(\{[\s\S]*?\n\s*\}\);/g) || [];
-      expect(calls).toHaveLength(3); // primary, replay series, replay estimate-linked (codex #5477 r6)
+      expect(calls).toHaveLength(2); // primary + replay series
       for (const c of calls) expect(c).toMatch(/excludeCallbackRequests: true/);
     });
   });
