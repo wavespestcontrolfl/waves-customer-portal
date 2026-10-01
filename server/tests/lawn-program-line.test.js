@@ -158,13 +158,14 @@ function segmentsFor(grass, visit) {
 function derivedDetail(grass, month, tag) {
   const visit = visitFor(grass, month);
   const hits = segmentsFor(grass, visit).filter((seg) => EVIDENCE[tag].test(seg.text));
-  if (!hits.some((seg) => seg.where !== 'G' || GRASS_WIDE_FACTS.has(tag))) return { status: null, because: [] };
+  if (!hits.some((seg) => seg.where !== 'G' || GRASS_WIDE_FACTS.has(tag))) return { status: null, because: [], hitTexts: [] };
   const marked = hits.filter((seg) => isConditional(seg.cond));
   // A customer talk the visit lists as OPTIONAL stays optional on its continuation lines.
-  if (TALK_TAGS.has(tag) && /\boptional\b/i.test(visitText(visit))) return { status: 'conditional', because: ['visit lists the customer talk as OPTIONAL'] };
+  if (TALK_TAGS.has(tag) && /\boptional\b/i.test(visitText(visit))) return { status: 'conditional', because: ['visit lists the customer talk as OPTIONAL'], hitTexts: hits.map((seg) => seg.text) };
   const shownPlainly = hits.some((seg) => !isConditional(seg.cond)
     && (seg.where === 'P' || (OBSERVATION_TAGS.has(tag) && (seg.where !== 'G' || GRASS_WIDE_FACTS.has(tag)))));
   return {
+    hitTexts: hits.map((seg) => seg.text),
     status: shownPlainly && !marked.length ? 'plain' : 'conditional',
     because: marked.length ? marked.map((seg) => `${seg.where}: ${seg.text}`) : ['no plain primary line'],
   };
@@ -245,6 +246,19 @@ const QUALIFIER_LIST = QUALIFIERS;
 const hasQualifier = (phrase) => QUALIFIER_LIST.some((q) => phrase.toLowerCase().includes(q));
 const clausesOf = (entry) => Object.entries(entry.claims);
 
+// Intent: a claim that says "prevent / preventive / prevention" must be backed by
+// protocol wording that says preventive for that grass and month; a claim that
+// says rescue / curative must be backed by curative / rescue / active-only wording.
+// (Bahia's October fungicide is conditional on active dollar spot, so a generic
+// "disease prevention" claim fails here.)
+function intentProblems(grass, month, tag, phrase) {
+  const { hitTexts } = derivedDetail(grass, month, tag);
+  const problems = [];
+  if (/\bprevent\w*/i.test(phrase) && !hitTexts.some((t) => /prevent/i.test(t))) problems.push(`${grass} ${month} ${tag}: "${phrase}" claims prevention but the protocol never says preventive`);
+  if (/\b(rescue|curative)\b/i.test(phrase) && !hitTexts.some((t) => /rescue|curative|\bactive\b/i.test(t))) problems.push(`${grass} ${month} ${tag}: "${phrase}" claims a rescue but the protocol never says curative or active`);
+  return problems;
+}
+
 describe('every claim is backed by protocols.json, conditions included', () => {
   const rows = [];
   for (const grass of GRASSES) for (const month of MONTHS) rows.push([`${grass} ${month}`, grass, month, PROGRAM_LINES[grass][month]]);
@@ -254,6 +268,7 @@ describe('every claim is backed by protocols.json, conditions included', () => {
     for (const [tag, phrase] of clausesOf(entry)) {
       expect(EVIDENCE[tag]).toBeDefined();
       expect(entry.line).toContain(phrase);
+      expect(intentProblems(grass, month, tag, phrase)).toEqual([]);
       const status = derivedStatus(grass, month, tag);
       expect({ tag, status: status === null ? 'absent from protocol visit' : 'ok' }).toEqual({ tag, status: 'ok' });
       if (status === 'conditional') expect({ tag, phrase, because: derivedDetail(grass, month, tag).because, qualified: hasQualifier(phrase) }).toEqual({ tag, phrase, because: derivedDetail(grass, month, tag).because, qualified: true });
@@ -267,6 +282,7 @@ describe('every claim is backed by protocols.json, conditions included', () => {
       for (const grass of GRASSES) {
         const status = derivedStatus(grass, month, tag);
         expect({ grass, tag, present: status !== null }).toEqual({ grass, tag, present: true });
+        expect(intentProblems(grass, month, tag, phrase)).toEqual([]);
         if (status === 'conditional') conditionalSomewhere = true;
       }
       if (conditionalSomewhere) expect({ tag, phrase, qualified: hasQualifier(phrase) }).toEqual({ tag, phrase, qualified: true });
@@ -335,6 +351,16 @@ describe('every claim is backed by protocols.json, conditions included', () => {
     for (const entry of [...rows.map((row) => row[3]), ...MONTHS.map((m) => DEFAULT_LINES[m])]) {
       expect(entry.line).not.toMatch(/\b(plan|tier|basic|standard|enhanced|premium|bronze|silver|gold|platinum)\b/i);
     }
+  });
+
+  test('the intent check catches a preventive claim the protocol does not make (generic October vs Bahia)', () => {
+    expect(intentProblems('bahia', 10, 'fungicide', 'fall disease prevention where the lawn needs it')).not.toEqual([]);
+    expect(intentProblems('st_augustine', 10, 'fungicide', 'fall disease prevention where the lawn needs it')).not.toEqual([]);
+    expect(intentProblems('bermuda', 10, 'fungicide', 'a preventive fungicide before soil cools')).toEqual([]);
+    expect(intentProblems('bahia', 10, 'fungicide', 'disease control where needed')).toEqual([]);
+    expect(derivedStatus('bahia', 10, 'fungicide')).toBe('conditional');
+    expect(DEFAULT_LINES[10].line).not.toMatch(/prevent/i);
+    expect(DEFAULT_LINES[10].claims.fungicide).toMatch(/where needed/);
   });
 
   test('qualifiers are neutral wording: no water, tier, count or product word', () => {
@@ -546,6 +572,33 @@ describe('resolveProgramVisit: only recurring lawn plan visits get the line', ()
     await expect(resolveProgramVisit({ scheduledService: visit, loadProfile: async () => { throw new Error('db'); } })).resolves.toBe(false);
     await expect(resolveProgramVisit({ scheduledService: visit })).resolves.toBe(false);
     await expect(resolveProgramVisit()).resolves.toBe(false);
+  });
+  test('the frozen completion identity wins in both edit directions (repointing the scheduled row changes nothing)', async () => {
+    const live = (serviceKey, billingType) => jest.fn(async () => ({ serviceKey, billingType }));
+    // completed one-time visit later repointed to a recurring service: still no line
+    const toRecurring = live('lawn_care_recurring', 'recurring');
+    await expect(resolveProgramVisit({ serviceData: { completedServiceKey: 'lawn_care_one_time' }, scheduledService: visit, loadProfile: toRecurring })).resolves.toBe(false);
+    await expect(resolveProgramVisit({ serviceData: { completedServiceKey: 'lawn_pest_knockdown' }, scheduledService: visit, loadProfile: toRecurring })).resolves.toBe(false);
+    expect(toRecurring).not.toHaveBeenCalled();
+    // genuine program visit later repointed to a one-time service, or the row gone: still gets the line
+    const toOneTime = live('lawn_care_one_time', 'one_time');
+    await expect(resolveProgramVisit({ serviceData: { completedServiceKey: 'lawn_care_quarterly' }, scheduledService: visit, loadProfile: toOneTime })).resolves.toBe(true);
+    await expect(resolveProgramVisit({ serviceData: { completedServiceKey: 'lawn_care_monthly' }, scheduledService: null })).resolves.toBe(true);
+    expect(toOneTime).not.toHaveBeenCalled();
+  });
+  test('a frozen but null / blank / non-lawn key is an unknown identity: no line and no live fallback', async () => {
+    const loadProfile = jest.fn(async () => ({ serviceKey: 'lawn_care_recurring', billingType: 'recurring' }));
+    for (const completedServiceKey of [null, '', undefined, 'pest_control_quarterly', 'lawn_tree_shrub_combo', 'lawn_aeration']) {
+      await expect({ completedServiceKey, ok: await resolveProgramVisit({ serviceData: { completedServiceKey }, scheduledService: visit, loadProfile }) }).toEqual({ completedServiceKey, ok: false });
+    }
+    expect(loadProfile).not.toHaveBeenCalled();
+  });
+  test('a legacy record (no completedServiceKey) falls back to live resolution; a callback never qualifies', async () => {
+    const live = jest.fn(async () => ({ serviceKey: 'lawn_care_recurring', billingType: 'recurring' }));
+    await expect(resolveProgramVisit({ serviceData: {}, scheduledService: visit, loadProfile: live })).resolves.toBe(true);
+    await expect(resolveProgramVisit({ serviceData: null, scheduledService: visit, loadProfile: live })).resolves.toBe(true);
+    await expect(resolveProgramVisit({ serviceData: { completedServiceName: 'Lawn Care' }, scheduledService: visit, loadProfile: async () => ({ serviceKey: 'lawn_care_one_time', billingType: 'one_time' }) })).resolves.toBe(false);
+    await expect(resolveProgramVisit({ serviceData: { completedServiceKey: 'lawn_care_recurring' }, scheduledService: visit, isCallback: true, loadProfile: live })).resolves.toBe(false);
   });
   test('the WaveGuard tier is never read', async () => {
     const loadProfile = jest.fn(async () => ({ serviceKey: 'lawn_care_recurring', billingType: 'recurring' }));

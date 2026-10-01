@@ -5319,6 +5319,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // WaveGuard tier, which is a bundle discount, not a lawn program).
         // One-time lawn jobs, callbacks and unresolved identities get null.
         programVisit = await resolveProgramVisit({
+          // Frozen completion identity first (a later repoint of the scheduled
+          // row cannot change a permanent report); live resolution only for
+          // legacy records with no completedServiceKey.
+          serviceData: parseJsonObject(service.service_data),
           scheduledService: scheduledServiceRow,
           isCallback: !!service.is_callback,
           loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),

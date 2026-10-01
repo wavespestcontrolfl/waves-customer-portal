@@ -73,7 +73,7 @@ const PROGRAM_LINES = {
     7: L('In July the program focuses on checking for chinch bugs, with summer broadleaf weed control when conditions allow and potassium where the lawn needs it.', { chinch_check: 'checking for chinch bugs', broadleaf: 'summer broadleaf weed control when conditions allow', potassium: 'potassium where the lawn needs it' }),
     8: L('August is a scouting month: the program checks the lawn for chinch bugs and disease, and photographs anything that needs attention.', { scouting_visit: 'checks the lawn for chinch bugs and disease, and photographs anything that needs attention' }),
     9: L('In September the program focuses on potassium where a soil test calls for it and weed control when conditions allow.', { potassium: 'potassium where a soil test calls for it', broadleaf: 'weed control when conditions allow' }),
-    10: L(`In October the program focuses on ${FALL_FEED} with iron, plus fall disease prevention where the lawn needs it and a thatch check.`, { feed: FALL_FEED, micros: 'with iron', fungicide: 'fall disease prevention where the lawn needs it', thatch_check: 'a thatch check' }),
+    10: L(`In October the program focuses on ${FALL_FEED} with iron, plus fall disease control where the lawn needs it and a thatch check.`, { feed: FALL_FEED, micros: 'with iron', fungicide: 'fall disease control where the lawn needs it', thatch_check: 'a thatch check' }),
     11: L('In November the program focuses on micronutrients and potassium where the lawn needs it, plus broadleaf weed control when conditions allow.', { micros: 'micronutrients and potassium where the lawn needs it', potassium: 'micronutrients and potassium where the lawn needs it', broadleaf: 'broadleaf weed control when conditions allow' }),
     12: L('In December the program offers a winter wellness check-in on request.', { winter_touchpoint: 'offers a winter wellness check-in on request' }),
   },
@@ -100,7 +100,7 @@ const PROGRAM_LINES = {
     6: L('In June the program focuses on webworm checks, light growth regulation as needed, and micronutrients and potassium where a soil test calls for it.', { webworm_check: 'webworm checks', growth_regulator: 'light growth regulation as needed', micros: 'micronutrients and potassium where a soil test calls for it', potassium: 'micronutrients and potassium where a soil test calls for it' }),
     7: L('In July the program focuses on summer broadleaf weed control when conditions allow and light growth regulation as needed.', { broadleaf: 'summer broadleaf weed control when conditions allow', growth_regulator: 'light growth regulation as needed' }),
     8: L('August is a scouting month: the program checks zoysia for disease and webworms.', { scouting_visit: 'checks zoysia for disease and webworms', webworm_check: 'checks zoysia for disease and webworms' }),
-    9: L('In September the program focuses on potassium where the lawn needs it and weed control when conditions allow, ahead of October’s large patch prevention.', { potassium: 'potassium where the lawn needs it', broadleaf: 'weed control when conditions allow', large_patch_prep: 'ahead of October’s large patch prevention' }),
+    9: L('In September the program focuses on potassium where the lawn needs it and weed control when conditions allow, ahead of October’s large patch treatment.', { potassium: 'potassium where the lawn needs it', broadleaf: 'weed control when conditions allow', large_patch_prep: 'ahead of October’s large patch treatment' }),
     10: L(`In October the program focuses on ${FALL_FEED} and large patch prevention, the most important disease step on zoysia, plus a thatch check.`, { feed: FALL_FEED, fungicide: 'large patch prevention, the most important disease step on zoysia', thatch_check: 'a thatch check' }),
     11: L('In November the program focuses on large patch prevention and potassium where the lawn needs it.', { fungicide: 'large patch prevention', potassium: 'potassium where the lawn needs it' }),
     12: L('In December the program offers a winter check-in on request and a large patch rescue treatment where needed.', { winter_touchpoint: 'offers a winter check-in on request', fungicide: 'a large patch rescue treatment where needed' }),
@@ -132,7 +132,7 @@ const DEFAULT_LINES = {
   7: L('In July the program focuses on summer broadleaf weed control when conditions allow.', { broadleaf: 'summer broadleaf weed control when conditions allow' }),
   8: L('August is a scouting month: the program checks the lawn for insect activity and general condition.', { scouting_visit: 'checks the lawn for insect activity and general condition' }),
   9: L('In September the program focuses on potassium where the lawn needs it and weed control when conditions allow.', { potassium: 'potassium where the lawn needs it', broadleaf: 'weed control when conditions allow' }),
-  10: L(`In October the program focuses on ${FALL_FEED} and fall disease prevention where the lawn needs it.`, { feed: FALL_FEED, fungicide: 'fall disease prevention where the lawn needs it' }),
+  10: L(`In October the program focuses on ${FALL_FEED} and disease control where needed.`, { feed: FALL_FEED, fungicide: 'disease control where needed' }),
   11: L('In November the program focuses on potassium where the lawn needs it and broadleaf weed control when conditions allow.', { potassium: 'potassium where the lawn needs it', broadleaf: 'broadleaf weed control when conditions allow' }),
   12: L('In December the program offers a winter check-in on request.', { winter_touchpoint: 'offers a winter check-in on request' }),
 };
@@ -218,25 +218,36 @@ const RECURRING_LAWN_PLAN_KEY = /^lawn_(?:care|recurring)(?:_|$)/;
 /**
  * Is this visit a recurring lawn plan visit? Only those get the program line:
  * a one-time lawn job (lawn_care_one_time, lawn_pest_knockdown, ...) or a
- * callback is not part of the program. The signal is the visit's catalog
- * service identity (scheduled_services.service_id, then service_key_snapshot,
- * then an unambiguous name, the same resolver the completion profile uses): a
- * real, non-synthesized profile whose billing type is recurring and whose key
- * is a recurring lawn plan key. Never the WaveGuard tier. Fails closed: no
- * scheduled visit, a callback, an unresolved or synthesized profile, or a
- * lookup error all mean false.
- * @param {{ scheduledService?: object|null, isCallback?: boolean, loadProfile: (row: object) => Promise<object|null> }} input
+ * callback is not part of the program. Never the WaveGuard tier.
+ *
+ * The frozen completion identity wins (same rule the trace-eligibility path
+ * uses): service_data.completedServiceKey is stamped at completion, so a later
+ * edit that repoints the scheduled row to another service can neither give a
+ * completed one-time visit the line nor take it from a genuine program visit.
+ * A frozen key that is null (the freezer could not prove an identity) is an
+ * unknown identity: no line, and no live fallback. Only a legacy record with
+ * no completedServiceKey at all falls back to the live catalog identity of the
+ * scheduled visit (service_id, then service_key_snapshot, then an unambiguous
+ * name, via the completion-profile resolver): a real, non-synthesized profile
+ * whose billing type is recurring and whose key is a recurring lawn plan key.
+ * Fails closed: no scheduled visit and no frozen key, a callback, an unresolved
+ * or synthesized profile, or a lookup error all mean false.
+ * @param {{ serviceData?: object|null, scheduledService?: object|null, isCallback?: boolean, loadProfile?: (row: object) => Promise<object|null> }} input
  * @returns {Promise<boolean>}
  */
-async function resolveProgramVisit({ scheduledService = null, isCallback = false, loadProfile } = {}) {
-  if (!scheduledService || isCallback === true || typeof loadProfile !== 'function') return false;
+const isRecurringLawnPlanKey = (key) => RECURRING_LAWN_PLAN_KEY.test(String(key || '')) && !/one_?time/i.test(String(key || ''));
+
+async function resolveProgramVisit({ serviceData = null, scheduledService = null, isCallback = false, loadProfile } = {}) {
+  if (isCallback === true) return false;
+  if (serviceData && typeof serviceData === 'object' && Object.prototype.hasOwnProperty.call(serviceData, 'completedServiceKey')) {
+    return isRecurringLawnPlanKey(serviceData.completedServiceKey);
+  }
+  if (!scheduledService || typeof loadProfile !== 'function') return false;
   try {
     const profile = await loadProfile(scheduledService);
     if (!profile || profile.synthesized) return false;
-    const key = String(profile.serviceKey || '');
     return String(profile.billingType || '').toLowerCase() === 'recurring'
-      && RECURRING_LAWN_PLAN_KEY.test(key)
-      && !/one_?time/i.test(key);
+      && isRecurringLawnPlanKey(profile.serviceKey);
   } catch {
     return false;
   }
