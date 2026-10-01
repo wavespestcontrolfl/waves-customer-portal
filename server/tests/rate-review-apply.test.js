@@ -68,7 +68,7 @@ jest.mock('../routes/admin-schedule', () => {
     .sort((a, b) => (a.scheduled_date < b.scheduled_date ? -1 : 1));
   const httpError = (status, message, code) => Object.assign(new Error(message), { statusCode: status, isOperational: true, ...(code ? { code } : {}) });
   return {
-    _private: {
+    _test: {
       acquireRecurringSeriesMaintenanceLock: jest.fn(async (conn, parentId, wait) => {
         mockDb.log.push(['seriesLock', String(parentId), wait]);
         if (mockSchedule.seriesLockBusy) throw httpError(409, 'This plan is being updated — reload and save again.', 'VISIT_CHANGED_RETRY');
@@ -113,7 +113,7 @@ const PlanRateLedger = require('../services/plan-rate-ledger');
 const { offerEligibility } = require('../services/cancellation-resolution/retention-offer');
 const { CUSTOMER, VISIT, ROW, TERM, BATCH_KEY, TODAY, NOW } = fixture;
 
-const schedule = require('../routes/admin-schedule')._private;
+const schedule = require('../routes/admin-schedule')._test;
 
 function pestBook(n = 1, { dates = ['2026-12-10', '2027-03-10', '2027-06-10'], price = '117.00', snapshot = {}, customer = {}, ledger = true } = {}) {
   const series = fixture.pestSeries(n, dates, { price });
@@ -297,8 +297,15 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
     const out = await scheduleBook(prepayBook());
     expect(out.created).toBe(1);
     const notice = notices()[0];
-    expect(notice).toMatchObject({ billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', noticed_current_cents: 11700, noticed_new_cents: 12100 });
-    expect(JSON.parse(notice.metadata)).toMatchObject({ term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400 });
+    // the public page shows current → new "per year": the ANNUAL totals, cent-exact with the renewal amount
+    expect(notice).toMatchObject({
+      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+    });
+    expect(JSON.parse(notice.metadata)).toMatchObject({
+      term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400,
+      per_application_current_cents: 11700, per_application_new_cents: 12100,
+    });
   });
   test('annual_prepay: a term renewing inside the notice window, or already reminded, is held', async () => {
     let out = await scheduleBook(prepayBook({ term_end: '2026-11-28' }));
@@ -351,6 +358,28 @@ describe('applyDueRateChanges — gate, due selection, idempotency', () => {
     ];
     const out = await runApply(book);
     expect(out).toMatchObject({ ok: true, due: 0, applied: 0, held: 0 });
+  });
+  test('status alone is never delivery evidence: a previewed DRAFT flipped to viewed by the public page is not due; a sent row with no delivered leg is not due', async () => {
+    mockDb.reset({ price_change_notices: [
+      fixture.noticeRow(1, { id: 'n-viewed-draft', status: 'viewed', sent_at: null, email_sent: false, sms_sent: false }),
+      fixture.noticeRow(2, { id: 'n-no-leg', status: 'sent', email_sent: false, sms_sent: false }),
+      fixture.noticeRow(3, { id: 'n-viewed-sent', status: 'viewed', email_sent: false, sms_sent: true }),
+    ] });
+    const due = await apply._private.loadDueNotices(mockDb, '2026-12-10');
+    expect(due.map((n) => n.id)).toEqual(['n-viewed-sent']);
+    expect(apply._private.wasDelivered({ status: 'viewed', sent_at: null, email_sent: true })).toBe(false);
+    expect(apply._private.wasDelivered({ status: 'sent', sent_at: new Date(), email_sent: false, sms_sent: false })).toBe(false);
+    expect(apply._private.wasDelivered({ status: 'sent', sent_at: new Date(), email_sent: true, sms_sent: false })).toBe(true);
+  });
+  test('the 30-day rule is enforced from the ACTUAL delivery day: a notice delivered 20 days before its effective date holds', async () => {
+    const book = sentBook({ notice: { sent_at: new Date('2026-11-20T15:00:00Z') } }); // effective 2026-12-10 → 20 days
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['notice_too_recent']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+    expect(notices()[0]).toMatchObject({ applied_at: null, apply_hold_reason: 'notice_too_recent' });
+    // exactly 30 days is fine
+    const ok = await runApply(sentBook({ notice: { sent_at: new Date('2026-11-10T15:00:00Z') } }));
+    expect(ok.applied).toBe(1);
   });
   test('a prepaid notice is due as soon as it is sent (the renewal machinery reads the amount before the term ends)', async () => {
     const due = await apply._private.loadDueNotices(mockDb, '2026-12-10');
@@ -638,7 +667,11 @@ describe('applyDueRateChanges — annual_prepay', () => {
       book: { snapshot: { billing_lane: 'annual_prepay', current_rate_source: 'prepay_term' }, customer: { billing_mode: 'annual_prepay' } },
       notice: {
         billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
-        metadata: { source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'application', visits_per_year: 4, current_rate_source: 'prepay_term', term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400 },
+        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        metadata: {
+          source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'application', visits_per_year: 4, current_rate_source: 'prepay_term',
+          term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400, per_application_current_cents: 11700, per_application_new_cents: 12100,
+        },
       },
     });
     book.annual_prepay_terms = [{
@@ -659,7 +692,7 @@ describe('applyDueRateChanges — annual_prepay', () => {
     expect(customer1().per_application_fee).toBe('117.00');
     expect(customer1().monthly_rate).toBe('39.00');
     expect(mockDb.store.customer_plan_rates[0].monthly_rate).toBe('39.00');
-    expect(mockDb.store.audit_log[0].metadata).toMatchObject({ lane: 'annual_prepay', termId: TERM(1), after: { prepay_amount: 468, next_term_prepay_amount: 484 } });
+    expect(mockDb.store.audit_log[0].metadata).toMatchObject({ lane: 'annual_prepay', termId: TERM(1), noticed_current_cents: 46800, noticed_new_cents: 48400, after: { prepay_amount: 468, next_term_prepay_amount: 484 } });
     expect(notices()[0].applied_at).toEqual(ASOF);
     expect(snapshots()[0].status).toBe('applied');
   });
@@ -702,6 +735,59 @@ describe('listApplyHolds', () => {
   });
 });
 
+describe('retireDraftNotices and the rebuild guard', () => {
+  test('retires the batch\'s draft rows and unlinks their ranking rows; a delivered notice is kept', async () => {
+    const book = pestBook();
+    await scheduleBook(book);
+    // a second line already delivered
+    mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(2, { status: 'sent', family_key: 'lawn_care', notice_id: 'n-sent-2' }));
+    mockDb.store.price_change_notices.push(fixture.noticeRow(2, { id: 'n-sent-2', family_key: 'lawn_care' }));
+    const out = await apply.retireDraftNotices(BATCH_KEY);
+    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 1, keptDelivered: 1 });
+    expect(notices().map((n) => n.id)).toEqual(['n-sent-2']);
+    expect(snapshots().map((r) => r.notice_id)).toEqual([null, 'n-sent-2']);
+    // and the batch can be scheduled again
+    const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
+    expect(again.created).toBe(1);
+  });
+  test('gate off → retires nothing', async () => {
+    process.env.GATE_RATE_REVIEW = 'false';
+    mockDb.reset(pestBook());
+    expect(await apply.retireDraftNotices(BATCH_KEY)).toEqual({ ok: false, reason: 'gate_off' });
+  });
+  test('a rebuild is refused while any ranking row carries a notice row (its draft would be orphaned)', async () => {
+    const rateReview = require('../services/rate-review');
+    await scheduleBook(pestBook());
+    expect(await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW })).toEqual({ ok: false, reason: 'batch_has_scheduled_rows', batchKey: BATCH_KEY });
+    expect(snapshots()).toHaveLength(1);
+  });
+});
+
+describe('noticedRenewalAmountConflict — the admin renewal consumer of next_term_prepay_amount', () => {
+  const term = (overrides = {}) => ({ id: TERM(1), customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', term_start: '2026-05-15', term_end: '2027-05-14', next_term_prepay_amount: '484.00', ...overrides });
+  test('a renewal recorded at a different amount than the noticed successor amount is a conflict; the noticed amount is not', async () => {
+    mockDb.reset({ annual_prepay_terms: [term()] });
+    expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(1), amount: 468, today: '2027-05-14' })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(1), amount: 484, today: '2027-05-14' })).toBeNull();
+  });
+  test('no noticed amount, a term long ended, or another customer → no conflict', async () => {
+    mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })] });
+    expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(1), amount: 468, today: '2027-05-14' })).toBeNull();
+    mockDb.reset({ annual_prepay_terms: [term()] });
+    expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(1), amount: 468, today: '2027-09-01' })).toBeNull(); // ended > 60 days ago
+    expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(2), amount: 468, today: '2027-05-14' })).toBeNull();
+  });
+  test('both admin prepay routes consult it behind the gate, and 409 without the acknowledgement', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-customers.js'), 'utf8');
+    expect(src.match(/noticedRenewalAmountConflictFor\(customer\.id, amount\)/g)).toHaveLength(2);
+    expect(src).toMatch(/if \(!require\('\.\.\/config\/feature-gates'\)\.rateReviewLive\(\)\) return null;/);
+    expect(src.match(/code: 'RENEWAL_AMOUNT_NOTICED'/g)).toHaveLength(2);
+    expect(src.match(/acknowledgeNoticedAmount !== true/g)).toHaveLength(2);
+  });
+});
+
 describe('wiring', () => {
   const fs = require('fs');
   const path = require('path');
@@ -714,6 +800,18 @@ describe('wiring', () => {
     expect(tick.indexOf('rateReviewLive()')).toBeLessThan(tick.indexOf("runExclusive('rate-review-apply'"));
     expect(tick).toMatch(/applyDueRateChanges\(\)/);
     expect(tick).toMatch(/\}, \{ timezone: 'America\/New_York' \}\);/);
+  });
+  test('the schedule helpers the apply destructures are real exports of admin-schedule.js (router._test), not an interface the mock invented', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const start = src.indexOf('router._test = {');
+    expect(start).toBeGreaterThan(0);
+    const bag = src.slice(start, src.indexOf('\n};', start));
+    for (const name of ['acquireRecurringSeriesMaintenanceLock', 'lockAndGuardFollowingSiblings', 'propagatePriceServiceToFollowingSiblings', 'stampRecurringTemplateOverrides', 'calculateStoredVisitFinancials', 'loadStoredDiscountScope', 'parseTemplateOverrides', 'readProvenanceOverrides']) {
+      expect(bag).toMatch(new RegExp(`(^|\\s)${name},`));
+    }
+    const applySrc = fs.readFileSync(path.join(__dirname, '../services/rate-review-apply.js'), 'utf8');
+    expect(applySrc).toMatch(/require\('\.\.\/routes\/admin-schedule'\)\._test/);
+    expect(applySrc).not.toMatch(/admin-schedule'\)\._private/);
   });
   test('the 30-day minimum is the notice workflow\'s own constant, not a second copy', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/rate-review-apply.js'), 'utf8');

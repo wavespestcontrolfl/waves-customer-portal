@@ -1356,6 +1356,16 @@ async function batchHasSentRows(dbh, batchKey) {
   return Number(row && row.n) > 0;
 }
 
+// A row whose notice row exists (the apply lane's scheduleNoticeRows wrote
+// notice_id) is never deleted by a rebuild either: the FK would orphan its
+// draft (SET NULL) and the rebuilt row could never be re-linked
+// (notice_event_collision). Retire the drafts first
+// (DELETE /api/admin/rate-review/batches/:key/schedule).
+async function batchHasScheduledRows(dbh, batchKey) {
+  const row = await dbh(SNAPSHOTS).where({ batch_key: batchKey }).whereNotNull('notice_id').count({ n: '*' }).first();
+  return Number(row && row.n) > 0;
+}
+
 async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null, now = new Date(), deps = {} } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
@@ -1367,6 +1377,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
 
   const dbh = trx || db;
   if (await batchHasSentRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', batchKey };
+  if (await batchHasScheduledRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_scheduled_rows', batchKey };
 
   const today = etDateString(now);
   const config = await loadConfig(dbh);

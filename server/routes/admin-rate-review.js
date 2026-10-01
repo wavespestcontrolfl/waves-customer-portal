@@ -12,6 +12,9 @@
  *        NOTHING is sent; 409 when nothing is approved); body
  *        { plannedSendDate?: 'YYYY-MM-DD' } (default today) — the 30-day
  *        rule is measured from it
+ *   DELETE /api/admin/rate-review/batches/:key/schedule  retire the batch's DRAFT
+ *        (never delivered) notice rows and unlink their ranking rows — the undo
+ *        before the send, and what a rebuild of a scheduled batch needs first
  *   GET  /api/admin/rate-review/apply-holds         rate-review notices the nightly
  *        apply refused, with the reason
  *
@@ -79,6 +82,9 @@ router.post('/batches/:key/build', async (req, res) => {
     if (!result.ok && result.reason === 'batch_has_sent_rows') {
       return res.status(409).json({ error: 'This batch already has rows that were sent to customers — it cannot be recomputed.', reason: result.reason });
     }
+    if (!result.ok && result.reason === 'batch_has_scheduled_rows') {
+      return res.status(409).json({ error: 'This batch has notice rows scheduled — retire its draft notices first (DELETE …/schedule), then recompute.', reason: result.reason });
+    }
     if (!result.ok) return res.status(409).json({ error: 'Rate review batch could not be built', reason: result.reason });
     return res.json({ ok: true, batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances });
   } catch (err) {
@@ -112,6 +118,20 @@ router.post('/batches/:key/schedule', async (req, res) => {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] schedule failed for ${key}: ${err.message}`);
     return res.status(500).json({ error: 'Could not schedule the rate review notices' });
+  }
+});
+
+router.delete('/batches/:key/schedule', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  try {
+    const result = await rateReviewApply.retireDraftNotices(key);
+    if (!result.ok) return res.status(409).json({ error: 'Draft notice rows could not be retired', reason: result.reason });
+    return res.json({ ok: true, batchKey: key, retired: result.retired, keptDelivered: result.keptDelivered });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] retire drafts failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not retire the draft notice rows' });
   }
 });
 

@@ -9,6 +9,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockScheduleNoticeRows = jest.fn();
 const mockListApplyHolds = jest.fn();
+const mockRetireDraftNotices = jest.fn();
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -29,6 +30,7 @@ jest.mock('../services/rate-review', () => ({ listBatches: jest.fn(), getBatch: 
 jest.mock('../services/rate-review-apply', () => ({
   scheduleNoticeRows: (...args) => mockScheduleNoticeRows(...args),
   listApplyHolds: (...args) => mockListApplyHolds(...args),
+  retireDraftNotices: (...args) => mockRetireDraftNotices(...args),
 }));
 
 const express = require('express');
@@ -65,12 +67,13 @@ beforeEach(() => {
     firstEffectiveDate: '2026-12-10', lastEffectiveDate: '2027-01-04', notices: [],
   });
   mockListApplyHolds.mockResolvedValue([{ noticeId: 'n-1', holdReason: 'rate_moved_since_notice' }]);
+  mockRetireDraftNotices.mockResolvedValue({ ok: true, batchKey: '2026-12', retired: 2, keptDelivered: 1 });
 });
 
 afterAll(() => { delete process.env.GATE_RATE_REVIEW; });
 
 describe('gate off', () => {
-  test.each([['POST', '/batches/2026-12/schedule'], ['GET', '/apply-holds']])('%s %s answers 404 and calls nothing', async (method, path) => {
+  test.each([['POST', '/batches/2026-12/schedule'], ['DELETE', '/batches/2026-12/schedule'], ['GET', '/apply-holds']])('%s %s answers 404 and calls nothing', async (method, path) => {
     process.env.GATE_RATE_REVIEW = 'false';
     await withServer(async (base) => {
       const out = await call(base, method, `/api/admin/rate-review${path}`);
@@ -79,6 +82,7 @@ describe('gate off', () => {
     });
     expect(mockScheduleNoticeRows).not.toHaveBeenCalled();
     expect(mockListApplyHolds).not.toHaveBeenCalled();
+    expect(mockRetireDraftNotices).not.toHaveBeenCalled();
   });
 });
 
@@ -138,6 +142,18 @@ describe('POST /batches/:key/schedule', () => {
       const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/schedule');
       expect(out.status).toBe(500);
       expect(out.body).toEqual({ error: 'Could not schedule the rate review notices' });
+    });
+  });
+});
+
+describe('DELETE /batches/:key/schedule', () => {
+  test('retires the draft rows and reports what was kept', async () => {
+    await withServer(async (base) => {
+      const out = await call(base, 'DELETE', '/api/admin/rate-review/batches/2026-12/schedule');
+      expect(out.status).toBe(200);
+      expect(out.body).toEqual({ ok: true, batchKey: '2026-12', retired: 2, keptDelivered: 1 });
+      expect(mockRetireDraftNotices).toHaveBeenCalledWith('2026-12');
+      expect((await call(base, 'DELETE', '/api/admin/rate-review/batches/dec-2026/schedule')).status).toBe(400);
     });
   });
 });

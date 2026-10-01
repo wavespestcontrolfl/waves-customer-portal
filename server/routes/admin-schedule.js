@@ -26648,6 +26648,10 @@ router._test = {
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,
   propagatePriceServiceToFollowingSiblings,
+  // The lock-and-refuse phase on its own — the annual rate review apply lane
+  // (services/rate-review-apply.js) validates the locked targets before it
+  // lets the propagation write.
+  lockAndGuardFollowingSiblings,
   PRICE_SERVICE_OVERRIDE_KEYS,
   retiredGateInputsForVisitEdit,
   retiredSaleKeysVouchedByAcceptedEstimate,

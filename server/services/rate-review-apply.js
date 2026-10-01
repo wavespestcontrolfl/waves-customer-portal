@@ -24,16 +24,24 @@
  *                         the same two floors.
  *       annual_prepay     the successor term's start (term_end + 1); held
  *                         when that is under 31 days out or a renewal
- *                         reminder already went out for the term.
+ *                         reminder already went out for the term. Its
+ *                         notice amounts are the ANNUAL totals (the term's
+ *                         amount → the successor's), labelled per year —
+ *                         the public page shows them as stored; the
+ *                         per-application figures ride in metadata.
  *     The ranking row keeps status `approved` and records notice_id; only
  *     the comms PR marks it `sent`.
  *
  *   applyDueRateChanges({ asOf })  nightly 03:10 ET (scheduler.js, under
- *     runExclusive). For every rate-review notice the comms PR has SENT
- *     (status sent | viewed — the public page flips a sent notice to viewed)
- *     whose effective date has arrived and that is not applied yet, ONE
- *     transaction per notice: the customer's comms lock, the customers row
- *     FOR UPDATE, the notice row FOR UPDATE, then
+ *     runExclusive). For every rate-review notice the comms PR has
+ *     DELIVERED — status sent | viewed (the public page flips a sent notice
+ *     to viewed, and flips an opened DRAFT too, so status alone is never the
+ *     evidence) AND sent_at set AND at least one leg (email_sent / sms_sent)
+ *     delivered — whose effective date has arrived and that is not applied
+ *     yet, ONE transaction per notice: the customer's comms lock, the
+ *     customers row FOR UPDATE, the notice row FOR UPDATE (the delivery
+ *     evidence re-read under it; MIN_NOTICE_DAYS enforced from the ACTUAL
+ *     sent_at day, never the planned send — too recent → hold), then
  *       - any active plan hold on the account → hold 'plan_on_hold' (retried
  *         nightly; the resume restores the pre-hold rate, the next night
  *         applies the increase on top of it — holds.js is never written
@@ -145,6 +153,7 @@ const HOLD_COPY = Object.freeze({
   term_not_live: 'The prepaid term is no longer live, so the renewal amount was not recorded.',
   termite_program: 'Termite programs renew under their own agreement and are never repriced here.',
   notice_event_collision: 'A notice with the same amounts and date already exists for this customer.',
+  notice_too_recent: 'The notice went out fewer than 30 days before the new rate, so the rate waits.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
 
@@ -346,31 +355,46 @@ async function scheduleRow(dbh, row, { batch, customer, lane, accountLines, toda
       term_id: term.id, term_end: ymd(term.term_end), coverage_visits: visitsPerTerm,
       current_term_amount_cents: cents(term.prepay_amount),
       next_term_amount_cents: Number(row.proposed_rate_cents) * visitsPerTerm,
+      per_application_current_cents: Number(row.current_rate_cents),
+      per_application_new_cents: Number(row.proposed_rate_cents),
     });
   }
   const { effectiveDate, firstVisitId } = effectiveDateFor(lane, { floor, visits, billingDay: customer.billing_day, term, plannedSend });
   if (firstVisitId) metadata.first_visit_id = firstVisitId;
-  const inserted = await dbh('price_change_notices').insert({
-    batch_id: batchId,
-    customer_id: row.customer_id,
-    current_amount_cents: Number(row.current_rate_cents),
-    new_amount_cents: Number(row.proposed_rate_cents),
-    cadence_label: cadenceLabelFor(lane),
-    effective_date: effectiveDate,
-    notice_token: crypto.randomBytes(16).toString('hex'),
-    status: 'draft',
-    created_by: actorId || null,
-    metadata: JSON.stringify(metadata),
-    rate_review_row_id: row.id,
-    billing_lane: lane,
-    family_key: row.family_key,
-    noticed_current_cents: Number(row.current_rate_cents),
-    noticed_new_cents: Number(row.proposed_rate_cents),
-    apply_attempts: 0,
-  }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning(['id', 'effective_date']);
-  if (!inserted.length) throw hold('notice_event_collision', { effectiveDate });
-  await dbh('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, updated_at: new Date() });
-  return { noticeId: inserted[0].id, rowId: row.id, customerId: row.customer_id, familyKey: row.family_key, lane, effectiveDate };
+  // The public page renders current_amount_cents → new_amount_cents "per
+  // <cadence_label>" exactly as stored, and the apply charges exactly what
+  // was shown: per application for a visit-billed line, per month for dues,
+  // and the ANNUAL totals for a prepaid term (the per-application figures
+  // stay in metadata for the letter).
+  const noticedCurrent = lane === LANE_PREPAY ? metadata.current_term_amount_cents : Number(row.current_rate_cents);
+  const noticedNew = lane === LANE_PREPAY ? metadata.next_term_amount_cents : Number(row.proposed_rate_cents);
+  // The notice row and the ranking row's link commit together (a savepoint
+  // when the caller already holds a transaction): a crash between the two
+  // would otherwise leave a draft row the next schedule cannot re-link.
+  const noticeId = await dbh.transaction(async (sp) => {
+    const inserted = await sp('price_change_notices').insert({
+      batch_id: batchId,
+      customer_id: row.customer_id,
+      current_amount_cents: noticedCurrent,
+      new_amount_cents: noticedNew,
+      cadence_label: cadenceLabelFor(lane),
+      effective_date: effectiveDate,
+      notice_token: crypto.randomBytes(16).toString('hex'),
+      status: 'draft',
+      created_by: actorId || null,
+      metadata: JSON.stringify(metadata),
+      rate_review_row_id: row.id,
+      billing_lane: lane,
+      family_key: row.family_key,
+      noticed_current_cents: noticedCurrent,
+      noticed_new_cents: noticedNew,
+      apply_attempts: 0,
+    }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning(['id', 'effective_date']);
+    if (!inserted.length) throw hold('notice_event_collision', { effectiveDate });
+    await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, updated_at: new Date() });
+    return inserted[0].id;
+  });
+  return { noticeId, rowId: row.id, customerId: row.customer_id, familyKey: row.family_key, lane, effectiveDate };
 }
 
 /**
@@ -447,10 +471,20 @@ async function scheduleNoticeRows(batchKey, { plannedSendDate = null, actorId = 
 
 // ── apply ───────────────────────────────────────────────────────────────
 
+// Delivery evidence, not status: the public page flips ANY opened notice —
+// a previewed draft included — to 'viewed', so a notice is applied only
+// with sent_at set and at least one leg delivered. Re-read under the row
+// lock in applyNotice.
+function wasDelivered(notice) {
+  return !!(notice && notice.sent_at && NOTIFIED_STATUSES.includes(String(notice.status)) && (notice.email_sent === true || notice.sms_sent === true));
+}
+
 async function loadDueNotices(dbh, asOfDay) {
   return dbh('price_change_notices')
     .whereNotNull('rate_review_row_id')
     .whereIn('status', NOTIFIED_STATUSES)
+    .whereNotNull('sent_at')
+    .where(function delivered() { this.where('email_sent', true).orWhere('sms_sent', true); })
     .whereNull('applied_at')
     .where(function due() {
       // A prepaid renewal amount is recorded as soon as the notice is out
@@ -658,7 +692,8 @@ async function moveFeeAndLedger(trx, { notice, customer, metadata, noticedCurren
 
 async function applyPerApplication(trx, ctx) {
   const { notice, customer } = ctx;
-  const schedule = require('../routes/admin-schedule')._private;
+  // The route module exports its helper bag as `_test` (router._test).
+  const schedule = require('../routes/admin-schedule')._test;
   if (!isEnabled('editApptPriceServiceScope')) throw hold('template_overlay_gate_off');
   const effectiveDate = ymd(notice.effective_date);
   const noticedCurrent = Number(notice.noticed_current_cents);
@@ -686,15 +721,22 @@ async function applyPrepay(trx, ctx) {
   const term = found.term;
   if (term.annual_plan_version) throw hold('termite_program', { termId: term.id });
   if (term.renewal_decision) throw hold('term_not_live', { termId: term.id, decision: term.renewal_decision });
-  if (cents(term.prepay_amount) !== Number(metadata.current_term_amount_cents)) throw hold('rate_moved_since_notice', { termAmountCents: cents(term.prepay_amount) });
+  // The notice carries the ANNUAL totals: the term's amount the customer
+  // saw and the successor amount they were told — the renewal charges
+  // exactly the latter.
+  if (cents(term.prepay_amount) !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { termAmountCents: cents(term.prepay_amount) });
   const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : Number(metadata.coverage_visits);
   if (visitsPerTerm !== Number(metadata.coverage_visits)) throw hold('rate_moved_since_notice', { coverageVisits: visitsPerTerm });
-  // The per-application figures the customer saw must still describe the term.
-  if (Math.round(Number(term.prepay_amount) * 100 / visitsPerTerm) !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { perApplication: true });
+  // The per-application figure the letter quotes must still describe the
+  // term (the ranking's own derivation, resolveCurrentRate, to the cent).
+  if (metadata.per_application_current_cents != null
+    && Math.round((Number(term.prepay_amount) / visitsPerTerm) * 100) !== Number(metadata.per_application_current_cents)) {
+    throw hold('rate_moved_since_notice', { perApplication: true });
+  }
   // "Notified amount is the charged amount": once the renewal reminder is
   // out (or a termite fee was frozen), the term's amount is spoken for.
   if (termRenewalNoticed(term)) throw hold('renewal_notice_already_sent', { termId: term.id });
-  const nextAmount = dollars(Number(notice.noticed_new_cents) * visitsPerTerm);
+  const nextAmount = dollars(Number(notice.noticed_new_cents));
   if (term.next_term_prepay_amount != null && term.next_term_prepay_amount !== '' && roundMoney(term.next_term_prepay_amount) !== nextAmount) {
     throw hold('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
   }
@@ -755,8 +797,12 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       const customer = await trx('customers').where({ id: noticeRow.customer_id }).forUpdate().first();
       if (!customer || customer.deleted_at) throw hold('rate_moved_since_notice', 'customer gone');
       const notice = await trx('price_change_notices').where({ id: noticeRow.id }).forUpdate().first();
-      if (!notice || notice.applied_at || !NOTIFIED_STATUSES.includes(String(notice.status))) { outcomeBox.skipped = true; return; }
+      if (!notice || notice.applied_at || !wasDelivered(notice)) { outcomeBox.skipped = true; return; }
       if (!LANES.includes(notice.billing_lane)) throw hold('lane_unknown', { lane: notice.billing_lane });
+      // The 30-day rule is measured from the DELIVERY the customer actually
+      // got, never from the day the owner planned to send.
+      const sentDay = etDateString(new Date(notice.sent_at));
+      if (daysBetweenYmd(sentDay, ymd(notice.effective_date)) < MIN_NOTICE_DAYS) throw hold('notice_too_recent', { sentDay, effectiveDate: ymd(notice.effective_date) });
       const activeHold = await activePlanHold(trx, customer.id);
       if (activeHold) throw hold('plan_on_hold', { holdId: activeHold.id, familyKey: activeHold.family_key, resumeOn: ymd(activeHold.resume_on) });
       const ctx = { notice, customer, today, metadata: parseMetadata(notice.metadata) };
@@ -836,6 +882,52 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
   return out;
 }
 
+// Undo before the send: delete the batch's DRAFT (never delivered) notice
+// rows and clear the ranking rows' links, so the batch can be rebuilt or
+// re-scheduled. A delivered notice is never touched (reported as kept).
+async function retireDraftNotices(batchKey, { dbh = db } = {}) {
+  if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
+  if (!BATCH_KEY_RE.test(String(batchKey || ''))) throw badInput('batchKey must be YYYY-MM');
+  return dbh.transaction(async (trx) => {
+    const rows = await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id').select('id', 'notice_id');
+    const noticeIds = rows.map((r) => r.notice_id);
+    if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0 };
+    const linked = await trx('price_change_notices').whereIn('id', noticeIds).select('id', 'status', 'sent_at', 'email_sent', 'sms_sent');
+    const drafts = linked.filter((n) => String(n.status) === 'draft' && !n.sent_at && !n.email_sent && !n.sms_sent);
+    const draftIds = drafts.map((n) => n.id);
+    let retired = 0;
+    if (draftIds.length) {
+      await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereIn('notice_id', draftIds).update({ notice_id: null, updated_at: new Date() });
+      retired = await trx('price_change_notices').whereIn('id', draftIds).where({ status: 'draft' }).whereNull('sent_at').delete();
+    }
+    logger.info(`[rate-review-apply] ${batchKey}: ${retired} draft notice rows retired, ${linked.length - draftIds.length} delivered kept`);
+    return { ok: true, batchKey, retired, keptDelivered: linked.length - draftIds.length };
+  });
+}
+
+// The non-termite renewal consumer of next_term_prepay_amount: an admin
+// recording a renewal (routes/admin-customers.js, the collected-prepay and
+// draft-invoice routes) for a customer whose live or just-ended term
+// carries a noticed successor amount must charge exactly that amount, or
+// say so (acknowledgeNoticedAmount). Returns null when no noticed amount
+// applies or the amount matches; else { termId, noticedAmount, termEnd }.
+// `today` is an ET calendar day; the window is the term's renewal season
+// (ended within the last 60 days or still live).
+async function noticedRenewalAmountConflict(dbh, { customerId, amount, today }) {
+  if (!customerId || !(Number(amount) > 0)) return null;
+  const since = addDaysYmd(today, -60);
+  const term = await dbh('annual_prepay_terms')
+    .where({ customer_id: customerId })
+    .whereNotNull('next_term_prepay_amount')
+    .where('term_end', '>=', since)
+    .orderBy('term_end', 'desc')
+    .first('id', 'term_end', 'next_term_prepay_amount');
+  if (!term) return null;
+  const noticedCents = cents(term.next_term_prepay_amount);
+  if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
+  return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents) };
+}
+
 // Held rate-review notices (sent, not applied, with a recorded hold).
 async function listApplyHolds({ dbh = db } = {}) {
   const rows = await dbh('price_change_notices as n')
@@ -874,8 +966,10 @@ module.exports = {
   scheduleNoticeRows,
   applyDueRateChanges,
   listApplyHolds,
+  retireDraftNotices,
+  noticedRenewalAmountConflict,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
-    loadLineOpenVisits, resolvePrepayTerm, applyNotice, loadDueNotices, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice,
+    loadLineOpenVisits, resolvePrepayTerm, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice,
   },
 };
