@@ -955,7 +955,11 @@ service line the request asked for (`inferServiceLine` per part of a composite
 such as `Lawn Care + Pest Control` or `Lawn & Pest`, on both sides); a request
 that named no service is answered by any booking, and one asking for a line the
 visit does not carry (a lawn + pest request, then a lawn-only booking) stays
-open for the office. The audit row and the FYI name the visit's service and day
+open for the office. It must also be for the same property: the request's house
+number + 5-digit zip against the visit's service address (its own stamp, else
+the customer's); a customer with two homes on one phone who asks at A and books
+at B keeps the A request open (when either side has no such key the close
+proceeds). The audit row and the FYI name the visit's service and day
 as read under the visit lock. A request staff attached an estimate
 to (`leads.estimate_id` set) is never closed and never converted by the
 booking: it stays open, as before this change, and converts the way any
@@ -967,7 +971,9 @@ won nor lost, and is set through
 as it is and nothing is uploaded to Google or Meta for the request); the
 booking's own attribution runs exactly as for any other booking. Once the
 booking has its own funnel row, the closed request's row is removed
-(`dropSupersededPreferredFunnelRows`), so the journey counts as one lead. First
+(`dropSupersededPreferredFunnelRows`), so the journey counts as one lead; only
+by the booking whose close is the request's CURRENT one (a request reopened and
+closed again by a later booking is that booking's). First
 touch keeps the credit (owner ruling 2026-10-01): when the request's row came
 in paid (`is_paid`: a paid click, or paid UTMs whose click id was stripped)
 and the booking's own row has no paid click id, the booking's

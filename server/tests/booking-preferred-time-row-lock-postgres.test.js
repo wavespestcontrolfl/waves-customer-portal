@@ -79,10 +79,10 @@ jest.setTimeout(60000);
       transcript_summary text, extracted_data jsonb, lead_source_id uuid, gclid text, wbraid text, gbraid text, fbclid text, fbc text, fbp text,
       converted_at timestamptz, deleted_at timestamptz, customer_id uuid, estimate_id uuid, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`, [schema]);
     await database.raw('CREATE TABLE ??.funnel_rows (lead_id uuid PRIMARY KEY)', [schema]);
-    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text, first_name text, last_name text, email text)', [schema]);
+    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text, first_name text, last_name text, email text, address_line1 text, zip text)', [schema]);
     await database.raw(`CREATE TABLE ??.self_booked_appointments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status text DEFAULT 'confirmed', created_at timestamptz DEFAULT now())`, [schema]);
-    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, customer_id uuid, status text DEFAULT \'pending\', is_callback boolean DEFAULT false, service_type text DEFAULT \'Pest Control\', scheduled_date date DEFAULT \'2099-01-08\')', [schema]);
+    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, customer_id uuid, service_address_line1 text, service_address_zip text, status text DEFAULT \'pending\', is_callback boolean DEFAULT false, service_type text DEFAULT \'Pest Control\', scheduled_date date DEFAULT \'2099-01-08\')', [schema]);
     await database.raw('CREATE TABLE ??.lead_activities (id serial PRIMARY KEY, lead_id uuid NOT NULL, activity_type text, description text, performed_by text, metadata jsonb, created_at timestamptz DEFAULT now())', [schema]);
     await database.raw('CREATE TABLE ??.ad_service_attribution (id serial PRIMARY KEY, lead_id uuid UNIQUE, customer_id uuid, self_booked_appointment_id uuid UNIQUE, lead_source text DEFAULT \'google_ads\', lead_source_detail text, lead_date date, fbp text, gclid text, wbraid text, gbraid text, fbclid text, fbc text, utm_campaign text, utm_term text, is_paid boolean, service_line text, specific_service text, service_bucket text, updated_at timestamptz DEFAULT now(), funnel_stage text DEFAULT \'lead\')', [schema]);
     ({ recordPreferredTimeRequest } = require('../services/booking-preferred-time'));
@@ -658,6 +658,51 @@ jest.setTimeout(60000);
       await database('scheduled_services').insert({ self_booking_id: sba[0].id, customer_id: winner }); // repointed by the merge
       expect((await closeBookedPreferredLeads(database, { customerId: loser, booking: sba[0] })).closed).toBe(1);
       expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
+    });
+
+    describe('a booking settles only the request for the same property (terminal Codex pass 3)', () => {
+      const setupHomes = async ({ visitAddress, visitZip }) => {
+        const cust = randomUUID();
+        await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample', address_line1: '100 Main St', zip: '34236' });
+        const req = await recordPreferredTimeRequest(database, value({ addressLine1: '100 Main Street', zip: '34236' }), { notify: false });
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id, service_address_line1: visitAddress, service_address_zip: visitZip });
+        return { closed: (await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })).closed, req };
+      };
+      test('a booking at the customer\'s other home leaves the request open', async () => {
+        const { closed, req } = await setupHomes({ visitAddress: '742 Gulf Dr', visitZip: '34242' });
+        expect(closed).toBe(0);
+        expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'new' });
+      });
+      test('the same home, street spelled differently, closes it', async () => {
+        expect((await setupHomes({ visitAddress: '100 Main St Unit 2', visitZip: '34236-1234' })).closed).toBe(1);
+      });
+      test('an unstamped visit takes the customer\'s address, the same home: closes it', async () => {
+        expect((await setupHomes({ visitAddress: null, visitZip: null })).closed).toBe(1);
+      });
+    });
+
+    test('a replay of an older booking never drops the row a LATER close kept (its current close is the later booking\'s; terminal Codex pass 3)', async () => {
+      const cust = randomUUID();
+      await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
+      const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+      const mk = async () => {
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        return sba[0];
+      };
+      const a = await mk();
+      expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: a })).closed).toBe(1);
+      await database('ad_service_attribution').insert({ lead_id: null, self_booked_appointment_id: a.id, funnel_stage: 'booked' });
+      // staff reopen it (the bridge restores its row), and booking B (no row of its own) closes it again
+      await database('leads').where({ id: req.leadId }).update({ status: 'new', extracted_data: database.raw("COALESCE(extracted_data, '{}'::jsonb) || jsonb_build_object('last_requested_at', now()::text)") });
+      await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
+      const b = await mk();
+      await database('self_booked_appointments').where({ id: b.id }).update({ created_at: new Date(Date.now() + 120000) });
+      expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: { ...b, created_at: new Date(Date.now() + 120000) } })).closed).toBe(1);
+      // replaying A finds its historical audit and the request handled, but the current close is B's
+      expect(await dropSupersededPreferredFunnelRows(database, { booking: a })).toBe(0);
+      expect(await requestRow(req.leadId)).toHaveLength(1);
     });
 
     describe('the close FYI is retryable from the persisted audit rows (codex #5477 r4 P2)', () => {

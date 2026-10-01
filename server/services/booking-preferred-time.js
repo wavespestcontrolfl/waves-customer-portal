@@ -479,6 +479,23 @@ function bookingAnswersRequest(requestedService, bookedService) {
   const booked = serviceLines(bookedService);
   return [...serviceLines(requestedService)].every((line) => booked.has(line));
 }
+// A booking settles only a request for the SAME property (terminal Codex pass 3):
+// a customer with two homes on one phone and name can ask for lawn at A and book
+// lawn at B. The visit's service address is its own stamp, else the customer's
+// (the COALESCE every dispatch reader uses). Keyed on house number + 5-digit zip,
+// so 'St' vs 'Street' and unit formatting never split one home; when either side
+// has no such key the property cannot be told apart and does not block the close.
+const propertyKey = (street, zip) => {
+  const number = String(street || '').trim().match(/^\d+[a-z]?/i);
+  const zip5 = String(zip || '').trim().slice(0, 5);
+  return number && /^\d{5}$/.test(zip5) ? `${number[0].toLowerCase()}|${zip5}` : null;
+};
+function sameProperty(lead, visit, customer) {
+  const requested = propertyKey(lead.address, lead.zip);
+  const booked = propertyKey(visit.service_address_line1 || (customer && customer.address_line1),
+    visit.service_address_zip || (customer && customer.zip));
+  return !requested || !booked || requested === booked;
+}
 // The words the audit row and the FYI name the visit by.
 const visitWords = (visit) => ({
   service: clean(visit.service_type, 120) || 'a service',
@@ -622,8 +639,9 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         const owner = await trx('scheduled_services').where({ id: visit.id }).first('customer_id');
         const ownerId = (owner && owner.customer_id) || customerId;
         const liveCustomer = await trx('customers').where({ id: ownerId }).forShare()
-          .first('phone', 'first_name', 'last_name', 'email');
-        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id');
+          .first('phone', 'first_name', 'last_name', 'email', 'address_line1', 'zip');
+        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate()
+          .first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id', 'service_address_line1', 'service_address_zip');
         if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
         // A merge between the owner read and the lock: leave it to the next closer.
         if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) return null;
@@ -634,7 +652,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         // to close). The advisory lock only orders closers, so the lead's own
         // state, phone identity and request recency are re-proven right here.
         const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
-          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest',
+          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest', 'address', 'zip',
           trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
         );
         const stillOurs = current
@@ -645,7 +663,8 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
           && !current.estimate_id // staff may have attached an estimate since the query above
           && current.requested_in_time === true
           && requestIdentifiesCustomer(current, liveCustomer, [ownerId, customerId])
-          && bookingAnswersRequest(current.service_interest, liveVisit.service_type);
+          && bookingAnswersRequest(current.service_interest, liveVisit.service_type)
+          && sameProperty(current, liveVisit, liveCustomer);
         if (!stillOurs) return null;
         // Named from the visit as locked (codex #5477 r10), not the earlier read.
         const { service, day } = visitWords(liveVisit);
@@ -732,10 +751,19 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
     return await db.transaction(async (trx) => {
       const locked = (await trx('leads as l')
         .whereIn('l.id', function closedByThisBooking() {
+          // ...whose CURRENT close is this booking's (terminal Codex pass 3): staff may
+          // have reopened a request this booking closed and a later booking closed it
+          // again, and that later close's funnel row is not this booking's to drop.
           this.select('a.lead_id').from('lead_activities as a')
             .where('a.activity_type', 'status_change')
             .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
-            .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)]);
+            .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
+            .whereNotExists(function laterClose() {
+              this.select(1).from('lead_activities as later')
+                .whereRaw('later.lead_id = a.lead_id AND later.id > a.id')
+                .where('later.activity_type', 'status_change')
+                .whereRaw("later.metadata->>'reason' = ?", [CLOSE_REASON]);
+            });
         })
         .where('l.status', CLOSED_STATUS)
         .forUpdate()
