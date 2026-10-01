@@ -259,6 +259,10 @@ describe('writerRulesRejection', () => {
     ["You told the technician, 'roaches again by the sink'.", 'quote'],
     ['‘Roaches again by the sink,’ you said.', 'quote'],
     ["'It's back by the sink,' you texted.", 'quote'],
+    [`'${'roaches again by the sink and behind the fridge '.repeat(6)}' you said.`, 'quote'],
+    ["It's on the house.", 'price'],
+    ["The follow-up's on the house.", 'price'],
+    ['We treated twelve square yards around the building.', 'footage'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -301,6 +305,7 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('You told us about the ants by the sink.')).toBeNull();
     expect(writerRulesRejection('We found a mud tube on the house foundation.')).toBeNull();
     expect(writerRulesRejection("The customer's kitchen and the tech's truck were checked.")).toBeNull();
+    expect(writerRulesRejection('We treated the two yards.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
@@ -354,6 +359,7 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection(`"${'ants are back '.repeat(6000)}`)).toBeNull();
     // Many unclosed curly quotes: each span ends at the next opener.
     writerRulesRejection('“ants '.repeat(20000));
+    writerRulesRejection(`'${'ants are back '.repeat(6000)}`);
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
