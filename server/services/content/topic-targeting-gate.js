@@ -1110,6 +1110,22 @@ function stem(w) {
   return w;
 }
 
+// Alternate names and closed compounds of the same pest reduce alike on
+// both sides: "cockroaches" / "roaches", "bedbugs" / "bed bugs".
+const PEST_NAME_ALIASES = [
+  [/\bcockroach(es)?\b/gi, 'roach$1'],
+  [/\bbed-?bugs\b/gi, 'bed bugs'],
+  [/\bbed-?bug\b/gi, 'bed bug'],
+  [/\byellow-?jackets\b/gi, 'yellow jackets'],
+  [/\byellow-?jacket\b/gi, 'yellow jacket'],
+  [/\bbox[- ]?elder\b/gi, 'boxelder'],
+  [/\bwhite-?footed\b/gi, 'white footed'],
+  [/\bmice\b/gi, 'mouse'],
+];
+function canonicalPestNames(text) {
+  return PEST_NAME_ALIASES.reduce((t, [re, to]) => t.replace(re, to), text);
+}
+
 // The topic of a keyword / title / slug: its content words, singular, with
 // served cities, geo qualifiers and framing words dropped — so "how to get
 // rid of paper wasps in Sarasota" and /pest-control/get-rid-of-paper-wasps/
@@ -1119,7 +1135,7 @@ function topicKey(text) {
   // Footprint regions ("Manatee County", "Southwest Fla.") and a bare
   // statewide qualifier are geo too: changing only the geo must not
   // resurrect a retired topic.
-  const geoFree = String(text || '').replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
+  const geoFree = canonicalPestNames(String(text || '')).replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
   const words = tokenize(geoFree)
     .filter((w) => !GEO_TOKENS.has(w) && !cities.has(w) && !GENERIC_TOKENS.has(w))
     .map(stem)

@@ -1187,6 +1187,23 @@ describe('retired topics', () => {
     expect(r.findings.map((f) => f.code)).toContain(gate.CODES.RETIRED_TOPIC);
   });
 
+  test('alternate names and closed compounds of a retired pest still match (codex r2)', () => {
+    for (const [query, url] of [
+      ['how to get rid of cockroaches', '/pest-control/get-rid-of-roaches/'],
+      ['bedbugs treatment', '/pest-control/bed-bug-treatment-bradenton/'],
+      ['yellowjackets', '/pest-control/get-rid-of-yellow-jackets/'],
+      ['box elder bugs', '/pest-control/get-rid-of-boxelder-bugs/'],
+    ]) {
+      const hit = gate.evaluate(blog({ query }), { requireCorpus: false }).findings.find((f) => f.code === gate.CODES.RETIRED_TOPIC);
+      expect(hit).toBeTruthy();
+      expect(hit.url).toBe(url);
+    }
+  });
+
+  test('registry size is deliberate (47: 51 proposed minus 4 kept live)', () => {
+    expect(gate._internals.RETIRED_POSTS).toHaveLength(47);
+  });
+
   test('a different topic in the same family still passes', () => {
     for (const query of ['german cockroach identification', 'how to get rid of wasps', 'drywood termite frass', 'pest control sarasota', 'lawn treatment sarasota', 'termite cost']) {
       expect(gate.evaluate(blog({ query }), { requireCorpus: false }).findings.filter((f) => f.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);

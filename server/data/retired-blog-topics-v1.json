@@ -1,5 +1,5 @@
 {
-  "_comment": "Blog posts retired in the 2026-10-01 prune (owner approved D1, \"yes on all\"). Each 301s to merged_into on the hub. The topic-targeting gate refuses a NEW blog on a retired URL or topic; grow merged_into as a refresh instead. Add a row whenever a post is merged away.",
+  "_comment": "Blog posts retired in the 2026-10-01 prune (owner approved D1). Each 301s to merged_into on the hub. The topic-targeting gate refuses a NEW blog on a retired URL or topic; grow merged_into as a refresh instead. 47 of the 51 first proposed: get-rid-of-bagworms became the outdoor-bagworm winner, get-rid-of-webworms (fall webworms) and get-rid-of-crickets-in-lakewood-ranch-fl (house crickets) have no matching live page, and the Sarasota-spoke sarasota-active-pests-by-neighborhood stays live (owner 10-01). Add a row whenever a post is merged away.",
   "retired_on": "2026-10-01",
   "posts": [
     {
@@ -67,10 +67,6 @@
       "merged_into": "/pest-control/dangerous-ants-in-florida/"
     },
     {
-      "url": "/pest-control/get-rid-of-crickets-in-lakewood-ranch-fl/",
-      "merged_into": "/lawn-care/mole-crickets-bahia-sarasota-fl/"
-    },
-    {
       "url": "/pest-control/get-rid-of-earwigs/",
       "merged_into": "/pest-control/silverfish-earwig-booklice-identification/"
     },
@@ -123,10 +119,6 @@
       "merged_into": "/pest-control/get-rid-of-wasps/"
     },
     {
-      "url": "/pest-control/get-rid-of-webworms/",
-      "merged_into": "/lawn-care/tropical-sod-webworms-sarasota-fl/"
-    },
-    {
       "url": "/pest-control/get-rid-of-white-footed-ants/",
       "merged_into": "/pest-control/get-rid-of-ants/"
     },
@@ -161,10 +153,6 @@
     {
       "url": "/pest-control/rodent-control-guide-lakewood-ranch-fl/",
       "merged_into": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/"
-    },
-    {
-      "url": "/pest-control/sarasota-active-pests-by-neighborhood/",
-      "merged_into": "/pest-control/seasonal-pest-calendar-sarasota-fl/"
     },
     {
       "url": "/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/",
