@@ -28,6 +28,9 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
+const { renderCompanyFactsSection } = require('./sms-company-facts');
+const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
+const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -97,7 +100,48 @@ const PROMPT_VERSION = 'house_voice_v11';
 // cancellation). generateGroundedDraft stamps this version instead of
 // PROMPT_VERSION on a draft that actually used the rewritten prompt, so
 // judge/ledger rows tell the two cohorts apart.
-const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
+// v12 update (2026-09-29, owner ruling): a pest report ("still seeing bugs",
+// "they're back") is NOT a complaint for hand-off purposes — the PEST
+// REPORTS rule (realAnswersHandoffBullets) now answers it unconditionally,
+// offering the free re-service off the SAME FREE RE-SERVICE fact the
+// COMPLAINTS rule uses. That fact (reserviceFactLine / fetchReserviceFactState)
+// is no longer gated on GATE_SMS_AGENT_COMPLAINTS — it renders on EVERY
+// gate-on facts block now, same as FOLLOW-UP SLA RIGHT NOW. This is an
+// UNCONDITIONAL change to the bare v12 prompt (no gate protects it), so the
+// identity carries a numeric token ("2") to keep pre-PR bare-v12 judge/graduation/
+// sealed-eval evidence from pooling with post-PR evidence under one
+// identity — the exact pooling hazard this stamp exists to prevent (see the
+// currentPromptVersion() comment below). The 'house_voice_v12' PREFIX is
+// unchanged on purpose: every other reader that matches it (sms-followup-sla,
+// sms-amount-recheck, agent-decision-send-checks, sms-sealed-eval) keys off
+// that prefix, not the exact string, so they need no change.
+//
+// COMPANY FACTS (owner rulings 2026-09-29/30): the gate-on facts block also
+// carries the owner-approved COMPANY FACTS section (sms-company-facts.js) and
+// the gate-on system prompt allows general pest knowledge + treats those
+// facts as authoritative, so drafts made with them stamp the '_cf' token.
+// The two cohorts stay distinct: bare (pre both), '_cf' (company facts, no
+// re-service fact), '2' (re-service fact, no company facts), '2_cf' (both,
+// shipped), '3_cf' (both + LIVE ETA, current). 32 chars; with all four category tags ('+bclm') 37, under
+// PROMPT_VERSION_COLUMN_MAX (40).
+// The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', '3_cf', any later
+// suffix, any '+category' tags): readers that must recognize ALL of them —
+// sms-auto-send's gratitude discovery — match this prefix, never the current
+// constant, so a suffix bump cannot orphan rows stamped under earlier versions.
+const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
+// LIVE ETA (Codex round-1 finding, PR #5334): the LIVE ETA prompt rule +
+// deterministic minutes guard change what a gate-on draft may say, so they need
+// their own cohort identity — pooling their graduation/exam evidence with
+// pre-LIVE-ETA drafts would credit this change with evidence that never
+// examined it. Merged with main's '2_cf' (free re-service + company facts)
+// identity (#5336): the fresh identity above both is the numeric token "3" —
+// 'house_voice_v12_real_answers3_cf' (32 chars; with all four category tags
+// ('+bclm') 37, under PROMPT_VERSION_COLUMN_MAX). A numeric token is the
+// cohort-bump mechanism sms-sealed-eval already understands (>= 2 = carries the
+// unconditional FREE RE-SERVICE line, so "3" keeps that contract and 'cf' keeps
+// COMPANY FACTS); the earlier '_eta' suffix on top of '2_cf' would have been 36
+// chars and 41 with all four category tags — one past the varchar(40) columns.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cf`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -120,13 +164,11 @@ const SHADOW_STATUS = 'shadow';
  * draft rows, graduation cohorts, and exam checks all share one identity.
  * Exported so OTHER "what counts as current" readers — sms-graduation's
  * cohort-version default, sms-auto-send's gratitude expectedPromptVersion
- * checks and its gratitudeCandidatePage discovery filter (a LIKE-prefix
- * match against REAL_ANSWERS_PROMPT_VERSION, since it must recognize every
- * suffixed variant, not just the bare one) — can resolve the SAME effective
- * version instead of the static PROMPT_VERSION constant, which stays v11
- * forever. While GATE_SMS_REAL_ANSWERS stays off (the default) this is
- * identical to PROMPT_VERSION, so today's call sites are unaffected either
- * way.
+ * checks and its gratitudeCandidatePage discovery filter (an escaped
+ * LIKE on REAL_ANSWERS_VERSION_FAMILY) — can resolve the SAME effective version instead of
+ * the static PROMPT_VERSION constant, which stays v11 forever. While
+ * GATE_SMS_REAL_ANSWERS stays off (the default) this is identical to
+ * PROMPT_VERSION, so today's call sites are unaffected either way.
  */
 // prompt_version columns are varchar(40) (message_drafts, agent_decisions,
 // shadow_draft_judgments, sms_pathology_entries, sms_sealed_eval_runs) — a
@@ -187,11 +229,11 @@ const INTENDED_ACTION_TYPES = [
 // (pre-push audit P1 round 3): prompt_version is varchar(40) across
 // message_drafts, agent_decisions, shadow_draft_judgments,
 // sms_pathology_entries and sms_sealed_eval_runs, and REAL_ANSWERS_PROMPT_VERSION
-// alone is 28 chars — a full-word tag like 'billing_disputes' would already
+// alone is 29 chars — a full-word tag like 'billing_disputes' would already
 // overflow the column with just ONE category gate on. Concatenated with no
 // separator (currentPromptVersion() sorts them, so order is still
 // deterministic) every one of these codes must stay a single character, or
-// the worst case (all four gates on) must still fit in `28 + 1 + N` chars.
+// the worst case (all four gates on) must still fit in `29 + 1 + N` chars.
 const REAL_ANSWERS_HANDOFF_CATEGORIES = [
   { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints', tag: 'c' },
   { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes', tag: 'b' },
@@ -225,6 +267,9 @@ function followupSlaPhrase(now = new Date()) {
 // SLA_PHRASES / replyPromisesFollowup / slaPhraseStatus live in
 // ./sms-followup-sla (Codex r3) and are re-exported below.
 const followupSla = require('./sms-followup-sla');
+const { stripTrackLinks } = require('./sms-track-links');
+const { sanitizeTechNames } = require('./live-eta-destination');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 // The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
 // line (only the categories whose own gate is still off), one instruction
@@ -252,7 +297,7 @@ function realAnswersHandoffBullets() {
     // Eligibility therefore rides in as a per-draft FACT, and the offer
     // routes to that link through an escalation a teammate owns — never
     // generic OPEN TIMES, never a promise the facts don't back.
-    lines.push('- COMPLAINTS: answer from the facts and acknowledge what happened. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists — then add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts their free re-service booking link (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, or is absent, never offer or imply a free visit: acknowledge, add {"type":"escalate"}, and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
+    lines.push('- COMPLAINTS: answer from the facts and acknowledge what happened. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists — then add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts their free re-service booking link (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says a line is ALREADY BOOKED, never offer a new link, OPEN TIMES or a paid visit for it: acknowledge and refer to the appointment already on the schedule (the date/window in the fact), and offer help with that appointment. When it says not eligible, or is absent, never offer or imply a free visit: acknowledge, add {"type":"escalate"}, and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
   }
   if (gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES')) {
     lines.push('- BILLING DISPUTES: answer from the facts only — state the real numbers from BILLING, never resolve the dispute or offer a credit/refund/discount that is not in the facts.');
@@ -263,6 +308,39 @@ function realAnswersHandoffBullets() {
   if (gateEnvValue('GATE_SMS_AGENT_LEGAL')) {
     lines.push('- LEGAL THREATS: answer from the facts only.');
   }
+  // PEST REPORTS (owner ruling 2026-09-29): "pests came back" / "still
+  // seeing X after service" is NOT a complaint for hand-off purposes —
+  // unconditional, independent of GATE_SMS_AGENT_COMPLAINTS (an ANGRY tone,
+  // property damage, or a dispute over what happened is still a complaint
+  // and stays on the HELD-FOR-A-PERSON list above while that gate is off).
+  // Same entitlement mechanism and wording contract as the COMPLAINTS rule
+  // (FREE RE-SERVICE fact, per-service-line, re-service link never OPEN
+  // TIMES) so the two rules can never drift on what "eligible" means — but
+  // ineligible routes to a normal PAID visit via OPEN TIMES instead of an
+  // unconditional escalate, since staff replay showed these get booked, not
+  // just acknowledged.
+  // The tie-break's OWN wording must track whether complaints are actually
+  // held right now (Codex round-1 review: the fixed-gates test "all four
+  // category gates on leaves nothing HELD" checks for the literal substring
+  // "HELD FOR A PERSON" anywhere in the prompt — with GATE_SMS_AGENT_COMPLAINTS
+  // on, a complaint is no longer held at all, it is answered per the
+  // COMPLAINTS rule above, so saying "held for a person" here would be both
+  // wrong and would falsely trip that invariant).
+  const pestComplaintTieBreak = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
+    ? 'follow the COMPLAINTS rule above instead of this one'
+    : 'it is HELD FOR A PERSON while that category is still held above';
+  // No deterministic regex backstop enforces this tie-break (removed
+  // 2026-09-29 after several audit/Codex rounds kept finding new complaint
+  // shapes a regex missed — anger, cancel threats, damage attribution,
+  // re-service resolution for an already-held complaint — a non-converging
+  // chokepoint, not a fixable gap). This bullet's own precedence — an actual
+  // complaint always wins over pest-activity wording — is enforced by
+  // prompt precedence plus the fact every draft is staff-reviewed before it
+  // reaches a customer: escalation intents never auto-send (see
+  // generateGroundedDraft's auto-send-safety check), so a model that misreads
+  // a complaint as a plain pest report is caught by the human in the loop,
+  // not by code.
+  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — ${pestComplaintTieBreakLabels()} — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says that service line is ALREADY BOOKED, do NOT offer a new link, OPEN TIMES or a paid visit for it — acknowledge what they're seeing and refer to the appointment already on the schedule (the date/window in the fact), offering to help with that visit. When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
   lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
   return lines.join('\n');
 }
@@ -291,19 +369,29 @@ function openTimesDayLabel(d) {
   return d?.fullDate || [d?.dayOfWeek, d?.month, d?.dayNum].filter(Boolean).join(' ');
 }
 
-// ── Scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER, owner ruling 2026-09-29, slice 1) ──
-// For a text about ONE upcoming visit, offered times are the times the
-// customer's own reschedule link would show for that visit: the same visit
-// loader, the same page eligibility verdict (grouped / missed / notice-window
-// / inactive account all refuse), the same booking range and the same
-// buildBookingAvailability picker (service time frames, proximity routing,
-// planning minutes, detour cap) — reused from routes/reschedule-public.js,
-// not copied. Required lazily: that module pulls in the express router.
-// SLICE 1 SCOPE: only an identity that IS an upcoming visit takes this path.
-// Open-estimate / new_service / last_completed / engine_default identities
-// keep the zone-based finder (fetchOpenTimesData above) even with the gate on;
-// new-visit offers move to the /book finder in the next slice.
+// ── Scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER, owner ruling 2026-09-29) ──
+// With the gate on, every appointment time the texting AI offers comes from
+// the picker that would COMMIT that visit, never the zone-based finder:
+//   - scheduler: a text about ONE upcoming visit is offered the times its own
+//     reschedule link would show — the same visit loader, page eligibility
+//     verdict (grouped / missed / notice-window / inactive account all
+//     refuse), booking range and buildBookingAvailability picker (service time
+//     frames, proximity routing, planning minutes, detour cap), reused from
+//     routes/reschedule-public.js, not copied;
+//   - estimate: an open or linked estimate is offered the times its public
+//     page would show (estimate-slot-availability behind the page's own gate,
+//     routes/estimate-slots-public.js) — the picker /reserve commits from;
+//   - book: a new / other service, a return visit or a brand-new customer is
+//     offered the times the /book funnel would show that customer for that
+//     funnel service (routes/booking.js availabilityForExistingCustomer) —
+//     the picker createSelfBooking commits from.
+// Required lazily: those modules pull in the express routers. A source with
+// no picker to commit through (no id, another customer's estimate, no funnel
+// service for the text, no resolvable location) gets NO OPEN TIMES — the zone
+// finder is never a fallback with the gate on.
 const SCHEDULER_OFFER_SOURCE = 'scheduler';
+const ESTIMATE_OFFER_SOURCE = 'estimate';
+const BOOK_OFFER_SOURCE = 'book';
 const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
 // service's availability build with a possible geocode and the find-time
@@ -361,6 +449,90 @@ async function loadSchedulerVisitDays({ customerId, scheduledServiceId }) {
   return availability ? { days: availability.days || [], currentWindow: visitCurrentWindow(svc) } : null;
 }
 
+// The estimate page's slots for an open or linked estimate, regrouped into the
+// picker-day shape the renderers read (the page lists primary chips and an
+// expander; both are offers). null when the page would show none, or the
+// estimate is not this customer's.
+// `fresh` is the send-time recheck's: uncached, uncapped (see
+// offerableEstimateSlots); the draft reads the page's default cut.
+async function loadEstimateDays({ customerId, estimateId, fresh = false }) {
+  const offerable = estimateId ? require('../routes/estimate-slots-public')._internals.offerableEstimateSlots : null;
+  const result = offerable
+    ? await (fresh ? offerable(estimateId, customerId, { fresh: true }) : offerable(estimateId, customerId))
+    : null;
+  if (!result) return null;
+  const byDate = new Map();
+  for (const slot of [...(result.primary || []), ...(result.expander || [])]) {
+    if (!slot?.date || !slot.windowStart) continue;
+    if (!byDate.has(slot.date)) byDate.set(slot.date, []);
+    byDate.get(slot.date).push({ startTime24: slot.windowStart });
+  }
+  return { days: [...byDate.keys()].sort().map((date) => ({ date, slots: byDate.get(date) })) };
+}
+
+// The /book funnel's days for this customer and funnel service. null when
+// /book would offer nothing to commit against (see availabilityForExistingCustomer).
+async function loadBookDays({ customerId, serviceKey }) {
+  if (!serviceKey) return null;
+  const availability = await require('../routes/booking')._internals.availabilityForExistingCustomer({ customerId, serviceKey });
+  return availability ? { days: availability.days || [] } : null;
+}
+
+// The days (plus, for a visit, its own current window) the picker that would
+// commit this offer shows. `offer` is { source, scheduledServiceId? |
+// estimateId? | serviceKey? } — what the snapshot lookup carries so the
+// send-time recheck asks the SAME picker. null = nothing to offer. Errors
+// throw — callers fail closed.
+async function loadSchedulerDays(offer, customerId, { fresh = false } = {}) {
+  if (offer.source === SCHEDULER_OFFER_SOURCE) return offer.scheduledServiceId ? loadSchedulerVisitDays({ customerId, scheduledServiceId: offer.scheduledServiceId }) : null;
+  if (offer.source === ESTIMATE_OFFER_SOURCE) return loadEstimateDays({ customerId, estimateId: offer.estimateId, fresh });
+  if (offer.source === BOOK_OFFER_SOURCE) return loadBookDays({ customerId, serviceKey: offer.serviceKey });
+  return null;
+}
+
+// The /book funnel service a text's service is, or '' when it names none the
+// funnel books (createSelfBooking refuses an empty key). An EXPLICIT table
+// (sms-book-funnel-map.js), never a keyword heuristic:
+//   1. the catalog service_key the identity step's model pick carried
+//      (new_booking) — authoritative when present, mapped or withheld;
+//   2. an exact known display name (the funnel's labels, known catalog names);
+//   3. an exact match of the name against the bookable catalog's own rows
+//      (a completed visit carries a display name, not a key), through the
+//      same key table — ambiguous or unmapped = withheld.
+// Actual bait, WDO, palm-injection and every unlisted service map to nothing.
+async function bookFunnelKeyFor(identity) {
+  try {
+    const map = require('./sms-book-funnel-map');
+    if (identity?.serviceKey) return map.funnelKeyForCatalogKey(identity.serviceKey);
+    // Owner ruling 2026-09-30: a brand-new customer who names no service is
+    // offered general pest control times (the zone finder's old default).
+    if (identity?.reason === 'engine_default') return 'pest_control';
+    const label = String(identity?.serviceType || '').trim();
+    if (!label) return '';
+    const byName = map.funnelKeyForServiceName(label);
+    if (byName) return byName;
+    const lower = label.toLowerCase();
+    const services = await require('./call-booking-catalog').loadBookableCallServices(db);
+    const keys = new Set((services || [])
+      .filter((s) => s && [s.name, s.short_name].some((n) => String(n || '').trim().toLowerCase() === lower))
+      .map((s) => map.funnelKeyForCatalogKey(s.service_key)));
+    return keys.size === 1 ? [...keys][0] : '';
+  } catch (err) {
+    logger.warn(`[sms-shadow] funnel service lookup failed (${err.message}); OPEN TIMES withheld`);
+    return '';
+  }
+}
+
+// Where OPEN TIMES come from with GATE_SMS_OFFERS_SCHEDULER on: the picker
+// that commits the job this text is about. An estimate (linked by the caller,
+// or the open estimate the identity step chose) wins; then an upcoming visit;
+// everything else is a new visit through /book.
+async function schedulerOfferFor(identity, estimateId) {
+  if (estimateId) return { source: ESTIMATE_OFFER_SOURCE, estimateId };
+  if (SCHEDULER_VISIT_REASONS.has(identity.reason)) return { source: SCHEDULER_OFFER_SOURCE, scheduledServiceId: identity.scheduledServiceId || null };
+  return { source: BOOK_OFFER_SOURCE, serviceKey: await bookFunnelKeyFor(identity) };
+}
+
 // Up to OPEN_TIMES_MAX_SLOTS_PER_DAY starts per day whose 2-hour arrival
 // windows do not overlap (the picker lists every feasible start, often close
 // together; quoting 8:00-10:00 and 8:15-10:15 as two choices is noise).
@@ -398,20 +570,16 @@ function excludeCurrentWindowSlots(slots, startMinutes) {
   });
 }
 
-async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
-  if (!scheduledServiceId) {
-    logger.info('[sms-shadow] OPEN TIMES withheld — upcoming visit has no id to offer times for');
-    return { block: null, days: [] };
-  }
+async function fetchSchedulerOpenTimesData({ customerId, schedulerOffer }) {
   let timer = null;
   const startedAt = Date.now();
   try {
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('open-times timeout')), SCHEDULER_OPEN_TIMES_TIMEOUT_MS);
     });
-    const loaded = await Promise.race([loadSchedulerVisitDays({ customerId, scheduledServiceId }), timeout]);
+    const loaded = await Promise.race([loadSchedulerDays(schedulerOffer, customerId), timeout]);
     if (!loaded) {
-      logger.info('[sms-shadow] OPEN TIMES withheld — visit is not reschedulable through the scheduler');
+      logger.info(`[sms-shadow] OPEN TIMES withheld — no ${schedulerOffer.source} picker offers times for this text`);
       return { block: null, days: [] };
     }
     const lines = [];
@@ -445,14 +613,13 @@ async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
 // [{date, windows: [...]}]), which validateOfferedTimes checks the model's
 // own offered_times declaration against — one fetch, two views of the same
 // data, so they can never drift apart.
-async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null, serviceType = null, offersFromScheduler = false, scheduledServiceId = null } = {}) {
+async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null, serviceType = null, schedulerOffer = null } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { block: null, days: [] };
-  if (!schedulingIntent || (!city && !offersFromScheduler)) return { block: null, days: [] };
-  // GATE_SMS_OFFERS_SCHEDULER: the identity step resolved to ONE upcoming
-  // visit, so its times come from the reschedule link's own picker. Never
-  // falls back to the zone finder below — a visit the picker refuses (or one
-  // with no id carried) gets no OPEN TIMES at all.
-  if (offersFromScheduler) return fetchSchedulerOpenTimesData({ customerId, scheduledServiceId });
+  if (!schedulingIntent || (!city && !schedulerOffer)) return { block: null, days: [] };
+  // GATE_SMS_OFFERS_SCHEDULER: times come from the picker that would commit
+  // this job (schedulerOfferFor). Never falls back to the zone finder below —
+  // a job whose picker offers nothing gets no OPEN TIMES at all.
+  if (schedulerOffer) return fetchSchedulerOpenTimesData({ customerId, schedulerOffer });
   let timer = null;
   try {
     const Availability = require('./availability');
@@ -494,46 +661,148 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
   }
 }
 
-// Free re-service eligibility for the facts block (Codex r6 P1), through
-// the EXISTING mechanism — reservice-scheduler.reserviceLanesForCustomer,
-// the same check the composer's /reservice-link helper and the public
-// /reservice page run. Only when the real-answers AND complaints gates are
-// on. Fail-closed everywhere: self-serve off, an inactive or missing
-// customer, a lookup error or a timeout all resolve to [] (not eligible).
-// Returns null when the gates are off (no fact is rendered at all).
-async function fetchReserviceLanes({ customerId } = {}) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return null;
-  if (!customerId) return [];
+// Live re-service lane eligibility for a customer, through the EXISTING
+// mechanism — reservice-scheduler.loadEligibleReserviceLanes, the SAME
+// shared predicate the composer's /reservice-link helper resolves through
+// (Codex round-4 P1: one loader, not three parallel re-implementations of
+// "deleted_at IS NULL, active, has a reservice_token, has a live lane") —
+// so the FREE RE-SERVICE fact, the drafted offer, and what staff can
+// actually send from the composer never disagree. Deliberately has NO
+// dependency on GATE_SMS_REAL_ANSWERS (unlike fetchReserviceFactState below,
+// which wraps this for the draft-time facts block, which only ever renders
+// inside a real-answers facts block): the send-time re-service promise
+// recheck (reservicePromiseStillEligible) must revalidate an
+// ALREADY-DRAFTED promise's wording even if the gate were flipped off
+// between drafting and sending. Fail-closed everywhere: self-serve off, no
+// customer, an inactive/missing/tokenless/deleted customer row, a lookup
+// error, or a timeout all resolve to [] (not eligible) — loadEligibleReserviceLanes
+// itself never throws, but the timeout race below still guards against it
+// hanging.
+// Codex round-11 P2 (PR #5336): the state comes from reservice-scheduler's
+// SHARED lane-availability computation (coverage MINUS lanes with an open
+// callback — what the public /reservice page renders as bookable), so a lane
+// another channel booked after review no longer passes, at draft time (the
+// FREE RE-SERVICE fact lists only bookable lanes) or at send time. Returns
+// { eligible, open, bookable }; fail-closed to all-empty.
+async function liveReserviceLaneState(customerId) {
+  // verified (Codex round-27 P1): true only for a COMPLETED lookup (or no customer at all, i.e. a prospect with
+  // no row to have a plan). A lookup error / timeout / self-serve off / unusable customer row is verified:false —
+  // "could not check", never a confirmed no-plan prospect.
+  const none = { eligible: [], open: {}, bookable: [], verified: false };
+  if (!customerId) return { ...none, verified: true, hasRecurringPlan: false };
   let timer = null;
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
-    if (!reserviceSelfServeEnabled()) return [];
+    const { reserviceSelfServeEnabled, loadReserviceLaneAvailability } = require('./reservice-scheduler');
+    // Codex round-32 P1: the ENTITLEMENT lookup is independent of the public-surface gate (GATE_RESERVICE_SELF_SERVE and its
+    // kill switch). With the surface off a covered customer is still covered — only the booking LINK is unavailable, a
+    // distinct fact state (`linkAvailable: false`) instead of "eligibility unavailable" (which sent the reply to paid OPEN TIMES).
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
-    const lookup = (async () => {
-      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate');
-      if (!row || row.active === false) return [];
-      return reserviceLanesForCustomer(row);
-    })();
-    const lanes = await Promise.race([lookup, timeout]);
-    return Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+    const state = await Promise.race([loadReserviceLaneAvailability(customerId), timeout]);
+    // Codex round-39 P2: a covered customer with no reservice_token (restored row) has no booking LINK either — same state as the surface being off
+    const linkAvailable = reserviceSelfServeEnabled() !== false && state?.linkMissing !== true;
+    const only = (lanes) => (Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : []);
+    const eligible = only(state?.eligible);
+    const open = state?.open || {};
+    return {
+      eligible,
+      open,
+      // no bookable lane while the link is unavailable — a free re-service cannot be booked (promise checks fail closed)
+      bookable: linkAvailable ? only(state?.bookable) : [],
+      linkAvailable,
+      // covered lanes with no open callback whose booking link is down: entitled, but nothing to offer or book right now
+      linkDownLanes: linkAvailable ? [] : eligible.filter((lane) => !open[lane]),
+      verified: state?.verified === true,
+      // Codex round-33 P2: false ONLY when the lookup affirmatively found no recurring plan of ANY kind (undefined = unknown)
+      hasRecurringPlan: typeof state?.hasRecurringPlan === 'boolean' ? state.hasRecurringPlan : undefined,
+    };
   } catch (err) {
-    logger.warn(`[sms-shadow] free re-service eligibility lookup failed (${err.message}); treating as not eligible`);
-    return [];
+    logger.warn(`[sms-shadow] re-service eligibility lookup failed (${err.message}); treating as not eligible`);
+    return none;
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+// Why the given lanes cannot be promised now: not covered any more vs covered
+// but already booked (an open re-service visit in the lane).
+function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
+  const blocked = lanes.filter((lane) => !state.bookable.includes(lane));
+  if (!blocked.length || (anyOf && blocked.length < lanes.length)) return null;
+  // anyOf: one bookable lane among `lanes` is enough, and the reason names no lane.
+  const names = anyOf ? '' : ` ${blocked.join(' and ')}`;
+  if (state.linkAvailable === false && blocked.every((lane) => state.eligible.includes(lane) && !state.open?.[lane])) {
+    return `the free${names} re-service booking link is unavailable right now — the customer is covered but nothing can be promised or booked; hand it to the office`;
+  }
+  return blocked.every((lane) => state.eligible.includes(lane))
+    ? `a free${names} re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page`
+    : `no longer eligible for a free${names} re-service`;
 }
 
 // The rendered fact line, and its reader. One line, fixed wording, so the
 // deterministic check below and a frozen replay read the same thing.
 const RESERVICE_FACT_LABEL = 'FREE RE-SERVICE:';
-function reserviceFactLine(lanes) {
+function reserviceFactLine(lanes, booked = {}, planState = 'unknown', linkDownLanes = []) {
   const list = Array.isArray(lanes) ? lanes : [];
-  return list.length
-    ? `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
-    : `${RESERVICE_FACT_LABEL} not eligible`;
+  // Codex round-13 P2 (PR #5336): a covered lane that already holds an open
+  // re-service callback is NOT "not eligible" — that wording steered the model
+  // to offer OPEN TIMES for a paid visit. It gets its own fact, naming the
+  // existing appointment so the reply references it. Validation still reads
+  // only the "eligible for …" lanes (eligibleReserviceLanes), i.e. bookable ones.
+  const bookedEntries = Object.entries(booked || {}).filter(([lane]) => lane === 'pest' || lane === 'lawn');
+  const bookedText = bookedEntries
+    .map(([lane, info]) => {
+      // Codex round-14 P2: the two-hour arrival WINDOW (never the raw start time,
+      // which reads as an exact arrival).
+      const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+      const range = info?.windowStart ? arrivalWindowRange(info.windowStart) : null;
+      const windowText = range ? `, ${formatSmsTimeRange(range)}` : '';
+      return `${lane} already booked${info?.date ? ` (${info.date}${windowText})` : ''}`;
+    })
+    .join('; ');
+  if (list.length) {
+    return `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
+      + (bookedText ? `; ${bookedText}` : '');
+  }
+  // Codex round-32 P1: COVERED but the booking link is unavailable (the surface gate is off / killed) — a distinct state.
+  // The reply acknowledges and hands it to the office; it never offers the link, a free visit or paid OPEN TIMES.
+  const down = (Array.isArray(linkDownLanes) ? linkDownLanes : []).filter((lane) => lane === 'pest' || lane === 'lawn');
+  if (down.length) {
+    return `${RESERVICE_FACT_LABEL} covered for ${down.join(' and ')}, but the free re-service booking link is unavailable right now — do NOT offer the link, a free visit or paid OPEN TIMES for it; acknowledge and hand it to the office`
+      + (bookedText ? `; ${bookedText}` : '');
+  }
+  return bookedText
+    ? `${RESERVICE_FACT_LABEL} ${bookedText} — their free re-service for that line is already on the schedule`
+    // Codex round-27 P1: two DISTINCT not-eligible states. Only a lookup that COMPLETED and found no recurring plan
+    // renders "(no recurring plan on file)" — the affirmative prospect signal that relaxes generic
+    // inspection/assessment wording (validateReserviceOffer). An unavailable / errored / unrequested lookup
+    // renders "(eligibility unavailable)" and is treated as a plan customer (fail closed). Gate-on only (the
+    // fact is never rendered gate-off).
+    : `${RESERVICE_FACT_LABEL} not eligible (${planState === 'none' ? 'no recurring plan on file' : (planState === 'unsupported' ? 'recurring plan on file, no self-serve re-service lane' : 'eligibility unavailable')})`;
+}
+
+// 'none' — a COMPLETED lookup affirmatively found NO recurring plan of ANY kind (the prospect signal);
+// 'unsupported' — verified, a plan exists, but no self-serve re-service lane (termite / mosquito / tree-and-shrub only): a
+//                 plan customer, NOT a prospect (Codex round-33 P2);
+// 'unknown' — anything else, including a lookup that could not say (fail closed).
+function reserviceLanePlanState(state) {
+  if (!state.verified || state.eligible.length) return 'unknown';
+  if (state.hasRecurringPlan === false) return 'none';
+  if (state.hasRecurringPlan === true) return 'unsupported';
+  return 'unknown';
+}
+// Fact-block state for a live draft (Codex round-13 P2): the bookable lanes plus
+// the covered-but-already-booked lanes with their open callback's date/window.
+// null when real-answers is off (no fact is rendered).
+async function fetchReserviceFactState({ customerId } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  const state = await liveReserviceLaneState(customerId);
+  // booked = every lane holding an open callback (loaded independently of current eligibility — round-32 P2)
+  const booked = {};
+  for (const lane of ['pest', 'lawn']) {
+    if (state.open?.[lane]) booked[lane] = state.open[lane];
+  }
+  return { lanes: state.bookable, booked, linkDownLanes: state.linkDownLanes || [], planState: reserviceLanePlanState(state) };
 }
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
@@ -575,31 +844,2553 @@ function validateComplianceCopy({ reply }) {
   return { ok: false, violations: ['the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'] };
 }
 
+// "revisit" only reads as a re-service reference when it has no ordinary
+// business/admin object — "Use the estimate link to revisit your options",
+// "revisit the schedule/portal/account/pricing" is routine copy about
+// looking something over again, not a promise to send a technician back
+// out (Codex round-3 P2). A BARE "revisit" with no object at all ("Your
+// revisit is included") or one that governs a visit/pest-shaped noun ("a
+// revisit visit", "revisit the property for free") still counts — the
+// negative lookahead only fires when "revisit" is immediately followed by
+// a determiner ("the"/"my"/"your"/…) plus one of these non-visit nouns.
+// Shared by both regexes below (built with `new RegExp` so the fragment
+// can't drift between them) rather than duplicated inline.
+// Round-26 P2: the object may also PRECEDE the verb ("options you can revisit", "the estimate link includes
+// options you'll revisit") — a customer-subject "you/they can|may|will|'ll ... revisit" is looking something over.
+const REVISIT_TERM_SOURCE = '(?<!\\b(?:you|they)(?:[\'’]ll|\\s+(?:can|could|may|might|will|would|should|want\\s+to|are\\s+able\\s+to|are\\s+welcome\\s+to))\\s+)revisit(?!\\s+(?:the|my|our|your|this|that|its?|their)\\s+(?:options?|quotes?|estimates?|schedules?|pricing|prices?|billing|bills?|invoices?|accounts?|portals?|terms|plans?|polic(?:y|ies)|profiles?|details?|history)\\b)';
+// Codex round-6 P1 (narrowed) + PR #5336 pre-push audit P1 (restored): two
+// noun sets, one per detector. RESERVICE_SPECIFIC_NOUN_SOURCE is the
+// RE-SERVICE-SPECIFIC set (re-service, reservice, re-treat(ment), re-spray,
+// revisit — narrowed by REVISIT_TERM_SOURCE above, callback visit, come back
+// out, follow-up treatment): the coverage detector below (link/covered/
+// included, no "free" needed) uses ONLY this set, so an ordinary "your visit
+// is included in your plan" billing line never trips it.
+const RESERVICE_SPECIFIC_NOUN_SOURCE = `re-?service|re-?treat(?:ment)?|re-?spray|${REVISIT_TERM_SOURCE}|callback\\s+visit|come\\s+back\\s+out|follow-?up\\s+treatment`;
+// The explicit-free-offer detector ALSO covers the plain free-visit
+// wordings the round-6 narrowing dropped — "A complimentary visit is on
+// us", "We can send a technician for a free visit", "we won't charge you for
+// the visit" — because a customer offered a free visit while ineligible is
+// exactly what this guard exists for. What round 6 actually needed to stop
+// was a false positive from the WORD "free"/"return" in ordinary copy, so
+// this set keeps the visit/trip/treatment/service/callback/come-back nouns
+// but drops bare "return" (only "return visit/trip" via the visit/trip
+// nouns, or "return out"/"return to your home"), and the free-word below
+// excludes the idioms. Decision against the prompt's allowed wording (the
+// prompt only ever offers a free RE-SERVICE): a free ESTIMATE / quote /
+// consultation is a different, unrestricted thing and is deliberately NOT a
+// re-service promise, so "free estimate" stays out; "free inspection" is a
+// technician visit, so it stays in (Codex round-10 P2: inspection / inspect /
+// assessment / look at / check-up are guarded nouns, not just mentioned here).
+// Codex round-14 P2 (PR #5336): the GENERIC nouns (service / treatment / visit /
+// trip / application) are billing and scheduling vocabulary too ("There is no
+// additional charge for your scheduled service"), so they only count as an OFFER
+// of another visit with a return marker — another / extra / second / return /
+// follow-up / repeat + noun, "come back", "go back", callback, redo — or, for
+// visit / trip only, when they are not a scheduled/regular/next/plan visit
+// (a technician-sent "free visit" is still an offer; "your scheduled visit" is
+// billing copy). service / treatment / application need the marker outright.
+const RESERVICE_NOT_SCHEDULED_LOOKBEHIND = "(?<!\\b(?:scheduled|regular|routine|upcoming|next|planned|annual|quarterly|monthly|bi-?monthly|initial|first|this|plan(?:['’]s)?|today['’]s|tomorrow['’]s)\\s)";
+// Codex round-17 P2 (PR #5336): a plain visit/trip is an OFFER only when it is not an existing
+// appointment: a possessive ("your visit", "our visit") or a day/date/time reference ("tomorrow",
+// "Tuesday's visit", "the visit on Tuesday", "at 9") marks a booked visit whose price is billing copy.
+// (Return semantics — another/return/extra/follow-up/come back — never go through this alternative.)
+const RESERVICE_NOT_EXISTING_VISIT_BEHIND = "(?<!\\b(?:your|my|our|his|her|their|its)\\s)(?<!\\b(?:tomorrow|today|tonight|(?:mon|tues|wednes|thurs|fri|satur|sun)day)['’]s\\s)";
+const RESERVICE_NOT_DATED_VISIT_AHEAD = "(?!(?:e?s)?\\s+(?:tomorrow|today|tonight|(?:on|at|scheduled)\\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b))";
+// Codex round-32 P2: OUTBOUND-visit constructions ("We can come out at no charge", "have a technician come out for free", "We will
+// stop by at no charge", "swing by") are free-visit offers too. A recurring-plan explanation ("we come out every quarter at no
+// charge") is billing copy, not an offer — the recurrence words after it exclude it.
+const RESERVICE_OUTBOUND_VISIT_SOURCE = "(?:come|coming|comes|stop|stopping|stops|swing|swinging|drop|dropping|pop|popping)\\s+(?:by|out|over)\\b(?!\\s+(?:every|each|quarterly|monthly|bi-?monthly|annually|regularly|on\\s+(?:a\\s+)?(?:regular|routine)))";
+const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|(?:another|extra|second|return|follow-?up|repeat)\\s+(?:visits?|trips?|treatments?|services?|applications?|sprays?|calls?)|${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}${RESERVICE_NOT_EXISTING_VISIT_BEHIND}(?:visit|trip)${RESERVICE_NOT_DATED_VISIT_AHEAD}|callback|redo|re-do|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)|${RESERVICE_OUTBOUND_VISIT_SOURCE}`;
+// "free" as a price word, not an idiom: excluded when "free" is followed by
+// "to <verb>" / "from ..." / "of ..." (except "free of charge"), so "feel
+// free to call", "you are / you're free to return", "free of pests" never
+// count — but a copula BEFORE it does not exclude it ("Your visit is free",
+// "the re-service is free", "it's free of charge" are promises; PR #5336
+// Codex round-8 P2). "Feel free" without "to" stays excluded, and a "free
+// estimate/quote/consultation" is not a re-service promise. The other
+// alternatives are the explicit no-charge wordings, including "won't charge
+// you for ..." and "on us" (but not "count/rely on us").
+// Codex round-13 P2 (PR #5336): a price word is bound to the noun it modifies.
+// "free" / "complimentary" / "no charge" followed within <=3 words by an
+// estimate / quote / consultation / cost assessment prices THAT thing, not a
+// visit — "We offer a free termite estimate before scheduling service" is not
+// an offer. The intervening words must not themselves be an offer noun, so
+// "your free pest re-service and a quote" still binds "free" to the re-service.
+const FREE_ESTIMATE_BIND_SOURCE = `(?!(?:\\s+(?!(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b)[\\w'’-]+){0,3}\\s+(?:estimates?|quotes?|quotations?|consultations?|cost\\s+assessments?|price\\s+checks?)\\b)`;
+// Codex round-23 P2 (PR #5336): "free" describing a PERSON'S AVAILABILITY is not a price word — "If you're free
+// Tuesday", "are you free this week", "when you're free", "I'm free at 3", "free on Thursday / after 5 /
+// between 9 and 11". The person construct must sit right before "free" (a price "free re-service" is
+// untouched, and "the re-service is free Tuesday" stays a promise: its subject is the service, not a person).
+const FREE_AVAILABILITY_BEFORE = "(?<!\\b(?:you(?:'|’)re|you\\s+are|are\\s+you|we(?:'|’)re|we\\s+are|are\\s+we|i(?:'|’)m|i\\s+am|am\\s+i|is\\s+anyone|is\\s+someone|if\\s+you|when\\s+you|whenever\\s+you)\\s+(?:(?:not|also|still|ever|only|usually|generally|really|actually|just|both)\\s+)?)";
+const FREE_AVAILABILITY_AFTER = "(?!\\s+(?:on|at|after|before|between|around|anytime|any\\s+time)\\b)";
+const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)" + FREE_AVAILABILITY_BEFORE + "\\bfree\\b(?!\\s+(?:to|from)\\b)" + FREE_AVAILABILITY_AFTER + "(?!\\s+of\\b(?!\\s+charge\\b))" + FREE_ESTIMATE_BIND_SOURCE
+  + "|complimentary" + FREE_ESTIMATE_BIND_SOURCE + "|gratis|\\bcomp(?:ed)?\\b|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)" + FREE_ESTIMATE_BIND_SOURCE + "|at no (?:additional )?(?:charge|cost)" + FREE_ESTIMATE_BIND_SOURCE
+  + "|without\\s+(?:any\\s+)?(?:charge|cost|fee)|nothing\\s+extra|cost\\s+(?:you\\s+)?nothing"
+  + "|waiv(?:e|ed|ing)\\s+(?:the\\s+|any\\s+)?(?:charge|cost|fee)s?"
+  + "|(?<!\\b(?:count|rely|depend|counting|relying|depending|wait|waiting)\\s)on us(?!\\s+to\\b)|on the house"
+  + "|(?:won['’]?t|will\\s+not|don['’]?t|do\\s+not)\\s+(?:charge|bill)(?:\\s+you)?|(?:won['’]?t|will\\s+not)\\s+(?:cost|be\\s+(?:charged|billed))|(?:won['’]?t|will\\s+not)\\s+be\\s+(?:any\\s+|an?\\s+)?(?:extra\\s+|additional\\s+)?(?:charge|cost|fee)s?"
+  + ")";
 // Deterministic backstop: a reply that offers a free visit while the facts
 // do not say eligible is a violation, fed into the same revise/verify loop
 // (and enforced in single-pass mode, where no verifier would catch it).
-const FREE_RESERVICE_OFFER_RE = /\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b[^.?!\n]{0,60}\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|service|callback|come back|return)\b|\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|callback|come back|return)\b[^.?!\n]{0,60}\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b/i;
+// Codex round-14 follow-up (PR #5336): the generic service/treatment/application
+// nouns count as an offer when a price word BINDS DIRECTLY to them — "free
+// treatment", "a complimentary service call", "no-charge treatment",
+// "treatment at no charge", "the service is free" — unless a schedule word
+// precedes the noun (scheduled / regular / routine / next / plan's / annual …:
+// "your regular treatment is complimentary with your plan" is billing copy).
+// Only the LOOSE form (a no-charge phrase somewhere near a generic noun, in
+// FREE_OFFER_NOUN_SOURCE above) needs a return marker. The words allowed
+// between the price word and the noun are modifiers only (never a
+// determiner/preposition, which would make it "no charge for your treatment").
+const GENERIC_SERVICE_NOUN = `${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:treatment|service|application)s?\\b(?!\\s+(?:estimates?|quotes?|consultations?)\\b)`;
+const BOUND_PRICE_ADJ = "(?:(?<!\\bfeel\\s)(?<!-)" + FREE_AVAILABILITY_BEFORE + "\\bfree(?!\\s+(?:to|from|of)\\b)" + FREE_AVAILABILITY_AFTER + "|complimentary|no[- ](?:charge|cost))";
+const BOUND_MODIFIER = "(?:(?!(?:for|your|the|our|this|that|its|of|with|on|to|and|a|an|is|are)\\b)[\\w'’-]+\\s+){0,2}";
+const BOUND_GENERIC_OFFER_SOURCE = `\\b${BOUND_PRICE_ADJ}\\s+${BOUND_MODIFIER}${GENERIC_SERVICE_NOUN}`
+  + `|\\b${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:treatment|service|application)s?\\s+(?:at\\s+no\\s+(?:additional\\s+)?(?:charge|cost)|(?:is|are|will\\s+be)\\s+(?:free|complimentary|on\\s+(?:us|the\\s+house)))\\b`;
+const FREE_RESERVICE_OFFER_RE_SOURCE = (gap) => `${FREE_OFFER_WORD_SOURCE}[^.?!\\n]${gap}\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b`
+  + `|\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]${gap}${FREE_OFFER_WORD_SOURCE}`
+  + `|${BOUND_GENERIC_OFFER_SOURCE}`
+  // "Your visit is free; we'll text the booking link now" — a possessive visit stays an offer when the same sentence sends the link.
+  + '|\\byour\\s+(?:visit|trip)\\s+is\\s+(?:free|complimentary|on\\s+us)\\b[^.?!\\n]{0,40}\\blink\\b';
+// Codex round-2 finding: a promise can cover a re-service WITHOUT ever
+// saying "free" — "Your pest re-service is covered; we'll text the booking
+// link now" skipped the eligibility/lane/action checks above entirely.
+// Deliberately scoped to the SAME re-service-specific noun set above (never
+// the generic visit/treatment/service words) so an ordinary "your visit is
+// included in your plan" billing line doesn't spuriously trip this. Any of
+// link/covered/no charge/no cost/free/complimentary/on us/on the
+// house/included, in either order.
+const RESERVICE_SCOPE_WITHIN_AHEAD = `(?!\\s+(?:with|in|during|within|on|as\\s+part\\s+of)\\s+(?:(?:your|a|an|the|this|every|each|any|our)\\s+)?(?:${RESERVICE_SPECIFIC_NOUN_SOURCE}))`;
+const RESERVICE_COVERAGE_RE_SOURCE = (gap) => `\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]${gap}\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b`
+  // Round-27 P2: "included / covered" must describe the re-service ITSELF, not something inside it — "Interior
+  // treatment is included with your re-service" / "The inside spray is included in a re-service" explain scope.
+  + `|\\b(?:link|covered${RESERVICE_SCOPE_WITHIN_AHEAD}|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included${RESERVICE_SCOPE_WITHIN_AHEAD})\\b[^.?!\\n]${gap}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})(?:e?s)?\\b`;
+// PR #5336 pre-push audit P1: an eligibility DENIAL names the same words as
+// a promise ("You are not eligible for a free re-service", "We cannot offer a
+// free pest re-service") but promises nothing — it is the truthful answer to
+// an ineligible customer, and the unconditional send-time check used to
+// reject it (an immediate send retired the reviewed decision, a scheduled one
+// was blocked). A clause whose promise is GOVERNED by a negator is a denial:
+// not eligible/covered/included/able, isn't/aren't covered/included/eligible,
+// can't/cannot/won't (be able to)/unable to offer|send|schedule|provide|
+// book|give, no longer eligible/qualifies/covered, doesn't/don't include|
+// cover|qualify|offer|provide|come with. Deliberately NOT a bare "won't" /
+// "no" / "not": the negation inside the price word itself ("we won't charge
+// you for the visit", "no charge") is still a promise, so each alternative
+// pairs the negator with the offer/eligibility verb it governs.
+const RESERVICE_DENIAL_RE = new RegExp(
+  '\\b(?:'
+  + 'not\\s+(?:currently\\s+|presently\\s+|yet\\s+)?(?:eligible|covered|included|qualified)'
+  // Codex round-8 P2: a negator directly on the PRICE WORD is a denial too ("This
+  // re-service is not free", "isn't complimentary", "not at no charge"); the
+  // negation INSIDE a price word ("won't charge you", "no charge") is not.
+  + "|(?:not|isn['’]?t|aren['’]?t|wasn['’]?t|wouldn['’]?t|won['’]?t)\\s+(?:be\\s+)?(?:currently\\s+|actually\\s+|always\\s+)?(?:a\\s+)?(?:free|complimentary|at\\s+no\\s+(?:additional\\s+)?(?:charge|cost))\\b"
+  + "|(?:don['’]?t|do\\s+not|doesn['’]?t|does\\s+not)\\s+(?:do|give|extend|perform|make)\\b"
+  + "|(?:isn['’]?t|is\\s+not|aren['’]?t)\\s+(?:something|an\\s+option|possible|allowed)\\b"
+  + "|(?:isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+)?(?:covered|included|eligible)"
+  + "|(?:can['’]?t|cannot|can\\s+not|won['’]?t\\s+be\\s+able\\s+to|will\\s+not\\s+be\\s+able\\s+to|unable\\s+to|not\\s+able\\s+to)\\s+(?:to\\s+)?(?:offer|send|schedule|provide|book|give|do|arrange|come|return|go|stop|make\\s+it|get)"
+  + '|no\\s+longer\\s+(?:eligible|qualif(?:y|ies|ied)|covered|included)'
+  // Availability denials ("no free re-service available", "no longer available", "isn't offered").
+  + "|no\\s+longer\\s+(?:available|offered|(?:an?\\s+|any\\s+)?(?:free|complimentary|no[- ]charge))"
+  + "|no\\s+(?:free|complimentary)\\b"
+  + "|(?:not|isn['’]?t|aren['’]?t)\\s+(?:currently\\s+)?(?:available|offered)|unavailable"
+  + "|(?:doesn['’]?t|does\\s+not|don['’]?t|do\\s+not)\\s+(?:currently\\s+)?(?:include|cover|qualify|offer|provide|come\\s+with)"
+  // Codex round-35 P2: a NEGATED scheduling / booking is a denial too — "Your free re-service is not scheduled", "We have not
+  // booked a free re-service", "hasn't been booked yet", "never scheduled" — nothing is promised.
+  + "|(?:isn['’]?t|is\\s+not|aren['’]?t|are\\s+not|wasn['’]?t|weren['’]?t|hasn['’]?t\\s+been|has\\s+not\\s+been|haven['’]?t\\s+been|have\\s+not\\s+been)\\s+(?:yet\\s+|currently\\s+|been\\s+)?(?:scheduled|booked|set|confirmed|arranged|on\\s+the\\s+(?:schedule|calendar))"
+  + "|(?:haven['’]?t|hasn['’]?t|have\\s+not|has\\s+not|didn['’]?t|did\\s+not|never)\\s+(?:yet\\s+|actually\\s+)?(?:scheduled|booked|arranged|set\\s+up)"
+  + ')',
+  'i',
+);
+// PR #5336 pre-push audit P1 (denial scoping): a negator only makes a clause a
+// denial when it GOVERNS the promise phrase itself. "We cannot offer a refund
+// but we can provide a free pest re-service" holds an unrelated denial ("cannot
+// offer a refund") beside a real offer, and used to read as no promise at all
+// — skipping every eligibility/action check on a genuine offer. Structural
+// rule, failing CLOSED (blocking a truthful denial is acceptable; skipping a
+// real promise is not): the negator's span must touch/overlap the matched
+// offer span or sit within a few words of it (either order: "cannot offer a
+// free re-service", "a free re-service isn't covered"), with no affirmative
+// verb or conjunction in the words between ("...can provide", "and send").
+// Contrastive conjunctions are also clause breaks (see
+// affirmativeReservicePromiseClauses) so each side is judged alone.
+const RESERVICE_DENIAL_GAP_MAX_WORDS = 6;
+const RESERVICE_DENIAL_GAP_BREAK_RE = /\b(?:can|could|will|would|we['’]ll|i['’]ll|send|sending|provide|providing|schedule|give|giving|book|arrange|happy|glad|and|plus|also|then|instead|but|however|though|although|yet|whereas)\b/i;
+function reserviceNegatorGoverns([ns, ne], [os, oe], text) {
+  if (ns < oe && os < ne) return true; // overlapping spans ("re-service isn't covered")
+  const gap = ne <= os ? text.slice(ne, os) : text.slice(oe, ns);
+  const words = gap.trim().split(/\s+/).filter(Boolean).length;
+  return words <= RESERVICE_DENIAL_GAP_MAX_WORDS && !RESERVICE_DENIAL_GAP_BREAK_RE.test(gap);
+}
+// PR #5336 pre-push audit P1 (every offer): each detector regex used to yield
+// only its FIRST match per clause, and its greedy 60-character gap swallowed a
+// second offer into the first one's span — so a denied offer hid a later
+// affirmative one ("We cannot offer a free lawn re-service and will send a
+// free pest re-service" read as one denied span). Offer spans are now ALL the
+// matches of global, LAZY-gap copies of both detectors (derived from the
+// detectors' own sources so they can never drift), and a clause is a denial
+// only when EVERY span is governed by a negator. The lazy gap keeps two offers
+// in one clause as two spans; whether a clause matches at all is unchanged.
+// Codex round-19 P1: the lazy copies are built from the SAME source parts as the detectors (a `gap`
+// argument), never by rewriting a compiled regex's source — a source-format change can no longer
+// silently leave a greedy gap behind. A test pins that no lazy copy carries a greedy `{0,60}`.
+const RESERVICE_OFFER_SPAN_RES = [FREE_RESERVICE_OFFER_RE_SOURCE, RESERVICE_COVERAGE_RE_SOURCE]
+  .map((build) => new RegExp(build('{0,60}?'), 'gi'));
+const RESERVICE_DENIAL_SCAN_RE = new RegExp(RESERVICE_DENIAL_RE.source, 'gi');
+// Codex round-25 P1 (PR #5336): a DIFFERENT PRODUCT is not a re-service offer. The Waves Assessment is the
+// legitimately free first-visit consultation offered to prospects (inspection-public.js), and a possessive
+// inspection/assessment that is already scheduled ("Your free inspection is Tuesday") is an existing booking —
+// counting either as a promise would demand re-service eligibility + a lane snapshot + a send_reservice_link
+// action from a reply to a lead. They are blanked (same length, so span indices hold) before the offer
+// detectors run. Kept COVERED: a generic technician "free pest inspection / free inspection of your lawn /
+// complimentary assessment visit" stays an offer (Codex round-10 P2 — a free return visit in disguise), as do
+// "free re-service / retreat / follow-up visit / callback".
+// Codex round-40 P2: "free consultation" is the customer-facing name of the same Waves Assessment product (ScheduleFlowPage.jsx: "Your free
+// consultation is already scheduled") — blanked with its optional free / complimentary lead and visit / appointment tail.
+const RESERVICE_OTHER_PRODUCT_RE = new RegExp(
+  '\\b(?:(?:free|complimentary|no[- ]charge)\\s+(?:(?!then\\b)[\\w-]+\\s+){0,2})?(?:waves\\s+)?consultations?(?:\\s+(?:visit|appointment|call))?\\b'
+  + '|\\bwaves\\s+assessments?(?:\\s+(?:visit|appointment|inspection))?\\b'
+  + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)(?:\\s+(?:visit|appointment|call))?\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))'
+  // Codex round-28 P2: a TERMINAL callback reference — completed / canceled / missed / expired — is factual history,
+  // not a new offer. Only the reference itself is blanked, so a separate new offer in the same reply still counts.
+  + '|\\b(?:(?:your|the|our|that|this|a)\\s+)?(?:(?:free|complimentary|no[- ]charge|pest|lawn|previous|last|earlier|original|scheduled|booked)\\s+){0,3}(?:re-?service|re-?treat(?:ment)?|call-?back|revisit|follow-?up)(?:\\s+(?:visit|appointment|treatment))?\\s+(?:was|were|has\\s+been|have\\s+been|had\\s+been|got|is\\s+now)\\s+(?:already\\s+)?(?:canceled|cancelled|completed|missed|skipped|closed|resolved|finished|done|expired|rescheduled|no-?showed)\\b'
+  + '|\\b(?:we|our\\s+(?:tech|technician|team))\\s+(?:already\\s+)?(?:completed|finished|cancell?ed|closed|missed)\\s+(?:your|the|our)\\s+(?:(?:free|complimentary|no[- ]charge|pest|lawn)\\s+){0,3}(?:re-?service|re-?treat(?:ment)?|call-?back|revisit|follow-?up)(?:\\s+(?:visit|appointment|treatment))?\\b',
+  'gi',
+);
+// Codex round-26 (PR #5336): a GENERIC free inspection / assessment is a re-service offer only for a customer who
+// HAS a recurring-plan lane. For a prospect (the facts show no lane state at all: "FREE RE-SERVICE: not
+// eligible") the same wording is the Waves Assessment product — a free consultation, not a re-service. The
+// nouns (with a trailing visit/appointment word) are blanked before the detectors run; "free re-service /
+// retreat / follow-up visit / callback" stays an offer for everyone.
+const RESERVICE_GENERIC_INSPECTION_RE = /\b(?:inspections?|inspect|assessments?)(?:\s+(?:visit|appointment|call|trip))?\b/gi;
+function withoutGenericInspections(text) {
+  return String(text || '').replace(RESERVICE_GENERIC_INSPECTION_RE, (m) => ' '.repeat(m.length));
+}
+// Only an AFFIRMATIVE prospect signal relaxes generic inspection/assessment wording: the fact line a COMPLETED lookup
+// renders for a customer with no recurring plan ("not eligible (no recurring plan on file)"). Every other state —
+// eligible, booked, "eligibility unavailable", a legacy plain "not eligible", a missing line — is a plan customer
+// (fail closed, Codex round-27 P1).
+function reserviceFactShowsNoPlan(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL));
+  return !!line && /^FREE RE-SERVICE:\s*not eligible \(no recurring plan on file\)\s*$/.test(line.trim());
+}
+// ONE helper for the different-product carve-out (Waves Assessment, a scheduled free inspection / assessment, terminal callback
+// history): blanked length-preservingly. Shared by the offer detector and the booked-callback claim reader (round-34 P2).
+function blankOtherProducts(rawText) {
+  return String(rawText).replace(RESERVICE_OTHER_PRODUCT_RE, (m) => ' '.repeat(m.length));
+}
+function reserviceOfferSpans(rawText) {
+  const text = blankOtherProducts(rawText);
+  return RESERVICE_OFFER_SPAN_RES
+    .flatMap((rx) => [...text.matchAll(rx)].filter((m) => m[0]).map((m) => [m.index, m.index + m[0].length]));
+}
+// The lane-bearing text of each AFFIRMATIVE offer in a clause — one string per
+// ungoverned (not denied) offer span, [] when the clause holds no offer or every
+// offer is a denial. Codex round-12 (PR #5336): lanes/specialties derive ONLY
+// from an offer span plus what is attached to it — up to 3 words before it (the
+// "pest" of "pest re-service") and up to 8 words after it within the same
+// segment (the purpose phrase, "to treat your lawn") — never from the rest of
+// the clause or sentence. "Your lawn treatment is scheduled, and I'll send your
+// free pest re-service link" therefore promises PEST only. Denied spans
+// contribute nothing ("We cannot offer a free lawn re-service and will send a
+// free pest re-service" → pest). A span whose two ends are unrelated words
+// ("treatment is scheduled, and I'll send your free": a noun far from a price
+// word with a verb between, or a wide cross-clause gap) is still an affirmative
+// offer for DETECTION (fail closed — an item is returned) but contributes an
+// empty string, so it can never lend a lane. Unsure -> a promise.
+const RESERVICE_SPAN_STRONG_BREAK_RE = /\b(?:send|sending|provide|providing|schedule|scheduled|book|booked|give|giving|arrange|happy|glad)\b/i;
+const RESERVICE_SPAN_CLAUSE_CROSS_RE = /[,;:–—]|\s-\s|\b(?:but|however|though|although|instead|whereas)\b/i;
+const RESERVICE_SPAN_UNIT_SOURCE = `(?:${FREE_OFFER_WORD_SOURCE}|(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?|link|covered|included)`;
+const RESERVICE_SPAN_LEAD_RE = new RegExp(`^${RESERVICE_SPAN_UNIT_SOURCE}`, 'i');
+const RESERVICE_SPAN_TAIL_RE = new RegExp(`${RESERVICE_SPAN_UNIT_SOURCE}$`, 'i');
+function reserviceSpanLaneText(text, [start, end], stops = []) {
+  const span = text.slice(start, end);
+  const lead = RESERVICE_SPAN_LEAD_RE.exec(span);
+  const tail = RESERVICE_SPAN_TAIL_RE.exec(span);
+  const gapStart = lead ? lead[0].length : 0;
+  const gapEnd = tail ? span.length - tail[0].length : span.length;
+  const gap = gapEnd > gapStart ? span.slice(gapStart, gapEnd) : '';
+  const gapWords = gap.split(/\s+/).filter((w) => /[A-Za-z0-9]/.test(w)).length;
+  if (RESERVICE_SPAN_STRONG_BREAK_RE.test(gap) || (RESERVICE_SPAN_CLAUSE_CROSS_RE.test(gap) && gapWords > 2)) return '';
+  const segmentBreak = /[,;:.!?–—]/;
+  // The attached text also stops at a contrastive conjunction and at the next offer
+  // span or negator ("...pest re-service but cannot offer a free lawn re-service").
+  const contrast = /\b(?:but|however|though|although|instead|whereas|yet)\b/i;
+  const nextStop = stops.filter((at) => at >= end).sort((x, y) => x - y)[0];
+  const afterRaw = text.slice(end, nextStop === undefined ? undefined : nextStop);
+  const beforeRaw = text.slice(0, start);
+  const prevStop = stops.filter((at) => at < start).sort((x, y) => y - x)[0];
+  const beforeText = prevStop === undefined ? beforeRaw : beforeRaw.slice(prevStop);
+  const before = beforeText.split(segmentBreak).pop().split(contrast).pop().trim().split(/\s+/).filter(Boolean).slice(-3).join(' ');
+  const after = afterRaw.split(segmentBreak)[0].split(contrast)[0].trim().split(/\s+/).filter(Boolean).slice(0, 8).join(' ');
+  return `${before} ${span} ${after}`.trim();
+}
+// Codex round-18 P2 (PR #5336): an offer span with an existing-appointment marker in the SAME clause
+// ("Your free pest re-service is already scheduled for Thursday", "…is on the schedule", "…is coming
+// up") describes a booked appointment, not a new offer. The marker must follow the span within the
+// clause; "get it scheduled for Thursday" (a to-do) is not one.
+const RESERVICE_EXISTING_APPT_SOURCE = "already\\s+(?:scheduled|booked|set|on\\s+(?:the|our)\\s+(?:schedule|calendar))|(?:is|are|was)\\s+(?:scheduled|booked)|(?:is|are)\\s+set\\s+for|(?:on|in)\\s+(?:the|our)\\s+(?:schedule|calendar)|coming\\s+up";
+const RESERVICE_EXISTING_APPT_RE = new RegExp(`\\b(?:${RESERVICE_EXISTING_APPT_SOURCE})\\b`, 'i');
+// Codex round-19 P2: a marker ATTACHED IMMEDIATELY BEFORE the span also counts ("Your already scheduled
+// free pest re-service falls on Thursday", "the booked complimentary re-service"): the marker must be the
+// last word(s) before the span, with no promise verb earlier in that clause and no link/send after it, so
+// "Your lawn treatment is scheduled and I'll send your free pest re-service link" and "I'll send the
+// scheduled free re-service link" stay offers.
+const RESERVICE_EXISTING_APPT_BEFORE_RE = /\b(?:(?:already|previously|currently)\s+)?(?:scheduled|booked|confirmed|upcoming|existing)\s*$/i;
+const RESERVICE_PROMISE_AFTER_RE = /\b(?:link|send|sending|text|texting|email)\b/i;
+function reserviceExistingApptGoverns([start, end], text) {
+  const clauseSplit = /[,;:.!?\u2013\u2014]/;
+  const after = text.slice(end).split(clauseSplit)[0];
+  // A marker AFTER the span (same clause) counts; one earlier in the sentence is a different statement
+  // ("Your lawn treatment is scheduled and I'll send your free pest re-service link").
+  // Codex round-29 P2: the marker must describe THE MATCHED RE-SERVICE itself — not a subordinate or a different
+  // subject ("We can offer a free pest re-service after your regular visit is scheduled": "is scheduled" belongs to
+  // the regular visit, so the offer stays an offer).
+  const marker = RESERVICE_EXISTING_APPT_RE.exec(after);
+  if (marker) {
+    const between = after.slice(0, marker.index).replace(/^\s*(?:visit|appointment|treatment|call-?back|call|trip)\b/i, '');
+    const otherSubject = /\b(?:after|once|when|whenever|if|until|before|because|since|as\s+soon\s+as|while|so\s+that|provided|unless|visit|appointment|treatment|service|inspection|spray|application|plan|regular|routine|next)\b/i;
+    if (!otherSubject.test(between)) return true;
+  }
+  const beforeClause = text.slice(0, start).split(clauseSplit).pop();
+  return RESERVICE_EXISTING_APPT_BEFORE_RE.test(beforeClause)
+    && !RESERVICE_DENIAL_GAP_BREAK_RE.test(beforeClause)
+    && !RESERVICE_PROMISE_AFTER_RE.test(after);
+}
+// Offer spans a negator DENIES. Codex round-19 P1: when one negator is in range of MORE THAN ONE span,
+// it denies the later spans only across a bare coordinator ("cannot offer a complimentary visit OR a free
+// re-service" — the gap between two spans is nothing but or/nor/either/commas/articles). Anything else
+// between them (an affirmative verb, "and", "but", another clause, a link) and every span past it stays a
+// PROMISE — fail closed.
+const RESERVICE_DENIAL_COORDINATOR_GAP_RE = /^[\s,]*(?:(?:or|nor|either|neither|any|an?|the|another|your)[\s,]*)*$/i;
+function reserviceDeniedSpans(offers, negators, text) {
+  const denied = new Set();
+  for (const n of negators) {
+    const group = offers.filter((o) => reserviceNegatorGoverns(n, o, text)).sort((x, y) => x[0] - y[0]);
+    let chained = true;
+    group.forEach((o, i) => {
+      if (i > 0) chained = chained && RESERVICE_DENIAL_COORDINATOR_GAP_RE.test(text.slice(group[i - 1][1], Math.max(group[i - 1][1], o[0])));
+      if (chained) denied.add(o);
+    });
+  }
+  return denied;
+}
+function affirmativeReserviceOfferTexts(clause) {
+  const text = String(clause || '');
+  const offers = reserviceOfferSpans(text);
+  if (!offers.length) return [];
+  const negators = [...text.matchAll(RESERVICE_DENIAL_SCAN_RE)].map((m) => [m.index, m.index + m[0].length]);
+  const stops = [...offers.flatMap(([a, b]) => [a, b]), ...negators.flatMap(([a, b]) => [a, b])];
+  const denied = reserviceDeniedSpans(offers, negators, text);
+  return offers
+    .filter((o) => !denied.has(o) && !reserviceExistingApptGoverns(o, text))
+    .map((o) => reserviceSpanLaneText(text, o, stops.filter((at) => at !== o[0] && at !== o[1])));
+}
+function rawReserviceOfferMatch(text) {
+  return reserviceOfferSpans(String(text || '')).length > 0;
+}
+// The AFFIRMATIVE promise clause(s) of an SMS body — the clauses the two
+// detectors above match that are not eligibility denials. Granularity narrows
+// only as far as it must: clause (split on , ; : and dashes) first, then
+// sentence, then — when the promise straddles those breaks — the whole body.
+// Contrastive conjunctions (but, however, though, although, yet, instead,
+// whereas) are clause breaks too, so each side of "we can't offer a refund
+// but we can provide a free re-service" is judged alone. The first
+// granularity that finds an affirmative span decides (finest first); hits
+// that are all denials at EVERY granularity mean NO promise ("You are not
+// eligible for a free re-service"), while a denial clause beside a separate
+// affirmative promise clause ("...not eligible for a free re-service, but your
+// free lawn re-service is covered") leaves the promise. Codex round-7 (PR #5336) used the clause split
+// for lane scoping; this is the same split, shared, so detection and lane
+// derivation can never disagree about which text is the promise.
+// Codex round-15 P2 (PR #5336): an offer split across two ADJACENT sentences — "We'll send someone
+// back out. There won't be any charge." / "No charge. We'll come back out." — has no single-sentence
+// span. A sentence with a RETURN-visit phrase (send someone back out, come back, another visit,
+// re-treat, …; never a bare "visit") paired with the neighbouring sentence's price word is one
+// offer; its lane text is the return sentence (the price sentence carries no lane). Guards: an
+// estimate/quote price ("No charge for the estimate. See you at the visit.") never counts (the
+// price-word pattern already binds it to its noun), a bare visit is no return marker, and a
+// denial in either sentence ("We can't come back out. No charge.") is no offer.
+const RESERVICE_RETURN_PHRASE_RE = /\b(?:(?:send|sending|have|get|getting|bring|bringing)\s+(?:a\s+|another\s+|the\s+)?(?:tech(?:nician)?|someone|somebody|crew|team|us)\s+(?:back|out|again|over)|come\s+back(?!\s+(?:to\s+you|with|later\s+with))|go\s+back|back\s+out|out\s+again|stop\s+by\s+again|(?:another|second|return|repeat)\s+(?:visit|trip|treatment|service|application|spray)|follow-?up\s+(?:visit|treatment)|re-?treat|re-?spray|re-?service|revisit|redo)\b/i;
+const RESERVICE_PRICE_WORD_RE = new RegExp(FREE_OFFER_WORD_SOURCE, 'i');
+function adjacentSentenceOffers(sentences) {
+  const offers = [];
+  for (let i = 0; i + 1 < sentences.length; i += 1) {
+    for (const [ret, price] of [[sentences[i], sentences[i + 1]], [sentences[i + 1], sentences[i]]]) {
+      if (RESERVICE_RETURN_PHRASE_RE.test(ret) && RESERVICE_PRICE_WORD_RE.test(price)
+        && !RESERVICE_DENIAL_RE.test(ret) && !RESERVICE_DENIAL_RE.test(price)) offers.push(ret);
+    }
+  }
+  return offers;
+}
+function affirmativeReservicePromiseClauses(text) {
+  const t = String(text || '');
+  const clauseSplitter = /[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]|\b(?:but|however|though|although|instead|whereas)\b|(?<!\bnot\s)\byet\b/i;
+  // Codex round-11 (PR #5336): the UNION across granularities, not the finest
+  // level that has any affirmative hit — "We'll send your free pest re-service
+  // link. We can also provide a lawn visit, free of charge." has an
+  // affirmative clause hit in sentence 1 and a promise that is only visible at
+  // sentence level in sentence 2 (the offer noun and "free" straddle a
+  // comma); returning sentence 1's clause alone dropped the lawn offer. Per
+  // sentence: every affirmative clause span PLUS the sentence-level spans; the
+  // whole body is consulted only for text NO sentence matched at all. A body
+  // is a non-promise only when every level yields nothing. Lanes then derive
+  // from this whole union.
+  const sentences = t.split(/[.?!\n]+/).filter((sentence) => sentence.trim());
+  const out = [];
+  let anySentenceHit = false;
+  for (const sentence of sentences) {
+    if (!rawReserviceOfferMatch(sentence)) continue;
+    anySentenceHit = true;
+    const clauses = sentence.split(clauseSplitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
+    out.push(...[...clauses, sentence].flatMap(affirmativeReserviceOfferTexts));
+  }
+  out.push(...adjacentSentenceOffers(sentences));
+  if (!anySentenceHit) {
+    out.push(...affirmativeReserviceOfferTexts(t));
+  }
+  return out;
+}
+// The single entry point every caller below uses — never test either regex
+// alone, or a caller could drift out of sync with the other.
+function isReserviceOfferPromise(text) {
+  return affirmativeReservicePromiseClauses(text).length > 0;
+}
 function eligibleReserviceLanes(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(`${RESERVICE_FACT_LABEL} eligible for `));
   if (!line) return [];
   return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(line.slice(RESERVICE_FACT_LABEL.length).split('(')[0]));
 }
-function validateReserviceOffer({ reply, factsBlock }) {
+// The clause(s) of an SMS body that actually CARRY the re-service promise.
+// Codex round-7 (PR #5336): lane words used to be scanned over the WHOLE
+// body, so a pest-only customer's "Sorry the ants are back in your yard.
+// Your free pest re-service is covered; we'll text the link now." read as
+// promising pest AND lawn ("yard" is a lawn word) and was rejected — round
+// after round of lane-vocabulary patches never fixed that, because the
+// acknowledgement is not the offer. Structural fix: split the body into
+// clauses and derive lanes / excluded specialties ONLY from the clause(s)
+// isReserviceOfferPromise itself recognizes as the promise
+// (affirmativeReservicePromiseClauses, which also drops denial clauses).
+// A body with no promise clause falls back to the whole text.
+function reservicePromiseClauses(text) {
+  const clauses = affirmativeReservicePromiseClauses(text);
+  return clauses.length ? clauses : [String(text || '')];
+}
+// The lane(s) an SMS body PROMISES — shared by validateReserviceOffer (the
+// drafted reply) and reservicePromiseStillEligible (the actual outgoing body,
+// which a human may have edited after drafting) so the two never run different
+// lane logic on text that is supposed to mean the same thing.
+//
+// Codex round-9 (PR #5336), structural and final: a lane counts as PROMISED
+// only when a SERVICE word directly modifies the offer noun — "<lane>
+// re-service/treatment/visit/service" ("free pest re-service", "lawn
+// treatment visit", "weed-treatment re-service") or "re-service/treatment
+// [link] for (your) <lane>" ("free re-service for your lawn"). Location words
+// (yard, grass, garden, landscape, home, house) never produce a lane anywhere
+// here, and neither does any lane word merely present in the promise clause:
+// "We'll send your free pest re-service link for the ants in your yard" is a
+// PEST promise, not pest+lawn. Every earlier round patched the vocabulary
+// ("yard", "weed-treatment", tree/shrub locations) because lanes were read
+// from every lane word in the text; reading only the word attached to the
+// offer noun retires that whole class. No lane-as-modifier → no named lane →
+// the callers fall back to the draft-time snapshot / reported lane (after the
+// excluded-specialty check). Pest words are reservice-scheduler's own
+// (RESERVICE_LANE_WORD_PATTERNS, species included); the lawn words are its
+// lawn SERVICE words minus the location words.
+const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|revisit|callback|follow-?up|treatment|visit|service|application|trip|inspections?|assessments?|check-?up|come\\s+back(?:\\s+out)?|go\\s+back(?:\\s+out)?|come\\s+out|back\\s+out|out\\s+again';
+// Codex round-10 P2: purpose clauses attach a lane to the offer too — "a free visit to treat your lawn".
+const RESERVICE_PURPOSE_VERB = 'treat|re-?treat|handle|take\\s+care\\s+of|spray|service|address|deal\\s+with|control|fix|inspect|check(?:\\s+on)?|look\\s+(?:at|over)|assess|get\\s+rid\\s+of|kill';
+const RESERVICE_LAWN_SERVICE_WORDS = `lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod|${TURF_INSECT_NOUN_SOURCES.join('|')}`;
+let reservicePromiseLaneRes = null;
+// Codex round-37 P2: grass / yard are LOCATIONS ("ants in the yard") — unless they are the OBJECT of the re-service or its purpose:
+// "free re-service link for your grass", "a grass re-service", "re-service your yard". A pest word modifying the offer noun keeps
+// the yard a location ("free pest re-service for your yard" is PEST).
+function lawnLocationObjectAlternatives(pestWords) {
+  const loc = '(?:grass|yard)';
+  return `|\\b(?<!\\bre-)(?<!(?:${pestWords})[\\s-]+(?:(?:control|care)[\\s-]+)?)(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?(?:\\s+link)?\\s+(?:for|of|on)\\s+(?:(?:your|my|our|the)\\s+)?${loc}\\b`
+    + `|\\b${loc}[\\s-]+(?:(?:control|care)[\\s-]+)?(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?\\b`
+    // ("re-treat the yard for the ants" stays PEST: the yard is where the ants are — a pest word in the purpose keeps it a location)
+    + `|\\b(?:re-?treat|re-?spray|re-?service|revisit|treat|spray|handle|take\\s+care\\s+of)\\s+(?:your|my|our|the)\\s+${loc}\\b(?![^.?!]{0,30}\\b(?:for|against|because\\s+of)\\b[^.?!]{0,30}\\b(?:${pestWords})\\b)`;
+}
+function promiseLaneRegexes() {
+  if (reservicePromiseLaneRes) return reservicePromiseLaneRes;
+  const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
+  const pestRx = RESERVICE_LANE_WORD_PATTERNS.find(([lane]) => lane === 'pest')[1];
+  const words = {
+    pest: pestRx.source.replace(/^\\b/, '').replace(/\\b$/, ''),
+    lawn: `(?:${RESERVICE_LAWN_SERVICE_WORDS})`,
+  };
+  // A coordinated modifier ("pest and lawn re-service") names both lanes.
+  const any = `(?:${words.pest}|${words.lawn})`;
+  const conj = '\\s*(?:and|or|&|\\/)\\s*'; // "pest or lawn re-service" names BOTH lanes (round-26 P2)
+  reservicePromiseLaneRes = ['pest', 'lawn'].map((lane) => {
+    const w = `(?:${any}${conj})?${words[lane]}(?:${conj}${any})?`;
+    return [lane, new RegExp(
+      // "<lane> [control|care] <offer noun>" — "pest re-service", "weed-treatment re-service"
+      `\\b${w}[\\s-]+(?:(?:control|care)[\\s-]+)?(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?\\b`
+      // "<offer noun> [link] for|to <treat/handle/…> (your) <lane>" — "re-service for your lawn", "visit to treat your lawn"
+      + `|\\b(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?(?:\\s+link)?(?:\\s+(?:your|my|our|the)\\s+[a-z-]+)?\\s+(?:for|of|on|to\\s+(?:${RESERVICE_PURPOSE_VERB}))\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`
+      // "to <verb> (your) <lane>" anywhere in the promise — "at no charge to treat your lawn"
+      + `|\\bto\\s+(?:${RESERVICE_PURPOSE_VERB})\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`
+      // "<verb> (your) <lane>" — "we will re-treat your lawn", "re-spray the lawn"
+      + `|\\b(?:re-?treat|re-?spray|re-?service|revisit|treat|spray|service|handle|take\\s+care\\s+of)\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`
+      + (lane === 'lawn' ? lawnLocationObjectAlternatives(words.pest) : ''),
+      'i',
+    )];
+  });
+  return reservicePromiseLaneRes;
+}
+function namedReserviceLanesInText(text) {
+  const promise = reservicePromiseClauses(text).join(' ');
+  return promiseLaneRegexes().filter(([, rx]) => rx.test(promise)).map(([lane]) => lane);
+}
+// Codex round-17 P2 (PR #5336): the lanes a body names. A DETECTED promise scopes lanes to its offer spans
+// (namedReserviceLanesInText — "Your lawn treatment is scheduled, and I'll send your free pest re-service"
+// is a pest promise). An action-backed body the detector MISSES has no span to scope to, so every
+// service-lane word anywhere in it counts (pest nouns, lawn service words; never location words like
+// yard): "We'll have someone stop by again, then treat your weeds at no cost" names lawn.
+function reserviceBodyLanes(body, promise) {
+  if (promise) return namedReserviceLanesInText(body);
+  const { RESERVICE_PEST_NOUNS_SOURCE } = require('./reservice-scheduler');
+  return [['pest', RESERVICE_PEST_NOUNS_SOURCE], ['lawn', RESERVICE_LAWN_SERVICE_WORDS]]
+    .filter(([, words]) => new RegExp(`\\b(?:${words})\\b`, 'i').test(body))
+    .map(([lane]) => lane);
+}
+// Codex round-7 (PR #5336): a promise clause that names an excluded
+// specialty ("we'll send your free termite re-service link" — a reviewer's
+// edit of a valid pest draft) is a promise the link can never keep, since
+// reservice-scheduler excludes termite/rodent/mosquito/tree & shrub from the
+// self-bookable lanes. namedReserviceLanesInText recognizes none of those
+// words, so without this check the send-time fallback silently reused the
+// draft-time ['pest'] snapshot and the promise passed. Same promise-clause
+// scoping as namedReserviceLanesInText, so an incidental mention elsewhere
+// in the acknowledgement never trips it.
+function reserviceExcludedSpecialtyInPromise(text) {
+  const { reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
+  return reservicePromiseClauses(text).some((c) => reportedReserviceExcludedSpecialty(c));
+}
+// ONE "the customer reported a pest issue" classifier, shared by needsOpenTimes (draft time) and the
+// owed-offer / lane checks (Codex round-19 P2): a pest-noun + activity report whose lane resolves to
+// pest, or a pronoun-only return ("they're back") from a customer with a pest relationship when the
+// facts list the pest lane. Returns 'pest' or null. Function declarations, so the regexes defined
+// further down are read only at call time.
+// The lane of an ACTIVE report, pest or lawn, when the facts list it as eligible (a pronoun-only return is pest).
+// Codex round-39 P2: the SET of reported lanes — "Ants and chinch bugs are back" reports BOTH pest and lawn. owed = reported ∩ eligible.
+function reportedLaneSet(text, context, coveredLanes) {
+  const { reportedReserviceLanes } = require('./reservice-scheduler');
+  const t = String(text || '');
+  const named = reportedReserviceLanes(t);
+  if (named.length) return named;
+  const pronoun = pronounOnlyReportLane(t, context, coveredLanes);
+  return pronoun ? [pronoun] : [];
+}
+function reportedReportLanes({ inboundMessage, context, lanes }) {
+  const { reportedReserviceLanes } = require('./reservice-scheduler');
+  const text = String(inboundMessage || '');
+  const eligible = [].concat(lanes || []);
+  if (PEST_REPORT_TEXT_RE.test(text)) {
+    const named = reportedReserviceLanes(text).filter((lane) => eligible.includes(lane));
+    if (named.length) return named;
+  }
+  if (pronounOnlyReportLane(text, context, eligible) && eligible.includes('pest')) return ['pest'];
+  return [];
+}
+function reportedPestLane({ inboundMessage, context, lanes }) {
+  const { reportedReserviceLanes } = require('./reservice-scheduler');
+  const text = String(inboundMessage || '');
+  if (PEST_REPORT_TEXT_RE.test(text) && reportedReserviceLanes(text).includes('pest') && lanes.includes('pest')) return 'pest';
+  if (pronounOnlyReportLane(text, context, lanes) && lanes.includes('pest')) return 'pest';
+  return null;
+}
+// The ONE history-based lane inference (Codex round-27 P1, PR #5336): ONLY a genuine pronoun-only return
+// ("they're back") from a customer with a pest relationship reads as a pest report. A report that names its
+// own pest noun, lawn word or excluded specialty (termites, rodents, mosquitoes, bed bugs, tree & shrub) has
+// a lane of its own — resolved or deliberately null — and never falls back to "pest" from history.
+// Codex round-41 P2: the pest relationship is the context's display-window history OR the already-loaded LIVE pest-lane state
+// (`coveredLanes`: eligible / link-down / booked lanes from the facts) — an eligible customer whose last pest visit fell out of the
+// 3-row completed-visit window still has a pest relationship.
+function pronounOnlyReportLane(text, context, coveredLanes) {
+  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
+  const t = String(text || '');
+  if (!PRONOUN_RETURN_TEXT_RE.test(t) || !hasPestRelationship(context, coveredLanes)) return null;
+  if (reportedReserviceExcludedSpecialty(t) || reportedReserviceLanes(t).length) return null;
+  return 'pest';
+}
+// Codex round-18 P2 (PR #5336): an ELIGIBLE pest report — the inbound reads as a pest report and its
+// lane is bookable — whose reply neither offers the covered free re-service nor carries the link
+// action must be revised, not accepted. Not forced when the lane is already booked / not eligible
+// (the facts then don't list it), and an independently established hand-off keeps it (a
+// complaint that also mentions pests is held for a human, never offered a link).
+// Codex round-20 P2: the owed offer is suppressed ONLY for a true hand-off the customer's OWN WORDS establish —
+// never the model's own escalate action, and never the classified intent (a COMPLAINT intent is exactly
+// where the COMPLAINTS rule offers the re-service, and "the ants came back" classifies as a customer
+// issue). Cancellation, refund, dispute/chargeback/wrong charge, legal, damage, chemical/medical
+// exposure. Plain frustration (upset, frustrated, angry, disappointed) does NOT suppress it.
+// Codex round-23 P2: ONE list drives both the prompt's PEST REPORTS complaint tie-break wording (its labels,
+// rendered by pestComplaintTieBreakLabels below — byte-identical to the old prose, so the pinned system-prompt
+// hash does not move) and the owed-offer exception (its patterns). The tie-break says a pest report that is
+// ALSO one of these is a complaint. With GATE_SMS_AGENT_COMPLAINTS ON the COMPLAINTS rule answers complaints
+// (offering the re-service when eligible), so only the true hand-offs — cancel / refund / dispute / damage,
+// plus legal and chemical/medical exposure, which the prompt's held categories cover — suppress the offer and
+// plain anger stays owed. With it OFF the prompt HOLDS complaints for a person, so anger suppresses it too.
+const PEST_COMPLAINT_TIEBREAK = Object.freeze([
+  { label: 'anger', anger: true, source: "angry|furious|upset|frustrated|disappointed|unacceptable|ridiculous|terrible|awful|outraged|livid|fed\\s+up|sick\\s+of|sick\\s+and\\s+tired|worst" },
+  { label: 'property damage', source: 'damag\\w*' },
+  { label: 'a refund/credit demand', source: 'refund\\w*' },
+  { label: 'a dispute over what happened or over billing', source: "disput\\w*|chargeback|charged\\s+(?:me\\s+)?(?:wrong|twice|again|incorrect\\w*)|(?:double|over|wrongly|incorrectly)[- ]?charg\\w*" },
+  // Codex round-44 P2: a cancel HAND-OFF is request / threat language — "I want to cancel", "going to cancel", "please cancel my plan",
+  // "I'm cancelling", "cancel my service" — never a past-tense description ("the tech canceled yesterday's appointment").
+  { label: 'a threat to cancel over it', source: "(?:want(?:ed)?|wanna|going|gonna|plan(?:ning)?|need(?:ed)?|ready|decid\\w+|think(?:ing)?|consider(?:ing)?|about|trying|try|please|pls|will|would|should|may|might|could|gotta|have|like|let['’]?s)\\s+(?:to\\s+|of\\s+|about\\s+)?(?:be\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|(?:i|we)['’](?:ll|d)\\s+(?:be\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|cancel(?:l?ing)?\\s+(?:my|our|the|this|that|it|them|everything|all|service|plan|account|membership|subscription|program|contract|agreement|autopay|us|me|now|(?:on|for|after|before|by|until|starting|effective|tomorrow|today|tonight|next|following|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|[a-z]+['’]s)\\b|(?:i['’]?m|we['’]?re|i\\s+am|we\\s+are)\\s+(?:just\\s+)?cancel(?:l?ing)\\b|(?:i|we)\\s+(?:just\\s+)?cancel\\b|(?:want|need|like|request(?:ing)?)\\s+(?:a\\s+)?cancell?ation\\b|cancell?ation\\s+(?:please|pls|request)\\b|(?:(?:want(?:ed)?|wanna|need(?:ed)?|would\\s+like|['’]d\\s+like|like|gotta)\\s+(?:to\\s+(?:have|get)\\s+)?|(?:please|pls|just|(?:can|could|would|will)\\s+(?:you|u|we)(?:\\s+please)?|go\\s+ahead\\s+and)\\s+(?:(?:have|get)\\s+)?|\\bget\\s+)(?:(?:my|our|the|this|that|it|them|everything|all|us|me|service|plan|account|membership|subscription|program|contract|agreement|autopay|visit|appointment|[a-z]+['’]s)\\s+){1,4}cancell?ed\\b|(?:needs?\\s+to|should|must|has\\s+to|have\\s+to)\\s+be\\s+cancell?ed\\b|(?<![\\w'’])cancel(?:l?ing)?(?=\\s*(?:[.!?,;:–—]|$|please\\b|pls\\b|now\\b|asap\\b))" },
+]);
+function pestComplaintTieBreakLabels() {
+  const labels = PEST_COMPLAINT_TIEBREAK.map((c) => c.label);
+  return `${labels.slice(0, -1).join(', ')}, or ${labels[labels.length - 1]}`;
+}
+const RESERVICE_HANDOFF_EXTRA_SOURCE = "legal\\w*|lawyer|attorney|lawsuit|sue|suing|chemical\\w*|toxic|poisoned|poisoning|allerg\\w*|hospital|medical|exposure|exposed|sick(?!\\s+(?:of|and\\s+tired)\\b)";
+const reserviceHandoffRe = (withAnger) => new RegExp(`\\b(?:${[...PEST_COMPLAINT_TIEBREAK.filter((c) => withAnger || !c.anger).map((c) => c.source), RESERVICE_HANDOFF_EXTRA_SOURCE].join('|')})\\b`, 'i');
+const RESERVICE_HANDOFF_TEXT_RE = reserviceHandoffRe(false); // complaints answered (gate on): true hand-offs only
+const RESERVICE_HANDOFF_WITH_ANGER_RE = reserviceHandoffRe(true); // complaints held (gate off): the prompt's whole tie-break
+// Codex round-39 P2: an EXPLICIT, affirmed refusal of a visit / callback / link ("Ants are back, but please don't send anyone",
+// "don't send me a link", "I don't want a visit", "no need to send anyone", "no thanks") suppresses the owed offer, and the reply may not
+// promise one. First-person / imperative only — "you never send anyone" is a complaint, not a refusal. mentionsAffirmed drops a
+// negated refusal ("I'm not saying don't send anyone").
+const RESERVICE_REFUSAL_NOUN = "(?:anyone|anybody|someone|somebody|no\\s*one|tech\\w*|technicians?|link|visit|visits|appointment|appointments|re-?service|re-?treat\\w*|call-?back|crew|team|truck|anything|a\\s+person)";
+const RESERVICE_REFUSAL_LEAD = "(?:^|[.!?;,:]|\\b(?:and|but|so|just|also|please|i|we)\\b)\\s*(?:really\\s+|also\\s+|please\\s+)*";
+const RESERVICE_REFUSAL_RE = new RegExp(
+  `${RESERVICE_REFUSAL_LEAD}(?:don['’]?t|do\\s+not|dont)\\s+(?:even\\s+|really\\s+|need\\s+to\\s+|have\\s+to\\s+|want\\s+(?:you\\s+)?to\\s+)*(?:send|sending|schedul\\w*|book\\w*|dispatch\\w*|text|come|coming|bother|set\\s+up|arrange)\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_REFUSAL_NOUN}\\b`
+  + `|${RESERVICE_REFUSAL_LEAD}(?:don['’]?t|do\\s+not|dont)\\s+(?:really\\s+)?(?:want|need|require)\\b(?:\\W+[\\w'’-]+){0,3}?\\W+${RESERVICE_REFUSAL_NOUN}\\b`
+  + `|\\bno\\s+need\\s+(?:to|for)\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_REFUSAL_NOUN}\\b`
+  + `|\\bno\\s+${RESERVICE_REFUSAL_NOUN}\\s+(?:is\\s+|are\\s+)?(?:needed|necessary|required|wanted|please|thanks)\\b`
+  + "|\\bno,?\\s+thank(?:s|\\s+you)\\b|\\bnot\\s+interested\\b",
+  'i',
+);
+function reserviceRefusalAffirmed(text) {
+  return require('./reservice-scheduler').mentionsAffirmed(String(text || ''), RESERVICE_REFUSAL_RE);
+}
+// A true hand-off the customer's OWN words establish, or an explicit refusal, suppresses the owed offer (and the state replies below).
+// PR #5465 round 1: a cancellation DESCRIBED as someone else's / a past act ("Your tech had to cancel", "You called to cancel", "they decided to
+// cancel on Friday", "I had to cancel last time") is not the customer's request or threat. The span is blanked before the hand-off read, so a
+// clause-final bare "cancel" or a "cancel on Friday" reads as intent only when its subject is the customer. Requests with the tech as the
+// ADDRESSEE ("can you cancel on Friday", "I told you to cancel") have no past / obligation lead and stay requests.
+const RESERVICE_CANCEL_DESCRIBED_RE = /\b(?:(?:(?:your|the|a|our)\s+)?(?:tech\w*|office|team|crew|company|staff|dispatcher|rep|guy|lady|girl|person|someone|somebody|they|he|she|you|u|waves)|(?:i|we)(?=\s+(?:(?:already|just)\s+)?had\s+to\b))\s+(?:(?:already|just|always|never|also|actually|then)\s+)*(?:had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|did|got|ended|asked|came|went|kept)\s+(?:(?:(?:already|just|always|never|also|actually|then|had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|did|got|ended|asked|came|went|kept)\s+){0,2})(?:to\s+)?cancel(?:l?ing)?\b/gi;
+function reserviceOfferSuppressed(inboundMessage) {
+  const handoffRe = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS') ? RESERVICE_HANDOFF_TEXT_RE : RESERVICE_HANDOFF_WITH_ANGER_RE;
+  const text = String(inboundMessage || '').replace(RESERVICE_CANCEL_DESCRIBED_RE, (m) => ' '.repeat(m.length));
+  // Codex round-24 P2: only an AFFIRMED hand-off clause suppresses the offer — "I don't need a refund" or
+  // "I don't want to cancel" mentions the term to negate it (the scheduler's clause-level negation rule).
+  return require('./reservice-scheduler').mentionsAffirmed(text, handoffRe) || reserviceRefusalAffirmed(inboundMessage);
+}
+function reserviceOfferOwed({ inboundMessage, lanes, context }) {
+  if (reserviceOfferSuppressed(inboundMessage)) return false;
+  // Codex round-36 P2: the owed lane is the RESOLVED reported lane — pest OR lawn (turf insects: "Chinch bugs are back") — when it is
+  // eligible, so the customer gets the link instead of neither the link nor times (OPEN TIMES are skipped for a deciding lane).
+  return reportedReportLanes({ inboundMessage, context, lanes }).length > 0;
+}
+// Recognizable customer-facing offer / send-link wording (free, no cost, re-service, a link, come back / stop by).
+function reserviceReplyHasOfferWording(text) {
+  return reserviceBodyPrescreen(text) || /\blink\b/i.test(String(text || ''));
+}
+// Does the re-service lane decide the reply (an active pest report on a bookable or already-booked lane)? Then normal
+// OPEN TIMES work is skipped (Codex round-28 P2).
+// Codex round-29 P1: the shortcut applies ONLY when the re-service is the customer's sole need. A pest report that also
+// cancels / complains, asks to move or book another visit, or names another service ("The ants are back, cancel my
+// plan"; "The ants are back. Can I move my lawn visit to Friday?") still needs the normal OPEN TIMES lookup.
+// Codex round-30 P1: a request is a SEPARATE need only when its OBJECT is a distinct appointment / service. A request
+// whose object is the re-service itself ("book a re-service", "someone to come back out", "schedule that", "book it")
+// is the re-service — sole need, guards stay on. Three kinds of evidence remain:
+//   * a move-type verb (reschedule / move / push / change / switch / swap / skip / postpone / delay) governing an object
+//     that is not the re-service and not a bare pronoun ("move my lawn visit", "reschedule my regular service");
+//   * a book-type verb (book / schedule / set up / arrange / make / get) governing a distinct appointment or service
+//     noun that is not the re-service ("book a mosquito treatment", "get me a time");
+//   * an explicit ask for times / another day, or an appointment request ("can I get an appointment").
+const RESERVICE_MOVE_VERB_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|push|pushing|change|changing|switch|swap|skip|postpone|delay)\b([^.?!;]{0,60})/gi;
+const RESERVICE_BOOK_VERB_RE = /\b(?:book|booking|schedule|scheduling|set\s+up|arrange|make|get)\b([^.?!;]{0,60})/gi;
+const RESERVICE_SELF_OBJECT_RE = /\b(?:re-?service|re-?treat\w*|re-?spray|call-?back|revisit|follow-?up|free\s+(?:visit|service|treatment|callback)|come\s+(?:back|out)|coming\s+(?:back|out)|stop\s+by|send\s+(?:someone|somebody|a\s+tech\w*)|someone|somebody|(?:a|the)\s+tech\w*|return|again)\b/i;
+const RESERVICE_BARE_PRONOUN_OBJECT_RE = /^\W*(?:it|that|this|them|those|one)\b|^\W*$/i;
+const RESERVICE_DISTINCT_BOOK_OBJECT_RE = /\b(?:appointments?|visits?|services?|treatments?|sprays?|applications?|inspections?|estimates?|quotes?|slots?|times?|days?|dates?|lawn|turf|mosquito|termite|rodent|tree|shrub)\b/i;
+const RESERVICE_TIME_ASK_RE = /\b(?:another\s+(?:day|time)|different\s+(?:day|time)|what\s+times?|which\s+times?|any\s+(?:openings?|availability)|availab\w+|openings?|earlier|later\s+(?:date|time|day)|next\s+(?:week|available))\b/i;
+const RESERVICE_APPOINTMENT_REQUEST_RE = /\b(?:can|could|would|will|may)\s+(?:i|you|we|someone|somebody)\b[^.?!]{0,40}\b(?:get|make|set\s+up|schedule|have)\s+(?:an?|another|my|the)\s+appointment\b|\b(?:please|pls|i\s+need|i\s+want|i['’]d\s+like|i\s+would\s+like|we\s+need|we\s+want|want\s+to|need\s+to|like\s+to)\b[^.?!]{0,40}\b(?:an?|another|my|the)\s+appointment\b/i;
+// (A bare mention of an appointment — "The ants are back after my appointment" — is history, not a request; round-29 P2.)
+function reserviceHasSeparateRequest(text) {
+  const t = String(text || '');
+  if (RESERVICE_TIME_ASK_RE.test(t) || RESERVICE_APPOINTMENT_REQUEST_RE.test(t)) return true;
+  for (const m of t.matchAll(RESERVICE_MOVE_VERB_RE)) {
+    const object = m[1];
+    if (RESERVICE_SELF_OBJECT_RE.test(object) || RESERVICE_BARE_PRONOUN_OBJECT_RE.test(object)) continue;
+    if (/\b(?:my|our|the|an?|another)\s+[\w-]+/i.test(object) || RESERVICE_DISTINCT_BOOK_OBJECT_RE.test(object)) return true;
+  }
+  for (const m of t.matchAll(RESERVICE_BOOK_VERB_RE)) {
+    const object = m[1];
+    if (RESERVICE_SELF_OBJECT_RE.test(object) || RESERVICE_BARE_PRONOUN_OBJECT_RE.test(object)) continue;
+    if (RESERVICE_DISTINCT_BOOK_OBJECT_RE.test(object)) return true;
+  }
+  return false;
+}
+// Codex round-32 P1 (PR #5336), structural and FAIL-CLOSED: no text detector may ever relax a slot guard. Three rounds of
+// "separate need" heuristics ("book" → "next week" → …) kept leaking, so when the reported pest lane decides the reply
+// (bookable or already booked) the guards ALWAYS apply — no offered_times, no book_appointment, no OPEN TIMES in the
+// facts — whatever else the inbound asks. This detector only decides whether to ADD a prompt hint telling the model
+// to hand the OTHER request to the office; it may be imperfect and never loosens anything.
+function reserviceMixedRequest({ inboundMessage, context, coveredLanes }) {
+  const text = String(inboundMessage || '');
+  // Codex round-37 P2: "another service" is judged against the RESOLVED reported lane (a lawn report's own lawn words are not another service)
+  const { reportedReserviceExcludedSpecialty, namesOtherService } = require('./reservice-scheduler');
+  const reported = reportedLaneSet(text, context, coveredLanes);
+  // several reported lanes: the only "other service" is an excluded specialty (each lane's own words are the report itself)
+  const other = reported.length > 1 ? reportedReserviceExcludedSpecialty(text) : namesOtherService(text, reported[0] || 'pest');
+  return SAVE_SALE_NON_PEST_TEXT_RE.test(text) || reserviceHasSeparateRequest(text) || other;
+}
+// Per-draft user-prompt hint (NOT the pinned system prompt), gate-on only: the re-service is handled per the PEST REPORTS
+// rule; the other request goes to a person.
+const RESERVICE_MIXED_REQUEST_HINT = 'MIXED REQUEST: this text reports pests AND asks for something else (another visit, a schedule change, a cancellation, another service, or a termite / rodent / mosquito / tree & shrub issue that the free re-service does not cover). Answer the pest report per the PEST REPORTS rule (offer the free re-service link when FREE RE-SERVICE says eligible, or refer to the appointment already on the schedule when it says booked). Never promise the free re-service for the other issue. Do NOT quote, offer or book any times for the other request — add {"type":"escalate","note":"<the other request in a few words>"} to intended_actions and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.';
+function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
+  if (!reserviceState) return false;
+  const covered = reserviceStateCoveredLanes(reserviceState);
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context, covered)) return false;
+  return reportedLaneSet(inboundMessage, context, covered).some((lane) => reserviceState.lanes.includes(lane) || (reserviceState.linkDownLanes || []).includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
+}
+// Lanes the facts mark COVERED-BUT-LINK-UNAVAILABLE ("covered for pest, but the free re-service booking link is unavailable …").
+function linkDownReserviceLanes(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(`${RESERVICE_FACT_LABEL} covered for `)) || '';
+  const named = line.slice(`${RESERVICE_FACT_LABEL} covered for `.length).split(',')[0];
+  return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(named));
+}
+function bookedReserviceLanes(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
+  return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane} already booked\\b`).test(line));
+}
+// Codex round-33 P1 (PR #5336): the unconditional SLOT GUARD, run FIRST in validateReserviceOffer — before every early
+// return (owed / not owed, promise / no promise, hand-off suppression). When the reported pest lane decides the reply
+// — bookable ("offer the covered free re-service") or ALREADY BOOKED ("refer to the appointment on the schedule") —
+// the reply may not declare offered_times or add book_appointment, whatever else the inbound asks or says
+// ("The ants are back, cancel my plan and book my lawn visit": the cancellation may suppress the OWED offer, never this).
+function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTimes, actions }) {
+  if (!([].concat(offeredTimes || []).length || actions.some((a) => a && a.type === 'book_appointment'))) return null;
+  const covered = factsCoveredReserviceLanes(factsBlock);
+  if (!pestReportSignal(inboundMessage, context, covered)) return null; // pronoun-aware ("they're back" + a pest relationship)
+  // Codex round-39 P2: EVERY reported lane is guarded ("Ants and chinch bugs are back" reports pest AND lawn); an excluded specialty never falls back to pest
+  for (const lane of reportedLaneSet(inboundMessage, context, covered)) {
+    if (bookedReserviceLanes(factsBlock).includes(lane)) {
+      return `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`;
+    }
+    if (linkDownReserviceLanes(factsBlock).includes(lane)) {
+      return `the customer reported a ${lane} issue and is COVERED, but the free re-service booking link is unavailable right now — never offer paid OPEN TIMES, declare offered_times or add book_appointment; acknowledge, add {"type":"escalate","note":"<what they need>"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW`;
+    }
+    if (eligibleReserviceLanes(factsBlock).includes(lane)) {
+      return `the customer reported a ${lane} issue and FREE RE-SERVICE in the facts says they are eligible — the re-service link shows its own availability, so never declare offered_times or add book_appointment; hand any OTHER request to the office with {"type":"escalate","note":"<the other request>"} and the FOLLOW-UP SLA wording`;
+    }
+  }
+  return null;
+}
+// Codex round-41 P2: a pest report whose reported lane is ALREADY BOOKED or COVERED-BUT-LINK-UNAVAILABLE owes no offer, but a generic
+// non-promise ("Sorry about that") must not converge either. Booked: the reply references the existing appointment (an
+// existing-appointment marker, or its stored day / date). Link unavailable: the reply hands it off — an escalate action plus the
+// CURRENT FOLLOW-UP SLA wording. (An eligible reported lane is the owed-offer path; hand-offs / refusals are not judged here.)
+// Codex round-42 P2: judged per NON-bookable reported lane EVEN WHEN another reported lane owes an offer ("Ants and chinch bugs are back"
+// with pest bookable and lawn booked: the offer for pest does not excuse ignoring the lawn appointment). Skipped for a pure promise with no
+// bookable lane reported (the promise checks below report that with their own wording).
+function reserviceStateReplyFault({ reply, factsBlock, inboundMessage, context, actions, promise = false }) {
+  const covered = factsCoveredReserviceLanes(factsBlock);
+  if (!pestReportSignal(inboundMessage, context, covered) || reserviceOfferSuppressed(inboundMessage)) return null;
+  const eligible = eligibleReserviceLanes(factsBlock);
+  const reportedAll = reportedLaneSet(inboundMessage, context, covered);
+  const reported = reportedAll.filter((lane) => !eligible.includes(lane));
+  if (!reported.length || (promise && reported.length === reportedAll.length)) return null;
+  const text = String(reply || '');
+  const booked = reported.filter((lane) => bookedReserviceLanes(factsBlock).includes(lane));
+  if (booked.length) {
+    const factsLine = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
+    const dayNames = booked.flatMap((lane) => {
+      const m = new RegExp(`\\b${lane} already booked \\((\\d{4}-\\d{2}-\\d{2})`).exec(factsLine);
+      return m ? reserviceBookedDayNames({ date: m[1], windowStart: null }) : [];
+    });
+    const refersToIt = RESERVICE_EXISTING_APPT_RE.test(text)
+      || dayNames.some((name) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i').test(text));
+    if (!refersToIt) return `the customer reported a ${booked.join(' and ')} issue and their free re-service for it is ALREADY BOOKED — the reply must refer to the appointment already on the schedule (say it is already scheduled, or name its day), not a generic acknowledgement`;
+  }
+  const down = reported.filter((lane) => linkDownReserviceLanes(factsBlock).includes(lane));
+  if (down.length && !(actions.some((a) => a && a.type === 'escalate') && followupSla.slaPhraseStatus(text) === 'current')) {
+    return `the customer reported a ${down.join(' and ')} issue and is COVERED, but the free re-service booking link is unavailable — the reply must hand it to the office: add {"type":"escalate","note":"<what they need>"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW`;
+  }
+  return null;
+}
+function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
-  if (!FREE_RESERVICE_OFFER_RE.test(text)) return { ok: true, violations: [] };
+  const actions = [].concat(intendedActions || []);
+  // FIRST, before any early return (round-33 P1): the unconditional slot guard.
+  const slotGuard = reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTimes, actions });
+  if (slotGuard) return { ok: false, violations: [slotGuard] };
+  // Codex round-16 P2 (PR #5336): a draft whose intended_actions carry the re-service link action is
+  // ALWAYS validated, whether or not the detector recognizes the wording — otherwise a card the model
+  // worded in a way the detector misses ("have someone stop by again … no cost to you") skips this
+  // function, stores no promisedLanes snapshot, and the new-version send check then rejects it even
+  // while the customer is eligible. Such a draft derives its lane below (named → reported → the single
+  // bookable lane) or is rejected. Its body is classified over the WHOLE text for lanes/specialties
+  // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
+  const planCustomer = !reserviceFactShowsNoPlan(factsBlock);
+  const promise = isReserviceOfferPromise(planCustomer ? text : withoutGenericInspections(text));
+  // Codex round-42 P2: the booked / link-down state replies are checked for every non-bookable reported lane, owed offer or not
+  const stateFault = reserviceStateReplyFault({ reply: text, factsBlock, inboundMessage, context, actions, promise });
+  if (stateFault) return { ok: false, violations: [stateFault] };
+  if (!promise) {
+    // Codex round-27 P2: when the offer is OWED, the link ACTION alone is not the customer-facing offer — a
+    // generic "Sorry to hear that" plus send_reservice_link tells the customer nothing. The reply must carry
+    // recognizable offer / send-link wording (the detector may still miss its exact phrasing).
+    const owed = reserviceOfferOwed({ inboundMessage, lanes: eligibleReserviceLanes(factsBlock), context });
+    if (owed && !(reserviceCarriesLinkAction(actions) && reserviceReplyHasOfferWording(text))) {
+      return { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] };
+    }
+    if (!reserviceCarriesLinkAction(actions)) return { ok: true, violations: [] };
+  }
+  // reservice-scheduler is the SAME classifier the no-named-lane path uses (NOT sms-service-intent.js's
+  // lead-intake regexClassify, which lumps termite/rodent/mosquito words into its 'pest' bucket — that
+  // bucket is for lead-intake ROUTING, not the re-service mechanism's own pest/lawn split, which
+  // categorically excludes those specialties).
+  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
   const lanes = eligibleReserviceLanes(factsBlock);
-  if (!lanes.length) {
-    return { ok: false, violations: ['the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'] };
-  }
-  // Codex r7: eligibility is per service line — a pest-only customer must
-  // not be offered a free LAWN re-service (or the reverse).
-  const named = [['pest', /\bpest\b/i], ['lawn', /\b(?:lawn|turf|grass)\b/i]].filter(([, rx]) => rx.test(text)).map(([lane]) => lane);
+  // Codex round-5 P1 (finding #1): the reported issue's own lane, from the customer's inbound text, is
+  // resolved and checked EVERY time — not only when the reply names no lane.
+  // Codex round-39 P2: the SET of reported lanes; the promise must cover each one that is eligible (owedLanes).
+  const reportedFromText = reportedReserviceLanes(inboundMessage);
+  const reportedLanes = reportedFromText.length ? reportedFromText : [reportedPestLane({ inboundMessage, context, lanes })].filter(Boolean);
+  const owedLanes = reportedLanes.filter((lane) => lanes.includes(lane));
+  const reportedPhrase = `a ${reportedLanes.join(' and ')} issue`;
+  // Codex r7: eligibility is per service line — a pest-only customer must not be offered a free LAWN
+  // re-service (or the reverse).
+  const named = reserviceBodyLanes(text, promise);
   const wrong = named.filter((lane) => !lanes.includes(lane));
-  if (wrong.length) {
-    return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
+  // The lane(s) this reply actually promises — carried by the caller into input_snapshot (Codex
+  // round-3 P2) so a later send-time recheck knows WHICH lane(s) must still be live eligible without
+  // re-deriving them from reply text a human may have edited. A reply naming none takes the customer's
+  // reported lane (Codex round-1 P2 (d)); an action-only draft also the single bookable lane, since no
+  // other lane exists to be ambiguous with. Nothing derivable → rejected below, never published.
+  const promisedLanes = named.length ? named
+    : (owedLanes.length ? owedLanes : (reportedLanes.length ? reportedLanes.slice(0, 1) : [!promise && lanes.length === 1 ? lanes[0] : null].filter(Boolean)));
+  const notLinked = !actions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link');
+  // Ordered checks, first hit wins. Pure conditions, so evaluating them all up front changes nothing.
+  const checks = [
+    // Codex round-39 P2: the customer explicitly declined a visit / callback / link — no re-service promise or link action
+    [reserviceRefusalAffirmed(inboundMessage), 'the customer explicitly declined a visit, callback or link — never promise or send a free re-service link; acknowledge the pest report and hand it to the office with {"type":"escalate","note":"<what they said>"} and the FOLLOW-UP SLA wording'],
+    // Codex round-5 P2 (finding #3): the re-service link page shows the customer its OWN real
+    // availability — a promise that ALSO offers or books a specific slot right here is a second,
+    // conflicting offer (and a book_appointment has no eligibility/pricing checks of its own).
+    [[].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
+    [actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
+    [!lanes.length, 'the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'],
+    [reportedReserviceExcludedSpecialty(inboundMessage) && !reportedLanes.length, 'the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'],
+    [reserviceExcludedSpecialtyInPromise(text), 'the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'],
+    [reportedLanes.length && named.length && !(owedLanes.length ? owedLanes.every((lane) => named.includes(lane)) : reportedLanes.some((lane) => named.includes(lane))), `the reply offers a free ${named.join(' and ')} re-service but the customer reported ${reportedPhrase}${owedLanes.length > 1 ? ' — the promise must cover each reported lane' : ''}`],
+    [wrong.length, `the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`],
+    // A GENERIC "we'll send your free re-service link" names no service line, so a pest customer
+    // offered a lawn-only entitlement (or the reverse) must be caught against the reported lane.
+    [reportedLanes.length && !named.length && !owedLanes.length, `the reply offers a free re-service but the customer reported ${reportedPhrase} and FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`],
+    [!promisedLanes.length, 'the reply offers a free re-service without naming which service line it covers, and the reported issue\'s service line could not be resolved from the customer\'s text — name the covered service line explicitly'],
+    // Codex round-1 P2 (c): a free-re-service PROMISE with no send_reservice_link escalate is a broken
+    // promise — the ONLY thing that gets a teammate to text the link is that action.
+    [notLinked, 'the reply promises a free re-service but intended_actions is missing {"type":"escalate","note":"send_reservice_link"} — nothing would actually send the link'],
+  ];
+  const hit = checks.find(([violated]) => violated);
+  return hit ? { ok: false, violations: [hit[1]] } : { ok: true, violations: [], promisedLanes };
+}
+
+// Send-time revalidation of a re-service promise (Codex round-3 P2): a
+// REVIEWED card can sit in the composer, or a QUEUED scheduled reply can
+// wait in the send window, long enough for the customer's eligibility to
+// change after it was reviewed/scheduled (their plan cancelled, they
+// already used the re-service through another channel, …) — the same
+// "reviewed wording can go stale before it fires" problem the OPEN TIMES /
+// amounts / follow-up-SLA rechecks above already solve, for this promise.
+// Shared by every send-time choke point that carries the problem:
+// agentDecisionSendBlockReason (agent-decision-send-checks.js — the
+// immediate /sms send AND the /schedule-sms verification it shares) and the
+// scheduler's own queued-send recheck (scheduler.js). The auto-send
+// executor does NOT need this: a re-service-offer reply always carries an
+// {"type":"escalate","note":"send_reservice_link"} action (validateReserviceOffer
+// requires it to converge), and ANY escalate action makes autoSendActionsSafe
+// return false — auto_send_safe is false for these drafts unconditionally,
+// so they never reach the auto-send claim/executor path at all. (A reply that only REFERS to an
+// already-booked callback has no such action: the auto-send executor rechecks it through
+// reserviceBookedReferenceBlock — sms-auto-send.js reserviceBookedHandoffCheck, round 43.)
+//
+// promisedLanes is what validateReserviceOffer resolved at DRAFT time
+// (persisted in input_snapshot). Codex round-4 P2: a REVIEWED card's body can
+// be hand-edited before it sends — including swapping which lane the text
+// actually names (a pest promise edited to name lawn) — and this recheck
+// used to validate ONLY the stale draft-time snapshot, never noticing the
+// edit changed what is actually being promised. Fix: reuse
+// namedReserviceLanesInText (the SAME named-lane detector
+// validateReserviceOffer runs on the drafted reply) on the ACTUAL outgoing
+// body — when the edited text explicitly names a lane, THAT lane is what
+// must be live-eligible, not the snapshot. Generic wording (no lane named in
+// the outgoing text — e.g. an unedited generic promise, or an edit that
+// only changes phrasing) falls back to the draft-time snapshot, unchanged
+// from before. Fails CLOSED: an outgoing body that still reads as a promise
+// but resolves no lane to check (named or snapshot), or no customer to
+// check, blocks; the live lookup (liveReserviceLaneState) is itself fail-closed
+// on any DB/timeout error. Returns null when the body may go out, else a
+// short reason.
+// Codex round-9 (PR #5336): a decision created BEFORE this feature deployed has
+// no reservice_lanes_snapshot, and the strict check above rejected every one of
+// its promises (a suggestion stays reviewable up to 48h, so pending cards
+// straddle the deploy). Codex round-15: the pre-deploy set is an EXPLICIT list —
+// never a parsed shape — so a future identity change can't silently grandfather
+// new decisions: only a missing version, the identities that shipped before the
+// snapshot existed (PROMPT_VERSION v11, bare v12 "house_voice_v12_real_answers",
+// and the older bare house_voice_v1..v11), each optionally category-tagged
+// ("+bc"), are pre-deploy. EVERY other identity — REAL_ANSWERS_PROMPT_VERSION,
+// any later bump, anything unrecognized — is treated as snapshot-emitting, so a
+// promise on it missing its snapshot stays fail-closed.
+const PRE_DEPLOY_PROMPT_IDENTITIES = Object.freeze([
+  ...Array.from({ length: 11 }, (_, i) => `house_voice_v${i + 1}`),
+  'house_voice_v12_real_answers',
+  'house_voice_v12_real_answers_cf', // shipped (company facts) before the re-service snapshot existed
+]);
+function reserviceSnapshotVersionEmitted(promptVersion) {
+  const identity = String(promptVersion || '').split('+')[0];
+  return !!identity && !PRE_DEPLOY_PROMPT_IDENTITIES.includes(identity);
+}
+// Cheap prescreen for "could this body plausibly be about a free return visit?" — the
+// price words and re-service nouns only (never bare visit/service/treatment). Used to decide
+// whether a recheck that could not read its decision row may still let a message go.
+const RESERVICE_PRESCREEN_RE = /\b(?:free|complimentary|gratis|comped?|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)|at no|on us|on the house|waive[ds]?|covered|included|without (?:any )?(?:charge|cost)|re-?service|re-?treat|re-?spray|revisit|callback|redo|come back|go back|come out again|stop by again|return visit|another visit|follow-?up|tech(?:nician)? (?:out|back))\b/i;
+function reserviceBodyPrescreen(text) {
+  return RESERVICE_PRESCREEN_RE.test(String(text || ''));
+}
+async function loadDraftRowForReservice(draftId) {
+  if (!draftId) return {};
+  try {
+    return (await db('message_drafts').where({ id: draftId }).first('facts_block', 'intended_actions', 'inbound_message')) || {};
+  } catch (err) {
+    logger.warn(`[sms-shadow] draft lookup failed for re-service grandfathering (${err.message}); using live eligibility`);
+    return {};
   }
-  return { ok: true, violations: [] };
+}
+function draftIntendedActions(raw) {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return [].concat(Array.isArray(parsed) ? parsed : (parsed && parsed.actions) || []).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+// Codex round-18 P2 (PR #5336): the already-booked fact's callback rides the decision snapshot
+// ({ lane: { date, windowStart } }, reservice_booked_snapshot) so a reply that refers to that
+// appointment ("your re-service is already scheduled for Thursday") is rechecked at send time: it
+// must still be an OPEN callback on the same date/window (the shared availability's `open` map — the
+// same read the public page uses), else 'reservice_booking_changed'. The callback id is deliberately
+// not persisted: openReserviceCallbacks feeds the public page payload, which must not carry it.
+function reserviceBookedSnapshot(booked) {
+  return Object.fromEntries(Object.entries(booked || {})
+    .filter(([lane, info]) => (lane === 'pest' || lane === 'lawn') && info && info.date)
+    .map(([lane, info]) => [lane, { date: String(info.date).slice(0, 10), windowStart: info.windowStart || null }]));
+}
+// Does the body refer to the booked appointment — an existing-appointment phrase, or its stored day/date/time?
+function reserviceBookedDayNames(info) {
+  const day = new Date(`${info.date}T12:00:00Z`);
+  const fmt = (opts) => day.toLocaleDateString('en-US', { timeZone: 'UTC', ...opts });
+  const names = [fmt({ weekday: 'long' }), fmt({ month: 'long', day: 'numeric' }), fmt({ month: 'short', day: 'numeric' }), `${day.getUTCMonth() + 1}/${day.getUTCDate()}`, String(info.date).slice(0, 10)];
+  const time = info.windowStart ? require('../utils/sms-time-format').formatSmsTime(info.windowStart) : null;
+  return [...names, time, time && time.replace(':00', '')].filter(Boolean);
+}
+// Codex round-22 P2 (PR #5336): a sentence refers to the booked callback only when it (a) carries an
+// existing-appointment marker or the callback's stored day/date/time AND (b) has RE-SERVICE context in the
+// same sentence (a re-service-specific noun) that does not name only ANOTHER lane. "Your regular lawn
+// treatment is already scheduled for Thursday" is an ordinary visit, not the callback — a moved pest
+// callback must not block it.
+// Relative day words are resolved against the CURRENT ET date at send time (Codex round-28 P2): "Your pest
+// re-service is tomorrow" must recheck, and a scheduled card that crosses midnight must not send a stale
+// "tomorrow" that is now "today".
+const RESERVICE_RELATIVE_DAY_RE = /\b(tomorrow|today|tonight)\b/i;
+function reserviceEtDates() {
+  const { etDateString } = require('../utils/datetime-et');
+  const today = etDateString();
+  const next = new Date(`${today}T12:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return { today, tomorrow: next.toISOString().slice(0, 10) };
+}
+// The absolute day / date a sentence ASSERTS, normalized ('thu' | 'oct 9' | '10/9'), so an edited "scheduled for Friday" can
+// be compared with the live callback (Codex round-29 P2).
+const RESERVICE_WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const RESERVICE_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+function reserviceAssertedDays(sentence) {
+  const out = [];
+  for (const m of sentence.matchAll(/\b(sun|mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?)(?:day)?\b/gi)) out.push(m[1].slice(0, 3).toLowerCase());
+  for (const m of sentence.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b/gi)) out.push(`${m[1].toLowerCase()} ${Number(m[2])}`);
+  for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\b/g)) out.push(`${Number(m[1])}/${Number(m[2])}`);
+  // Codex round-44 P2: FULL dates — ISO "2026-10-09" (the FREE RE-SERVICE fact renders this form, so a draft copies it) and M/D/YYYY — are
+  // compared year-and-all as an `iso:` token against the live callback date (the M/D token above is pushed too, so a wrong year fails here).
+  for (const m of sentence.matchAll(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g)) out.push(`iso:${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`);
+  for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/g)) {
+    const year = m[3].length === 2 ? `20${m[3]}` : m[3];
+    out.push(`iso:${year}-${String(Number(m[1])).padStart(2, '0')}-${String(Number(m[2])).padStart(2, '0')}`);
+  }
+  return out;
+}
+// The clock times / windows a sentence asserts, as minutes-of-day with an optional meridiem: "1–3 PM", "at 9", "9:30 am".
+const RESERVICE_LEXICAL_TIME_RE = /\b(?:noon|midnight|midday|tonight|later\s+today|this\s+(?:morning|afternoon|evening)|mornings?|afternoons?|evenings?|first\s+thing|end\s+of\s+(?:the\s+)?day|after\s+lunch|before\s+lunch|after\s+work|before\s+work|o['’]clock)\b/gi;
+function reserviceAssertedTimes(sentence) {
+  const out = [];
+  // an ISO / numeric full date is a DAY (reserviceAssertedDays), not a clock range ("2026-10-09" would read as the range 10–09)
+  let rest = String(sentence).replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ').replace(/\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/g, ' ');
+  const push = (h, mi, mer) => out.push({ minutes: (Number(h) % 12) * 60 + Number(mi || 0) + (mer === 'p' ? 720 : 0), mer: mer || null });
+  rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*(?:-|–|—|to|and|until)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h1, m1, mer1, h2, m2, mer2) => {
+    const second = mer2[0].toLowerCase();
+    const first = mer1 ? mer1[0].toLowerCase() : ((Number(h1) % 12) > (Number(h2) % 12) ? (second === 'p' ? 'a' : 'p') : second);
+    push(h1, m1, first);
+    push(h2, m2, second);
+    return ' ';
+  });
+  rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h, mi, mer) => { push(h, mi, mer[0].toLowerCase()); return ' '; });
+  // Codex round-39 P2: a MERIDIEM-FREE range ("from 1–3", "between 9 and 11", "9 to 11") is an asserted window too — both endpoints are
+  // recorded with no meridiem and compared modulo 12h against the live window (a wrong or one-sided range is unverifiable → blocked).
+  // Durations / counts ("5 to 10 minutes", "2-3 business days") and dates ("Oct 9 and 10") are not clock ranges.
+  rest = rest.replace(/(?<!\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s)\b(\d{1,2})(?::(\d{2}))?\s*(?:-|–|—|to|and|until|through|thru)\s*(\d{1,2})(?::(\d{2}))?\b(?![:/]|\s*(?:st|nd|rd|th|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|business|times|visits?|%|percent|inches|feet|ft)\b)/gi, (m, h1, m1, h2, m2) => {
+    if (Number(h1) > 24 || Number(h2) > 24) return m;
+    push(h1, m1, null);
+    push(h2, m2, null);
+    return ' ';
+  });
+  for (const m of rest.matchAll(/\bat\s+(\d{1,2})(?::(\d{2}))?\b|\b(\d{1,2}):(\d{2})\b/gi)) push(m[1] || m[3], m[2] || m[4], null);
+  // Codex round-37 P2: LEXICAL times of day ("at noon", "midnight", "Thursday morning", "this afternoon", "first thing") are asserted
+  // times too — they can only be verified by stating the full live window, so each is an unverifiable entry.
+  for (const m of rest.matchAll(RESERVICE_LEXICAL_TIME_RE)) out.push({ lexical: m[0].toLowerCase() });
+  return out;
+}
+function reserviceLiveWindowMinutes(windowStart) {
+  const { arrivalWindowRange } = require('../utils/sms-time-format');
+  const range = arrivalWindowRange(windowStart);
+  if (!range) return null;
+  return range.split('-').map((hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; });
+}
+function reserviceLiveDayTokens(dateStr) {
+  const d = new Date(`${String(dateStr).slice(0, 10)}T12:00:00Z`);
+  return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`, `iso:${String(dateStr).slice(0, 10)}`]);
+}
+// The booked-callback claims of an OUTGOING body, one per referring sentence: { lanes, relative, days, times } where `lanes` are
+// the lanes the SENTENCE names (Codex round-31 P2 — derived from the body itself, never only from snapshotted lanes, so an
+// edited "Your lawn re-service is scheduled Thursday" is a lawn claim even with no lawn snapshot). A sentence refers when it
+// carries an existing-appointment marker, a relative day, or a snapshotted day/date/time AND has re-service context.
+const RESERVICE_FULL_DATE_RE = /\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/;
+// Round-3: a full date is an APPOINTMENT ASSERTION only with present / future scheduling wording and no historical / completed qualifier
+// ("Your last pest re-service was on 9/15/2026", "your re-service invoice from 2026-09-12" are history, not the booked callback).
+const RESERVICE_DATED_ASSERT_RE = /\b(?:is|are|will\s+be|set|slated|planned|falls?|lands?|arrives?|comes?|coming|happening|on\s+the\s+(?:calendar|schedule|books)|down\s+for)\b|['’]s\b/i;
+const RESERVICE_DATED_HISTORICAL_RE = /\b(?:was|were|had|did|last|previous\w*|prior|past|earlier|ago|completed|finished|done|performed|originally|invoice\w*|receipt)\b/i;
+const reserviceFullDateAssertion = (sentence) => RESERVICE_FULL_DATE_RE.test(sentence) && RESERVICE_DATED_ASSERT_RE.test(sentence) && !RESERVICE_DATED_HISTORICAL_RE.test(sentence);
+function reserviceBookedClaims(body, snapshot) {
+  const named = Object.values(snapshot).flatMap((info) => reserviceBookedDayNames(info))
+    .map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
+  const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
+  const contextRe = new RegExp(`\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})`, 'i');
+  // Codex round-23 P2: a generic visit noun counts as callback context only when the same sentence QUALIFIES it
+  // as the free callback (free / complimentary / no-charge / follow-up / callback): "Your free pest visit is
+  // already scheduled for Thursday". A plain "your visit is scheduled" still does not.
+  const qualifiedVisitRe = /\b(?:free|complimentary|no[- ]charge|at\s+no\s+(?:additional\s+)?(?:charge|cost)|follow-?up|call-?back)\b/i;
+  const visitNounRe = /\b(?:visit|appointment|treatment|service|trip)s?\b/i;
+  const claims = [];
+  // Codex round-34 P2: a scheduled Waves Assessment / free inspection is a different product, never a booked re-service claim
+  // (and never defaults to the pest lane) — the same carve-out the offer detector uses.
+  // Codex round-41 P2: dotted meridiems ("1 p.m. to 3 p.m.") and common dotted abbreviations must not split a
+  // sentence before its asserted times are read — normalize them first, then split on real sentence ends.
+  const normalizedBody = blankOtherProducts(String(body))
+    .replace(/\b([ap])\.\s?m\.(?=\s|$|[,;!?])/gi, '$1m')
+    .replace(/\b(Mr|Mrs|Ms|Dr|St|Ave|Blvd|Rd|approx|Apt|Ste|No)\./gi, '$1');
+  for (const sentence of normalizedBody.split(/[.!?\n]+/)) {
+    const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
+    // Round-1 C3: a FULL date (ISO / M/D/YYYY) is admitted whatever its value — an EDITED wrong date ("Your pest re-service is 2027-10-08") must reach the
+    // day comparison, not be skipped because it is not the snapshot's exact string; the re-service-context check below still gates it.
+    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || reserviceFullDateAssertion(sentence) || named.some((rx) => rx.test(sentence)))) continue;
+    if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) continue;
+    // A sentence whose re-service is a NEW OFFER (its marker belongs to something else: "Your lawn treatment is scheduled, and
+    // I'll send your free pest re-service link") is not a reference to a booked callback.
+    const spans = reserviceOfferSpans(sentence);
+    // (a FULL date with no link / send / text wording is an assertion about a specific appointment even with no marker — "Your pest re-service is 2027-10-08")
+    const datedAssertion = reserviceFullDateAssertion(sentence) && !RESERVICE_PROMISE_AFTER_RE.test(sentence);
+    if (spans.length && !datedAssertion && !spans.some((span) => reserviceExistingApptGoverns(span, sentence))) continue;
+    claims.push({
+      lanes: RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l),
+      relative: relative ? (relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today') : null,
+      days: reserviceAssertedDays(sentence),
+      times: reserviceAssertedTimes(sentence),
+    });
+  }
+  return claims;
+}
+async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
+  const snapshot = reserviceBookedSnapshot(booked);
+  const claims = reserviceBookedClaims(body, snapshot);
+  if (!claims.length) return null;
+  // Codex round-35 P2: a booked-appointment claim with NO customer (lead-only / deleted customer) has nothing to verify against — block
+  if (!customerId) return 'reservice_booking_changed — the reply refers to a booked re-service appointment but no customer is on record to verify it against';
+  const { open } = await liveReserviceLaneState(customerId);
+  const now = claims.some((c) => c.relative) ? reserviceEtDates() : null;
+  // A claimed lane needs BOTH a snapshotted booked callback and a live open one — anything else is an appointment the
+  // reply cannot support ("Your lawn re-service is scheduled Thursday" with no lawn callback, or no snapshot at all).
+  const laneStale = (lane, info, claim) => {
+    const live = open[lane];
+    if (!info || !live) return true;
+    if (String(live.date).slice(0, 10) !== info.date) return true;
+    if (info.windowStart && String(live.windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5)) return true;
+    if (claim.relative && String(live.date).slice(0, 10) !== (claim.relative === 'tomorrow' ? now.tomorrow : now.today)) return true;
+    // an absolute day/date the body asserts must be the LIVE callback's ("scheduled for Friday" vs a Thursday callback)
+    if (claim.days.length) {
+      const dayTokens = reserviceLiveDayTokens(live.date);
+      if (claim.days.some((day) => !dayTokens.has(day))) return true;
+    }
+    // a clock time must state the FULL live arrival window (both endpoints): a lone "9 AM" would turn the two-hour
+    // arrival window into an exact-arrival promise (AGENTS.md — arrival copy is window_start → +120 min, display-only)
+    // Codex round-34 P2: an asserted time against a callback with NO valid window_start cannot be verified → block
+    if (claim.times.length) {
+      const windowMinutes = live.windowStart ? reserviceLiveWindowMinutes(String(live.windowStart).slice(0, 5)) : null;
+      if (!windowMinutes) return true;
+      const matches = (t, minutes) => (!t.lexical && (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720));
+      // a lexical time of day ("morning") beside BOTH numeric endpoints is fine; alone it is unverifiable
+      const numeric = claim.times.filter((t) => !t.lexical);
+      const onlyEndpoints = numeric.every((t) => windowMinutes.some((minutes) => matches(t, minutes)));
+      const hasBoth = windowMinutes.every((minutes) => numeric.some((t) => matches(t, minutes)));
+      if (!onlyEndpoints || !hasBoth) return true;
+    }
+    return false;
+  };
+  const moved = new Set();
+  for (const claim of claims) {
+    // a lane-less sentence refers to the snapshotted lane(s); with no snapshot at all it claims an appointment nothing supports
+    const lanes = claim.lanes.length ? claim.lanes : (Object.keys(snapshot).length ? Object.keys(snapshot) : ['pest']);
+    for (const lane of lanes) if (laneStale(lane, snapshot[lane], claim)) moved.add(lane);
+  }
+  return moved.size ? `reservice_booking_changed — the already-booked ${[...moved].join(' and ')} re-service appointment was cancelled, moved or never booked since this reply was drafted` : null;
+}
+// decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that
+// hold a decision row (agent-decision-send-checks, scheduler.js); NO_DECISION (no row behind the body)
+// keeps the strict, snapshot-or-named-lane behavior.
+// True when a decision's intended actions include the send-reservice-link escalation (or any
+// escalate whose note names the re-service).
+function reserviceCarriesLinkAction(actions) {
+  return Array.isArray(actions) && actions.some((a) => a && a.type === 'escalate' && /reservice/i.test(String(a.note || '')));
+}
+const NO_DECISION = { none: true };
+async function reservicePromiseStillEligible(args) {
+  // Codex round-18 P2: a reply referring to the already-booked appointment is rechecked against the live callback first.
+  const changed = await reserviceBookedReferenceBlock({ body: String(args.outgoingBody || ''), customerId: args.customerId, booked: args.decisionMeta && args.decisionMeta.bookedCallbacks });
+  return changed || reserviceLanesStillEligible(args);
+}
+// The body-only half of the recheck: what the (possibly edited) body itself promises. Returns
+// { reason } when the body is unsendable on its own, else { snapshotLanes, namedLanes, lanes }.
+function reserviceBodyLaneFault(body, promise, promisedLanes) {
+  // Codex round-7 (PR #5336): checked BEFORE any snapshot fallback — an edit that swaps the promised
+  // service for an excluded specialty names no pest/lawn lane. (A detected promise scopes specialties/lanes
+  // to its offer spans; an action-backed body the detector misses is classified over the WHOLE body — round 17.)
+  if (reserviceExcludedSpecialtyInPromise(body)) {
+    return { reason: 're-service promise names an excluded specialty (termites/rodents/mosquitoes/tree & shrub) the link cannot book' };
+  }
+  const snapshotLanes = ['pest', 'lawn'].filter((lane) => [].concat(promisedLanes).includes(lane));
+  const namedLanes = reserviceBodyLanes(body, promise);
+  // Round-17: any lane named anywhere in an action-backed non-promise body must be one the card promised.
+  if (!promise && snapshotLanes.length && namedLanes.some((lane) => !snapshotLanes.includes(lane))) {
+    return { reason: `re-service body names a service line (${namedLanes.join(' and ')}) outside the promised lane(s) ${snapshotLanes.join(' and ')}` };
+  }
+  return { snapshotLanes, namedLanes, lanes: namedLanes.length ? namedLanes : snapshotLanes };
+}
+// The decision's own record: intended actions, the draft's facts, and the inbound the promise answers.
+// A backed decision reads the persisted draft row only when something is missing from the send path's
+// own metadata or the promise names no lane (the inbound is needed to recover the reported one).
+async function reserviceDecisionRecord(meta, backed, laneUnnamed) {
+  const needsRow = backed && (!meta.intendedActions || meta.factsBlock === undefined || laneUnnamed);
+  const row = needsRow ? await loadDraftRowForReservice(meta.draftId) : {};
+  return {
+    actions: backed ? (meta.intendedActions || draftIntendedActions(row.intended_actions)) : [{ type: 'escalate', note: 'send_reservice_link' }],
+    factsBlock: meta.factsBlock === undefined ? row.facts_block : meta.factsBlock,
+    // Codex round-21 P2: the persisted draft's inbound, else the decision snapshot's (estimate-conversion
+    // decisions carry no draft_id; their inbound rides input_snapshot.sms.body).
+    inbound: row.inbound_message || meta.inboundMessage || null,
+  };
+}
+// Which lanes must still be bookable. Codex round-19/21 P2: a grandfathered generic promise (no snapshot,
+// no named lane) requires the REPORTED lane recovered from the inbound; when it cannot be recovered,
+// EVERY lane the facts list must stay bookable (fail closed). Only when NOTHING is on record does one
+// bookable lane of the two suffice (anyOf).
+function reserviceLanesToRequire({ lanes, laneUnnamed, record }) {
+  const recovered = laneUnnamed ? require('./reservice-scheduler').reportedReserviceLanes(record.inbound) : [];
+  const factsLanes = eligibleReserviceLanes(record.factsBlock);
+  const required = [lanes, recovered, factsLanes].find((set) => set.length);
+  return required ? { candidates: required, anyOf: false } : { candidates: ['pest', 'lawn'], anyOf: true };
+}
+async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta: meta = NO_DECISION }) {
+  const body = String(outgoingBody || '');
+  // STRUCTURAL BACKSTOP (pre-push audit P1, PR #5336): a decision whose intended_actions carry the
+  // send-reservice-link action ALWAYS revalidates its snapshot lanes live, whatever the (possibly
+  // edited) body says — body detection only ADDS checks; it is never the only trigger.
+  let promise = isReserviceOfferPromise(body);
+  // Codex round-26 P1: wording that is a promise ONLY through a generic inspection/assessment noun is a re-service
+  // offer only for a customer with a plan lane (a prospect's is the Waves Assessment). Read the live state, and
+  // only in that ambiguous case.
+  if (promise && customerId && !isReserviceOfferPromise(withoutGenericInspections(body))) {
+    const live = await liveReserviceLaneState(customerId);
+    if (live.verified && !live.eligible.length && live.hasRecurringPlan === false) promise = false; // unverified / unsupported-plan stays a plan customer's promise
+  }
+  if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
+  const fault = reserviceBodyLaneFault(body, promise, promisedLanes);
+  if (fault.reason) return fault.reason;
+  // Where the promised lanes come from (Codex round-14): the draft-time snapshot; the body's own named
+  // lanes when no decision backs it; a grandfathered pre-deploy decision (older prompt version, no
+  // snapshot) that live eligibility decides; else nothing on record — which includes a NEW-version decision
+  // missing its snapshot (round 11 P1: the edited body never stands in for the snapshot).
+  const backed = !meta.none;
+  const laneUnnamed = backed && !fault.snapshotLanes.length && !fault.namedLanes.length;
+  const known = fault.snapshotLanes.length || (backed ? !reserviceSnapshotVersionEmitted(meta.promptVersion) : fault.namedLanes.length);
+  if (!known) return 'no promised re-service lane on record to revalidate';
+  // Every decision-backed promise also needs the send_reservice_link action on record (round 10 P2 / 11).
+  const record = await reserviceDecisionRecord(meta, backed, laneUnnamed);
+  if (!record.actions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link')) {
+    return 'no send_reservice_link action on record — nothing would actually send the re-service link';
+  }
+  if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
+  const { candidates, anyOf } = reserviceLanesToRequire({ lanes: fault.lanes, laneUnnamed, record });
+  return reserviceLanesBlockedReason(candidates, await liveReserviceLaneState(customerId), anyOf);
+}
+
+// LIVE ETA minutes-away claim (independent review finding, PR #5334;
+// broadened — pre-push audit P1, PR #5334 round 2): scoped to arrival/away/
+// ETA phrasing found ANYWHERE in the SAME SENTENCE as the minutes figure, in
+// EITHER order — the original version only looked in a narrow window
+// immediately before/after the number, which missed ordinary phrasing like
+// "The tech is on the way, about 12 minutes." (the number sits after the
+// trigger, separated by a comma + "about"). Sentence-scoped trigger words:
+// "on the/his/her/their way", "en route", "heading over"/"heading your way",
+// "arriv*", "eta", "away", "out", "get(ting) there", "be(ing) there",
+// "show(ing) up", "pull(ing) up". An unrelated duration ("the treatment
+// takes about 30 minutes to dry", "allow 30 minutes before letting pets
+// out", "takes about 45 minutes") must still never false-positive even
+// though "out"/generic words can legitimately co-occur in the same sentence
+// ("...letting pets out") — a duration/wait phrase checked in a narrow
+// window right around the matched number (never sentence-wide) wins over
+// the sentence-level trigger.
+// Round 3 (audit P1: "take about 12 minutes to arrive" slipped through): a
+// STRONG arrival word in the sentence makes EVERY minutes figure in it a
+// claim, with no duration exclusion — arrival wording always wins. Only the
+// weak trigger "out" ("12 minutes out" vs "letting pets out") consults the
+// duration exclusions.
+// Round 4 (Codex round-4 P2, PR #5334): "20 minutes from you" / "from your
+// house" / "from the property", and "out from" — phrasing with no other
+// arrival word at all ("from you" alone has no "away"/"arriv"/"eta") was
+// missed entirely, so the reply passed both the draft-time verifier AND the
+// send-time freshness recheck with an unbound ETA claim.
+// Round 7 (Codex P2, PR #5334): "to go", "left", "until he/she/they/the
+// tech", "due in", "reach(ing) you" and "be(ing) with you" — yet another
+// round finding yet another phrasing ("20 minutes to go") the fixed word
+// list didn't cover. Adding these words is NOT the structural fix (see
+// findGroundedMinutesFigures below, which stops depending on this list
+// entirely once there's a LIVE ETA to check a claim against) — it only
+// keeps the ungrounded/no-snapshot trigger-based path (findEtaMinutesClaims,
+// bodyMentionsArrival, bodyHasTimedArrivalPhrase) from missing these exact
+// phrasings too.
+const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
+const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
+// Up to 5 digits (Codex round-9 P2, PR #5334): normalizeTimeQuantities below
+// rewrites hour figures into minutes ("17 hours" -> "1020 minutes"), so the
+// unit token must be able to read a normalized figure wider than 3 digits.
+// Decimal figures are one value (Codex round-10 P2, PR #5334): "12.5 minutes
+// away" is 12.5, never a fractional suffix "5" read on its own — a non-
+// integer claim can never equal an integer live-ETA minutes fact, so it is
+// rejected at both draft time and send time.
+const ETA_MINUTES_TOKEN_RE = /\b(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
+const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
+const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it|lasts?)\b[^.?!\n]{0,20}$/i;
+// A bare "in <number>" with no minutes unit at all ("be at your place in
+// 20", "he'll be there in 20") right after one of these arrival phrases —
+// Codex round-4 P2 sibling: never writing the word "minutes" doesn't make it
+// any less a stated ETA. Scoped tightly to the phrase immediately before
+// "in <number>" (never a sentence-wide trigger) so an unrelated "in 20"
+// ("read the invoice in 20", "back in 2026") never false-positives, and
+// excluded when a unit word DOES follow (seconds/hours/etc., or "minutes" —
+// which the ordinary unit-based pass above already claims on its own).
+// Round 7 (Codex P2): "due in 20" / "reach you in about 20" carry no unit
+// AND (for "due") no other STRONG trigger word at all — the phrase itself is
+// the trigger, same reasoning as the rest of this pass. An optional "about"
+// between "in" and the number is allowed ("reach you in about 20").
+// Round 8 (Codex P2, PR #5334): "the tech should make it in 20" — "make it
+// (there|here|to you)? in N" is the same shape (a fixed phrase right before
+// "in N") and joins this same alternation.
+const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here|with\s+you)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up|due|reach(?:ing)?\s+you|get(?:ting)?\s+to\s+you|make\s+it(?:\s+(?:there|here|to\s+you))?)\s+in\s+(?:about\s+)?(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// "He'll be by in 20" / "the tech will swing by in 20" / "they should be
+// there in 20" (Codex round-8 P2): the number sits after ARBITRARY words a
+// fixed phrase list can never enumerate, but "tech/he/she/they" + a
+// future-tense marker (will/should/the 'll contraction) earlier in the same
+// short span is itself as strong a trigger as any fixed phrase above — a
+// later bare "in N" in that span is claimed the same way, no unit word
+// required. Scoped to a short (<=30-char) gap so an unrelated later "in N"
+// elsewhere in a long sentence never false-positives.
+const FUTURE_ARRIVAL_IN_MINUTES_RE = /\b(?:tech|he|she|they)(?:'ll|\s+(?:will|should))\b[^.?!\n]{0,30}?\bin\s+(?:about\s+)?(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// Bare-integer ETA claims (Codex round-6 P2, PR #5334): "ETA: 20", "his ETA
+// is 20", "ETA 20", "eta ~20" carry no "minutes"/"in" wording at all — every
+// pass above requires SOME unit or connector word, so these skipped number
+// binding AND the send-time freshness window entirely (an unparsed status
+// claim never rechecks a stated figure). A STRONG arrival trigger anywhere
+// in the sentence — "eta" itself included — makes ANY bare integer 1-180 in
+// that sentence a minutes claim, UNLESS it reads as a time of day or an
+// address/phone-like token (see looksLikeTimeAddressOrPhone below); a number
+// with no trigger in its sentence at all is never touched by this pass.
+// Numbers already carrying a unit word are left to the passes above (the
+// negative lookahead here just keeps this pass from re-judging them under a
+// different rule).
+const BARE_ETA_NUMBER_RE = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|hrs?|days?|weeks?|months?|years?|%|st|nd|rd|th)\b)/gi;
+// "<N> out" with no unit and no OTHER trigger at all (round 6): the bare
+// "out" idiom ("20 out", "5 out") states an ETA exactly like "20 minutes
+// out" even though findEtaMinutesClaims has no unit to key off — the phrase
+// itself IS the trigger, same reasoning as IMPLICIT_MINUTES_ARRIVAL_RE above.
+// Scoped tightly to the word immediately following the number so an
+// unrelated count ("20 out of 30 completed", "call him — 20 out from
+// retirement") never claims; "of" is excluded outright, and "from" is left
+// to the STRONG-trigger pass above ("out from" is already its own trigger
+// phrase there).
+const BARE_MINUTES_OUT_RE = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)\s+out\b(?!\s+(?:of|from))/gi;
+// A bare integer that reads as a time of day (preceded by at/by/around, or
+// followed by am/pm/a colon-minutes/an "and <N> am/pm" range) or an
+// address/phone-like token (a street name right after it, or a digit group
+// on either side joined by a dash/dot, the shape of a phone number segment)
+// is never an ETA claim, however strong the sentence's arrival trigger is.
+const TIME_OF_DAY_BEFORE_RE = /(?:\b(?:at|by|around)|\d{1,2}:)\s*$/i;
+const TIME_OF_DAY_AFTER_RE = /^\s*(?::\d{2}\b|(?:am|pm|a\.m\.|p\.m\.)\b|(?:and|or|-|–|—|to)\s*\d{1,3}\s*(?:am|pm|a\.m\.|p\.m\.)\b)/i;
+const STREET_SUFFIX_RE = /^\s+[A-Z][A-Za-z.]*(?:\s+[A-Z][A-Za-z.]*)?\s+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Terrace|Trail)\b/;
+const PHONE_DIGIT_BEFORE_RE = /\d[-.]$/;
+const PHONE_DIGIT_AFTER_RE = /^[-.]\d/;
+function looksLikeTimeAddressOrPhone(str, index, length) {
+  const before = str.slice(Math.max(0, index - 12), index);
+  const after = str.slice(index + length, index + length + 24);
+  if (TIME_OF_DAY_BEFORE_RE.test(before)) return true;
+  if (TIME_OF_DAY_AFTER_RE.test(after)) return true;
+  if (STREET_SUFFIX_RE.test(after)) return true;
+  if (PHONE_DIGIT_BEFORE_RE.test(before) || PHONE_DIGIT_AFTER_RE.test(after)) return true;
+  return false;
+}
+// Bare-integer default-deny classification (Codex round-8 P2, PR #5334): once
+// findGroundedMinutesFigures's caller has a LIVE ETA to check a claim
+// against, a bare integer with NO unit/connector word at all ("The tech
+// should make it in 20") still needs to be told apart from every OTHER kind
+// of plain number a reply can contain — a dollar figure, a clock time, an
+// address, a date, a count of something that isn't time, an ordinal, or a
+// percentage. Each of these is checked in isolation, narrowly, against the
+// text immediately around the match; a bare integer that matches NONE of
+// them is the claim itself (default-deny). "N hour(s)" never reaches this
+// classifier — normalizeTimeQuantities (below) has already rewritten every
+// hour figure into a minutes figure by the time any pass runs.
+const MONEY_SIGN_BEFORE_RE = /\$\s*$/;
+const MONEY_WORD_AFTER_RE = /^\s*(?:dollars?|bucks?)\b/i;
+const ORDINAL_SUFFIX_AFTER_RE = /^(?:st|nd|rd|th)\b/i;
+const PERCENT_SIGN_AFTER_RE = /^\s*%/;
+const MONTH_NAME_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+const DATE_SLASH_AFTER_RE = /^\s*\/\s*\d{1,4}\b/;
+const DATE_SLASH_BEFORE_RE = /\d{1,4}\s*\/\s*$/;
+// A hyphenated word right after the figure ("2-hour", "3-bug") reads as its
+// unit/noun too, except "-ish" (a timed approximation).
+const WORD_AFTER_RE = /^(?:\s*|-(?!ish\b))[A-Za-z]+\b/i;
+// Qualifier words that belong to the ETA figure itself, not to a counted noun
+// (Codex round-15 P2): "ETA is 20 max", "20 or so", "20 tops", "about 20 at
+// most", "20 give or take", "20 approx". Only when the qualifier ends the
+// phrase, so "20 or so visits" still reads as a count.
+const ETA_QUALIFIER_AFTER_RE = /^\s*(?:max(?:imum)?|tops|or\s+so|or\s+less|or\s+more|or\s+thereabouts|at\s+(?:most|least)|give\s+or\s+take|approx(?:\.|imately)?|roughly|min(?:imum)?)(?=\s*(?:[.,;:!?)\u2014]|$|\s(?:away|out|from)\b))/i;
+// "N." / "N)" as a line's first token (optionally after a bullet), followed by
+// text: a numbered-list marker.
+function isListMarker(str, index, length) {
+  const prefix = str.slice(str.lastIndexOf('\n', index - 1) + 1, index);
+  return /^\s*(?:[-*\u2022]\s*)?$/.test(prefix) && /^[.)]\s+\S/.test(str.slice(index + length, index + length + 4));
+}
+// A number that is plainly NOT a duration/ETA figure: ordinal, percentage,
+// money, time of day / address / phone token, or a date. Shared by
+// classifyBareEtaNumber and the unclassified-ETA backstop.
+const UNIT_IDENTIFIER_BEFORE_RE = /(?:\b(?:(?:unit|apt|apartment|suite|ste|bldg|building|lot|room|rm)\.?|no\.)\s*#?\s*|#\s*)$/i;
+// A LABELED identifier / count ("invoice 12", "order #15", "account 30", "ticket 20", "zone 2", "Your confirmation code is 123") is a
+// reference number, never minutes (Codex #5334 P2). The label sits immediately before the figure: a document/record noun (optionally
+// "number"/"no."/"id"/"#"/":"), or a code-like noun joined by "is/was/=". Wider window than `before` — the labels run long.
+const LABELED_IDENTIFIER_BEFORE_RE = new RegExp(
+  '(?:\\b(?:invoice|inv|order|account|acct|ticket|confirmation|conf|code|zone|reference|ref|case|estimate|quote|job|policy|claim|id|pin)'
+  + '\\s*(?:(?:number|no\\.?|num|id|code)\\s*)?(?::\\s*)?#?\\s*'
+  + '|\\b(?:code|number|no\\.?|id|pin)\\s*(?:is|was|=)\\s*#?\\s*)$', 'i');
+function isLabeledIdentifier(str, index) {
+  return LABELED_IDENTIFIER_BEFORE_RE.test(str.slice(Math.max(0, index - 40), index));
+}
+function isNonDurationNumber(str, index, length) {
+  // A numbered-list marker ("1. Check the invoice", "2) Call us") at the start
+  // of a line is structure, never a duration (round-21 P2).
+  if (isListMarker(str, index, length)) return true;
+  const before = str.slice(Math.max(0, index - 15), index);
+  const after = str.slice(index + length, index + length + 24);
+  // Ordinal ("the 20th") / percentage ("100%") checked first — both would
+  // otherwise also match the generic trailing-word check.
+  if (ORDINAL_SUFFIX_AFTER_RE.test(after)) return true;
+  if (PERCENT_SIGN_AFTER_RE.test(after)) return true;
+  // A unit / apartment / suite / building / lot / room identifier ("on the way to unit 12",
+  // "apt 4", "Suite 200", "Bldg 3", "#7") is an address number, never minutes (round-44 P2).
+  if (UNIT_IDENTIFIER_BEFORE_RE.test(before)) return true;
+  // A labeled identifier ("invoice 12", "zone 2", "confirmation code is 123") likewise (Codex #5334 P2).
+  if (isLabeledIdentifier(str, index)) return true;
+  // Money ("$20", "20 dollars").
+  if (MONEY_SIGN_BEFORE_RE.test(before) || MONEY_WORD_AFTER_RE.test(after)) return true;
+  // Time of day / address / phone-like token — the shared helper above.
+  if (looksLikeTimeAddressOrPhone(str, index, length)) return true;
+  // Date: a month name nearby, or an N/N slash date.
+  if (MONTH_NAME_RE.test(before) || MONTH_NAME_RE.test(after)) return true;
+  return DATE_SLASH_AFTER_RE.test(after) || DATE_SLASH_BEFORE_RE.test(before);
+}
+function classifyBareEtaNumber(str, index, length) {
+  if (isNonDurationNumber(str, index, length)) return 'excluded';
+  const after = str.slice(index + length, index + length + 24);
+  // A count with a non-time noun directly after it ("3 bugs", "2 visits",
+  // "4 traps", "12 months", "30 days") — any other word sitting right after
+  // the number reads as its unit/noun, so it is never a bare arrival figure.
+  if (ETA_QUALIFIER_AFTER_RE.test(after)) return 'claim';
+  if (WORD_AFTER_RE.test(after)) return 'excluded';
+  return 'claim';
+}
+// Sentence spans over raw sentence-boundary punctuation only (. ? ! or a
+// newline) — an em dash, comma, or "—" never splits a sentence, so "heading
+// your way — 12 minutes" is one sentence and the trigger/number share it.
+function sentenceSpans(str) {
+  const spans = [];
+  let start = 0;
+  // A "." between two digits is a decimal point, never a sentence end (Codex
+  // round-10 P2): "12.5 minutes away" is ONE sentence, so the arrival word
+  // still shares it with the figure.
+  const re = /(?:[?!\n]|(?<!\d)\.|\.(?!\d))+/g;
+  let m;
+  while ((m = re.exec(str))) {
+    spans.push([start, m.index]);
+    start = re.lastIndex;
+  }
+  spans.push([start, str.length]);
+  return spans;
+}
+// Written-out minutes ("twelve minutes away", "twenty-five mins") are read
+// as digits before claim detection (audit P1, round 4), so a spelled number
+// is checked exactly like "12 minutes". Hundreds are ONE value (Codex round-11
+// P2, PR #5334): "one hundred twenty minutes away" used to read as "1 hundred
+// 20 minutes", so only the trailing 20 was validated. A number phrase is now
+// `[<1-9>|a|an] hundred [and] [<under-100>]` (also "hundred-twenty") or a
+// plain under-100 number, converted as a single figure. Anything it cannot
+// fully convert ("a thousand", "a dozen", "hundreds") is left as a word and
+// rejected next to a time unit by bodyHasUnconvertedNumberWord below.
+const NUMBER_WORD_UNITS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const NUMBER_WORD_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const NW_TENS = Object.keys(NUMBER_WORD_TENS).join('|');
+const NW_DIGITS = 'one|two|three|four|five|six|seven|eight|nine';
+const NW_UNDER_TWENTY = Object.keys(NUMBER_WORD_UNITS).join('|');
+const NUMBER_WORD_RE = new RegExp(
+  `\\b(?:(?:(?:(${NW_DIGITS}|an?)[\\s-]+)?hundred(?:(?:[\\s-]+and)?[\\s-]+(?:(${NW_TENS})(?:[\\s-]+(${NW_DIGITS}))?|(${NW_UNDER_TWENTY})))?)`
+  + `|(?:(${NW_TENS})(?:[\\s-]+(${NW_DIGITS}))?|(${NW_UNDER_TWENTY})))\\b`, 'gi');
+function lookupNumberWord(table, word) {
+  return word ? table[word.toLowerCase()] : 0;
+}
+function numberWordValue(m, hundredsWord, tens1, digit1, under20a, tens2, digit2, under20b) {
+  const isHundred = /hundred/i.test(m);
+  const multiplier = /^an?$/i.test(hundredsWord || '') || !hundredsWord ? 1 : lookupNumberWord(NUMBER_WORD_UNITS, hundredsWord);
+  const tens = lookupNumberWord(NUMBER_WORD_TENS, isHundred ? tens1 : tens2);
+  const digit = lookupNumberWord(NUMBER_WORD_UNITS, isHundred ? digit1 : digit2);
+  const under20 = lookupNumberWord(NUMBER_WORD_UNITS, isHundred ? under20a : under20b);
+  return (isHundred ? multiplier * 100 : 0) + tens + digit + under20;
+}
+// Every numeric/time parser enters here, so it also reads the text the CUSTOMER gets:
+// the provider path runs normalizeGsmPunctuation (curly apostrophes, en/em dashes,
+// smart quotes become plain ASCII) before delivery (Codex round-38 P2).
+function normalizeNumberWords(text) {
+  return normalizeGsmPunctuation(String(text || '')).replace(NUMBER_WORD_RE, (m, ...groups) => String(numberWordValue(m, ...groups.slice(0, 7))));
+}
+// A number word normalizeNumberWords cannot convert, right next to a time
+// unit ("a thousand minutes", "a dozen minutes", "hundreds of minutes") —
+// fail closed instead of letting the figure go unread.
+const UNCONVERTED_NUMBER_WORD_RE = /\b(?:hundreds|thousands?|millions?|dozens?|score|several|many|numerous|bunch|handful)\b[\s\w-]{0,20}?\b(?:min(?:ute)?s?|hours?|hrs?)\b/gi;
+// Structural time-quantity normalization (Codex round-9 P2, PR #5334): every
+// earlier round of this PR found ANOTHER way a customer-visible ETA could
+// slip past the exact-minutes comparison, and round 9 found the newest —
+// "About 2 hours out" was recorded as { minutes: 2 } (the raw captured
+// number, no unit conversion), so a live fact of "2 minutes" accepted an ETA
+// off by nearly two hours at both draft time and send time. The fix is ONE
+// function that reads every hour-unit quantity WITH its unit and rewrites it
+// as an equivalent "<total> minutes" figure BEFORE any claim pass runs, so
+// the existing minutes passes (units, ranges, trigger/duration-exclusion
+// judgment) compare real minutes: "2 hours" -> "120 minutes", "1 hr 20 min"
+// / "1h20m" / "1 hour and 20 minutes" -> "80 minutes", "2 and a half hours"
+// / "an hour and a half" -> "150"/"90 minutes", "1.5 hours" -> "90 minutes",
+// "1 to 2 hours" -> "60-120 minutes". Anything hour-ish it can NOT turn into
+// a number ("an hour", "half an hour", "a couple hours", "hour or so") is
+// left as-is on purpose and is rejected outright by bodyHasUnnormalizedHour-
+// Word below — fail closed, never guess. Used only by
+// findGroundedMinutesFigures (the two call sites with a LIVE ETA to compare
+// against) AND by findEtaMinutesClaims on every path, snapshot or not (Codex
+// pre-push P1, round 11: with no snapshot or tracking link "The tech is 2
+// hours away." passed while "120 minutes away" failed — hours were only
+// normalized in the live-context path). The tokenizer therefore always sees
+// "120 minutes away", and its existing trigger/duration exclusions apply
+// equally. An hour figure that names a WINDOW ("your 2 hour arrival window",
+// "a 2 hour window", "arrival window is 2 hours") is a scheduling span, never
+// an ETA. That decision lives in ONE predicate, isWindowQuantity below, shared
+// by normalizeTimeQuantities (which leaves a window figure alone), the
+// leftover-word checks (bodyHasUnnormalizedHourWord /
+// bodyHasUnconvertedNumberWord, via unreadDurationInArrivalSentence) and the
+// vague-phrase check (bodyHasTimedArrivalPhrase) — Codex round-12 P1, PR
+// #5334: they used to disagree, so a window hour the normalizer skipped was
+// then rejected as an "unread" ETA. Dry time / "takes about 2 hours" stay
+// excluded by the duration rules.
+const HOURS_TO_MINUTES = 60;
+// A duration figure that names a scheduling WINDOW rather than an arrival
+// time: "2 hour arrival window" / "a 2-hour slot" (window word AFTER) or
+// "arrival window is 2 hours" / "window: 1 to 2 hours" / "window is an hour"
+// (window word right BEFORE, an optional "N to" range prefix and article
+// allowed). `index`/`length` locate the figure — a number+unit span, a lone
+// hour word, or a number-word phrase — in `str`.
+const WINDOW_AFTER_RE = /^\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b/i;
+const WINDOW_BEFORE_RE = /\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:[./]\d+)?\s*(?:[-–—]|to|or)\s*)?(?:\d+(?:[./]\d+)?\s*|(?:(?:a\s+)?(?:half|quarter(?:\s+of)?)\s+)?an?\s+)?$/i;
+// Declarative service/treatment/visit/appointment DURATION (Codex round-22 P2):
+// "The service will be 20 minutes", "The treatment is 20 minutes long", "the
+// visit runs about an hour" describe how long the work takes — never when the
+// tech arrives. Subject noun DIRECTLY followed by the duration verb (so "For
+// your service, the tech will be 20 minutes away" and "the tech will be 20
+// minutes" — a technician subject — stay ETA claims), and an arrival cue right
+// after the figure ("20 minutes away / out / from you / until") keeps the ETA
+// reading even under a service subject.
+const SERVICE_DURATION_BEFORE_RE = /\b(?:service|treatment|visit|appointment|inspection|application|job|spray|session)(?:s|es)?(?:\s+(?:itself|time|duration|length))?(?:\s+(?:usually|typically|normally|generally|only|just|should|would|will|can|may))*\s+(?:is|are|be|takes?|lasts?|runs?)\s+(?:(?:about|only|around|roughly|approximately|approx\.?|just|usually|typically|normally|at\s+most|at\s+least|up\s+to|under|over)\s+)*$/i;
+const ARRIVAL_CUE_AFTER_RE = /^\s*(?:min(?:ute)?s?|hours?|hrs?)?[\s-]*(?:away|out|from|until|early|late|behind|to\s+go)\b/i;
+function isServiceDurationQuantity(str, index, length) {
+  const before = str.slice(Math.max(0, index - 60), index);
+  return SERVICE_DURATION_BEFORE_RE.test(before) && !ARRIVAL_CUE_AFTER_RE.test(str.slice(index + length, index + length + 24));
+}
+// The ONE shared "this figure is a scheduling/duration span, not an arrival
+// time" predicate every token kind consults: a scheduling window or a
+// service/treatment duration.
+// RETROSPECTIVE durations (Codex round-37/40 P2): "I emailed it 10 minutes ago", "We
+// sent the invoice 20 minutes ago", "for the last 20 minutes", "in the past hour",
+// "10 minutes after we spoke" look BACK; they are never a technician's arrival time.
+// The exclusion needs an actual ELAPSED relation ON THE FIGURE — "N units ago", a
+// "for/over/in/during the last/past/previous" lead-in, or "N units after|since
+// <someone> <past-tense verb>". A past-tense office verb elsewhere in the clause is
+// NOT enough: "We confirmed your technician is 20 minutes away" is a current ETA.
+const AGO_AFTER_RE = /^\s*(?:(?:min(?:ute)?s?|hours?|hrs?|seconds?|secs?|days?|weeks?)\s+)?ago\b/i;
+const RETRO_LEADIN_BEFORE_RE = /\b(?:for|over|in|during|within|throughout)\s+the\s+(?:last|past|previous)\s+(?:about\s+|roughly\s+)?$/i;
+const ELAPSED_AFTER_RE = /^\s*(?:(?:min(?:ute)?s?|hours?|hrs?|seconds?|secs?|days?|weeks?)\s+)?(?:after|since)\s+(?:i|we|you|someone|somebody|it|(?:the|our)\s+(?:office|team|tech\w*))\s+(?:was\s+|were\s+|had\s+|have\s+)?(?:\w+ed|sent|left|got|went|came|ran|began|took|made|saw|paid|spoke|met|heard|said|wrote|called)\b/i;
+function isRetrospectiveDuration(str, index, length) {
+  const after = str.slice(index + length);
+  if (AGO_AFTER_RE.test(after) || ELAPSED_AFTER_RE.test(after)) return true;
+  return RETRO_LEADIN_BEFORE_RE.test(str.slice(Math.max(0, index - 80), index));
+}
+function isWindowQuantity(str, index, length) {
+  return WINDOW_AFTER_RE.test(str.slice(index + length))
+    || WINDOW_BEFORE_RE.test(str.slice(Math.max(0, index - 60), index))
+    || isServiceDurationQuantity(str, index, length)
+    || isRetrospectiveDuration(str, index, length);
+}
+// String.replace that leaves a window figure exactly as written.
+function replaceQuantity(text, re, convert) {
+  return text.replace(re, (m, ...args) => {
+    const offset = args[args.length - 2];
+    const whole = args[args.length - 1];
+    return isWindowQuantity(whole, offset, m.length) ? m : convert(m, ...args);
+  });
+}
+// Office follow-up timing vs technician arrival timing (Codex pre-push P1,
+// round 13, PR #5334): "I'll confirm your arrival window within the hour."
+// and "I'll get back to you within the hour about your arrival." carry an
+// approved follow-up-SLA duration (sms-followup-sla SLA_PHRASES) that has
+// nothing to do with when the tech shows up — yet "arrival" in the sentence
+// made it read as an ETA. A duration is bound to the VERB that governs it:
+// the NEAREST verb phrase in its own sentence, office follow-up (confirm,
+// get back to you, text/call you back, follow up, check, let you know, send,
+// be in touch) or technician arrival (arrive, be there, on the way, en
+// route, pull/show up, away, out, get there / to you, reach you). Office
+// wins only when it is strictly nearer (a tie fails closed to ETA); a
+// duration that IS an SLA phrase with no arrival verb anywhere in the
+// sentence is office timing too. Shared by every ETA check (claim
+// tokenizers, leftover-word checks, vague phrases) so they cannot drift.
+// Round-24 P2: OBJECTLESS office callbacks ("I'll call in 20 minutes", "someone
+// from the office will text shortly") count too, but ONLY behind an office
+// subject (I / we / the office / someone from the office) — "The tech will call
+// in 20 minutes" has a technician subject, matches no office verb, and stays an
+// ETA-ish claim (conservative).
+const OFFICE_SUBJECT_CALLBACK = "(?:i|we|someone|somebody|(?:our|the)\\s+office|(?:someone|somebody|a\\s+(?:person|team\\s+member))\\s+(?:from|at)\\s+(?:the|our)\\s+office)(?:'ll|\\s+(?:will|can|shall|should|would))?\\s+(?:call|text|email|message|ping|phone)(?:ing)?(?:\\s+back)?";
+const OFFICE_FOLLOWUP_VERBS = /confirm(?:ing)?|get(?:ting)?\s+back\s+to\s+you|(?:text|call|email|message|ping)(?:ing)?\s+you(?:\s+back)?|reach(?:ing)?\s+out|follow(?:ing)?[\s-]+up|check(?:ing)?|let(?:ting)?\s+you\s+know|send(?:ing)?|update\s+you|circle\s+back|be\s+in\s+touch|touch\s+base/.source;
+const OFFICE_FOLLOWUP_VERB_RE = new RegExp(`\\b(?:${OFFICE_SUBJECT_CALLBACK}|${OFFICE_FOLLOWUP_VERBS})\\b`, 'gi');
+const TECH_ARRIVAL_VERB_RE = /\b(?:arrive[sd]?|arriving|be\s+there|be\s+(?:at\s+your|with\s+you)|on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|pull(?:ing)?\s+up|show(?:ing)?\s+up|away|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you|(?<!reach\s)out)\b/gi;
+// Characters between a verb match and the figure [a, b); 0 when they overlap.
+function nearestVerbGap(local, verbRe, a, b) {
+  let best = Infinity;
+  for (const m of local.matchAll(new RegExp(verbRe.source, verbRe.flags))) {
+    const end = m.index + m[0].length;
+    const gap = end <= a ? a - end : (m.index >= b ? m.index - b : 0);
+    best = Math.min(best, gap);
+  }
+  return best;
+}
+function isOfficeFollowupDuration(str, index, length) {
+  const [s, e] = sentenceSpans(str).find(([from, to]) => index >= from && index < to) || [0, str.length];
+  const local = str.slice(s, e);
+  const a = index - s;
+  const office = nearestVerbGap(local, OFFICE_FOLLOWUP_VERB_RE, a, a + length);
+  const tech = nearestVerbGap(local, TECH_ARRIVAL_VERB_RE, a, a + length);
+  if (office !== Infinity) return office < tech;
+  const lowered = local.toLowerCase();
+  return tech === Infinity && followupSla.SLA_PHRASES.some((p) => {
+    const at = lowered.indexOf(p.toLowerCase());
+    return at !== -1 && a >= at && a < at + p.length;
+  });
+}
+function hoursToMinutes(h) {
+  return Math.round(parseFloat(h) * HOURS_TO_MINUTES);
+}
+// Hours WITH a minutes part ("1 hr 20 min", "1h20m", "1 hour and 20 minutes",
+// "an hour and 20 minutes") -> one "<total> minutes" figure. Split out because
+// a mixed quantity must be read as ONE figure rather than mistaking its
+// trailing "20 min" for the whole ETA.
+function normalizeHourMinuteCompounds(text) {
+  let out = String(text || '');
+  // An article hour is read ONLY when a minutes figure follows it; a bare
+  // "an hour" / "half an hour" / "quarter of an hour" is vague and stays for
+  // bodyHasUnnormalizedHourWord to reject.
+  out = replaceQuantity(out, /(?<!half\s)(?<!quarter\s)(?<!of\s)\ban?\s+(?:hour|hr)\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi,
+    (m, mins) => `${HOURS_TO_MINUTES + parseInt(mins, 10)} minutes`);
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h(?=\d|\b))\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?|m)\b/gi,
+    (m, n, mins) => `${hoursToMinutes(n) + parseInt(mins, 10)} minutes`);
+  return out;
+}
+function normalizeTimeQuantities(text) {
+  let out = String(text || '');
+  // "1 to 2 hours" / "1-2 hours" / "1 or 2 hours" — both bounds scale.
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, a, b) => `${hoursToMinutes(a)}-${hoursToMinutes(b)} minutes`);
+  // "2 and a half hours" / "2 hours and a half" / "an hour and a half".
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b/gi,
+    (m, n) => `${hoursToMinutes(n) + 30} minutes`);
+  out = replaceQuantity(out, /\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b/gi,
+    (m, n) => `${hoursToMinutes(n || 1) + 30} minutes`);
+  // Slash fractions BEFORE the plain hour rewrite (Codex round-16 P2): "1/2
+  // hour" is 30 minutes, "3/4 hr" 45, "1 1/2 hours" 90 — never "1/120 minutes".
+  out = replaceQuantity(out, /\b(\d+)\s+(\d+)\/(\d+)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, w, n, d) => (Number(d) ? `${Math.round((Number(w) + Number(n) / Number(d)) * HOURS_TO_MINUTES)} minutes` : m));
+  out = replaceQuantity(out, /\b(\d+)\/(\d+)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, n, d) => (Number(d) ? `${Math.round((Number(n) / Number(d)) * HOURS_TO_MINUTES)} minutes` : m));
+  out = normalizeHourMinuteCompounds(out);
+  // "2 hours", "2h", "1.5 hrs".
+  out = replaceQuantity(out, /(?<!\d\/)\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h\b)/gi,
+    (m, n) => `${hoursToMinutes(n)} minutes`);
+  // "20m" / "20 m" as an ETA (Codex round-16 P2): a bare "m" unit is minutes
+  // only inside an arrival/ETA sentence (elsewhere it could be metres).
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)[ ]?m\b(?!\s*(?:\/|²|\^|2))/g,
+    (m, n, ...rest) => (ARRIVAL_TRIGGER_RE.test(sentenceAt(rest[rest.length - 1], sentenceSpans(rest[rest.length - 1]), rest[rest.length - 2])) ? `${n} minutes` : m));
+  // "90 seconds" -> "1.5 minutes" (Codex round-13 P2): a seconds ETA is a
+  // real, timed arrival claim; as a (usually non-integer) minutes figure it
+  // can only bind to a live fact that equals it exactly.
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)[\s-]*(?:seconds?|secs?)\b/gi,
+    (m, n) => `${Number((parseFloat(n) / 60).toFixed(4))} minutes`);
+  return out;
+}
+// Fail-closed leftover check for normalizeTimeQuantities: any hour word still
+// standing after the numeric rewrite is a duration the parser could not turn
+// into minutes ("an hour", "half an hour", "quarter hour", "a couple
+// hours", "an hour or so"). Judged with the SAME sentence rule a vague
+// arrival phrase gets (an arrival trigger in the sentence; a strong trigger
+// wins; a weak "out" consults the dry-time/wait-before duration exclusions)
+// so "the treatment needs about half an hour to dry" never false-positives.
+// Only meaningful — and only called — where there is a LIVE ETA to compare a
+// claim against; see validateLiveEtaMinutes and etaClaimBlockReason.
+// The shared sentence rule for a duration word the parser left unread: an
+// arrival trigger in the sentence; a strong trigger wins; a weak "out"
+// consults the dry-time/wait-before duration exclusions.
+// A TECH subject earlier in the sentence (Codex round-17 follow-up, PR #5334):
+// a counted day/week/month duration is a tech-arrival claim only when a
+// technician-style subject governs it — "the tech is 2 days away", "he will
+// arrive in 3 weeks" — never ordinary scheduling copy ("your visit is 2 days
+// away", "we'll see you in 2 weeks", "your next treatment is in 3 weeks").
+const TECH_SUBJECT_RE = /\b(?:tech(?:nician)?s?|he|she|they|driver|crew|our\s+(?:guy|team|tech(?:nician)?s?))\b/i;
+const LONG_UNIT_END_RE = /(?:days?|weeks?|months?)$/i;
+function hasTechSubjectBefore(str, spans, index) {
+  const [start] = spans.find(([from, to]) => index >= from && index < to) || [0];
+  // Only the CURRENT clause governs the duration (Codex round-27 P2): "He
+  // completed the service; your next visit is 2 days away." has its technician
+  // subject in an earlier clause. Same CLAUSE_BREAK_RE the negation checks use.
+  const sentenceBefore = str.slice(start, index);
+  let clauseStart = 0;
+  for (const m of sentenceBefore.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) clauseStart = m.index + m[0].length;
+  return TECH_SUBJECT_RE.test(sentenceBefore.slice(clauseStart));
+}
+// Is the figure at [index, index+length) inside one of the approved follow-up SLA
+// phrases ("within the hour", ...)? Those are ordinary English (sms-followup-sla:
+// "a reviewed reply can truthfully say a technician arrives within the hour"), so
+// with NO live ETA to hold the body to they are not an unverifiable timed claim.
+function insideSlaPhrase(str, index, length) {
+  const lowered = str.toLowerCase();
+  return followupSla.SLA_PHRASES.some((p) => {
+    const phrase = p.toLowerCase();
+    for (let at = lowered.indexOf(phrase); at !== -1; at = lowered.indexOf(phrase, at + 1)) {
+      if (index >= at && index + length <= at + phrase.length) return true;
+    }
+    return false;
+  });
+}
+function unreadDurationInArrivalSentence(str, wordRe, { ignoreSlaPhrases = false } = {}) {
+  const spans = sentenceSpans(str);
+  const re = new RegExp(wordRe.source, wordRe.flags);
+  for (const m of str.matchAll(re)) {
+    if (ignoreSlaPhrases && insideSlaPhrase(str, m.index, m[0].length)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    if (LONG_UNIT_END_RE.test(m[0]) && !hasTechSubjectBefore(str, spans, m.index)) continue;
+    const sentence = sentenceAt(str, spans, m.index);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)) return true;
+  }
+  return false;
+}
+// Hour words the normalizer could not convert, plus any counted day/week/month
+// duration (Codex round-13 P2: "in 2 days" is a timed arrival claim like
+// any other; a bare "day" — "have a great day" — is not).
+const UNREAD_LONG_DURATION_RE = /\b(?:hours?|hrs?)\b|\b(?:\d+(?:\.\d+)?|an?|a\s+(?:couple|few)(?:\s+of)?|several)[\s-]+(?:days?|weeks?|months?)\b/gi;
+function bodyHasUnnormalizedHourWord(text, opts) {
+  return unreadDurationInArrivalSentence(normalizeTimeQuantities(normalizeNumberWords(text)), UNREAD_LONG_DURATION_RE, opts);
+}
+// Codex round-11 P2 (PR #5334): a number word the converter could not turn
+// into digits next to a time unit is rejected outright, live ETA or not.
+function bodyHasUnconvertedNumberWord(text) {
+  return unreadDurationInArrivalSentence(normalizeNumberWords(text), UNCONVERTED_NUMBER_WORD_RE);
+}
+// STRUCTURAL BACKSTOP (Codex pre-push P1, round 16, PR #5334): every round of
+// this PR found one more ETA phrasing the claim parsers do not read ("ur tech
+// ≈ 15m out 🚚", "tech: 15 min"). Once there is a live snapshot/link to hold a
+// body to, ANY number (digits, "15m" shorthand, or a number word) sitting
+// within 3 tokens of a time unit or an arrival/status word is treated as a
+// possible ETA — after the window / office follow-up / duration exclusions and
+// the not-a-duration number kinds (money, time of day, date, ordinal, percent)
+// are removed — so the caller can require the bound visit to still be en
+// route and fresh instead of waving the body through as non-ETA copy.
+const ETA_SIGNAL_WORD_RE = /^(?:m|mins?|minutes?|hrs?|hours?|h|s|secs?|seconds?|away|out|arriv\w*|there|here|eta|close|closer|coming|heading|headed|nearby|route|way)$/i;
+// The figure with its own unit word attached, so a window check sees "2 hour"
+// (in "a 2 hour arrival window") as one span.
+const NUMBER_TOKEN_RE = /\d+(?:\.\d+)?(?:[\s-]*(?:hours?|hrs?|min(?:ute)?s?|days?|weeks?|months?))?/gi;
+function tokensAround(str, index, length) {
+  const wordsOf = (t) => t.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const before = wordsOf(str.slice(Math.max(0, index - 40), index)).slice(-3);
+  const after = wordsOf(str.slice(index + length, index + length + 40)).slice(0, 3);
+  return [...before, ...after];
+}
+function bodyHasUnclassifiedEtaSignal(text) {
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  for (const m of str.matchAll(NUMBER_TOKEN_RE)) {
+    if (isNonDurationNumber(str, m.index, m[0].length)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    if (durationExcluded(str, m.index, m[0].length) && !STRONG_ARRIVAL_TRIGGER_RE.test(sentenceAt(str, sentenceSpans(str), m.index))) continue;
+    if (LONG_UNIT_END_RE.test(m[0]) && !hasTechSubjectBefore(str, sentenceSpans(str), m.index)) continue;
+    const words = tokensAround(str, m.index, m[0].length);
+    // A figure that carries its own unit word ("15 minutes") is itself a signal.
+    if (/[a-z]/i.test(m[0]) || words.some((w) => ETA_SIGNAL_WORD_RE.test(w))) return true;
+  }
+  return false;
+}
+// A COMPLETED arrival (Codex round-13 P2, PR #5334): "has arrived", "just
+// arrived", "arrived at your home", "the tech is here / outside / at your
+// door", "pulled up" state the tech IS on site — a different fact from "on
+// the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
+// Every "arrived" form needs a technician-type subject (round-28 P2): "Your
+// payment has arrived at our office" is not a visit claim. Up to two words may
+// sit between the subject and the verb ("the tech, Sam, has arrived" / "your tech
+// Sam just arrived").
+// First-person plural ARRIVAL / on-site claims (Codex round-37 P2): "We've arrived",
+// "We just got there", "We're on site", "We're at your door". Explicit forms only —
+// bare "we're here" and "we have on-site inspections" stay excluded.
+const WE_ARRIVED_ALT = "we(?:'ve|\\s+have)?\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:arrived|(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address)))"
+  + "|we(?:'re|\\s+are)\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:on[\\s-]?site|at\\s+(?:your|the)\\s+(?:door|house|home|place|property|address)|outside\\s+(?:your|the)\\s+(?:door|house|home|place|property)|on\\s+(?:the|your)\\s+property)";
+const COMPLETED_ARRIVAL_BASE_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|made\s+it(?:\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|(?=\s*(?:[.!,;:?]|$)))|reached\s+(?:there|(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve))|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve)))|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_RE = new RegExp(COMPLETED_ARRIVAL_BASE_RE.source.replace(/\)\\b$/, `|${WE_ARRIVED_ALT})\\b`), 'i');
+// A negator governing a status phrase within the SAME clause (Codex pre-push
+// P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
+// way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
+// affirmative claims, and must not be blocked when the visit is done. Clause =
+// text since the last sentence/clause break (. , ; : ! ? — or "but"/"and").
+const NEGATOR_RE = /\b(?:not|no\s+longer|never|nobody|none|\w+n't)\b/i;
+const CLAUSE_BREAK_RE = /[.,;:!?\n\u2014\u2013]|\b(?:but|and|however|though)\b/gi;
+function isNegatedInClause(str, index) {
+  const before = str.slice(Math.max(0, index - 80), index);
+  let last = 0;
+  for (const m of before.matchAll(CLAUSE_BREAK_RE)) last = m.index + m[0].length;
+  return NEGATOR_RE.test(before.slice(last));
+}
+// THIS draft's technician names as extra status subjects. The prompt lets the
+// model NAME the technician ("Sam is on the way", "Sam is running late", "Sam has
+// arrived"), so a status idiom counts behind technician-type words OR one of the
+// technician first names the draft recorded (word-bounded, case-insensitive) —
+// never any capitalized word: "Dana's order is on the way" is not a claim unless
+// Dana is this snapshot's tech. Names only, no other PII; older snapshots carry
+// none and keep the technician-type-only behavior.
+function techNamesFromContext(context) {
+  return sanitizeTechNames([
+    ...(Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.flatMap((g) => g?.technicianNames || []) : []),
+    ...(Array.isArray(context?.upcomingServices) ? context.upcomingServices.map((u) => u?.tech) : []),
+  ]);
+}
+const nameAlt = (names) => sanitizeTechNames(names).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+const statusRegexCache = new Map();
+function statusRegexFor(kind, names) {
+  const alt = nameAlt(names);
+  if (!alt) return kind === 'completed' ? COMPLETED_ARRIVAL_RE : (kind === 'enRoute' ? EN_ROUTE_STATUS_RE : VISIT_STATUS_RE);
+  const key = `${kind}:${alt.toLowerCase()}`;
+  if (!statusRegexCache.has(key)) {
+    if (statusRegexCache.size > 200) statusRegexCache.clear();
+    let re;
+    if (kind === 'completed') {
+      let src = COMPLETED_ARRIVAL_RE.source;
+      for (const g of COMPLETED_ARRIVAL_SUBJECT_GROUPS) src = src.split(g).join(`${g.slice(0, -1)}|${alt})`);
+      re = new RegExp(src, 'i');
+    } else {
+      const subj = `(?:${VISIT_STATUS_SUBJECT.slice(3, -1)}|${alt})`;
+      re = kind === 'enRoute' ? buildEnRouteRe(subj) : buildVisitStatusRe(subj);
+    }
+    statusRegexCache.set(key, re);
+  }
+  return statusRegexCache.get(key);
+}
+const COMPLETED_ARRIVAL_SUBJECT_GROUPS = [
+  '(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)',
+  '(?:tech(?:nician)?s?|he|she|they|drivers?)',
+  '(?:crew|team)',
+  '(?:tech(?:nician)?|he|she|they|driver|crew)',
+];
+// Carry a technician subject across COORDINATED predicates (Codex round-35 P2):
+// "The technician isn't there yet, but is on the way" — the second predicate has
+// no subject of its own, so it is read with the nearest technician-type subject
+// (or recorded name) that precedes the conjunction in the same sentence, BEFORE
+// the negation/question/conditional exemptions run. Only when the conjunct starts
+// with a verb-ish token (a subjectless predicate); "…on the way and we'll follow
+// up" (a new subject) is left alone. Text is rewritten for classification only.
+const CARRY_SUBJECT_RE_SRC = "\\b(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they|we";
+const CARRY_CONJUNCTION_RE = /,?\s+(?:but|and|though|however|yet)\s+(?=(?:is|are|was|were|has|have|had|will|should|'ll|'s|now|just|already|almost|en[\s-]?route\b|on\s+(?:the|his|her|their|our|my)\s+way\b|running\b|coming\b|heading\b|headed\b|driving\b|arriv\w*|pulling\b|pull(?:ed)?\b|showing\b|nearby\b|close\b)\b)/gi;
+function carrySubjectAcrossConjunctions(str, techNames = []) {
+  const alt = nameAlt(techNames);
+  const subjectRe = new RegExp(`${CARRY_SUBJECT_RE_SRC}${alt ? `|${alt}` : ''})\\b`, 'gi');
+  let out = '';
+  let last = 0;
+  for (const m of str.matchAll(CARRY_CONJUNCTION_RE)) {
+    const sentenceStart = Math.max(str.lastIndexOf('.', m.index), str.lastIndexOf('!', m.index), str.lastIndexOf('?', m.index), str.lastIndexOf('\n', m.index), str.lastIndexOf(';', m.index)) + 1;
+    const before = str.slice(sentenceStart, m.index);
+    const subjects = [...before.matchAll(subjectRe)];
+    if (!subjects.length) continue;
+    const subject = subjects[subjects.length - 1][0];
+    out += `${str.slice(last, m.index + m[0].length)}${subject} `;
+    last = m.index + m[0].length;
+  }
+  return last ? out + str.slice(last) : str;
+}
+function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
+  for (const m of str.matchAll(new RegExp(statusRegexFor('completed', techNames).source, 'gi'))) {
+    // Same exemptions as the en-route classifiers: negation, question, a governing
+    // conditional ("once we've arrived I'll text"), and an explicit future day.
+    if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length, techNames)
+      && !isConditionalBefore(str.slice(Math.max(0, m.index - 60), m.index)) && !isFutureDayStatus(str, m.index, m[0].length)) return true;
+  }
+  return false;
+}
+// Does the body AFFIRMATIVELY say the tech is on the way? (Codex pre-push P1,
+// round 14, PR #5334.) The send-time freshness check treats such a body as an
+// en-route STATUS claim and rechecks it against the live tracker state — it
+// used to fire on any strong arrival TRIGGER word (arriv*, left, …), which
+// also matched non-claims: "I'll confirm your arrival window within the
+// hour", "Your arrival window is 2 hours", "You have 2 visits left this
+// year" then blocked valid replies once the visit was on site. Now only an
+// affirmative status phrase counts — on the way / en route / heading over /
+// has left for you / will be there / is close or nearby / is arriving /
+// pulling up / getting there — and never one that is
+//   - a conditional ("I'll text you once he's on the way", "when the tech
+//     is en route"), or
+//   - part of a scheduling window (isWindowQuantity).
+// ONE technician-subject rule for every visit-status regex (Codex round-30 P2):
+// "Your receipt is on the way" / "The replacement trap is en route" are fulfillment
+// copy, not a claim about the technician. A status idiom counts only behind a
+// technician-type subject (tech / technician / driver / crew / he / she / they),
+// optionally with a possessive/contraction ('s 're 'll 'd) and up to three
+// non-negating filler words between ("Your tech, Sam, is on his way", "He will be
+// arriving", "The tech is now en route"). EN_ROUTE_STATUS_RE (bodyMentionsArrival,
+// the en-route classifier etaClaimBlockReason uses) and VISIT_STATUS_RE (the
+// send-time default-deny vocabulary) are both built from this prefix.
+// Plural subjects count too (round-30 audit P1): grouped visits send "Your techs are on the way".
+// Same subject list as COMPLETED_ARRIVAL_RE's arrived form (round-31 P2: "Our team is
+// on the way"); "team ... here to help" stays non-status via the lookahead below.
+const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they)";
+function techStatusPrefix(subj) {
+  return `${subj}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet|was|were|had)\\b)\\w+,?){0,3}?\\s+`;
+}
+const TECH_STATUS_PREFIX = techStatusPrefix(VISIT_STATUS_SUBJECT);
+const ROUTE_IDIOM = '(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way)';
+const EN_ROUTE_PREDICATES = [
+  ROUTE_IDIOM,
+  '(?:head(?:ing|ed)|coming)\\s+(?:over|your\\s+way|to\\s+you|to\\s+your\\s+\\w+)',
+  '(?:coming|headed|heading|driving|rolling|travell?ing)\\b',
+  // The system prompt sanctions "running late" / "running ahead" (behind/ahead of
+  // schedule) beside LIVE STATUS, so they are live-status claims like "on the way".
+  'running\\s+(?:(?:(?:a\\s+)?(?:bit|little|touch)|a\\s+few\\s+minutes?|a\\s+couple\\s+(?:of\\s+)?minutes?|slightly|somewhat|(?:about\\s+)?\\d+\\s+minutes?)\\s+)?(?:late|behind|ahead|early)\\b',
+  '(?:behind|ahead\\s+of)\\s+schedule\\b',
+  '(?:in\\s+the\\s+(?:truck|van|vehicle)|on\\s+the\\s+road)\\b',
+  '(?:just\\s+|already\\s+)?left\\s+(?:for|to\\s+head|to\\s+you)',
+  'be\\s+(?:there|here|with\\s+you|at\\s+your\\s+\\w+)(?!\\s+to\\s+(?:help|assist|answer|support|serve))',
+  '(?:close|nearby|almost\\s+(?:there|here))',
+  '(?:arriv(?:e|ing)|arrives\\s+(?:soon|shortly|now))',
+  'pull(?:ing)?\\s+up',
+  'show(?:ing)?\\s+up',
+  'get(?:ting)?\\s+(?:there|to\\s+you)',
+  'reach(?:ing)?\\s+you',
+];
+// First-person plural route claims (Codex round-33 P2): "We're on our way", "We
+// will be there shortly", "We're en route". "we" is NOT a general status subject —
+// only these unambiguous route predicates, so "we're here to help" and scheduling
+// copy ("we will be there Tuesday": no shortly/soon/in-N, plus the future-day rule)
+// stay excluded.
+const WE_ROUTE_PREDICATES = [
+  ROUTE_IDIOM,
+  'pulling\\s+up',
+  'almost\\s+(?:there|here)',
+  EN_ROUTE_PREDICATES.find((p) => p.startsWith('running')),
+  '(?:there|here)\\s+(?:shortly|soon|momentarily|in\\s+\\d+(?:\\s*(?:min(?:ute)?s?|hrs?|hours?))?)',
+];
+const WE_ROUTE_ALT = `we(?:'re|\\s+are|'ll|\\s+will|\\s+should)(?:\\s+(?:now|just|already|almost|soon))*\\s+(?:be\\s+)?(?:${WE_ROUTE_PREDICATES.join('|')})`;
+const EN_ROUTE_STATUS_RE = buildEnRouteRe();
+function buildEnRouteRe(subj = VISIT_STATUS_SUBJECT) {
+  return new RegExp(`\\b(?:${techStatusPrefix(subj)}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT})\\b`, 'gi');
+}
+const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
+// Does a conditional word GOVERN the status clause (Codex round-29 P2)? Only the
+// text since the last clause boundary counts: "once he's on the way" and "when
+// the tech is en route" are conditional, but an introductory phrase CLOSED by a
+// comma ("After checking, your technician is en route") is not — the status
+// itself is asserted. Uses the same CLAUSE_BREAK_RE as the negation check.
+function isConditionalBefore(before) {
+  let last = 0;
+  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) last = m.index + m[0].length;
+  return CONDITIONAL_BEFORE_RE.test(before.slice(last));
+}
+// Is the match inside an interrogative CLAUSE (Codex round-29 P2)? "Has your
+// technician arrived yet?" asserts nothing. The clause runs from the previous
+// boundary to the next punctuation mark; it is a question when that mark is "?"
+// or it opens with subject-auxiliary inversion (has/have/is/are/did/was/were/
+// will/can/could/would/do/does + ...). A statement clause earlier in the same
+// sentence ("He is en route, is that ok?") is unaffected: its own boundary is
+// the comma.
+// An auxiliary opens a QUESTION only in real subject-auxiliary inversion: the next
+// token is a subject ("Has your technician arrived", "Will Sam be there", "Is he
+// here"). "Will is on the way" (technician Will) or "Mark has arrived" is a
+// declarative — the next token is a verb, and a recorded technician name is a
+// subject, never an auxiliary (Codex round-33 P2). A clause ending in "?" is a
+// question either way.
+const INTERROGATIVE_AUX = '(?:has|have|had|is|are|was|were|did|do|does|will|can|could|would|should)';
+const INTERROGATIVE_SUBJECT = "(?:you|he|she|they|it|we|i|the|your|our|my|his|her|their|this|that|there|any\\w+|every\\w+|someone|somebody|tech(?:nician)?s?|drivers?|crews?|teams?)";
+const interrogativeOpenerRe = (names) => {
+  const alt = nameAlt(names);
+  return new RegExp(`^\\s*${INTERROGATIVE_AUX}\\s+(?:${INTERROGATIVE_SUBJECT}${alt ? `|${alt}` : ''})\\b`, 'i');
+};
+function isInterrogativeAt(str, index, length = 0, names = []) {
+  const before = str.slice(0, index);
+  let start = 0;
+  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) start = m.index + m[0].length;
+  if (interrogativeOpenerRe(names).test(str.slice(start, index + length))) return true;
+  const end = /[.,;:!?\n\u2014\u2013]/.exec(str.slice(index + length));
+  return Boolean(end) && end[0] === '?';
+}
+// A status clause that names an explicit FUTURE day is a scheduling statement,
+// not live status for today's en-route stop (Codex round-31 P2): "Your technician
+// is coming tomorrow", "We will be there Friday", "on the 5th", "next week".
+// "today" / "tonight" / "now" / "this morning|afternoon|evening" keep it live.
+// A weekday counts as future only when it is not TODAY (America/New_York). Read
+// over the matched status clause, so the day word may lead or trail within it. ONE
+// predicate for bodyMentionsArrival, bodyMentionsVisitStatus and therefore the
+// send-time en-route classifier that uses them.
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const LIVE_DAY_RE = /\b(?:today|tonight|right\s+now|(?:this|later\s+this)\s+(?:morning|afternoon|evening)|now)\b/i;
+const FUTURE_DAY_RE = /\b(?:tomorrow|the\s+day\s+after|next\s+(?:week|month|visit|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|on\s+the\s+\d{1,2}(?:st|nd|rd|th)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{1,2}\/\d{1,2}|in\s+\d+\s+(?:days?|weeks?))\b/i;
+function todayWeekdayET(now = new Date()) {
+  return new Date(now).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }).toLowerCase();
+}
+function isFutureDayStatus(str, index, length = 0, now = new Date()) {
+  // Bounded to the matched status CLAUSE (Codex round-32 P2), same CLAUSE_BREAK_RE
+  // as isConditionalBefore / hasTechSubjectBefore: "Your technician is on the way,
+  // and we'll follow up tomorrow" keeps its status live because "tomorrow"
+  // belongs to the next clause. The clause starts after the last boundary before
+  // the match and ends at the first boundary after it (boundaries INSIDE the
+  // match, such as "your tech, Sam, is ...", do not end it).
+  const breaks = [...str.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))];
+  let clauseStart = 0;
+  let clauseEnd = str.length;
+  for (const b of breaks) {
+    if (b.index + b[0].length <= index) clauseStart = b.index + b[0].length;
+    else if (b.index >= index + length) { clauseEnd = b.index; break; }
+  }
+  const sentence = str.slice(clauseStart, clauseEnd);
+  if (LIVE_DAY_RE.test(sentence)) return false;
+  if (FUTURE_DAY_RE.test(sentence)) return true;
+  const today = todayWeekdayET(now);
+  return WEEKDAY_NAMES.some((day) => day !== today && new RegExp(`\\b${day}\\b`, 'i').test(sentence));
+}
+function bodyMentionsArrival(text, { techNames = [] } = {}) {
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
+  for (const m of str.matchAll(new RegExp(statusRegexFor('enRoute', techNames).source, 'gi'))) {
+    const before = str.slice(Math.max(0, m.index - 60), m.index);
+    if (isConditionalBefore(before)) continue;
+    if (isNegatedInClause(str, m.index)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length, techNames)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isFutureDayStatus(str, m.index, m[0].length)) continue;
+    return true;
+  }
+  return false;
+}
+// Round-20 structural gate: does the body say ANYTHING about the visit's live
+// status (arrival, route, position)? The send-time check uses this as the
+// DEFAULT-DENY trigger: a draft that carried a live snapshot and whose body
+// touches visit status in any form is rechecked against the snapshot's recorded
+// state / technician / destination even when no narrower classifier (numeric
+// ETA, "on the way", "has arrived") recognized the exact wording ("The
+// technician arrived.", "en-route", whatever comes next). Deliberately broad
+// (vocabulary, not phrasing); the only exemptions are the same non-claims the
+// narrower classifiers already honor: a conditional ("once he's on the way"), a
+// negated correction ("hasn't arrived"), and a scheduling window.
+function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
+  const PREFIX = techStatusPrefix(SUBJ);
+  return new RegExp(
+  // "en route" / "on the way" are technician idioms on their own. Verbal "arrive"
+  // forms (round-25 P2: not the noun in "arrival instructions") and coming/headed/
+  // driving need a technician-type subject (round-28 audit P1): "Your payment has
+  // arrived at our office" / "We're coming up on renewal" are not visit status.
+  // Up to three non-negating words may sit between ("He will be arriving").
+  '\\b(?:'
+  // Superset of every en-route predicate bodyMentionsArrival classifies, so the
+  // default-deny vocabulary can never be narrower than the specific classifier.
+  + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT}|${WE_ARRIVED_ALT}`
+  + `|${SUBJ}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet|was|were|had)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
+  // Positional status forms (here / there / outside / nearby / close / on site /
+  // at your door / almost there) count ONLY with a technician-type subject
+  // (round-21 P2): "We are here to help" / "we're here" are not a claim.
+  + `|${SUBJ}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
+  // Completed-arrival "got there/here" (round-36 P2): part of the same default-deny
+  // vocabulary as the completed-arrival classifier.
+  // Codex round-48 P2: "made it" / "reached" take the SAME technician-subject prefix as "got there" ("Glad you made it!" is not visit status).
+  + `|${PREFIX}(?:(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address)))`
+  // Movement forms (left for / pulled up / showed up) also need a technician-type
+  // subject (round-26 P2): "I pulled up your invoice" is not an arrival.
+  + `|${SUBJ}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');
+}
+const VISIT_STATUS_RE = buildVisitStatusRe();
+function bodyMentionsVisitStatus(text, { techNames = [] } = {}) {
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
+  for (const m of str.matchAll(new RegExp(statusRegexFor('visit', techNames).source, 'gi'))) {
+    const before = str.slice(Math.max(0, m.index - 60), m.index);
+    if (isConditionalBefore(before)) continue;
+    if (isNegatedInClause(str, m.index)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length, techNames)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isFutureDayStatus(str, m.index, m[0].length)) continue;
+    return true;
+  }
+  return false;
+}
+// Vague/approximate duration wording (Codex round-5 P2, PR #5334): a
+// reviewer or the model rewriting an exact "20 minutes away" claim as "half
+// an hour away" / "an hour out" / "a few minutes away" / "a couple minutes"
+// / "quarter hour" states a TIMED claim exactly like a parsed number does —
+// it says WHEN the tech arrives, not just THAT they're coming — even though
+// findEtaMinutesClaims can never parse an exact figure out of it. "soon" and
+// "shortly" / "any minute now" lean TIMED on purpose (owner-facing default:
+// fail closed): a customer reads any of them as a time-bounded promise, not
+// a pure status statement like "on the way"/"en route", which claims no
+// timeframe at all and is left alone. Scoped to a sentence that also carries
+// an arrival trigger (ARRIVAL_TRIGGER_RE), with the SAME duration-exclusion
+// window a numeric claim gets for a WEAK trigger only ("out") — a strong
+// arrival word in the sentence wins over the exclusion, same as round 3 —
+// so "the treatment needs about half an hour to dry" (no arrival word at
+// all besides "out" from an unrelated "letting pets out") never
+// false-positives.
+const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?(?:min(?:ute)?s?|sec(?:ond)?s?)|any\s+minute(?:\s+now)?|momentarily|shortly|soon)\b/i;
+// `unnormalizedHoursOnly` (Codex round-9 P2, PR #5334): instead of the vague
+// phrase list, report only whether an hour-based duration normalizeTimeQuantities
+// could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
+// Routed through this one already-shared entry point so every send seam's
+// existing import of the drafter keeps working unchanged.
+// "on-site inspection/visit/..." is an adjective use, not an arrival.
+const ON_SITE_ARRIVAL_TRIGGER_RE = /\b(?:on[\s-]?site(?!\s+(?:inspection|visit|service|treatment|appointment|estimate|work|fee|consult\w*|tech\w*|crew))|on\s+(?:the|your)\s+property|at\s+your\s+(?:door|home|house))\b/i;
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false, ignoreSlaPhrases = false, techNames = [] } = {}) {
+  if (unclassifiedSignalOnly) return bodyHasUnclassifiedEtaSignal(text);
+  if (completedArrivalOnly) return bodyClaimsCompletedArrival(text, { techNames });
+  if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text, { ignoreSlaPhrases });
+  if (unconvertedNumbersOnly) return bodyHasUnconvertedNumberWord(text);
+  const str = normalizeNumberWords(text);
+  const spans = sentenceSpans(str);
+  const sentenceFor = (index) => {
+    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+    return str.slice(span[0], span[1]);
+  };
+  const re = new RegExp(TIMED_ARRIVAL_PHRASE_RE.source, 'gi');
+  let m;
+  while ((m = re.exec(str))) {
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    const sentence = sentenceFor(m.index);
+    // Round-45 P2: future on-site / at-the-property wording ("will be on site soon") is arrival
+    // wording too, so a vague time beside it is a TIMED claim. Scoped to THIS vague-phrase check
+    // (not the numeric claim judges), and only past the same duration exclusions as a weak trigger.
+    const onSiteArrival = ON_SITE_ARRIVAL_TRIGGER_RE.test(sentence);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence) && !onSiteArrival) continue;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
+    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
+    const before = str.slice(Math.max(0, m.index - 30), m.index);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
+    return true;
+  }
+  return false;
+}
+// Range claims ("10–12 minutes away", "ten to twelve minutes away", "10 or
+// 12 minutes", "between 10 and 12 minutes") — Codex round-2 P2: the old
+// single-number pass matched only the bound sitting right next to
+// "min(s)/minutes" ("10-12 minutes" recorded 12 alone), so a reply stating
+// an unsupported OTHER bound was never caught by validateLiveEtaMinutes or
+// the send-time freshness recheck. Matched over the SAME number-words-read
+// string, BEFORE the single-number pass below, so every bound of a range
+// becomes its own claim; the range's own sentence/trigger/duration-exclusion
+// verdict (computed once, off the whole range span) applies to BOTH bounds
+// alike — they share one clause ("takes 10-12 minutes to dry" excludes both,
+// "10-12 minutes out" includes both) — and the span is marked `consumed` so
+// the single-number pass never double-claims the bound already covered.
+const RANGE_MINUTES_RE = /\b(\d{1,5}(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
+const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,5}(?:\.\d+)?)\s+and\s+(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
+// ONE ordered tokenizer over the normalized text (Codex round-10 P2, PR #5334;
+// replaces six successive passes with overlapping dedupe/consume rules — the
+// shape every "one more ETA phrasing" round kept extending). Each token spec
+// is a regex, the capture groups that carry a minutes figure, and a judge
+// rule. Specs run in this order over the SAME string; a match whose figure
+// span was already claimed by an earlier spec is skipped (consume-once, by
+// the figure's own span, so an unrelated later figure in the same phrase is
+// still judged on its own). Adding an ETA form means adding a row here.
+//   trigger  range/between/unit figures: need an arrival trigger in the
+//            sentence; a STRONG trigger always claims, a weak one ("out")
+//            consults the dry-time/wait-before duration exclusions.
+//   always   the phrase itself is the trigger ("be there in 20", "he'll be
+//            by in 20").
+//   out      "<N> out" with no unit: 1-180, not a time of day/address/phone.
+//   bare     a bare integer 1-180 in a STRONG-trigger sentence that
+//            classifyBareEtaNumber reads as neither time, money, address, a
+//            date, a non-time count, an ordinal nor a percentage.
+function inBareMinutesRange(m) {
+  const minutes = Number(m[1]);
+  return minutes >= 1 && minutes <= 180;
+}
+function durationExcluded(str, index, length) {
+  const after = str.slice(index + length, index + length + 30);
+  const before = str.slice(Math.max(0, index - 30), index);
+  return DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before);
+}
+const ETA_CLAIM_JUDGES = {
+  trigger: (str, m, sentence) => ARRIVAL_TRIGGER_RE.test(sentence)
+    && (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)),
+  always: () => true,
+  out: (str, m) => inBareMinutesRange(m) && !looksLikeTimeAddressOrPhone(str, m.index, m[0].length),
+  bare: (str, m, sentence) => STRONG_ARRIVAL_TRIGGER_RE.test(sentence)
+    && inBareMinutesRange(m)
+    && classifyBareEtaNumber(str, m.index, m[0].length) === 'claim',
+};
+const ETA_CLAIM_TOKENS = [
+  { re: RANGE_MINUTES_RE, groups: [1, 2], judge: 'trigger' },
+  { re: BETWEEN_MINUTES_RE, groups: [1, 2], judge: 'trigger' },
+  { re: ETA_MINUTES_TOKEN_RE, groups: [1], judge: 'trigger' },
+  { re: IMPLICIT_MINUTES_ARRIVAL_RE, groups: [1], judge: 'always' },
+  { re: FUTURE_ARRIVAL_IN_MINUTES_RE, groups: [1], judge: 'always' },
+  { re: BARE_MINUTES_OUT_RE, groups: [1], judge: 'out' },
+  { re: BARE_ETA_NUMBER_RE, groups: [1], judge: 'bare' },
+];
+function spansOverlap([s1, e1], [s2, e2]) {
+  return s1 < e2 && s2 < e1;
+}
+function sentenceAt(str, spans, index) {
+  const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+  return str.slice(span[0], span[1]);
+}
+function findEtaMinutesClaims(text) {
+  const claims = [];
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const spans = sentenceSpans(str);
+  const consumed = []; // [start, end) of every figure already claimed
+  for (const token of ETA_CLAIM_TOKENS) {
+    const re = new RegExp(token.re.source, `${token.re.flags}d`);
+    for (const m of str.matchAll(re)) {
+      const figureSpans = token.groups.map((g) => m.indices[g]);
+      if (figureSpans.some((fs) => consumed.some((c) => spansOverlap(fs, c)))) continue;
+      // Office follow-up timing (round 13): never a tech ETA. 'always' tokens
+      // ("be there in 20") carry their own arrival subject and are exempt.
+      if (token.judge !== 'always' && isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+      // ONE window predicate for EVERY token kind (Codex round-19 P2): "Your
+      // 120-minute arrival window" is a scheduling span whatever its unit.
+      if (isWindowQuantity(str, m.index, m[0].length)) continue;
+      // Round-23 P2: a bare figure that was a written number word with no unit or
+      // arrival cue beside it is a count ("we sprayed two"), not an ETA.
+      if (token.judge === 'bare' && numberWordOriginIndexes(text, str).has(m.index) && isPlainWordCount(str, m.index, m[0].length)) continue;
+      if (!ETA_CLAIM_JUDGES[token.judge](str, m, sentenceAt(str, spans, m.index))) continue;
+      for (const g of token.groups) claims.push({ minutes: Number(m[g]), index: m.index });
+      consumed.push(...figureSpans);
+    }
+  }
+  return claims;
+}
+// Structural default-deny (Codex round-7 P2, PR #5334): findEtaMinutesClaims
+// above requires an arrival-TRIGGER word to share the sentence with a
+// minutes figure, and every round of this PR has found one more phrasing
+// that trigger list doesn't cover ("on the way", written numbers, ranges,
+// "from you", bare "ETA: 20", now "20 minutes to go") — an open-ended
+// enumeration that can never be finished. This function is the fix for the
+// two call sites that actually have a LIVE ETA to check a claim against
+// (sms-eta-freshness.js's send-time recheck when the snapshot has entries or
+// the body carries a /track/ link, and validateLiveEtaMinutes below when the
+// facts carry a LIVE ETA line): a plain "N minute(s)" figure — after
+// number-word normalization, ranges/between bounds included — is a timed ETA
+// claim with NO trigger word required at all, UNLESS its own clause is an
+// explicit NON-arrival duration (treatment/dry time, "wait ... before
+// pets/re-entry", "takes about", "lasts", "the service takes ...") — a
+// short, closed list that doesn't grow the way ETA phrasing does. A STRONG
+// arrival word in the clause still wins over the exclusion (same as
+// findEtaMinutesClaims, e.g. "he'll take about 12 minutes to arrive" despite
+// "take about" also reading like a duration-exclusion prefix) — everything
+// else is identical to maybeClaim above minus the "no trigger at all ⇒ not a
+// claim" bailout, since removing that bailout IS the structural fix: a bare
+// "20 minutes." with nothing else in the sentence is exactly the shape a
+// trigger-word list can never catch, and grounded default-deny catches it.
+// Round 8 (Codex P2): the same default-deny now also covers a BARE integer
+// with no unit word at all ("The tech should make it in 20") — see the
+// bare-integer pass and classifyBareEtaNumber below, which tell an unclaimed
+// bare number apart from a time of day, money, an address/phone-like token,
+// a date, a count of something that isn't time, an ordinal, or a percentage.
+// Which figures in the normalized string came from a written NUMBER WORD
+// ("one", "two", ...) rather than digits the author typed (Codex round-23 P2):
+// "Yes, we completed one." reads as "…completed 1." after normalization, and the
+// bare pass must not take that count for an ETA. Marks each conversion with a
+// private control character, runs the SAME time normalization, and maps the
+// marks back to indexes in `str`; if stripping the marks does not reproduce
+// `str` exactly the mapping is untrustworthy and NO figure is treated as
+// number-word origin (default-deny stays).
+const NUMBER_WORD_MARK = '\u0001';
+function numberWordOriginIndexes(text, str) {
+  const marked = normalizeTimeQuantities(normalizeGsmPunctuation(String(text || '')).replace(NUMBER_WORD_RE, (m, ...groups) => NUMBER_WORD_MARK + String(numberWordValue(m, ...groups.slice(0, 7)))));
+  let plain = '';
+  const origins = new Set();
+  for (const ch of marked) {
+    if (ch === NUMBER_WORD_MARK) origins.add(plain.length);
+    else plain += ch;
+  }
+  return plain === str ? origins : new Set();
+}
+// A number-word figure is still an ETA next to an arrival cue: "five out",
+// "one away", "in five", "within ten", "ETA five".
+const WORD_FIGURE_CUE_AFTER_RE = /^\s*(?:away|out|from|until|early|late|behind|to\s+go)\b/i;
+const WORD_FIGURE_CUE_BEFORE_RE = /\b(?:in|within|eta\s*:?)\s*(?:about\s+|around\s+|roughly\s+)?$/i;
+function isPlainWordCount(str, index, length) {
+  return !WORD_FIGURE_CUE_AFTER_RE.test(str.slice(index + length)) && !WORD_FIGURE_CUE_BEFORE_RE.test(str.slice(Math.max(0, index - 20), index));
+}
+// findGroundedMinutesFigures, as three stages over one shared scan context (pure extraction — same
+// scans, same order, same claims). The context carries the normalized string, the accumulating claims
+// and the shared "is this figure a claim" judge.
+function groundedFigureContext(text) {
+  const claims = [];
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const spans = sentenceSpans(str);
+  const sentenceFor = (index) => {
+    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+    return str.slice(span[0], span[1]);
+  };
+  const maybeGroundedClaim = (minutes, matchIndex, matchLength, sentence) => {
+    // Round-19 P2: a window figure (any unit) is never an ETA claim.
+    if (isWindowQuantity(str, matchIndex, matchLength)) return false;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
+      claims.push({ minutes, index: matchIndex });
+      return true;
+    }
+    const after = str.slice(matchIndex + matchLength, matchIndex + matchLength + 30);
+    const before = str.slice(Math.max(0, matchIndex - 30), matchIndex);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) return false;
+    claims.push({ minutes, index: matchIndex });
+    return true;
+  };
+  return { claims, str, wordOrigins: numberWordOriginIndexes(text, str), sentenceFor, maybeGroundedClaim };
+}
+// Stage 1 — ranges ("10-12 minutes", "between 10 and 12 minutes"). Returns the consumed spans.
+function groundedRangeFigures({ str, sentenceFor, maybeGroundedClaim }) {
+  const consumed = [];
+  for (const rangeRe of [RANGE_MINUTES_RE, BETWEEN_MINUTES_RE]) {
+    const re = new RegExp(rangeRe.source, rangeRe.flags);
+    let rm;
+    while ((rm = re.exec(str))) {
+      const sentence = sentenceFor(rm.index);
+      const addedFirst = maybeGroundedClaim(Number(rm[1]), rm.index, rm[0].length, sentence);
+      const addedSecond = maybeGroundedClaim(Number(rm[2]), rm.index, rm[0].length, sentence);
+      if (addedFirst || addedSecond) consumed.push([rm.index, rm.index + rm[0].length]);
+    }
+  }
+  return consumed;
+}
+// Stage 2 — unit-bearing single figures ("12 minutes"), skipping spans a range already consumed.
+function groundedUnitFigures({ str, sentenceFor, maybeGroundedClaim }, consumed) {
+  const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
+  let m;
+  while ((m = re.exec(str))) {
+    if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
+    maybeGroundedClaim(Number(m[1]), m.index, m[0].length, sentenceFor(m.index));
+  }
+}
+// Stage 3 — bare integers, then "<N>ish". Bare-integer default-deny (Codex round-8 P2, PR #5334): "the
+// tech should make it in 20" carries no unit word AND matches none of findEtaMinutesClaims's fixed
+// phrase/trigger lists. Once there IS a live ETA to check a claim against, ANY bare integer 1-180 left
+// unclaimed above is a timed claim UNLESS classifyBareEtaNumber reads it as something else entirely — a
+// time of day, money, an address/phone-like token, a date, a count with a non-time noun right after it,
+// an ordinal, or a percentage. Numbers already claimed or excluded by the unit-based passes above are
+// skipped by index so this pass never double-claims or re-fights a duration exclusion those passes
+// already settled (a trailing "minutes" word reads here as an ordinary trailing noun either way, so the
+// verdict agrees).
+function groundedBareFigures({ claims, str, wordOrigins }, consumed) {
+  const bareRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)/g;
+  let bm2;
+  while ((bm2 = bareRe.exec(str))) {
+    if (consumed.some(([s, e]) => bm2.index >= s && bm2.index < e)) continue;
+    if (claims.some((c) => c.index === bm2.index)) continue;
+    const minutes = Number(bm2[1]);
+    if (minutes < 1 || minutes > 180) continue;
+    // Round-23 P2: a bare figure that was a written number word with no time unit or arrival cue beside
+    // it is a count ("we completed one"), not an ETA.
+    if (wordOrigins.has(bm2.index) && isPlainWordCount(str, bm2.index, bm2[0].length)) continue;
+    if (!isWindowQuantity(str, bm2.index, bm2[0].length) && classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
+      claims.push({ minutes, index: bm2.index });
+    }
+  }
+}
+// "<N>ish" (round 8): the digits and "ish" share no word boundary at all, so the \b-anchored bare-integer
+// pass can never match "20ish" — this tiny dedicated pass is the only way to catch it. Always a timed
+// approximation once findGroundedMinutesFigures runs at all; no exclusion category applies to an "-ish"
+// suffix.
+function groundedIshFigures({ claims, str }) {
+  const ishRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?=ish\b)ish\b/gi;
+  let ishm;
+  while ((ishm = ishRe.exec(str))) {
+    if (claims.some((c) => c.index === ishm.index)) continue;
+    const minutes = Number(ishm[1]);
+    if (minutes >= 1 && minutes <= 180 && !isWindowQuantity(str, ishm.index, ishm[0].length)) claims.push({ minutes, index: ishm.index });
+  }
+}
+function findGroundedMinutesFigures(text) {
+  const ctx = groundedFigureContext(text);
+  const consumed = groundedRangeFigures(ctx);
+  groundedUnitFigures(ctx, consumed);
+  groundedBareFigures(ctx, consumed);
+  groundedIshFigures(ctx);
+  // Office follow-up timing (round 13) is never an ETA — see isOfficeFollowupDuration.
+  return ctx.claims.filter((c) => !isOfficeFollowupDuration(ctx.str, c.index, 1));
+}
+// Backstop for sms-eta-freshness.js (round 6): does the outgoing body carry
+// an arrival-triggered sentence with a digit findEtaMinutesClaims could NOT
+// turn into a claim? Scoped to a STRONG-trigger sentence, same as the
+// bare-integer pass above, so this never fires on an unrelated digit
+// elsewhere in the message (a dollar amount, an address in another
+// sentence). Exists so a future phrasing this module's own parser still
+// can't read fails the send-time recheck closed rather than passing as pure
+// status copy. Round 8 (Codex P2): "he should be there at 2:30" / "on the
+// way to 123 Main St" carry a STRONG trigger ("be there" / "on the way")
+// alongside a digit that is plainly a clock time or a street address, never
+// an unread ETA phrasing — each digit run in a qualifying sentence is run
+// through classifyBareEtaNumber so a digit classified as something else
+// entirely (time of day, money, an address/phone-like token, a date, a
+// count with a non-time noun, an ordinal, a percentage) never trips this
+// backstop; a digit classifyBareEtaNumber can't otherwise explain still does.
+function bodyHasUnclassifiedArrivalDigit(text) {
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const spans = sentenceSpans(str);
+  const claims = findEtaMinutesClaims(text);
+  const digitRe = /(?<![\d.])\d{1,3}(?:\.\d+)?(?!\d|\.\d)/g;
+  return spans.some(([s, e]) => {
+    const sentence = str.slice(s, e);
+    if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return false;
+    if (claims.some((c) => c.index >= s && c.index < e)) return false;
+    const re = new RegExp(digitRe.source, digitRe.flags);
+    let dm;
+    while ((dm = re.exec(str))) {
+      if (dm.index < s || dm.index >= e) continue;
+      if (classifyBareEtaNumber(str, dm.index, dm[0].length) === 'claim') return true;
+    }
+    return false;
+  });
+}
+// The send-time freshness recheck (sms-eta-freshness.js) needs only "does
+// this outgoing body make an ETA-style minutes claim at all" — never the
+// factsBlock-derived correctness check below, which isn't available at
+// send time.
+function replyClaimsEtaMinutes(reply) {
+  return findEtaMinutesClaims(reply).length > 0;
+}
+
+// The send-time freshness snapshot for a drafted reply (independent review
+// finding, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2):
+// context.liveEtaGroups is the [{ minutes, scheduledServiceIds }] list
+// context-aggregator built, one entry per distinct resolved LIVE ETA
+// (grouped-stop siblings sharing one physical stop collapse to one entry —
+// see liveEtaDedupeKey there), never rendered into any prompt. Persisted as
+// { entries: [...] } alongside facts_generated_at exactly like
+// open_times_snapshot so sms-eta-freshness.js can bind each claimed minutes
+// figure in the outgoing body to the ONE entry it came from and recheck —
+// with no GPS/Distance Matrix call of its own — that THAT entry's visit(s),
+// not some other stop's, are still customer-facing en_route before the
+// claim may go out. A flat scheduledServiceIds list (the pre-round-2 shape)
+// could let a reply quoting one completed stop pass on another stop's
+// en_route status. null when this draft's facts carried no LIVE ETA at all;
+// a missing snapshot plus a minutes claim in the outgoing body fails closed
+// there — and the old flat shape (no `entries`) fails closed too, since
+// nothing merged yet ever persisted it.
+// `trackTokens` (Codex round-4 P2, PR #5334): each entry's own
+// /track/:token(s), carried through so sms-eta-freshness.js can revalidate a
+// reply that shares ONLY the tracking link — never rendered into any prompt.
+// Has the LIVE ETA behind this reply's minutes claim already gone stale, by the
+// SAME two clocks the send seams enforce (sms-eta-freshness draftFreshnessReason):
+// the facts are older than the 15-minute draft window, or the GPS fix behind an
+// entry passed its tracker-staleness deadline (fixExpiresAtMs). Only a reply that
+// actually states minutes is affected; status-only copy carries nothing to age.
+function liveEtaExpiredByPublication({ reply, context, factsAt = null, now = new Date() }) {
+  const entries = (buildLiveEtaSnapshot(context)?.entries || []).filter((e) => Number.isFinite(e.minutes));
+  if (!entries.length) return false;
+  // Parse the reply without its tracking links (same shared step as the draft and
+  // send validators): a token's trailing digits are not a minutes figure.
+  const text = stripTrackLinks(reply);
+  if (!findEtaMinutesClaims(text).length && !findGroundedMinutesFigures(text).length) return false;
+  const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness'); // lazy: that module requires this one lazily too
+  const t = now.getTime();
+  if (factsAt instanceof Date && t - factsAt.getTime() > ETA_FRESHNESS_WINDOW_MS) return true;
+  return entries.some((e) => Number.isFinite(e.fixExpiresAtMs) && t > e.fixExpiresAtMs);
+}
+function buildLiveEtaSnapshot(context) {
+  const groups = Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups : [];
+  const entries = groups
+    .filter((g) => g && (Number.isFinite(g.minutes) || g.minutes === null) && Array.isArray(g.scheduledServiceIds))
+    .map((g) => ({
+      minutes: g.minutes,
+      scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null),
+      trackTokens: Array.isArray(g.trackTokens) ? g.trackTokens.filter(Boolean) : [],
+      // Which technician the figure/status was about (Codex round-18 P2);
+      // sms-eta-freshness refuses at send when a reassignment changed it.
+      ...(g.technicianId != null ? { technicianId: g.technicianId } : {}),
+      ...(g.deviceImei ? { deviceImei: g.deviceImei } : {}),
+      // The tracker-mapping generation (bouncie_imei_changed_at) the ETA was computed under
+      // (round-41 P2): send time blocks when a remap advanced it, even A->B->A.
+      ...('mappingChangedAt' in g ? { mappingChangedAt: g.mappingChangedAt } : {}),
+      // Round-33: the technician first name(s) the draft may have used as a status
+      // subject ("Sam is on the way"); names only. Send time reads them from here.
+      ...(sanitizeTechNames(g.technicianNames).length ? { technicianNames: sanitizeTechNames(g.technicianNames) } : {}),
+      ...(typeof g.state === 'string' ? { state: g.state } : {}),
+      // Round-20 P2: the destination (property + stamped coordinates) the figure
+      // was computed for; send time refuses when the appointment moved.
+      ...(Array.isArray(g.destinations) ? { destinations: g.destinations.filter((d) => d && d.id != null) } : {}),
+      // The instant the GPS fix behind this figure goes stale to the public
+      // tracker (Codex round-11 P2, PR #5334); sms-eta-freshness.js expires a
+      // minutes claim at min(15-minute draft window, this). Omitted when
+      // unknown, so an entry without it keeps the draft-window-only rule.
+      ...(Number.isFinite(g.fixExpiresAtMs) ? { fixExpiresAtMs: g.fixExpiresAtMs } : {}),
+      // The GPS fix timestamp the figure used (round-24 P2): send time refuses when
+      // a newer fix has landed in tech_status.
+      ...(Number.isFinite(g.fixAtMs) ? { fixAtMs: g.fixAtMs } : {}),
+    }))
+    .filter((g) => g.scheduledServiceIds.length);
+  return entries.length ? { entries } : null;
+}
+
+// Deterministic backstop (independent review finding, PR #5334): today only
+// the LLM verifier checks that a stated ETA number matches LIVE ETA — this
+// runs alongside the other deterministic guards (validateReserviceOffer,
+// validateComplianceCopy) in the SAME revise/verify loop, and in single-pass
+// mode where no verifier would catch it at all. Any ETA-style minutes claim
+// must equal the LIVE ETA minutes the facts block actually carries, and must
+// not appear at all when the facts carry no LIVE ETA line.
+// Distinct EN-ROUTE stops in the context (the unit the send-time snapshot binds
+// a numeric ETA over): an on_property (on-site) group can't be the subject of
+// an ETA figure, so it is not counted. null when the context has no groups.
+function countEnRouteEtaStops(context) {
+  return Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.filter((g) => g && g.state !== 'on_property').length : null;
+}
+// validateLiveEtaMinutes, as four decision units (pure extraction — same checks, same order, same
+// violation text). Each returns a violation message or null.
+const liveEtaFail = (message) => ({ ok: false, violations: [message] });
+// Arrival-state consistency between the reply and the LIVE STATUS facts.
+function arrivalStateViolation(reply, factsBlock, techNames) {
+  const facts = String(factsBlock || '');
+  // Codex round-13 P2: a completed-arrival claim ("has arrived") with an en-route tech and no on-site
+  // fact is false — the facts must say the tech is on site before a reply may say so.
+  if (bodyClaimsCompletedArrival(reply, { techNames }) && /LIVE (?:STATUS: tech marked en route|ETA:)/.test(facts) && !/tech marked on site/.test(facts)) {
+    return 'the reply says the tech has ARRIVED but the facts show the tech is still EN ROUTE — say the tech is on the way (with the exact LIVE ETA if stated), never that they have arrived';
+  }
+  // Round-34 P2 (mirror of the arrived-vs-en-route check above): route wording ("on the way", "running
+  // late", "nearby") against an ON-SITE-only fact is false — the send-time guard requires en_route for
+  // it, so the draft must not converge.
+  if (/tech marked on site/.test(facts) && !/tech marked en route/.test(facts) && bodyMentionsArrival(reply, { techNames })) {
+    return 'the reply says the tech is on the way / running late / nearby but the facts show the tech is already ON SITE — say the tech has arrived (is on site), never that they are on the way';
+  }
+  return null;
+}
+// Time wording the parsers cannot turn into an exact figure.
+function unparseableTimeViolation(reply, hasLiveEta) {
+  // Codex round-9 P2 (PR #5334): an hour-based duration the normalizer could not turn into minutes ("an
+  // hour", "half an hour", "a couple hours") next to a real minutes figure ("about an hour out, 2
+  // minutes") would otherwise ride the numeric claim through — reject it outright once there is a LIVE
+  // ETA to hold the reply to.
+  if (bodyHasUnconvertedNumberWord(reply)) {
+    return 'the reply states an arrival time in number words that cannot be read as an exact figure — state the EXACT LIVE ETA minutes as digits, or drop the timeframe and say the tech is on the way';
+  }
+  if (hasLiveEta && bodyHasUnnormalizedHourWord(reply)) {
+    return 'the reply gives an hour-based arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number of minutes, or drop the timeframe and say the tech is on the way';
+  }
+  return null;
+}
+// No numeric claim was read: a vague / approximate duration is still a TIMED claim. Codex round-5 P2: a
+// vague/approximate duration ("half an hour away", "an hour out", "a few minutes", "a couple minutes",
+// "quarter hour", "shortly", "any minute now", "soon") is a TIMED claim exactly like a parsed number,
+// but there is no number here to check against the LIVE ETA fact — it is rejected outright, the same
+// direction as a claim that doesn't match, rather than waved through as pure status copy.
+function vagueTimeViolation(reply) {
+  return bodyHasTimedArrivalPhrase(reply)
+    ? 'the reply gives an approximate/vague arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number, or drop the timeframe and say the tech is on the way'
+    : null;
+}
+// Numeric claims vs the LIVE ETA figures: ambiguity across stops, then the exact-minute match.
+function exactMinuteViolation(claims, factsMinutes, liveStops) {
+  if (!factsMinutes.size) return 'the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one';
+  // Two distinct live ETAs (two techs en route at once): prose can't be bound to the right visit
+  // deterministically, so no minutes figure may go out at all (Codex r3) — rare, and failing closed
+  // costs one revision. Count LIVE ETA lines, not distinct values (Codex round-15 P2): two stops with the
+  // same figure are still two entries, which send-time binding rejects as ambiguous — so the number must
+  // never be approved here.
+  if (liveStops > 1) return 'more than one tech is en route, so a minutes-away figure cannot be tied to the right visit — say the techs are on the way and share the tracking link instead of stating minutes';
+  const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
+  return wrong.length ? `the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${[...factsMinutes].join(' or ')} minutes — use that EXACT number` : null;
+}
+function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount = null, techNames = [] }) {
+  // Round-19 P2: parse the reply without its tracking links (a token's trailing digits are not an ETA) —
+  // the same shared step the send-time check uses.
+  const reply = normalizeGsmPunctuation(stripTrackLinks(rawReply));
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  const stateViolation = arrivalStateViolation(reply, factsBlock, techNames);
+  if (stateViolation) return liveEtaFail(stateViolation);
+  // Every LIVE ETA line, not only the first (audit P1): a customer with two distinct live stops has two
+  // figures, and a reply about either is grounded.
+  const factsLineMinutes = [...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10));
+  // Distinct live STOPS (Codex round-16 P2): grouped siblings render the shared ETA once per service
+  // line, so rendered lines over-count; when the caller has the context's liveEtaGroups (the unit the
+  // send-time snapshot uses) it passes their count.
+  const liveStops = Number.isInteger(liveEtaStopCount) ? liveEtaStopCount : factsLineMinutes.length;
+  const factsMinutes = new Set(factsLineMinutes);
+  // Structural default-deny (Codex round-7 P2): once the facts actually carry a LIVE ETA to check a
+  // claim against, stop relying on findEtaMinutesClaims's trigger-word list — union in
+  // findGroundedMinutesFigures, which catches a plain minutes figure with no trigger word at all. With
+  // no LIVE ETA fact, keep the trigger-based detection only (there's nothing to bind an untriggered
+  // figure to here anyway, and this keeps an ordinary duration mention in a reply about a non-live visit
+  // from being second-guessed).
+  const claims = factsMinutes.size
+    ? [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)]
+    : findEtaMinutesClaims(reply);
+  const timeViolation = unparseableTimeViolation(reply, factsMinutes.size > 0);
+  if (timeViolation) return liveEtaFail(timeViolation);
+  if (!claims.length) {
+    const vague = vagueTimeViolation(reply);
+    return vague ? liveEtaFail(vague) : { ok: true, violations: [] };
+  }
+  const minuteViolation = exactMinuteViolation(claims, factsMinutes, liveStops);
+  return minuteViolation ? liveEtaFail(minuteViolation) : { ok: true, violations: [] };
 }
 
 // Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
@@ -700,7 +3491,7 @@ function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
-  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking' };
+  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
   if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
 }
@@ -1222,7 +4013,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
 // offered_times declaration (owner-directed structural fix) rather than
 // re-deriving quoted pairs from reply text. null when there's nothing to
 // recheck: no OPEN TIMES was fetched, or the draft declared no times.
-function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId, serviceType = null, scheduledServiceId = null }) {
+function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId, serviceType = null, schedulerOffer = null }) {
   if (!openTimesBlock) return null;
   const quotedWindows = Array.isArray(offeredTimes)
     ? offeredTimes
@@ -1232,25 +4023,30 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
   if (!quotedWindows.length) return null;
   // serviceType only when known — keeps the persisted shape unchanged for
   // every caller that has none (and every existing snapshot row).
-  // scheduledServiceId (+ source marker) ONLY when the scheduler path
-  // produced the offer (GATE_SMS_OFFERS_SCHEDULER): the send-time recheck
-  // then asks the same picker about the same visit. Absent, the snapshot
-  // keeps its old shape and the old finder rechecks it.
+  // The offer's source + the ids its picker needs (a visit id, or the
+  // funnel service key; an estimate's id is already on the lookup) ONLY when
+  // the scheduler path produced the offer (GATE_SMS_OFFERS_SCHEDULER): the
+  // send-time recheck then asks the same picker the same question. Absent,
+  // the snapshot keeps its old shape and the old finder rechecks it.
   return {
     lookup: {
       city, customerId: customerId || null, estimateId: estimateId || null, ...(serviceType ? { serviceType } : {}),
-      ...(scheduledServiceId ? { scheduledServiceId, source: SCHEDULER_OFFER_SOURCE } : {}),
+      ...(schedulerOffer ? {
+        source: schedulerOffer.source,
+        ...(schedulerOffer.scheduledServiceId ? { scheduledServiceId: schedulerOffer.scheduledServiceId } : {}),
+        ...(schedulerOffer.source === BOOK_OFFER_SOURCE ? { serviceKey: schedulerOffer.serviceKey } : {}),
+      } : {}),
     },
     quotedWindows,
   };
 }
 
-// The days a send-time recheck compares against: the scheduler picker's for
-// a snapshot that carries a visit id, else the zone finder's. null = the
-// visit is no longer one the picker offers times for.
-async function currentOfferedDays({ city, customerId, estimateId, serviceType, scheduledServiceId }) {
-  if (scheduledServiceId) {
-    const loaded = await loadSchedulerVisitDays({ customerId, scheduledServiceId });
+// The days a send-time recheck compares against: the picker's that minted the
+// snapshot (its `source`), else the zone finder's for a legacy snapshot. null
+// = that picker no longer offers times for this job.
+async function currentOfferedDays({ city, customerId, estimateId, serviceType, schedulerOffer }) {
+  if (schedulerOffer) {
+    const loaded = await loadSchedulerDays(schedulerOffer, customerId, { fresh: true });
     return loaded ? { days: loaded.days, labelOf: schedulerDayLabel, currentWindow: loaded.currentWindow } : null;
   }
   const Availability = require('./availability');
@@ -1266,9 +4062,16 @@ async function currentOfferedDays({ city, customerId, estimateId, serviceType, s
 // all resolve to "not still offered" — the one thing this function must
 // never do is silently assume a quoted time is fine when it couldn't
 // actually confirm that.
-async function openTimesStillOffered({ city, customerId, estimateId = null, serviceType = null, scheduledServiceId = null, quotedWindows } = {}) {
+async function openTimesStillOffered({ city, customerId, estimateId = null, serviceType = null, source = null, scheduledServiceId = null, serviceKey = null, quotedWindows } = {}) {
   if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
-  if (!city && !scheduledServiceId) return { ok: false, reason: 'open_times_recheck_no_city' };
+  // A snapshot minted by the scheduler path (`source` on its lookup) is
+  // rechecked through the same picker for the same job; a legacy snapshot
+  // without one keeps the zone finder.
+  // A slice-1 snapshot carries a visit id + source; a bare visit id still
+  // reads as the scheduler's.
+  const offerSource = source || (scheduledServiceId ? SCHEDULER_OFFER_SOURCE : null);
+  const schedulerOffer = offerSource ? { source: offerSource, scheduledServiceId, estimateId, serviceKey } : null;
+  if (!city && !schedulerOffer) return { ok: false, reason: 'open_times_recheck_no_city' };
   let timer = null;
   const startedAt = Date.now();
   try {
@@ -1276,15 +4079,13 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(
         () => reject(new Error('open-times recheck timeout')),
-        scheduledServiceId ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
+        schedulerOffer ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
       );
     });
-    // A snapshot minted by the scheduler path (scheduledServiceId on its
-    // lookup) is rechecked through the same picker for the same visit; a
-    // legacy snapshot without one keeps the zone finder. A visit the picker
-    // no longer offers times for reads as every quoted window gone.
+    // A job the picker no longer offers times for reads as every quoted
+    // window gone.
     const current = await Promise.race([
-      currentOfferedDays({ city, customerId, estimateId, serviceType, scheduledServiceId }),
+      currentOfferedDays({ city, customerId, estimateId, serviceType, schedulerOffer }),
       timeout,
     ]);
     if (!current) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows: quotedWindows };
@@ -1324,7 +4125,7 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
   } finally {
     // Same leaked-handle fix as fetchOpenTimesBlock's own timer.
     if (timer) clearTimeout(timer);
-    if (scheduledServiceId) logger.info(`[sms-shadow] scheduler open-times recheck took ${Date.now() - startedAt}ms`);
+    if (schedulerOffer) logger.info(`[sms-shadow] scheduler open-times recheck took ${Date.now() - startedAt}ms`);
   }
 }
 
@@ -1374,7 +4175,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
   // pins the full rendered system prompt.
   const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
     ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
@@ -1386,9 +4187,41 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const noAppointmentRule = realAnswersOn
     ? "If the customer asks when we're coming and no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times) so they can pick one; only if OPEN TIMES is absent or empty, say you'll confirm it and get right back to them."
     : "If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.";
+  // COMPANY FACTS (owner rulings 2026-09-29/30), gate-on only: the per-draft
+  // COMPANY FACTS section is authoritative. '' when the gate is off, so the
+  // v11 prompt is byte-identical. The section's content is per-draft data
+  // (buildFactsBlock), never interpolated here.
+  const companyFactsRules = realAnswersOn
+    ? `
+COMPANY FACTS:
+- The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
+`
+    : '';
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
+  // LIVE ETA (GATE_SMS_REAL_ANSWERS only — gate-off stays the exact v11
+  // literal, matching every other conditional in this function): the
+  // facts block now carries a LIVE ETA + TRACKING LINK line on a TODAY
+  // en-route visit whenever context-aggregator resolved one (same
+  // resolveFreshTechPosition + calculateBoundedTrackingEta bounds the
+  // customer tracking page uses). The model may state THAT number only —
+  // never compute or invent one — and share the link with it.
+  const liveEtaClause = realAnswersOn
+    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK.'
+    : '';
+  // Round-34 P2: route wording is authorized by an EN-ROUTE fact only. An ON-SITE
+  // fact authorizes arrived/on-site wording only — "on the way" beside it is false
+  // and every send seam would reject it. Gate-off keeps the exact v11 literal.
+  const liveStatusRule = realAnswersOn
+    ? "Say the tech is on the way, running late, running ahead, or nearby ONLY when TODAY's visit line shows LIVE STATUS: tech marked en route. When it shows LIVE STATUS: tech marked on site, say only that the tech has arrived / is on site — never on the way, running late, running ahead, or nearby."
+    : "Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site.";
+  const liveStatusMeaning = realAnswersOn
+    ? 'LIVE STATUS "en route" means you may confidently tell the customer the tech is on the way right now; LIVE STATUS "on site" means the tech is on site right now (say so — never "on the way").'
+    : 'LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now.';
+  const liveEtaUseRule = realAnswersOn
+    ? ' A visit line that also shows LIVE ETA and TRACKING LINK means you may tell the customer about how many minutes away the tech is (that exact number) and share the link.'
+    : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
@@ -1397,7 +4230,7 @@ ${CUSTOMER_SMS_HOUSE_VOICE}
 FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (${factSourceList}). A plausible-sounding guess is still a fabrication. You must NEVER:
 - State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. ${noAppointmentRule}
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
-- Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site. If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
+- ${liveStatusRule}${liveEtaClause} If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
 - Assert a service cadence or frequency ("every other month") or treatment timing ("safe to water in 1–2 hours") that isn't in the context.
 - Reference a billing event — a payment, an auto-pay attempt, a charge, an invoice — that isn't shown in BILLING.
@@ -1413,8 +4246,8 @@ PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
 ${deferRule}
-
-USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now. If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
+${companyFactsRules}
+USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and ${liveStatusMeaning}${liveEtaUseRule} If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
 ${handoffBullet}
@@ -1564,11 +4397,20 @@ function buildFactsBlock(context, extras = {}) {
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
-  // Free re-service eligibility (Codex r6 P1) — only when the real-answers
-  // AND complaints gates are on; a caller that passes no lanes renders
-  // "not eligible" (fail closed). Resolved upstream (fetchReserviceLanes).
-  const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS') && gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
-    ? `${reserviceFactLine(extras.reserviceLanes)}\n`
+  // Free re-service eligibility (Codex r6 P1; decoupled from the complaints
+  // gate 2026-09-29 — see fetchReserviceFactState's comment) — renders whenever
+  // real-answers is on, for both the COMPLAINTS rule (when that gate is on)
+  // and the unconditional PEST REPORTS rule below; a caller that passes no
+  // lanes renders "not eligible" (fail closed). Resolved upstream
+  // (fetchReserviceFactState).
+  const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? `${reserviceFactLine(extras.reserviceLanes, extras.reserviceBooked, extras.reservicePlanState, extras.reserviceLinkDownLanes)}\n`
+    : '';
+  // COMPANY FACTS (owner rulings 2026-09-29/30): owner-approved company
+  // knowledge, gate-on only, ordinary per-draft facts the verifier grounds
+  // against like any other section. '' gate-off (byte-identical).
+  const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? renderCompanyFactsSection()
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -1602,6 +4444,16 @@ function buildFactsBlock(context, extras = {}) {
   // the #1 live judge failure was invented day-of ETAs on exactly these
   // messages. The status is only trusted (and only shown) on a TODAY visit;
   // when it's absent the drafter genuinely doesn't know where the tech is.
+  // Codex round-4 P2, PR #5334: this used to read raw `s.status` here while
+  // liveEtaEligible (context-aggregator) decided ELIGIBILITY off the
+  // customer-facing tracker state (s.trackState) instead — two different
+  // sources that CAN disagree (see the track_state select comment in
+  // context-aggregator.js), which could show "LIVE STATUS: en route" for a
+  // stop the public tracking page doesn't consider live, or the reverse.
+  // ONE source now: on the gate-on path, `s.trackState` (when present)
+  // decides en-route/on-site, same as liveEtaEligible; the gate-off path —
+  // and any caller whose context predates trackState — stays exactly
+  // status-based, so gate-off output is byte-identical to v11.
   const upcoming = (context.upcomingServices || []).filter((s) => s && s.date);
   const upcomingBlock = upcoming.length
     ? upcoming
@@ -1609,8 +4461,31 @@ function buildFactsBlock(context, extras = {}) {
           const parts = [`${s.type}${s.isToday ? ' TODAY' : ''} on ${formatEtDate(s.date)}`];
           parts.push(s.window ? `window ${s.window}` : 'no arrival window set');
           parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
-          if (s.isToday && s.status === 'en_route') parts.push('LIVE STATUS: tech marked en route to this visit');
-          else if (s.isToday && s.status === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
+          const liveState = (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.trackState) ? s.trackState : s.status;
+          if (s.isToday && liveState === 'en_route') {
+            parts.push('LIVE STATUS: tech marked en route to this visit');
+            // LIVE ETA (GATE_SMS_REAL_ANSWERS): context-aggregator only
+            // ever populates s.liveEta from a fresh GPS position + bounded
+            // ETA (same functions + staleness/timeout the customer tracking
+            // page uses) — a stale/missing position, missing destination
+            // coords, or a provider timeout/error all resolve to null there,
+            // so this line is absent exactly when the drafter genuinely has
+            // no live minutes to state. Gate-checked again here (belt and
+            // suspenders) so a gate-off caller can never surface this fact,
+            // keeping this block byte-identical to v11 when the gate is off.
+            if (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.liveEta && Number.isFinite(s.liveEta.minutes) && s.liveEta.trackUrl) {
+              parts.push(`LIVE ETA: about ${s.liveEta.minutes} minutes (GPS, as of ${s.liveEta.asOf})`);
+              // SMS-safe, scheme-free form (comms-lint's portal-link-scheme
+              // rule fails any SMS carrying https:// — the send path itself
+              // strips it via the same helper, but that strip runs AFTER
+              // comms-lint already ran on the raw draft, so a model that
+              // just echoes this fact verbatim would fail lint at draft
+              // time). Same helper the send path uses — never a second
+              // normalizer.
+              const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+              parts.push(`TRACKING LINK: ${stripSmsUrlScheme(s.liveEta.trackUrl)}`);
+            }
+          } else if (s.isToday && liveState === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
           else if (s.isToday) parts.push('no live tech location known');
           return `- ${parts.join(', ')}`;
         })
@@ -1810,7 +4685,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${openTimesSection}${slaSection}${reserviceSection}BILLING:
+${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -1917,14 +4792,14 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, ex
   }
 }
 
-function buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock = '') {
+function buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock = '', mixedHint = '') {
   return `${factsBlock}
 
 CLASSIFIED INTENT: ${intent?.intent || 'GENERAL'}${schedulingIntent ? ' (scheduling-intent detected — be especially careful to only state schedule facts present above)' : ''}
 ${intent?.intent === GRATITUDE_INTENT ? `APPROVED GRATITUDE REPLY: ${JSON.stringify(intent.approvedReply || 'Our pleasure!')}` : ''}
 
 The facts above are the ONLY ones you have. If answering needs a detail that isn't shown — an exact time, a tech name, what was found, a billing event — do not invent it; say you'll confirm and follow up.
-${exemplarBlock ? `\n${exemplarBlock}\n` : ''}
+${exemplarBlock ? `\n${exemplarBlock}\n` : ''}${mixedHint ? `\n${mixedHint}\n` : ''}
 NEW INBOUND MESSAGE: "${inboundMessage}"
 
 Draft the reply JSON now.`;
@@ -1962,7 +4837,121 @@ const MAX_REVISIONS = (() => {
 //   here labeled service_scheduling_window_reply — the intent string alone
 //   would misroute exactly the retention-critical class to the mini lane.
 const SAVE_SALE_INTENT_RE = /cancel|complaint|customer_issue/i;
-const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|still (?:seeing|have|having|getting|finding)|came back|come back|keep (?:seeing|coming)|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b/i;
+// The persistence constructions ("still seeing/have/getting", "came back", "keep coming") come from the ONE shared
+// source the scheduler's pest-report classifier also reads (Codex round-24 P2).
+const SAVE_SALE_TEXT_ALTS = String.raw`cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|${PEST_PERSISTENCE_PHRASES_SOURCE}|what happened|went wrong|refund|upset|missed|no.?show|never showed`;
+const SAVE_SALE_TEXT_RE = new RegExp(String.raw`\b(${SAVE_SALE_TEXT_ALTS})\b`, 'i');
+// The same save-the-sale / cancel wording WITHOUT the pest-persistence constructions ("came back", "still seeing"):
+// those ARE the pest report, so they cannot count as a second need (Codex round-29 P1).
+const SAVE_SALE_NON_PEST_TEXT_RE = new RegExp(String.raw`\b(${SAVE_SALE_TEXT_ALTS.replace(`|${PEST_PERSISTENCE_PHRASES_SOURCE}`, '')})\b`, 'i');
+
+// Pest-report text signal for the OPEN TIMES availability fetch below
+// (Codex round-1 P2 (b), widened Codex round 2): mirrors the PEST REPORTS
+// bullet's own examples ("still seeing bugs/ants/etc", "they're back", a new
+// pest sighting after a service). SAVE_SALE_TEXT_RE above already catches
+// "still seeing X" and "came/come back". Round 1 enumerated "back"/"again"
+// phrasings ("they're back", "I saw roaches again") to close the gap those
+// two miss; round 2 found MORE phrasings the enumeration missed ("the
+// roaches have returned", "more ants showed up after the treatment") — an
+// enumerate-every-phrasing approach doesn't converge. Structural fix: match
+// a PEST NOUN anywhere in the text together with ANY activity/sighting verb
+// anywhere in the text (either order, not necessarily adjacent), via two
+// independent lookaheads, instead of enumerating fixed phrasings. A bare
+// pest noun alone ("we have ants") or a bare activity word alone ("call me
+// back") is not enough — both must be present. Over-fetching OPEN TIMES on
+// a false-positive combination is cheap and harmless (it's read-only,
+// facts-only availability, never booked or offered without the model
+// choosing to); under-fetching leaves the PEST REPORTS "not eligible" branch
+// with no times to offer, so this leans permissive. Documented choice: a
+// pest noun with NO activity verb ("thanks, no bugs since!") does not fire —
+// there is nothing to act on, and it is usually a closing/gratitude message,
+// not a report.
+// Codex round-15 P2 (PR #5336): the pest nouns come from reservice-scheduler's ONE shared list
+// (RESERVICE_PEST_NOUNS_SOURCE) plus the excluded specialties, so this prescreen and the lane
+// classifier can't drift. Codex round-16: built LAZILY on first use (like promiseLaneRegexes) and
+// with NO silent fallback — a scheduler mock that omits the list throws here rather than quietly
+// narrowing the prescreen. Exposed as { test } so callers keep the regex-style `.test(text)`.
+// Codex round-22 (PR #5336): the ONE clause-level classifier lives in reservice-scheduler
+// (isActivePestReport — a pest noun bound to an activity predicate in a clause that is not negated or
+// resolved); this object keeps the regex-style `.test(text)` callers use, and still throws when the
+// scheduler omits the shared noun list rather than quietly narrowing the prescreen.
+const PEST_REPORT_TEXT_RE = {
+  test(text) {
+    const scheduler = require('./reservice-scheduler');
+    const nouns = scheduler.RESERVICE_PEST_NOUNS_SOURCE;
+    if (typeof nouns !== 'string' || !nouns) throw new Error('reservice-scheduler must export RESERVICE_PEST_NOUNS_SOURCE');
+    return scheduler.isActivePestReport(text);
+  },
+};
+
+// Pronoun-only / bare return phrasing (Codex round-3 P2): the structural
+// pest-noun + activity-verb rule above deliberately dropped "they're back"
+// on its own (see the "structural change" test below it) — a genuinely
+// bare pronoun names no pest at all, so requiring a pest noun elsewhere in
+// the text is right for a customer with no on-file relationship. But
+// "they're back" is the PEST REPORTS bullet's OWN example (line ~325
+// above), and for a customer with a completed pest-family visit or an
+// active recurring pest plan on file, "they're back" unambiguously means
+// the pests are back — the pest noun is simply implicit from context
+// instead of the message. Matched ONLY together with
+// customerHasPestRelationship() below (needsOpenTimes), never alone —
+// otherwise this would fire on "call me back"/"I'll be back tomorrow" for
+// any customer with pest history at all.
+// Codex round-37 P2: a pronoun return needs an actual pest PRONOUN SUBJECT ("they're back", "they've come back", "it is still there") —
+// a bare "back again" ("Will you be back again next Tuesday?") is about Waves returning, not a report.
+const PRONOUN_RETURN_TEXT_RE = /\b(?:they|it)(?:['’]re|['’]ve|['’]s|\s+(?:are|is|have|has|were|was))?\s+(?:(?:all\s+)?back(?:\s+again)?|(?:came|come|coming|comes)\s+back|returned|returning|(?:still|all)\s+(?:there|here))\b/i;
+
+// Cheap, synchronous relationship signal for the PRONOUN_RETURN_TEXT_RE
+// branch above — read from the SAME context object generateGroundedDraft
+// already has in hand (no extra DB call; the authoritative eligibility
+// check is the existing async fetchReserviceFactState below, which still gates
+// whether a free re-service may actually be OFFERED). True for a completed
+// pest-family visit in serviceHistory (same category/label rule
+// reservice-scheduler.js's laneForCoverageRow uses for the pest lane,
+// re-service/rodent/termite/mosquito/tree/shrub excluded) or any recurring
+// plan tier on file (context.customer.tier — WaveGuard/membership). A
+// false positive here only over-fetches read-only OPEN TIMES, which is
+// harmless (same reasoning as PEST_REPORT_TEXT_RE above) — this leans
+// permissive rather than trying to perfectly classify "pest family" from a
+// free-text service label with no DB round trip.
+// (Round-30: the recurring-tier shortcut is gone — see the body.)
+// History-based relationship OR live pest-lane coverage (eligible / link-down / booked) already loaded for this draft.
+function hasPestRelationship(context, coveredLanes) {
+  return customerHasPestRelationship(context) || [].concat(coveredLanes || []).includes('pest');
+}
+// Every lane the facts / fact state shows the customer COVERED for, whatever its booking state.
+function factsCoveredReserviceLanes(factsBlock) {
+  return [...new Set([...eligibleReserviceLanes(factsBlock), ...linkDownReserviceLanes(factsBlock), ...bookedReserviceLanes(factsBlock)])];
+}
+function reserviceStateCoveredLanes(state) {
+  return [...new Set([...(state?.lanes || []), ...(state?.linkDownLanes || []), ...Object.keys(state?.booked || {})])];
+}
+function customerHasPestRelationship(context) {
+  // Codex round-30 P2: PEST-BACKED evidence only — a pest service in history, or an upcoming pest visit (an active pest
+  // plan). A bare waveguard_tier proves nothing: it can be 'none', 'One-Time', 'Commercial', or stamped from a
+  // mosquito / tree-shrub / termite family (reservice-scheduler.reserviceLanesForCustomer).
+  const history = [
+    ...(Array.isArray(context?.serviceHistory) ? context.serviceHistory : []),
+    ...(Array.isArray(context?.upcomingServices) ? context.upcomingServices : []),
+  ];
+  return history.some((s) => {
+    const label = String(s?.type || '').toLowerCase();
+    if (!label) return false;
+    // Codex round-35 P2: exclude SPECIALTY-LED labels only — one shared helper with the callback-lane rule. A retained pest-led combined
+    // service ("Pest & Rodent Control Service", "Quarterly Pest + Termite Bait Station Service" — catalog pest_control;
+    // migrations 20260712600000 / 20260612000031) is a pest relationship; "Termite Bait Stations", "Rodent Trapping",
+    // "Mosquito Misting", "Tree & Shrub Care" lead with the specialty and go.
+    if (specialtyLedLabel(label)) return false;
+    return /\bpest\b|waveguard/.test(label);
+  });
+}
+
+// The text-only half of the pest-report classifier (no facts): shared by needsOpenTimes and reportedPestLane's
+// callers so the two never drift. A pronoun-only return counts only with a pest relationship on file.
+function pestReportSignal(inboundMessage, context, coveredLanes) {
+  const text = String(inboundMessage || '');
+  return PEST_REPORT_TEXT_RE.test(text) || (PRONOUN_RETURN_TEXT_RE.test(text) && hasPestRelationship(context, coveredLanes));
+}
 
 function draftRouteFor({ intentName, inboundMessage } = {}) {
   if (SAVE_SALE_INTENT_RE.test(String(intentName || ''))) return MODELS.ROUTES.smsDraftSaveSale;
@@ -2084,16 +5073,28 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // instead of answering. Reuses the SAME cancel/complaint detection this
   // file's own save-the-sale routing already applies to intent + raw text
   // (SAVE_SALE_INTENT_RE / SAVE_SALE_TEXT_RE), so the two decisions can't
-  // drift apart.
-  // Which job the OPEN TIMES are sized for (Codex r3, follow-up #5, owner
-  // 2026-09-28): serviceIdentityFor has the model pick the visit, open
-  // estimate or catalog service the text is about. An estimate the message
-  // is linked to (estimateId) pins the service itself — its service_interest
-  // wins inside the engine — so no classification then. Carried on the
-  // snapshot so the send-time recheck asks the same question.
+  // drift apart — PLUS PEST_REPORT_TEXT_RE (Codex round-1 P2 (b)): the PEST
+  // REPORTS rule's own "not eligible" branch routes to a normal paid visit
+  // via OPEN TIMES, so a pest-report phrasing that names an actual pest noun
+  // ("the ants are back") must still fetch times, or that branch has
+  // nothing to offer — PLUS PRONOUN_RETURN_TEXT_RE (Codex round-3 P2): a
+  // BARE pronoun report ("they're back", the PEST REPORTS bullet's OWN
+  // example) names no pest noun at all, so PEST_REPORT_TEXT_RE structurally
+  // can't (and, by design, shouldn't) catch it on the text alone — it only
+  // means "the pests are back" for a customer this file can independently
+  // tell has a pest relationship (customerHasPestRelationship: a completed
+  // pest-family visit or a recurring plan tier, read straight off `context`,
+  // no DB round trip). Which job the OPEN TIMES are sized for (Codex r3,
+  // follow-up #5, owner 2026-09-28): serviceIdentityFor has the model pick
+  // the visit, open estimate or catalog service the text is about. An
+  // estimate the message is linked to (estimateId) pins the service itself —
+  // its service_interest wins inside the engine — so no classification
+  // then. Carried on the snapshot so the send-time recheck asks the same
+  // question.
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
-    || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
+    || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
+    || pestReportSignal(inboundMessage, context);
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
   // or with no city to look up (fetchOpenTimesData returns nothing then —
@@ -2101,10 +5102,18 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // no extra model call.
   // A live draft (liveOpenTimes: only draftShadowReply passes it — replay and
   // backfill callers pass no city on purpose) may also fetch with no customer
-  // city under GATE_SMS_OFFERS_SCHEDULER: the scheduler path locates the visit
-  // from the visit row itself; the zone finder still needs a city and returns
-  // nothing without one.
-  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes
+  // city under GATE_SMS_OFFERS_SCHEDULER: the scheduler pickers locate the job
+  // from the visit, the estimate or the customer's own booking pin; the zone
+  // finder still needs a city and returns nothing without one.
+  // Codex round-28 P2: the re-service lane state is resolved FIRST. For an active pest report whose lane is bookable
+  // (offer the covered free re-service) or already booked (refer to the appointment), a converged reply may NOT use
+  // normal OPEN TIMES — so the service-identity provider call, the catalog read and the availability build are
+  // skipped outright. Frozen replays (presetFactsBlock) keep their own facts and never reach this.
+  // Frozen replays keep their own FREE RE-SERVICE line (or none); a live draft resolves eligibility through the
+  // existing re-service mechanism.
+  const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
+  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage, context });
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const identity = willFetchOpenTimes && !estimateId
@@ -2118,25 +5127,22 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   if (willFetchOpenTimes && !identityCertain) {
     logger.info(`[sms-shadow] OPEN TIMES withheld — service identity uncertain (${identity.reason})`);
   }
-  // GATE_SMS_OFFERS_SCHEDULER (slice 1): a text the identity step resolved to
-  // ONE upcoming visit is offered that visit's times from the reschedule
-  // link's own picker. Everything else (estimate, new_service,
-  // last_completed, engine_default) stays on the zone finder for now.
-  const offersFromScheduler = willFetchOpenTimes && !estimateId && identityCertain
-    && SCHEDULER_VISIT_REASONS.has(identity.reason) && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER');
-  const scheduledServiceId = offersFromScheduler ? (identity.scheduledServiceId || null) : null;
+  // GATE_SMS_OFFERS_SCHEDULER: the times come from the picker that would
+  // commit the job this text is about (schedulerOfferFor) — an estimate's page,
+  // a visit's reschedule link, or /book for a new visit — never the zone finder.
+  const schedulerOffer = willFetchOpenTimes && identityCertain && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')
+    ? await schedulerOfferFor(identity, pricingEstimateId) : null;
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
   // null there so no send-time snapshot is minted for a draft nothing sends.
   const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
-      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain, estimateId: pricingEstimateId, serviceType,
-      ...(offersFromScheduler ? { offersFromScheduler: true, scheduledServiceId } : {}),
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
+      schedulerOffer,
     });
-  // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
-  // draft resolves eligibility through the existing re-service mechanism.
-  const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
+  const reserviceLanes = reserviceState ? reserviceState.lanes : null;
+  const reserviceBooked = reserviceState ? reserviceState.booked : {};
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2149,7 +5155,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -2162,7 +5168,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
     ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
-  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock);
+  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage, context, coveredLanes: reserviceStateCoveredLanes(reserviceState) }) ? RESERVICE_MIXED_REQUEST_HINT : '');
 
   // Route once for the whole loop (revisions included) — routing looks at the
   // intent label AND the raw message so complaints mislabeled as scheduling
@@ -2182,7 +5188,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
   };
   let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no LLM verification claim, behave as
@@ -2204,7 +5210,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // also switches real answers off at the delivery boundary.
     logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
     return {
-      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
       openTimesSnapshot: null,
     };
   }
@@ -2218,22 +5224,29 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
     }
-    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock });
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage, offeredTimes: parsed?.offered_times, context });
     if (!singlePassReservice.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
     }
+    // Round-19 P2: the deterministic live-ETA guard runs in single-pass mode too
+    // (no verifier here would catch a wrong minutes figure).
+    const singlePassLiveEta = validateLiveEtaMinutes({ reply: parsed?.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
+    if (!singlePassLiveEta.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassLiveEta.violations);
+    }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
-        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
         openTimesSnapshot: null,
       };
     }
     return {
-      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
       openTimesSnapshot: computeOpenTimesSnapshot({
-        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
+        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
     };
   }
@@ -2245,7 +5258,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
 
   for (let attempt = 0; attempt <= MAX_REVISIONS; attempt += 1) {
     // An empty reply ("no reply warranted") asserts nothing — nothing to check.
-    if (!parsed.reply) { converged = true; break; }
+    // Codex round-19 P2: unless a covered re-service offer is OWED (an eligible pest report) — then the
+    // empty reply is checked like any other and revised.
+    if (!parsed.reply) {
+      const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
+      if (owed.ok) { converged = true; break; }
+    }
 
     // Owner-directed structural fix: check the model's own offered_times
     // declaration deterministically FIRST, before spending a verifier call —
@@ -2253,9 +5271,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
-    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    for (const check of [reserviceCheck, complianceCheck]) {
+    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
+    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -2317,13 +5336,24 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
+  // Codex round-30 P2: the draft/verify calls can outlive the live ETA. A card
+  // whose minutes claim is ALREADY stale at publication time is unusable (every
+  // send seam rejects it as eta_claim_stale_facts), so it is WITHHELD — kept as a
+  // shadow row, never published or auto-sent — instead of re-resolving (a second
+  // GPS + route-provider round trip and a full re-verify for a figure the next
+  // inbound will refresh anyway).
+  if (converged && liveEtaExpiredByPublication({ reply: parsed?.reply, context, factsAt })) {
+    logger.warn('[sms-shadow] live ETA expired while the draft was generated; withholding the card (not converged)');
+    converged = false;
+  }
+
   return {
-    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
     openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
   };
 }
@@ -2365,7 +5395,23 @@ function parseShadowResponse(text) {
   // type isn't exactly 'none' — unknown types included — so applying it here,
   // pre-sanitize, is the honest signal. (Empty/absent = no action = safe.)
   const { autoSendActionsSafe } = require('./sms-auto-send');
-  const autoSendSafe = autoSendActionsSafe(parsed.intended_actions);
+  let autoSendSafe = autoSendActionsSafe(parsed.intended_actions);
+  // Codex round-1 P2 (c), defense in depth: a free-re-service PROMISE with
+  // no {"type":"escalate","note":"send_reservice_link"} in the RAW actions
+  // is never auto-send-safe — nobody would actually be told to send the
+  // link, so auto-sending it would leave a broken promise in the customer's
+  // hands. The revise/verify loop's own validateReserviceOffer already keeps
+  // a draft like this from converging (so maybeAutoSend never even sees it,
+  // since it requires converged:true), but this flag is read independently
+  // by other consumers (e.g. sms-gratitude-qualification.js), so it must
+  // read false on its own too, not only via the convergence gate.
+  // (generic inspections blanked: a prospect's Waves Assessment offer is no re-service promise; validateReserviceOffer
+  // still requires the link action for a plan customer's)
+  if (autoSendSafe && isReserviceOfferPromise(withoutGenericInspections(String(parsed.reply || '')))) {
+    const rawActions = Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [];
+    const hasSendLinkAction = rawActions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link');
+    if (!hasSendLinkAction) autoSendSafe = false;
+  }
 
   const intendedActions = Array.isArray(parsed.intended_actions)
     ? parsed.intended_actions
@@ -2418,9 +5464,28 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // The webhook already matched a single active customer (deleted_at +
     // shared-number protection) — build context from that row instead of
     // re-looking-up by phone, which could pick a different account.
+    // includeLiveEta (Codex round-2 P2, PR #5334): getContextForCustomer
+    // defaults to NOT resolving LIVE ETA (a GPS + Distance Matrix call) —
+    // this is one of the two SMS drafting paths that actually renders the
+    // fact into the prompt (buildFactsBlock, below via generateGroundedDraft),
+    // so it opts in explicitly.
+    // Codex round-12 P2: a gratitude-only "thanks" (gratitudeCandidate, known
+    // above) is answered with the fixed approved reply, so a LIVE ETA could
+    // never affect delivery — skip the GPS + paid Distance Matrix lookup a
+    // "thanks" from an en-route customer would otherwise trigger.
+    // Codex round-16 P2: gate-off must be byte-identical — the live-row query
+    // changes the upcoming list, so the opt-in also requires the release gate.
+    const includeLiveEta = gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
     const context = customer
-      ? await ContextAggregator.getContextForCustomer(customer)
-      : await ContextAggregator.getFullCustomerContext(fromPhone);
+      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta })
+      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });
+    // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
+    const liveEtaSnapshot = buildLiveEtaSnapshot(context);
+    // The technician first name(s) this draft may have used as a status subject ("Sam is on
+    // the way"), persisted INDEPENDENTLY of live entries (round-42 P2): a decision with no
+    // live snapshot still needs them so the send-time no-snapshot check can read name-subjected
+    // status wording. Names only.
+    const techNames = techNamesFromContext(context);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -2430,7 +5495,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot, factsGeneratedAt,
+      openTimesSnapshot, factsGeneratedAt, reserviceBooked,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
     });
@@ -2574,6 +5639,24 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
 
+    // Codex round-3 P2: which lane(s) this draft's re-service promise (if
+    // any) actually covers — a PURE re-run of validateReserviceOffer's own
+    // resolution over the exact facts/reply/actions the loop above already
+    // verified against (no new I/O; the loop's own converged verdict already
+    // guarantees this returns ok:true here). Carried into publishSuggestion's
+    // input_snapshot below so a send-time recheck (reservicePromiseStillEligible)
+    // knows WHICH lane to revalidate without re-deriving it from a possibly
+    // human-edited outgoing body. The PROMISE lanes are not threaded into maybeAutoSend/claimAutoSend:
+    // a re-service-offer reply always carries an
+    // {"type":"escalate","note":"send_reservice_link"} action, and ANY
+    // escalate action makes autoSendActionsSafe return false, so these
+    // drafts never reach the auto-send claim/executor path at all. A reply that merely REFERS to an
+    // already-booked callback has no such action and CAN auto-send, so the booked snapshot is threaded
+    // (round 43) and rechecked live before provider entry.
+    const reserviceLanesSnapshot = validateReserviceOffer({
+      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context,
+    }).promisedLanes || null;
+
     // Only verified-clean drafts (verify loop converged) may leave the silent
     // shadow lane — a draft still asserting unsupported facts after the
     // revision budget is never shown to a human OR sent to a customer; it
@@ -2608,6 +5691,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // input_snapshot so slaDraftedAt can anchor the deadline to it
           // instead of the row's own (later) created_at.
           factsGeneratedAt,
+          // Independent review finding (PR #5334): the visit(s) this
+          // draft's LIVE ETA fact was drawn from — dispatchClaimedSend
+          // rechecks them are still en_route immediately before sending.
+          liveEtaSnapshot,
+          techNames,
+          // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
+          reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -2646,6 +5736,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               intendedActions: parsed.intended_actions,
               // Codex #5194 P2 — see the maybeAutoSend call's comment above.
               factsGeneratedAt,
+              // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
+              liveEtaSnapshot,
+              techNames,
+              // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
+              reserviceLanesSnapshot,
+              reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -2697,6 +5793,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             intendedActions: parsed.intended_actions,
             // Codex #5194 P2 — see the maybeAutoSend call's comment above.
             factsGeneratedAt,
+            // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
+            liveEtaSnapshot,
+            techNames,
+            // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
+            reserviceLanesSnapshot,
+            reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -2750,6 +5852,7 @@ module.exports = {
   DRAFTER,
   PROMPT_VERSION,
   REAL_ANSWERS_PROMPT_VERSION,
+  REAL_ANSWERS_VERSION_FAMILY,
   currentPromptVersion,
   VERIFY_ENABLED,
   MAX_REVISIONS,
@@ -2775,12 +5878,45 @@ module.exports = {
   billingAmountCents,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
+  validateLiveEtaMinutes,
+  countEnRouteEtaStops,
+  findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival, bodyMentionsVisitStatus, sanitizeTechNames, techNamesFromContext,
+  bodyHasTimedArrivalPhrase,
+  bodyHasUnclassifiedArrivalDigit,
+  findGroundedMinutesFigures,
+  normalizeTimeQuantities,
+  bodyHasUnnormalizedHourWord,
+  bodyHasUnconvertedNumberWord,
+  bodyClaimsCompletedArrival,
+  replyClaimsEtaMinutes,
+  liveEtaExpiredByPublication,
+  buildLiveEtaSnapshot,
   replyBindsDeclaredDays,
   liveServiceType,
   serviceIdentityFor,
-  fetchReserviceLanes,
+  fetchReserviceFactState,
+  liveReserviceLaneState,
   reserviceFactLine,
   validateReserviceOffer,
+  isReserviceOfferPromise,
+  namedReserviceLanesInText,
+  reservicePromiseStillEligible,
+  reserviceCarriesLinkAction,
+  RESERVICE_OFFER_SPAN_RES,
+  reserviceBookedSnapshot,
+  reserviceBookedReferenceBlock,
+  reserviceSnapshotVersionEmitted,
+  reserviceBodyPrescreen,
+  PRE_DEPLOY_PROMPT_IDENTITIES,
   validateComplianceCopy,
   hasBannedCustomerCopy,
+  PEST_REPORT_TEXT_RE,
+  PRONOUN_RETURN_TEXT_RE,
+  customerHasPestRelationship,
+  pestReportSignal,
+  reserviceLaneDecidesReply,
+  reserviceMixedRequest,
+  RESERVICE_MIXED_REQUEST_HINT,
+  reportedPestLane,
+  reportedLaneSet,
 };

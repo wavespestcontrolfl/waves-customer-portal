@@ -62,6 +62,79 @@ describe("CallLogTabV2 standalone navigation", () => {
   });
 });
 
+// Call alerts (missed call, voicemail, repeat caller, ...) link
+// /admin/communications#tab=calls&call=<call_log id>. An older call is outside
+// the loaded window; the tab must fetch it by id and show it, not open empty.
+describe("CallLogTabV2 call deep link from an alert", () => {
+  const call = (id, phone) => ({ id, direction: "inbound", from_phone: phone, answered_by: "missed", created_at: new Date().toISOString() });
+  beforeEach(() => {
+    window.location.hash = "#tab=calls&call=call-old";
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes("route-calibration") || String(url).includes("/admin/call-recordings/stats")
+        ? {}
+        : { calls: [String(url).includes("id=call-old") ? call("call-old", "+19415550199") : call("call-new", "+19415550123")] },
+    })));
+  });
+  afterEach(() => {
+    cleanup();
+    window.location.hash = "";
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches a linked call that is not in the loaded page and lists it", async () => {
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes("/ai/admin/calls?id=call-old"))).toBe(true));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Create Lead" })).toHaveLength(2));
+  });
+});
+
+// Route review (codex #5446 r1 P2): a verdict for a decision that was refreshed or
+// superseded since the list loaded is answered 409 STALE_ROUTE_DECISION; the tab
+// must reload the calls so the next Right/Wrong judges the CURRENT decision.
+describe("CallLogTabV2 route review on a stale decision", () => {
+  const callWith = (revision) => ({
+    id: "call-9", direction: "inbound", from_phone: "+19415550123", answered_by: "human", duration_seconds: 60,
+    created_at: new Date().toISOString(),
+    routeDecision: { id: "rd-1", finalAction: "auto_route", recommendation: "auto_create_appointment", blockedReasons: [], createdAt: "2026-01-01T00:00:00Z", revision },
+    routeFeedback: null,
+  });
+  let listLoads;
+  let posted;
+  beforeEach(() => {
+    listLoads = 0;
+    posted = null;
+    vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes("/route-feedback")) {
+        posted = JSON.parse(init.body);
+        return { ok: false, status: 409, statusText: "Conflict", json: async () => ({ error: "This decision changed since it loaded", code: "STALE_ROUTE_DECISION" }) };
+      }
+      const body = u.includes("route-calibration") || u.includes("/admin/call-recordings/stats")
+        ? {}
+        : (() => { listLoads += 1; return { calls: [callWith(listLoads === 1 ? "1001" : "1002")] }; })();
+      return { ok: true, status: 200, json: async () => body };
+    }));
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("sends the displayed decision's id and revision, then reloads the calls on STALE_ROUTE_DECISION", async () => {
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    const rightButton = await screen.findByRole("button", { name: /Right/ });
+    const loadsBeforeClick = listLoads;
+    fireEvent.click(rightButton);
+    await waitFor(() => expect(posted).not.toBeNull());
+    expect(posted).toMatchObject({ verdict: "accept", routeDecisionId: "rd-1", routeDecisionRevision: "1001" });
+    // the stale answer triggers a reload (a second list fetch) and tells the reviewer why
+    await waitFor(() => expect(listLoads).toBeGreaterThan(loadsBeforeClick));
+    expect(await screen.findByText(/reprocessed since it loaded/)).toBeInTheDocument();
+  });
+});
+
 describe("CallLogTabV2 synced transcript", () => {
   const SEGMENTS = {
     segments: [

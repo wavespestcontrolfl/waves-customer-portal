@@ -27,6 +27,10 @@ jest.mock('../config/feature-gates', () => ({
   // that gate, and false matches this route's pre-existing (append-only)
   // behavior for every test that doesn't override it.
   bookCapacityCommitLive: jest.fn(() => false),
+  // GATE_BOOK_ARRIVAL_GRACE (2026-09-29): routes/booking.js reads this
+  // canonical reader; off here — it only ever runs behind
+  // bookInsertionOffersLive() anyway (also off).
+  bookArrivalGraceLive: jest.fn(() => false),
 }));
 
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js
@@ -34,6 +38,8 @@ jest.mock('../config/feature-gates', () => ({
 // list terminals resolve listResults.
 const firstResults = {};
 const listResults = {};
+const mockDbFailures = new Set(); // tables whose list reads reject (a dependency outage)
+const mockCallbackReadFailure = { on: false }; // only the open-CALLBACK read rejects (coverage read still works)
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
@@ -51,7 +57,9 @@ jest.mock('../models/db', () => {
       return q;
     };
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
-    q.then = (onOk, onErr) => Promise.resolve(callbackOnly ? [] : (listResults[table] || [])).then(onOk, onErr);
+    q.then = (onOk, onErr) => (mockDbFailures.has(table) || (mockCallbackReadFailure.on && callbackOnly)
+      ? Promise.reject(new Error(`db down: ${table}`)).then(onOk, onErr)
+      : Promise.resolve(callbackOnly ? [] : (listResults[table] || [])).then(onOk, onErr));
     q.catch = (fn) => Promise.resolve(listResults[table] || []).catch(fn);
     return q;
   };
@@ -479,6 +487,49 @@ describe('selected-lane availability for a customer with both plans', () => {
     await browse({});
     expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey: 'lawn_care', duration: 30 }));
   });
+  // Codex round-36 P2: the unconditional open-callback read must not turn a dependency outage into a 500 on the PUBLIC page —
+  // the non-strict path fails closed to the friendly not-eligible state it always rendered.
+  test('a failing eligibility + callback read renders not_eligible (200), never a 500 / next(err)', async () => {
+    mockDbFailures.add('scheduled_services as s');
+    try {
+      const res = await browse({});
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'not_eligible', lanes: [] }));
+      expect(build).not.toHaveBeenCalled();
+    } finally {
+      mockDbFailures.delete('scheduled_services as s');
+    }
+  });
+
+  // Codex round-39 P2: a failed CALLBACK read (coverage read fine) must not make every covered lane bookable — the page would
+  // offer a lane that already holds a booked re-service. It fails closed to the friendly unavailable state.
+  test('a failing callback-only read (coverage OK) offers NO lane: not_eligible, no availability built', async () => {
+    listResults['scheduled_services as s'] = [{ category: 'pest_control', service_type: 'Quarterly Pest Control' }];
+    mockCallbackReadFailure.on = true;
+    try {
+      const res = await browse({});
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'not_eligible', lanes: [], availability: null }));
+      expect(build).not.toHaveBeenCalled();
+      const { reserviceLaneAvailability } = require('../services/reservice-scheduler');
+      await expect(reserviceLaneAvailability({ id: CUST_ID, active: true }, require('../models/db'))).resolves.toMatchObject({ eligible: [], bookable: [], callbackReadFailed: true });
+      await expect(reserviceLaneAvailability({ id: CUST_ID, active: true }, require('../models/db'), { strict: true })).rejects.toThrow(/db down/);
+    } finally {
+      mockCallbackReadFailure.on = false;
+    }
+  });
+
+  test('the STRICT availability read (SMS facts / rechecks) still rethrows a failed callback read', async () => {
+    const { reserviceLaneAvailability } = require('../services/reservice-scheduler');
+    mockDbFailures.add('scheduled_services as s');
+    try {
+      await expect(reserviceLaneAvailability({ id: CUST_ID, active: true }, require('../models/db'), { strict: true })).rejects.toThrow(/db down/);
+      await expect(reserviceLaneAvailability({ id: CUST_ID, active: true }, require('../models/db'))).resolves.toMatchObject({ eligible: [], open: {}, bookable: [] });
+    } finally {
+      mockDbFailures.delete('scheduled_services as s');
+    }
+  });
+
   test('rejects an unavailable service without building offers', async () => {
     const res = await browse({ lane: 'termite' });
     expect(res.status).toHaveBeenCalledWith(400);

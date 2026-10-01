@@ -80,7 +80,8 @@ jest.setTimeout(60000);
       created_at timestamptz DEFAULT now())`, [schema]);
     await mockDatabase.raw(`CREATE TABLE ??.notifications (
       id text PRIMARY KEY, metadata jsonb, created_at timestamptz DEFAULT now(),
-      title text, body text, link text, read_at timestamptz)`, [schema]);
+      title text, body text, detail text, link text, read_at timestamptz,
+      done_at timestamptz, done_by text, resolution text)`, [schema]);
     engine = require('../services/estimator-engine');
     persistence = require('../services/admin-estimate-persistence');
     claimSql = require('../utils/estimate-claim-sql');

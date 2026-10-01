@@ -146,6 +146,7 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
 function lawnCalendarBlock(services) {
@@ -3062,6 +3063,13 @@ function buildStandardPayPerApplicationInvoiceCopy({
   // station setup' (a non-member's rodent plan), or both. The copy must
   // name what the invoice bills (codex #3591 r9 P1).
   setupLabel = 'WaveGuard setup',
+  // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): true only for a
+  // customer on the card rail (card saved, nothing charged or sent before the
+  // first visit). Every other customer keeps today's wording. The SETUP-ONLY
+  // shape never takes the new wording: its invoice is minted unattached and
+  // still delivered as a pay link at accept (see the standard accept mint),
+  // so "billed at your first visit" would be untrue for it.
+  payAfterFirstVisit = false,
 } = {}) {
   const setup = roundPositiveMoney(setupAmount);
   const firstApplication = roundPositiveMoney(firstApplicationAmount);
@@ -3076,9 +3084,13 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; after you confirm, we send the setup + first application invoice for ${fmtMoney(total)} so you can pay before service.`,
+      payAfterBody: payAfterFirstVisit
+        ? `Approve now; nothing is charged today. The setup + first application total of ${fmtMoney(total)} is billed at your first visit.`
+        : `Approve now; after you confirm, we send the setup + first application invoice for ${fmtMoney(total)} so you can pay before service.`,
       payPrefCardSub: `Invoice includes ${setupLabel} + first application (${fmtMoney(total)}).`,
-      billingSmall: `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${fmtMoney(total)}.`,
+      billingSmall: payAfterFirstVisit
+        ? `No payment is charged on this page. The setup plus first application, totaling ${fmtMoney(total)}, is billed at your first visit.`
+        : `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${fmtMoney(total)}.`,
     };
   }
 
@@ -3102,9 +3114,13 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; after you confirm, we send the first application invoice for ${fmtMoney(firstApplication)} so you can pay before service.`,
+      payAfterBody: payAfterFirstVisit
+        ? `Approve now; nothing is charged today. The first application (${fmtMoney(firstApplication)}) is billed at your first visit.`
+        : `Approve now; after you confirm, we send the first application invoice for ${fmtMoney(firstApplication)} so you can pay before service.`,
       payPrefCardSub: `Invoice includes the first application (${fmtMoney(firstApplication)}).`,
-      billingSmall: `No payment is charged on this page. After confirmation, we open the first application invoice for ${fmtMoney(firstApplication)}.`,
+      billingSmall: payAfterFirstVisit
+        ? `No payment is charged on this page. The first application (${fmtMoney(firstApplication)}) is billed at your first visit.`
+        : `No payment is charged on this page. After confirmation, we open the first application invoice for ${fmtMoney(firstApplication)}.`,
     };
   }
 
@@ -4805,6 +4821,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // "Show your work" payload — built (gate-checked) by the caller; null
   // keeps every byte of the rendered page identical to the pre-gate HTML.
   const showYourWork = opts.showYourWork || null;
+  // GATE_PAY_AFTER_FIRST_VISIT: the caller (handleEstimateView) sets this only
+  // for a customer on the card rail while the gate is live. Everyone else —
+  // gate off, exempt customers — keeps today's wording.
+  const payAfterFirstVisitCopy = opts.payAfterFirstVisitCopy === true;
   const estimateAskToken = signEstimateAskToken(est, token);
   const tier = est.tier || 'Bronze';
   const firstName = escapeHtml((est.customerName || '').split(' ')[0] || 'there');
@@ -4884,7 +4904,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         billingHeading: 'Choose how you want to pay',
         billingLede: null,
         payAfterTitle: 'Pay per application',
-        payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
+        payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
         noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
         bookingTitle: 'Pick your first lawn care visit',
         bookingSubhead: 'Choose a window to get your lawn care plan started.',
@@ -4909,7 +4929,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           billingHeading: 'Choose how you want to pay',
           billingLede: null,
           payAfterTitle: 'Pay per application',
-          payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
+          payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
           noPaymentCopy: 'No payment is charged on this page. Your first mosquito control visit will be billed after completion.',
           bookingTitle: 'Pick your first mosquito control visit',
           bookingSubhead: 'Choose a window to get your mosquito control plan started.',
@@ -4934,7 +4954,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           billingHeading: 'Choose how you want to pay',
           billingLede: null,
           payAfterTitle: 'Pay per application',
-          payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
+          payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
           noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
           bookingTitle: 'Pick your first tree & shrub visit',
           bookingSubhead: 'Choose a window to get your tree & shrub plan started.',
@@ -4959,7 +4979,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             billingHeading: 'Choose how you want to pay',
             billingLede: null,
             payAfterTitle: 'Pay per application',
-            payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
+            payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
             noPaymentCopy: 'No payment is charged on this page. Your first termite protection visit will be billed after completion.',
             bookingTitle: 'Pick your first termite protection visit',
             bookingSubhead: 'Choose a window to get your termite protection plan started.',
@@ -4984,7 +5004,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
               payAfterTitle: 'Pay per application',
-              payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
+              payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. You pay on service day.' : 'Approve now; after you confirm, we send the invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. You pay on service day; no card or deposit now.',
               bookingTitle: 'Review your termite trenching quote with Waves',
               bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and written service terms — then schedules your visit. You pay on service day; no card or deposit now.',
@@ -5009,7 +5029,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 billingHeading: 'Choose how you want to pay',
                 billingLede: null,
                 payAfterTitle: 'Pay per application',
-                payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
+                payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. You pay on service day.' : 'Approve now; after you confirm, we send the invoice so you can pay before service.',
                 noPaymentCopy: 'No payment is charged on this page. Your Bora-Care treatment will be billed after completion.',
                 bookingTitle: 'Pick your Bora-Care treatment visit',
                 bookingSubhead: 'Choose a window to get your Bora-Care wood treatment scheduled.',
@@ -5038,7 +5058,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
               payAfterTitle: 'Pay per application',
-              payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
+              payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
               bookingTitle: 'Search by date or time — no calling, no hold music, no back-and-forth',
               bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
@@ -5457,15 +5477,20 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     setupLabel: standardSetupLabel,
     firstApplicationAmount: standardInvoiceFirstApplicationAmount,
     fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
+    payAfterFirstVisit: payAfterFirstVisitCopy,
   });
   const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
   const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
   const standardInvoiceBillingSmallHtml = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
-    ? `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`
+    ? (payAfterFirstVisitCopy
+      ? `No payment is charged on this page. The setup plus first application, totaling ${standardInvoiceDynamicTotalHtml}, is billed at your first visit.`
+      : `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`)
     : (standardInvoiceCopy.hasSetup
         ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`
         : (standardInvoiceCopy.hasFirstApplication
-            ? `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`
+            ? (payAfterFirstVisitCopy
+              ? `No payment is charged on this page. The first application (${standardInvoiceDynamicTotalHtml}) is billed at your first visit.`
+              : `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`)
             : escapeHtml(pageCopy.noPaymentCopy)));
   // Annual prepay shows for ANY recurring estimate with an annual total. The
   // incentive depends on the mix: pest/mosquito waive the WaveGuard setup;
@@ -5598,7 +5623,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="pay_at_visit">Choose pay per application</button>
-        <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
+        <p class="billing-small">${payAfterFirstVisitCopy && !(standardInvoiceCopy.hasSetup && !standardInvoiceCopy.hasFirstApplication) ? 'Next: pick a time, then confirm. Nothing is charged today.' : 'Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.'}</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
@@ -6943,6 +6968,7 @@ ${shellQuestionsBar()}
   const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(standardSetupDue)};
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
+  const PAY_AFTER_FIRST_VISIT_COPY = ${payAfterFirstVisitCopy ? 'true' : 'false'};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
@@ -7239,12 +7265,18 @@ ${shellQuestionsBar()}
     const hasSetup = setupDue > 0;
     const hasFirstApplication = STANDARD_INVOICE_HAS_FIRST_APPLICATION && currentFirstVisitAmount() > 0;
     if (hasSetup && hasFirstApplication) {
+      if (PAY_AFTER_FIRST_VISIT_COPY) {
+        return 'No payment is charged here. The setup plus first application, totaling ' + standardInvoiceTotalText() + ', is billed at your first visit; choose a service window to continue.';
+      }
       return 'No payment is charged here. After confirmation, we open an invoice for setup plus the first application totaling ' + standardInvoiceTotalText() + '; choose a service window to continue.';
     }
     if (hasSetup) {
       return 'No payment is charged here. After confirmation, we open the setup invoice for ' + fmt(setupDue) + '; choose a service window to continue.';
     }
     if (hasFirstApplication) {
+      if (PAY_AFTER_FIRST_VISIT_COPY) {
+        return 'No payment is charged here. The first application (' + firstVisitTotalText() + ') is billed at your first visit; choose a service window to continue.';
+      }
       return 'No payment is charged here. After confirmation, we open the first application invoice for ' + firstVisitTotalText() + '; choose a service window to continue.';
     }
     return STANDARD_NO_PAYMENT_COPY + ' Choose a service window to continue.';
@@ -8656,7 +8688,7 @@ async function handleEstimateView(req, res, next) {
         // React view implements the quote acknowledgement, so lane-active
         // estimates must land there while the prepay gate is on.
         return RecurringCards.isPrepayCardAndChargeEnabled()
-          && ['saved_method_consented', 'autopay_already_active'].includes(viewPolicy.exemptReason || '');
+          && RecurringCards.payAfterFirstVisitInvoiceRail(viewPolicy);
       })();
     // ?adminPreview=1 is the staff draft-preview param (the estimate tool's
     // "Customer View" + the estimates list's Preview). The param is NOT
@@ -8928,6 +8960,40 @@ async function handleEstimateView(req, res, next) {
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
 
+    // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): the "nothing is
+    // charged today, billed at your first visit" wording renders only for a
+    // customer on the card rail — the SAME policy the accept resolves, minus
+    // anything the accept exempts (invoice mode, commercial manual billing,
+    // one-time-only). Short-circuits before any lookup while the gate or the
+    // card lane is off, so gate-off pages are byte-identical to today.
+    let payAfterFirstVisitCopy = false;
+    if (require('../config/feature-gates').payAfterFirstVisitLive()
+      && RecurringCards.isRecurringCardOnFileEnabled()
+      && !effectiveInvoiceMode && !depositStructuralOneTime) {
+      try {
+        const lcForPayAfter = commercialLowConfidenceRange(estData);
+        if (!commercialAcceptDepositExempt({
+          isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+          siteConfirmationHold: lcForPayAfter.hasLowConfidence && !lcForPayAfter.forceSiteQuote,
+          treatAsOneTime: false,
+          billByInvoice: effectiveInvoiceMode,
+        })) {
+          const payAfterPolicy = await RecurringCards.resolveRecurringCardPolicyForEstimate({
+            estimate,
+            membership,
+            treatAsOneTime: false,
+            billByInvoice: effectiveInvoiceMode,
+            paymentMethodPreference: null,
+          });
+          payAfterFirstVisitCopy = RecurringCards.payAfterFirstVisitCardRail(payAfterPolicy);
+        }
+      } catch (payAfterErr) {
+        // Fail toward today's wording: never promise "nothing is charged"
+        // on a lookup we could not complete.
+        logger.warn(`[estimate-view] pay-after-first-visit policy check failed, keeping today's wording: ${payAfterErr.message}`);
+      }
+    }
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
@@ -8986,7 +9052,7 @@ async function handleEstimateView(req, res, next) {
       // record even with the gate off (codex #3338 r15 sibling) — same
       // committed definition the snapshot reconciler uses.
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
-    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
+    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate, payAfterFirstVisitCopy });
   } catch (err) { next(err); }
 }
 
@@ -9856,8 +9922,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       recurringCardPolicy.required = false;
       recurringCardPolicy.exemptReason = 'commercial_manual_billing';
     }
-    const recurringCardLaneActive = recurringCardPolicy.required
-      || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicy.exemptReason || '');
+    const recurringCardLaneActive = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicy);
     // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
     // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
     // contract) is removed — resolveDepositPolicy is permanently
@@ -13188,13 +13253,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // SKIPPED conversion (converter found nothing to convert) may still
     // return a membershipEmail payload — no membership started, so send
     // nothing for it.
-    if (!annualPrepaySelected
-      && standardConversion?.membershipEmail
-      && standardConversion?.recurringConversionSkipped !== true) {
-      const AccountMembershipEmail = require('../services/account-membership-email');
-      void AccountMembershipEmail.sendMembershipStarted(standardConversion.membershipEmail)
-        .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
-    }
+    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a standard recurring
+    // signup the combined onboarding email below carries the property and the
+    // plan, so membership.started waits for that send and goes out inline right
+    // after it ONLY when the send did not cover it (decided at send time; owner
+    // ruling 2026-09-30). Gate off: exactly the block below, sent now.
+    const membershipDue = !annualPrepaySelected
+      && !!standardConversion?.membershipEmail
+      && standardConversion?.recurringConversionSkipped !== true;
+    const foldMembership = SignupSingleEmail.signupLaneEligible({ annualPrepaySelected, customerId, standardConversion });
+    const sendMembershipStarted = () => require('../services/account-membership-email')
+      .sendMembershipStarted(standardConversion.membershipEmail)
+      .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
+    if (membershipDue && !foldMembership) void sendMembershipStarted();
     // "You're booked — here's what happens next" onboarding email
     // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
     // idempotent per estimate so an accept retry can't double-send. The
@@ -13225,7 +13296,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
           : ad.localeCompare(bd);
       })[0] || null;
-      void sendEstimateAcceptedOnboarding({
+      const onboardingArgs = {
         customerId,
         estimateId: estimate.id,
         acceptanceId: acceptanceRecordId,
@@ -13234,7 +13305,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
           || 'service',
         appointment: firstAcceptedAppointment,
-      });
+      };
+      if (foldMembership) {
+        // The combined signup email, then membership.started unless that send
+        // covered it (anything but a covering send, including a throw, sends it).
+        void sendEstimateAcceptedOnboarding({ ...onboardingArgs, signup: { membershipEmail: standardConversion.membershipEmail } })
+          .catch((e) => logger.error(`[estimate-accept] onboarding email failed for customer ${customerId}: ${e.message}`))
+          .then((result) => (result?.coversMembership ? null : sendMembershipStarted()));
+      } else {
+        void sendEstimateAcceptedOnboarding(onboardingArgs);
+      }
     }
     if (customerId) {
       try {
@@ -14205,6 +14285,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       try {
         const InvoiceService = require('../services/invoice');
         const runDelivery = () => InvoiceService.sendViaSMSAndEmail(invoiceId, {
+          // The customer's own accept: dispute-hold exempt.
+          holdExempt: 'customer',
           payUrlParams: estimateInvoicePayUrlParams({
             billingTerm,
             saveCard: !treatAsOneTime,
@@ -24520,7 +24602,7 @@ function normalizeBreakdownItemLabel(item = {}) {
 // result.lineItems / engineResult.lineItems don't read as an empty mix here
 // (which would strip a setup fee the converter is going to invoice).
 function estimateDataRecurringServices(estData = {}) {
-  // Fall back to estData ITSELF like estimateRecurringKeysForDetails and the
+  // Fall back to estData ITSELF like estimateServiceDetailsScope and the
   // accept/read paths — some estimates store `recurring.services` at the
   // top level of estimate_data rather than under result/engineResult.
   const result = estData?.result && typeof estData.result === 'object'
@@ -24780,6 +24862,51 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
       ...(withContract.renderFlags?.manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
     },
   };
+}
+
+// The page's acceptance contract (acceptance.mode: whether the slot picker
+// renders at all) and the inputs /data reads alongside it. ONE resolution,
+// shared with the texting AI's estimate offers (estimate-slots-public
+// offerableEstimateSlots), so SMS offers times only where the page would
+// let the customer pick one.
+async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+  const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
+  const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+  const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  });
+  // Narrow low-confidence commercial recurring estimate (the population whose
+  // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
+  // its accept, whatever the billing mode — invoice-mode holds the first-
+  // invoice mint, non-invoice bills per application after the confirmed visit,
+  // and annual prepay is rejected/hidden until the price is confirmed. Drives
+  // /data's payment copy + deposit overrides AND the no-slot accept mode
+  // (slots return the empty commercial-manual list for every commercial auto
+  // estimate). Matches the accept-handler hold predicate.
+  const siteConfirmationHold = defaultServiceMode !== 'one_time'
+    && (() => {
+      const lc = commercialLowConfidenceRange(estData);
+      return lc.hasLowConfidence && !lc.forceSiteQuote;
+    })();
+  const commercialNoSlotAccept = siteConfirmationHold;
+  // Guarantee-only renewals accept with NO appointment: the acceptance
+  // contract tells the React view to skip the slot picker and offer the
+  // payment-only (invoice) accept. An existing linked appointment keeps
+  // precedence inside the contract — accepting against it works as-is.
+  const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estData);
+  // Accept + deposit-intent reject an invoice-mode estimate with no linked
+  // customer and no customer phone (nothing to bill / deliver the invoice
+  // to) — an email-only renewal must not advertise an accept the server
+  // refuses. Contact-required renewals get the call-office contract.
+  const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
+  const acceptance = buildEstimateAcceptanceContract({
+    quoteRequirement,
+    existingAppointment: linkedAppointment,
+    invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
+    invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
+    commercialNoSlotAccept,
+  });
+  return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance };
 }
 
 function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
@@ -26492,13 +26619,53 @@ const serviceDetailsSendLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 });
 
-// The packet only exists for services actually ON this estimate.
-function estimateRecurringKeysForDetails(estimate) {
+// One-time lawn specialty lines (engine keys — estimate-one-time-copy.json)
+// carry the lawn prep & service guide too, so an estimate whose only lawn work
+// is one of these rows can fetch/send the 'lawn_care' packet — in its
+// one-time variant (no visit count, re-service, or program promises). Keep in
+// step with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
+const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+// Mechanical/material lawn work that applies no product (prep-guide-sender.js).
+const MECHANICAL_LAWN_GUIDE_SERVICES = new Set(['plugging', 'dethatching', 'top_dressing']);
+
+// The packet only exists for services actually ON this estimate: the
+// recurring lines, plus 'lawn_care' when the estimate carries a one-time lawn
+// line. Nothing else widens — a one-time pest/rodent/termite row never unlocks
+// its (recurring-program) packet. One-time rows are read from the SAME
+// replayed pricing bundle /data sends the page (pricingBundle.oneTimeBreakdown,
+// stored breakdown as the fallback), so an engine-inputs-only estimate whose
+// page shows the guide row can also fetch it.
+// `preferOneTime` (the one-time card's `scope=one_time` hint): an estimate
+// that carries BOTH a recurring lawn line and a one-time lawn row (lawn
+// toggle estimate, one-time mode) serves the one-time variant. The hint only
+// picks the variant when a one-time lawn row is actually present — it never
+// widens `keys`, and recurring stays the default.
+// Returns { keys, lawnScope, mechanicalOnly } — lawnScope is 'recurring',
+// 'one_time', or null; mechanicalOnly = every one-time lawn row applies no
+// product (the guide then omits the product sections).
+async function estimateServiceDetailsScope(estimate, { preferOneTime = false } = {}) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
-  return new Set(
+  const keys = new Set(
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
+  const recurringLawn = keys.has('lawn_care');
+  if (recurringLawn && !preferOneTime) return { keys, lawnScope: 'recurring', mechanicalOnly: false };
+  let lawnRows = [];
+  try {
+    let breakdown = null;
+    try {
+      breakdown = (await buildPricingBundle(estimate))?.oneTimeBreakdown || null;
+    } catch { /* replay failed: fall back to the stored breakdown */ }
+    if (!breakdown) breakdown = normalizeOneTimeBreakdown(estData);
+    const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+    lawnRows = items.filter((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service));
+  } catch { /* malformed one-time data: no widening (fail closed) */ }
+  if (lawnRows.length) {
+    keys.add('lawn_care');
+    return { keys, lawnScope: 'one_time', mechanicalOnly: lawnRows.every((item) => MECHANICAL_LAWN_GUIDE_SERVICES.has(item.service)) };
+  }
+  return { keys, lawnScope: recurringLawn ? 'recurring' : null, mechanicalOnly: false };
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -26523,10 +26690,13 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     }
     const serviceKey = String(req.params.serviceKey || '');
     const { serviceDetailsAvailable, buildServiceDetailsContent } = require('../services/estimate-service-details');
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.query?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const content = await buildServiceDetailsContent(serviceKey, estimate);
+    const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
     const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
     const buffer = await renderServiceDetailsPdf(content);
     res.set('Content-Type', 'application/pdf');
@@ -26628,7 +26798,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Generic 404, matching the GET route and the public-route contract — a
     // distinct error here would make the send endpoint a service-membership
     // oracle for bearer-token links.
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.body?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
 
@@ -26652,11 +26825,15 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
-    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
+    // A one-time guide keeps its variant through the texted link.
+    // Only the lawn guide has a one-time variant; every other guide keeps one
+    // URL and one idempotency key regardless of the estimate's lawn scope.
+    const oneTimeLawnGuide = serviceKey === 'lawn_care' && detailsScope.lawnScope === 'one_time';
+    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf${oneTimeLawnGuide ? '?scope=one_time' : ''}`;
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
-      const content = await buildServiceDetailsContent(serviceKey, estimate);
+      const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
       if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
@@ -26676,7 +26853,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
           // One send per estimate+service+day — the button is customer-initiated
           // but a retap shouldn't stack identical emails.
-          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
+          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${etDateString()}`,
           categories: ['estimate_service_details'],
           // Codex round 1 on #4608 (P1): content derivation would catch the
           // estimate_url in the payload anyway, but the explicit id is
@@ -26729,7 +26906,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // per estimate+service, underscore-safe; never a different packet)
     // covers restarts, best-effort: its failure never blocks the send.
     const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
-    const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    // The lawn guide's one-time variant is a different packet (its own link):
+    // it gets its own claim so neither variant dedups the other.
+    const dedupKey = `${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${tenDigits}`;
     const claimKey = dedupKey;
     // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably so
     // a concurrent loser's poll can read the SAME refusal — best-effort,
@@ -26788,18 +26967,26 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // form. The bare URL is a substring of the scheme-ful one, so matching on
     // it also still finds rows logged before this send moved onto the chokepoint.
     const pdfUrlBare = stripSmsUrlScheme(pdfUrl);
-    const recentPacketSend = async () => db('sms_log')
-      .where({ direction: 'outbound', message_type: 'estimate_service_details' })
-      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
-      // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
-      // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
-      // so a row matches on the raw URL OR on a code minted for that exact URL.
-      .where(function packetLinkInBody() {
-        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
-          .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
-      })
-      .whereRaw("created_at >= NOW() - interval '10 minutes'")
-      .first();
+    const recentPacketSend = async () => {
+      let q = db('sms_log')
+        .where({ direction: 'outbound', message_type: 'estimate_service_details' })
+        .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
+        // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
+        // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
+        // so a row matches on the raw URL OR on a code minted for that exact URL.
+        .where(function packetLinkInBody() {
+          this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
+            .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
+        })
+        .whereRaw("created_at >= NOW() - interval '10 minutes'");
+      // The recurring lawn URL is a prefix of the one-time one, so a one-time
+      // text must not dedup a recurring request. (A wrapped body carries only
+      // /l/<code>, never the raw URL, so this never excludes a short-link row.)
+      if (serviceKey === 'lawn_care' && !oneTimeLawnGuide) {
+        q = q.whereRaw('strpos(COALESCE(message_body, \'\'), ?) = 0', [`${pdfUrlBare}?scope=one_time`]);
+      }
+      return q.first();
+    };
     const sendPromise = (async () => {
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure
@@ -27184,27 +27371,11 @@ async function composeEstimateDataPayload(estimate, {
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
     const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
-    const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
-    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const {
+      defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
+    } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
       && estimateTrenchingReviewRequired(estimateDataForIntelligence);
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence, {
-      serviceModes: adoptionServiceModesForContract(estimate, estimateDataForIntelligence),
-    });
-    // Narrow low-confidence commercial recurring estimate (the population whose
-    // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
-    // its accept, whatever the billing mode — invoice-mode holds the first-
-    // invoice mint, non-invoice bills per application after the confirmed visit,
-    // and annual prepay is rejected/hidden until the price is confirmed. Drives
-    // the payment copy + deposit overrides below AND the no-slot accept mode
-    // (slots return the empty commercial-manual list for every commercial auto
-    // estimate). Matches the accept-handler hold predicate.
-    const siteConfirmationHold = defaultServiceMode !== 'one_time'
-      && (() => {
-        const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
-        return lc.hasLowConfidence && !lc.forceSiteQuote;
-      })();
-    const commercialNoSlotAccept = siteConfirmationHold;
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -27237,24 +27408,7 @@ async function composeEstimateDataPayload(estimate, {
     // authored-proposal estimate): no line covering the whole estimate, on
     // the page or in Ask Waves, may state them.
     const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
-    // Guarantee-only renewals accept with NO appointment: the acceptance
-    // contract tells the React view to skip the slot picker and offer the
-    // payment-only (invoice) accept. An existing linked appointment keeps
-    // precedence inside the contract — accepting against it works as-is.
-    const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estimateDataForIntelligence);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
-    // Accept + deposit-intent reject an invoice-mode estimate with no linked
-    // customer and no customer phone (nothing to bill / deliver the invoice
-    // to) — an email-only renewal must not advertise an accept the server
-    // refuses. Contact-required renewals get the call-office contract.
-    const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
-    const acceptance = buildEstimateAcceptanceContract({
-      quoteRequirement,
-      existingAppointment: linkedAppointment,
-      invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
-      invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
-      commercialNoSlotAccept,
-    });
     const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
@@ -27364,8 +27518,7 @@ async function composeEstimateDataPayload(estimate, {
     // client keys the deposit modal off this policy, so during the rollout
     // window with both flags on it must see required:false or the "$0
     // today" story breaks (Codex #2680).
-    const recurringCardLaneActiveForData = recurringCardPolicyForData.required
-      || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicyForData.exemptReason || '');
+    const recurringCardLaneActiveForData = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData);
     if (recurringCardLaneActiveForData && depositPolicy.required) {
       // Prepay accepts sit OUTSIDE the card lane only while the legacy
       // carve-out is in force (the resolver exempts prepay_annual before any
@@ -27905,6 +28058,14 @@ async function composeEstimateDataPayload(estimate, {
         // NOT advertise a charge the accept route deliberately skips
         // (Codex r9). The accept gate re-resolves authoritatively either way.
         prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled(),
+        // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): this customer
+        // is on the card rail AND the gate is on — the same predicate that
+        // drives the server-rendered "nothing is charged today" wording
+        // (payAfterFirstVisitCardRail, minus the page's invoice-mode /
+        // one-time / commercial short-circuits, which the policy above already
+        // carries). PLUMBING ONLY: no client code reads it yet. Present only
+        // when true so every gate-off response stays byte-identical.
+        ...(RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData) ? { payAfterFirstVisit: true } : {}),
       },
       estimate: {
         id: estimate.id,
@@ -28527,6 +28688,7 @@ module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServic
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
+module.exports.resolveEstimateAcceptance = resolveEstimateAcceptance;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;
@@ -28688,6 +28850,7 @@ module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
+module.exports.estimateServiceDetailsScope = estimateServiceDetailsScope;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;

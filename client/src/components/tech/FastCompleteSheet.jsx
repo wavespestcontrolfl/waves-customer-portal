@@ -37,7 +37,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
-import { defaultApplicationMethodForLine, resolveRatePrefill } from '../../lib/product-rate-prefill';
+import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
@@ -268,10 +268,7 @@ function rowRate(row, sprayMethod) {
   const labelRate = !(row.added && (resolved.usePestSprayDefault || !row.labelUnit));
   const rateUnit = labelRate && isSendableRateUnit(resolved.rateUnit) ? resolved.rateUnit : '';
   const prefill = !row.added && Number(resolved.rate) > 0 && rateUnit ? String(Number(resolved.rate)) : '';
-  const maxRaw = resolved.perBasisUnit
-    ? resolved.labelMaxRate
-    : resolved.usePestSprayDefault ? null : parseFloat(String(row.product?.max_label_rate_per_1000 ?? ''));
-  const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
+  const max = prefillRateCeiling(resolved, row.product);
   return { rate: row.rateInput ?? prefill, rateUnit, max };
 }
 

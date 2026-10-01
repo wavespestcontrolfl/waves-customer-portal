@@ -51,6 +51,7 @@
 
 const { isEnabled } = require('../../config/feature-gates');
 const logger = require('../logger');
+const { raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
 const { etDateString } = require('../../utils/datetime-et');
 const { claimProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
 const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements, movePatch, isOutreachLocked } = require('./link-registry');
@@ -88,7 +89,7 @@ const isAuto = (l) => typeof l === 'string' && l.startsWith('AUTO_');
 const severity = (l) => { const i = LEVEL_SEVERITY.indexOf(l); return i === -1 ? LEVEL_SEVERITY.length : i; };
 const mostSevere = (levels) => levels.reduce((best, l) => (best === null || severity(l) < severity(best) ? l : best), null);
 const defaultExclusive = (key, fn) => require('../../utils/cron-lock').runExclusive(key, fn, { recordHealth: false });
-const defaultNotify = (title, body, opts) => require('../notification-service').notifyAdmin('system', title, body, opts);
+const defaultNotify = (spec, opts) => raiseAdminAlert('system', spec, opts);
 
 // A row is AUTHORIZED when it is satisfied, AUTO_*, or OWNER_* with a valid
 // (approved, not invalidated) approval attached — PR 2b writes those; the
@@ -729,10 +730,23 @@ async function dispatchAutoSends(db, out, { send, now, exclusive }) {
 async function bellForParked(notify, out, parkedDomains, now) {
   if (!(out.parked > 0)) return;
   try {
-    await notify('Link placements await your decision', `${out.parked} placement${out.parked === 1 ? '' : 's'} parked awaiting your approval: ${parkedDomains.slice(0, 8).join(', ')}${parkedDomains.length > 8 ? ` +${parkedDomains.length - 8} more` : ''}`, {
-        link: '/admin/seo', bell: true, dedupeKey: `link-authority:${etDateString(now)}`, refreshOnDedupe: true,
-        metadata: { lane: 'link_authority', parked: out.parked, domains: parkedDomains },
-      });
+    const n = out.parked;
+    const shown = parkedDomains.slice(0, 3).join(', ');
+    const more = parkedDomains.length > 3 ? ` +${parkedDomains.length - 3} more` : '';
+    await notify({
+      area: 'Content',
+      action: `approve ${n} link placement${n === 1 ? '' : 's'}`,
+      why: cutAtWord(`Parked awaiting your approval: ${shown}${more}.`, MAX_WHY_CHARS),
+      severity: 'needs-you',
+      link: '/admin/seo',
+      subject: { type: 'check', id: 'link-authority' },
+      doneWhen: 'placements_decided',
+      who: 'person',
+    }, {
+      detail: `${n} placement${n === 1 ? '' : 's'} parked awaiting your approval: ${parkedDomains.slice(0, 8).join(', ')}${parkedDomains.length > 8 ? ` +${parkedDomains.length - 8} more` : ''}`,
+      bell: true, dedupeKey: `link-authority:${etDateString(now)}`, refreshOnDedupe: true,
+      metadata: { lane: 'link_authority', parked: n, domains: parkedDomains },
+    });
   } catch (err) { logger.error(`[link-authority] bell failed: ${err.message}`); }
 }
 

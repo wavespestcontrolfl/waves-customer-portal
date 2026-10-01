@@ -38,7 +38,7 @@ let mockRows = [];
 let mockFirstRow = null;
 let mockRejectWith = null;
 const builders = [];
-const CHAIN_METHODS = ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
+const CHAIN_METHODS = ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'whereNotNull', 'select', 'from', 'as', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
 const makeBuilder = (table) => {
   const b = { table };
   CHAIN_METHODS.forEach((m) => { b[m] = jest.fn(() => b); });
@@ -49,6 +49,8 @@ const makeBuilder = (table) => {
 };
 const mockDb = jest.fn((table) => makeBuilder(table));
 mockDb.raw = jest.fn((sql) => ({ sql }));
+// Capped candidate queries open with db.select(...).from(subquery).
+mockDb.select = jest.fn(() => makeBuilder(null));
 jest.mock('../models/db', () => mockDb);
 
 const express = require('express');

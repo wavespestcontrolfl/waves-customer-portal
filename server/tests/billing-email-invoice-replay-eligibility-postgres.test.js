@@ -24,6 +24,10 @@ postgres('direct invoice Email replay eligibility (PostgreSQL)', () => {
     admin = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
+    // The dispute-hold read (collections/collection-hold.js) - no rows: no active hold.
+    await mockPg.schema.createTable('collections_flags', (table) => {
+      table.increments('id'); table.uuid('customer_id'); table.text('flag'); table.text('reason'); table.timestamp('released_at', { useTz: true });
+    });
     await mockPg.schema.createTable('invoices', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable(); table.text('status');
       table.uuid('payer_id'); table.text('scheduled_send_error');

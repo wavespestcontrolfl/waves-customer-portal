@@ -51,4 +51,54 @@ function zoneSlugOf(zone) {
   return zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
 }
 
-module.exports = { resolveEstimateZone, zoneSlugOf };
+// Coordinate-based zone resolution: the service_zones row whose CENTER is
+// nearest (great-circle miles) to lat/lng, or null when none is within
+// `maxMiles` (an address outside the service area belongs to no zone) or no
+// zone row carries center coordinates. Resolution by coordinates rather than
+// city text on purpose: 'North Venice', 'Northport' and the like are real
+// customer addresses that are NOT in service_zones.cities, so a city scan
+// would miss exactly the far-south addresses the zone route days serve.
+// Approximate by design (nearest center, not a polygon — the table has no
+// polygons); the consolidated Venice / North Port row and the retained Port
+// Charlotte row both name the same south pool (see zone-day-funnel.js), so
+// which of the two a far-south address lands on does not change the outcome
+// for its callers. Throws on query failure — callers decide how to degrade.
+const EARTH_RADIUS_MILES = 3958.8;
+const DEFAULT_ZONE_RADIUS_MILES = 35;
+
+function milesBetween(aLat, aLng, bLat, bLng) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(bLat - aLat);
+  const dLng = rad(bLng - aLng);
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_MILES * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+// Pure — exported for tests.
+function nearestZoneByCoords(zones, lat, lng, { maxMiles = DEFAULT_ZONE_RADIUS_MILES } = {}) {
+  const la = Number(lat);
+  const ln = Number(lng);
+  if (lat == null || lng == null || !Number.isFinite(la) || !Number.isFinite(ln)) return null;
+  let best = null;
+  let bestMiles = Infinity;
+  for (const zone of zones || []) {
+    if (zone?.center_lat == null || zone?.center_lng == null) continue;
+    const zLat = Number(zone.center_lat);
+    const zLng = Number(zone.center_lng);
+    if (!Number.isFinite(zLat) || !Number.isFinite(zLng)) continue;
+    const miles = milesBetween(la, ln, zLat, zLng);
+    if (miles < bestMiles) { best = zone; bestMiles = miles; }
+  }
+  return best && bestMiles <= maxMiles ? best : null;
+}
+
+async function resolveZoneByCoords(dbc, lat, lng, opts) {
+  const la = Number(lat);
+  const ln = Number(lng);
+  if (lat == null || lng == null || !Number.isFinite(la) || !Number.isFinite(ln)) return null;
+  const zones = await dbc('service_zones').select('id', 'cities', 'zone_name', 'center_lat', 'center_lng');
+  return nearestZoneByCoords(zones, la, ln, opts);
+}
+
+module.exports = { resolveEstimateZone, zoneSlugOf, resolveZoneByCoords, nearestZoneByCoords };

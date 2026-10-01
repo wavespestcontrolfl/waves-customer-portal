@@ -1,14 +1,12 @@
-// Admin-alerts-brevity scope (owner ruling 2026-09-28):
-//   1. NotificationService.create's admin brevity guard — for category
-//      ops_digest ONLY, a body over 110 chars is cut at a word boundary;
-//      the full original (+ any caller-supplied detail) lands in `detail`.
-//      Every OTHER admin category's body is stored UNCHANGED, whatever its
-//      length — only the Activity feed ever reads `detail`, and it only
-//      reads ops_digest rows, so cutting another category's body would
-//      make the rest of it unreachable. A title is only LOGGED when it
-//      runs long, never cut, for ANY category (several senders
-//      dedupe/refresh by an exact title lookup, so cutting it here would
-//      break that probe).
+// Admin-alerts-brevity scope (owner rulings 2026-09-28 and 2026-09-30):
+//   1. NotificationService.create's admin brevity guard — an admin body over
+//      110 chars is cut to one sentence and the full original (+ any
+//      caller-supplied detail) lands in `detail`, for EVERY admin category
+//      (the bell's "Show full text" and the Activity feed read it). With
+//      ADMIN_BODY_GUARD_ALL killed, only ops_digest is cut and every other
+//      category is stored byte-for-byte. A title is only LOGGED when it runs
+//      long, never cut, for ANY category (several senders dedupe/refresh by
+//      an exact title lookup, so cutting it here would break that probe).
 //   2. notifyAdmin's refresh path compares/stores through the SAME
 //      normalization, including `detail`, so a changed detail is stored
 //      and an unrelated guard artifact never reads as "content changed".
@@ -47,6 +45,8 @@ jest.mock('../models/db', () => {
         return b;
       },
       orderBy() { return b; },
+      select() { return b; },
+      orderByRaw() { return b; },
       limit() { return b; },
       offset(n) { return (mockRows[table] || []).filter((r) => conds.every((c) => c(r))).slice(n || 0); },
       first: async () => (mockRows[table] || []).find((r) => conds.every((c) => c(r))) || null,
@@ -70,6 +70,7 @@ jest.mock('../models/db', () => {
     return b;
   };
   const fn = jest.fn((table) => builder(table));
+  fn.raw = jest.fn((sql) => sql);
   fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn(async () => {}); return cb(trx); };
   return fn;
 });
@@ -79,7 +80,9 @@ const { truncateAtWord, applyAdminBrevityGuard, MAX_ADMIN_BODY_CHARS, MAX_ADMIN_
 
 beforeEach(() => {
   mockRows = { notifications: [] };
+  delete process.env.ADMIN_BODY_GUARD_ALL;
 });
+afterAll(() => { delete process.env.ADMIN_BODY_GUARD_ALL; });
 
 describe('truncateAtWord', () => {
   test('leaves a short string untouched', () => {
@@ -129,27 +132,53 @@ describe('applyAdminBrevityGuard', () => {
     expect(out.detail).toBe(already);
   });
 
-  // Restriction: only the Activity feed ever reads `detail`, and it only
-  // reads ops_digest — every OTHER category's body is stored unchanged,
-  // whatever its length, and just logged (never cut, never moved).
-  test('a non-ops_digest over-length body is left completely unchanged; detail stays whatever the caller passed', () => {
+  test('an over-length body on ANY admin category is cut at a word boundary; the full original moves to detail', () => {
     const body = 'word '.repeat(40).trim();
     const out = applyAdminBrevityGuard({ category: 'alert', title: 't', body, detail: null });
-    expect(out.body).toBe(body);
-    expect(out.detail).toBeNull();
+    expect(out.body.length).toBeLessThanOrEqual(MAX_ADMIN_BODY_CHARS);
+    expect(out.body.endsWith('…')).toBe(true);
+    expect(out.detail).toBe(body);
   });
 
-  test('a non-ops_digest over-length body never absorbs a caller-supplied detail either', () => {
+  test('a caller-supplied detail on a non-digest row is kept AFTER the full body', () => {
     const body = 'word '.repeat(40).trim();
     const out = applyAdminBrevityGuard({ category: 'review', title: 't', body, detail: 'caller extra context' });
-    expect(out.body).toBe(body);
-    expect(out.detail).toBe('caller extra context');
+    expect(out.detail).toBe(`${body}\n\ncaller extra context`);
+  });
+
+  test('a multi-line list body cuts at its first line break when that line fits; a long first line word-cuts', () => {
+    const list = 'Promises with no follow-up:\n• callback for Test Caller\n• quote for Test Owner\n• text for Test Neighbor\n• estimate for Test Tenant';
+    expect(list.length).toBeGreaterThan(MAX_ADMIN_BODY_CHARS);
+    const out = applyAdminBrevityGuard({ category: 'alert', title: 't', body: list, detail: null });
+    expect(out.body).toBe('Promises with no follow-up…');
+    expect(out.detail).toBe(list);
+    const longFirst = `${'word '.repeat(30).trim()}\n• item`;
+    const cut = applyAdminBrevityGuard({ category: 'alert', title: 't', body: longFirst, detail: null });
+    expect(cut.body.length).toBeLessThanOrEqual(MAX_ADMIN_BODY_CHARS);
+    expect(cut.body).not.toContain('\n');
+    expect(cut.detail).toBe(longFirst);
+  });
+
+  test('ADMIN_BODY_GUARD_ALL killed: a non-digest body is stored unchanged and ops_digest is still cut, as before', () => {
+    const body = 'word '.repeat(40).trim();
+    for (const off of ['off', 'FALSE', '0']) {
+      process.env.ADMIN_BODY_GUARD_ALL = off;
+      const alert = applyAdminBrevityGuard({ category: 'alert', title: 't', body, detail: null });
+      expect(alert).toEqual({ title: 't', body, detail: null });
+      const withDetail = applyAdminBrevityGuard({ category: 'review', title: 't', body, detail: 'caller extra context' });
+      expect(withDetail.body).toBe(body);
+      expect(withDetail.detail).toBe('caller extra context');
+      const digest = applyAdminBrevityGuard({ category: DIGEST_CATEGORY, title: 't', body, detail: null });
+      expect(digest.body.length).toBeLessThanOrEqual(MAX_ADMIN_BODY_CHARS);
+      expect(digest.detail).toBe(body);
+    }
   });
 
   test('a title is never cut, only logged when it runs long — several senders dedupe on it exactly', () => {
     const longTitle = 'x'.repeat(MAX_ADMIN_TITLE_CHARS + 40);
     const out = applyAdminBrevityGuard({ category: DIGEST_CATEGORY, title: longTitle, body: 'short body', detail: null });
     expect(out.title).toBe(longTitle);
+    expect(applyAdminBrevityGuard({ category: 'alert', title: longTitle, body: 'word '.repeat(40).trim(), detail: null }).title).toBe(longTitle);
   });
 });
 
@@ -168,11 +197,19 @@ describe('NotificationService.create — admin brevity guard end to end', () => 
     expect(notif.detail).toMatch(/2 customers texted while autopay is off/);
   });
 
-  test('a long body on any OTHER admin category is stored unchanged, with a null detail', async () => {
+  test('a long body on any other admin category is cut in the stored row; detail carries the whole thing', async () => {
+    const body = 'sentence '.repeat(30).trim();
+    const notif = await NotificationService.create({ recipientType: 'admin', category: 'alert', title: 'Short title', body });
+    expect(notif.body.length).toBeLessThanOrEqual(110);
+    expect(notif.detail).toBe(body);
+  });
+
+  test('ADMIN_BODY_GUARD_ALL killed: a long non-digest body is stored byte-for-byte, no detail column written', async () => {
+    process.env.ADMIN_BODY_GUARD_ALL = 'off';
     const body = 'sentence '.repeat(30).trim();
     const notif = await NotificationService.create({ recipientType: 'admin', category: 'alert', title: 'Short title', body });
     expect(notif.body).toBe(body);
-    expect(notif).not.toHaveProperty('detail'); // column not written without a detail
+    expect(notif).not.toHaveProperty('detail');
   });
 
   test('a customer row is never touched by the guard', async () => {
@@ -248,6 +285,21 @@ describe('notifyAdmin refresh — detail participates in the change comparison a
     expect(mockRows.notifications[0].read_at).not.toBeNull();
   });
 
+  test('an over-length NON-digest body emitted twice dedupes quietly; a changed tail beyond char 110 is a real change', async () => {
+    const head = 'sentence '.repeat(14); // 126 chars: the cut lands before the tail
+    const opts = { dedupeKey: 'k3b', refreshOnDedupe: true };
+    await NotificationService.notifyAdmin('billing', 'Standing check', `${head}tail one`, opts);
+    expect(mockRows.notifications[0].body.length).toBeLessThanOrEqual(110); // the cut path ran
+    mockRows.notifications[0].read_at = new Date();
+    const same = await NotificationService.notifyAdmin('billing', 'Standing check', `${head}tail one`, opts);
+    expect(same.refreshed).toBeUndefined();
+    expect(mockRows.notifications[0].read_at).not.toBeNull();
+    const changed = await NotificationService.notifyAdmin('billing', 'Standing check', `${head}tail two`, opts);
+    expect(changed.refreshed).toBe(true);
+    expect(mockRows.notifications[0].detail).toBe(`${head}tail two`);
+    expect(mockRows.notifications[0].read_at).toBeNull();
+  });
+
   test('the same invariant holds on the ops_digest CUT path — a re-emission with the same long body stays deduped, not changed', async () => {
     const longBody = 'sentence '.repeat(30).trim();
     await NotificationService.notifyAdmin(DIGEST_CATEGORY, 'Standing check', longBody, { dedupeKey: 'k4', refreshOnDedupe: true });
@@ -285,5 +337,19 @@ describe('activity-only rows never reach the admin bell', () => {
     const [owner, engineering] = mockRows.notifications;
     expect(owner.read_at).not.toBeNull();
     expect(engineering.read_at).toBeNull();
+  });
+});
+
+// create() swallows its own errors and returns null, so a gate reader that is
+// missing (a test or caller that mocks feature-gates without it) must read as
+// live, never throw and drop the alert.
+test('a missing ADMIN_BODY_GUARD_ALL reader reads as live: the alert is still written, cut', () => {
+  jest.isolateModules(() => {
+    jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gates: {} }));
+    const svc = require('../services/notification-service');
+    const long = `${'word '.repeat(40)}end.`;
+    const out = svc.normalizeAdminText({ category: 'alert', title: 'T', body: long });
+    expect(out.body.length).toBeLessThanOrEqual(110);
+    expect(out.detail).toBe(long);
   });
 });

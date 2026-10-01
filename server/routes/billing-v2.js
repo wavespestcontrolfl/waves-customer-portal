@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral, excludeHoldDeferralPlaceholders } = require('../services/collections/collection-hold');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -87,14 +88,16 @@ router.get('/', async (req, res, next) => {
     };
     let total;
     if (payerInvoiceIds.size === 0) {
-      const countRow = await db('payments')
-        .where({ customer_id: req.customerId })
+      // Hold-deferral placeholders are never shown (getPaymentHistory drops them), so
+      // they are not counted either: `total` must match what pagination serves.
+      const countRow = await excludeHoldDeferralPlaceholders(db('payments')
+        .where({ customer_id: req.customerId }), 'payments')
         .count('* as count')
         .first();
       total = Number(countRow?.count || 0);
     } else {
-      const rows = await db('payments')
-        .where({ customer_id: req.customerId })
+      const rows = await excludeHoldDeferralPlaceholders(db('payments')
+        .where({ customer_id: req.customerId }), 'payments')
         // Every field isPayerLinked reads — metadata alone under-counts the
         // exclusion for rows payer-linked only through their PaymentIntent or
         // invoice-number description, leaving `total` above the number of
@@ -1023,7 +1026,9 @@ router.get('/balance', async (req, res, next) => {
     // without superseding (Auto Pay off, customer off the monthly lane —
     // next_retry_at cleared, retry_count still 0) no collector is coming
     // for it any more, and it is visible debt like any other disarmed row.
-    const isNeverAttemptedDeferral = (p) => {
+    // collection_hold (B10) deferrals: the shared predicate every failed-payment consumer uses.
+    const isNeverAttemptedDeferral = (p) => isNeverAttemptedHoldDeferral(p) || isNeverAttemptedLockDeferral(p);
+    const isNeverAttemptedLockDeferral = (p) => {
       if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;

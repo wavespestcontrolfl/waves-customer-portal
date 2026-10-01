@@ -238,6 +238,47 @@ function seriesPropertyVerdict(a, b) {
   return 'different';
 }
 
+// Makes scopes of MIXED shape comparable. A root with no stamped property_id
+// resolves from its address alone (topUpScopeInput: the customer's primary
+// address) -> {propertyId: null, key}, while its child rows carry only a
+// stamped property_id and no service_address_* columns ->
+// {propertyId, key: null}. seriesPropertyVerdict reads that pair as nothing
+// comparable ('different'), which silently dropped every child row of such a
+// series from the host dates (and from the apply script's host occurrence).
+// When a set of scopes holds BOTH a key-only and an id-only scope, the
+// id-only ones get their property's own address key (customer_properties,
+// ONE batched read for the whole set, never per row) built with the SAME
+// normalizedEstimatePropertyKey the other side's key is, so the compare
+// stays samePropertyKey. The id is kept (two ids still decide by id). Fails
+// CLOSED: a failed read, a missing property row, or a property with no
+// parseable address leaves key null, which stays 'different' (never 'same',
+// never guessed). Returns a new array, same order; inputs are not mutated.
+async function withComparableKeys(conn, scopes) {
+  const list = scopes.map((s) => s || null);
+  const idOnly = (s) => !!(s?.resolved && s.propertyId && !s.key);
+  const keyOnly = (s) => !!(s?.resolved && !s.propertyId && s.key);
+  if (!list.some(idOnly) || !list.some(keyOnly)) return list;
+  const { normalizedEstimatePropertyKey } = require('./estimate-property-linkage');
+  const ids = Array.from(new Set(list.filter(idOnly).map((s) => s.propertyId)));
+  const keyById = new Map();
+  try {
+    // Savepoint, like resolveSeriesPropertyScope: a failed read must not
+    // abort the caller's transaction (25P02).
+    const props = await conn.transaction((sp) => sp('customer_properties')
+      .whereIn('id', ids)
+      .select('id', 'address_line1', 'address_line2', 'city', 'state', 'zip'));
+    for (const p of props) {
+      const address = [
+        p.address_line1, p.address_line2, p.city, `${p.state || ''} ${p.zip || ''}`.trim(),
+      ].filter(Boolean).join(', ');
+      keyById.set(String(p.id), address ? normalizedEstimatePropertyKey(address) : null);
+    }
+  } catch {
+    return list;
+  }
+  return list.map((s) => (idOnly(s) && keyById.get(s.propertyId) ? { ...s, key: keyById.get(s.propertyId) } : s));
+}
+
 // Pure, per-ROW twin of resolveSeriesPropertyScope (Codex P1 round #2 on PR
 // #5290 — loadHostDates' own host-date filter, below): a plain child row's
 // own stamped `property_id` and `service_address_*` columns, reduced to the
@@ -493,8 +534,10 @@ async function evaluatePairGates(conn, ctx) {
   const sameCustomer = String(riderParent.customer_id) === String(hostParent.customer_id);
   let hostScope = null;
   if (cols.property_id && sameCustomer) {
-    const riderScope = await resolveSeriesPropertyScope(conn, riderParent);
-    hostScope = await resolveSeriesPropertyScope(conn, hostParent);
+    const rawRiderScope = await resolveSeriesPropertyScope(conn, riderParent);
+    const rawHostScope = await resolveSeriesPropertyScope(conn, hostParent);
+    const [riderScope, comparableHost] = await withComparableKeys(conn, [rawRiderScope, rawHostScope]);
+    hostScope = comparableHost;
     const verdict = seriesPropertyVerdict(riderScope, hostScope);
     if (verdict === 'unresolved') reasons.push('property_unresolved');
     else if (verdict === 'different') reasons.push('different_property');
@@ -603,14 +646,18 @@ async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
       ...(cols.property_id ? ['property_id'] : []), ...addressCols,
     )
     .then((rows) => rows.filter(isPlanSeriesRow));
-  const filtered = (cols.property_id && hostScope?.resolved)
-    ? hostRowsRaw.filter((r) => {
+  let filtered = hostRowsRaw;
+  if (cols.property_id && hostScope?.resolved) {
+    // One batched key lookup for the whole host series (withComparableKeys):
+    // an unstamped parent's address-only scope vs id-only child rows.
+    const rowScopes = hostRowsRaw.map(rowPropertyScope);
+    const [comparableHost, ...comparableRows] = await withComparableKeys(conn, [hostScope, ...rowScopes]);
+    filtered = hostRowsRaw.filter((r, i) => {
       if (String(r.id) === String(hostParent.id)) return true;
-      const rowScope = rowPropertyScope(r);
-      if (!rowScope.resolved) return true;
-      return seriesPropertyVerdict(rowScope, hostScope) === 'same';
-    })
-    : hostRowsRaw;
+      if (!comparableRows[i].resolved) return true;
+      return seriesPropertyVerdict(comparableRows[i], comparableHost) === 'same';
+    });
+  }
   return Array.from(new Set(filtered.map((r) => dateOnly(r.scheduled_date)).filter(Boolean))).sort();
 }
 
@@ -858,7 +905,8 @@ module.exports = {
   previewRiderPair,
   resolveSeriesPropertyScope,
   seriesPropertyVerdict,
+  withComparableKeys,
   _internals: {
-    dateOnly, addDaysStr, classifyRiderRow, diffPlan, attributeReasonMap, computeRiderHorizon, nextRiderDate,
+    dateOnly, addDaysStr, classifyRiderRow, diffPlan, attributeReasonMap, computeRiderHorizon, nextRiderDate, rowPropertyScope,
   },
 };

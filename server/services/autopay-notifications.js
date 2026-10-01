@@ -244,6 +244,10 @@ async function sendPreChargeReminders() {
         logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
         skipped++; continue;
       }
+      if (require('./collections/collection-hold').isHoldSuppression(outcome)) {
+        // Dispute hold: a wait, not a failure. Nothing is stamped, so the next pass re-tries.
+        skipped++; continue;
+      }
       if (outcome.blocked || outcome.sent === false) {
         throw new Error(`autopay reminder blocked: ${outcome.code || outcome.reason || 'unknown'}`);
       }
@@ -454,6 +458,12 @@ async function sendCardExpiryWarnings() {
         },
         hasEmailLeg: reminderStage !== '60_day',
       });
+      if (require('./collections/collection-hold').isHoldSuppression(sendResult)) {
+        // Dispute hold: the notice waits (nothing stamped, retried next sweep); the email leg is
+        // gated at its own lifecycle boundary.
+        await emailPromise;
+        skipped++; continue;
+      }
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
       }

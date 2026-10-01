@@ -32,7 +32,7 @@ const scheduleRouter = require('../routes/schedule');
 // Records every predicate, including the nested where(fn) the property rule adds.
 function chain(rows) {
   const c = { calls: [] };
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'orWhereNull', 'leftJoin', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'orWhereNull', 'whereRaw', 'leftJoin', 'select', 'orderBy', 'limit']) {
     c[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') { const inner = chain([]); args[0].call(inner, inner); c.calls.push([m + '(fn)', inner.calls]); }
       else c.calls.push([m, ...args]);

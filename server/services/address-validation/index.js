@@ -7,7 +7,7 @@
  * { status: 'not_attempted' } and the gate falls back to model/deterministic
  * address signals exactly as before.
  *
- * Service area: Manatee, Sarasota, Charlotte, DeSoto (FL). An address that
+ * Service area: Manatee, Sarasota, Charlotte (FL); DeSoto is NOT served. An address that
  * resolves outside these counties is out_of_service_area.
  *
  * AddressValidationResult:

@@ -328,25 +328,22 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
         await require('./stripe').chargeInvoiceWithSavedCard(invoice.id, method.id, {
           requireAutopayForCustomerId: customer.id, requireVisitCompletionPacketId: packet.id,
           refuseWhenDunningStopped: true,
+          // The combined-visit summary text may carry this receipt's link
+          // (visit-completion-summary.js): the receipt job waits, as it does
+          // for the completion text's own combined receipt, until the coordinator
+          // has decided. Its email still sends.
+          deferReceiptDelivery: true,
         });
         outcome = 'sent';
         reason = null;
       }
     }
   } catch (err) {
-    const stripe = require('./stripe');
-    if (stripe.savedCardChargeSuppressesAlternateCollection(err)) {
-      outcome = 'retry';
-      reason = 'payment_pending';
-    } else if (err.wavesCardDecline) {
-      // A closeout retry never starts a fresh automatic attempt after a decline.
-      reason = 'payment_failed';
-    } else if (['VISIT_PAYMENT_REVIEW_REQUIRED', 'INVOICE_COLLECTION_STOPPED'].includes(err.code)) {
-      reason = 'office_required';
+    const verdict = classifyVisitPaymentError(err);
+    if (verdict.outcome) outcome = verdict.outcome; // decline / office_required keep the initial 'suppressed'
+    reason = verdict.reason;
+    if (verdict.billingHold) {
       await database('service_visits').where({ id: visit.id }).update({ billing_hold: true, updated_at: database.fn.now() });
-    } else {
-      outcome = 'retry';
-      reason = 'payment_pending';
     }
   }
   // A failed zero-only replay must not turn the terminal attempt into a
@@ -363,4 +360,28 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
   return { state: reason || current.status, invoiceId: invoice.id };
 }
 
-module.exports = { assertVisitCompletionCharge, collectVisitCompletionInvoice };
+// How a failed collection attempt lands on the closeout. Pure so it can be
+// pinned by tests. `billingHold` asks the caller for the DURABLE
+// service_visits.billing_hold — never set for a collections dispute hold
+// (B10): it would not clear on release, so the closeout would never resume.
+function classifyVisitPaymentError(err) {
+  const stripe = require('./stripe');
+  if (stripe.savedCardChargeSuppressesAlternateCollection(err)) {
+    return { outcome: 'retry', reason: 'payment_pending', billingHold: false };
+  }
+  if (err.wavesCardDecline) {
+    // A closeout retry never starts a fresh automatic attempt after a decline.
+    return { outcome: undefined, reason: 'payment_failed', billingHold: false };
+  }
+  if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
+    // Retryable and non-durable: no billing_hold, no office_required; the
+    // next attempt after the office releases the hold charges normally.
+    return { outcome: 'retry', reason: 'payment_pending', billingHold: false };
+  }
+  if (['VISIT_PAYMENT_REVIEW_REQUIRED', 'INVOICE_COLLECTION_STOPPED'].includes(err.code)) {
+    return { outcome: undefined, reason: 'office_required', billingHold: true };
+  }
+  return { outcome: 'retry', reason: 'payment_pending', billingHold: false };
+}
+
+module.exports = { assertVisitCompletionCharge, collectVisitCompletionInvoice, classifyVisitPaymentError };

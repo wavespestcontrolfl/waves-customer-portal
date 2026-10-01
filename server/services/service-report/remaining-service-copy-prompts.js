@@ -403,6 +403,7 @@ module.exports = {
   REMAINING_SERVICE_ADAPTERS,
   SERVICE_KEY_BINDINGS,
   FINDINGS_TYPE_MODULES,
+  resolveRemainingServiceModules,
   selectRemainingServicePrompt,
   _test: {
     MODIFIER_KEYS,

@@ -429,6 +429,42 @@ describe('flag matrix — each flag vs each channel', () => {
     }
   });
 
+  // Round-11 P2: a trusted hold exemption (rail-guard holdExempt 'customer' / 'operator') passes
+  // ignoreDisputeHold, which skips ONLY an active DISPUTE collection_hold row.
+  describe('ignoreDisputeHold (trusted exemption consult)', () => {
+    const DISPUTE = 'dispute on call: synthetic billing question';
+    const holdRow = (reason, flag = 'collection_hold') => ({ id: 'flag-1', customer_id: 'cust-1', flag, reason, released_at: null });
+    const consult = (channel, ignoreDisputeHold) => ContactPolicy.evaluate('cust-1', {
+      channel, purpose: 'late_payment', now: WED_11AM_EDT, ...(ignoreDisputeHold ? { ignoreDisputeHold: true } : {}),
+    });
+
+    test.each(['sms', 'email', 'push', 'voice', 'manual_call'])('a dispute-prefixed hold denies %s by default but is ignored on an exempt consult', async (channel) => {
+      armAllowedBaseline({ flags: [holdRow(DISPUTE)] });
+      expect((await consult(channel, false)).denialReasons).toContain('flag_collection_hold');
+      armAllowedBaseline({ flags: [holdRow(DISPUTE)] });
+      expect((await consult(channel, true)).denialReasons).not.toContain('flag_collection_hold');
+    });
+
+    test('a fallback (wrong-number / wrong-party) collection_hold still blocks an exempt consult', async () => {
+      for (const reason of ['wrong-number report - synthetic', 'wrong-party answer - synthetic', null, '']) {
+        armAllowedBaseline({ flags: [holdRow(reason)] });
+        expect((await consult('sms', true)).denialReasons).toContain('flag_collection_hold');
+      }
+    });
+
+    test('a dispute row still carrying an embedded fallback hold keeps blocking (the fallback stands)', async () => {
+      armAllowedBaseline({ flags: [holdRow(`${DISPUTE} [earlier hold: wrong-number report - synthetic]`)] });
+      expect((await consult('sms', true)).denialReasons).toContain('flag_collection_hold');
+    });
+
+    test.each(['do_not_collect', 'attorney_represented', 'bankruptcy', 'do_not_text'])('every other flag (%s) still blocks an exempt consult, even beside an ignored dispute hold', async (flag) => {
+      armAllowedBaseline({ flags: [holdRow(DISPUTE), holdRow('synthetic', flag)] });
+      const result = await consult('sms', true);
+      expect(result.denialReasons).toContain(`flag_${flag}`);
+      expect(result.denialReasons).not.toContain('flag_collection_hold');
+    });
+  });
+
   test('active holds are surfaced on the result', async () => {
     const flagRow = { id: 'flag-1', customer_id: 'cust-1', flag: 'collection_hold', released_at: null };
     armAllowedBaseline({ flags: [flagRow] });

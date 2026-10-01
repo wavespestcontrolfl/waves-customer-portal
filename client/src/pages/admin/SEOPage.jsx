@@ -1939,6 +1939,12 @@ function LlmBenchmarkCard({ llmDash }) {
         {llmDash.benchmark.measured} measured answers (a model change
         keeps its answers separate). Recommended counts a mentioned
         answer with positive sentiment ranked in the top 3 brands
+        {(llmDash.benchmark.rankMethods || []).includes("known_list_v1")
+          ? " (older answers ranked against a fixed competitor list, so this rate mixes both until they age out)"
+          : ""}
+        {(llmDash.benchmark.rankMethods || []).includes("all_named_text_v2")
+          ? " (some ranks are read from the answer text, so they are conservative and never better than the true rank)"
+          : ""}
         {llmDash.benchmark.unclassified > 0
           ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`
           : ""}

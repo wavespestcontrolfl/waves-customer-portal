@@ -1,0 +1,97 @@
+/**
+ * Typed decisions caller (dark behind GATE_TYPED_DECISIONS).
+ *
+ * askPackage(packageId, state) asks TypeSafe Jev the registered questions of a
+ * decision package (./packages.js) about one `state` and returns normalised,
+ * threshold-aware answers. It is the ONLY way a caller reaches the typed-
+ * decision route: ROUTES.typedDecision is single-leg (nothing else answers
+ * typed questions), so on `ok:false` the caller keeps its existing path.
+ * Shadow/evidence use only: the answers propose, they never send or write on
+ * their own, and this module never throws.
+ */
+const logger = require('../logger');
+const MODELS = require('../../config/models');
+const { dispatch, rejectCall } = require('../llm/call');
+const { typedDecisionsLive } = require('../../config/feature-gates');
+const { packageFor, packageHash } = require('./packages');
+
+function stateProblem(state, pkg) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return 'state must be an object';
+  const keys = Object.keys(state);
+  const missing = pkg.stateShape.filter((k) => state[k] === undefined);
+  const extra = keys.filter((k) => !pkg.stateShape.includes(k));
+  if (missing.length) return `missing state keys: ${missing.join(', ')}`;
+  if (extra.length) return `unexpected state keys: ${extra.join(', ')}`;
+  return null;
+}
+
+const isProb = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
+
+// choice / score answers share a confidence block.
+function confidenceBlock(answer, thresholds) {
+  const confidence = isProb(answer.confidence) ? answer.confidence : null;
+  return {
+    confidence,
+    probabilities: answer.probabilities && typeof answer.probabilities === 'object' ? answer.probabilities : {},
+    confident: confidence !== null && confidence >= thresholds.confident_high,
+  };
+}
+
+// One typed answer -> the shape reviews and callers read. Null when the
+// answer is not the type the package asked for.
+function normaliseAnswer(question, answer, thresholds) {
+  if (!answer || typeof answer !== 'object' || answer.type !== question.type) return null;
+  if (question.type === 'noul') {
+    const p = answer.noul;
+    if (!isProb(p)) return null;
+    return { p, yes: p >= 0.5, confident: p <= thresholds.confident_low || p >= thresholds.confident_high };
+  }
+  if (question.type === 'choice') {
+    return typeof answer.choice === 'string' ? { choice: answer.choice, ...confidenceBlock(answer, thresholds) } : null;
+  }
+  if (question.type === 'score') {
+    return Number.isFinite(answer.score) ? { score: answer.score, legend: answer.legend ?? null, ...confidenceBlock(answer, thresholds) } : null;
+  }
+  return null;
+}
+
+async function askPackage(packageId, state, { laneId } = {}) {
+  if (!typedDecisionsLive()) return { ok: false, reason: 'gate_off' };
+  const pkg = packageFor(packageId);
+  if (!pkg) return { ok: false, reason: 'unknown_package', packageId };
+  const base = { packageId: pkg.id, packageHash: packageHash(pkg) };
+  const problem = stateProblem(state, pkg);
+  if (problem) {
+    logger.warn(`[typed-decisions] bad_state for ${pkg.id}: ${problem}`);
+    return { ok: false, reason: 'bad_state', ...base };
+  }
+  try {
+    const result = await dispatch(MODELS.ROUTES.typedDecision, {
+      state,
+      questions: pkg.questions,
+      laneId: laneId || 'typed_decisions',
+      promptVersion: pkg.id,
+    });
+    if (!result || !result.ok) {
+      return { ok: false, reason: (result && result.reason) || 'error', ...base, ...(result && result.usage ? { usage: result.usage } : {}) };
+    }
+    const answers = {};
+    for (const [id, question] of Object.entries(pkg.questions)) {
+      const normalised = normaliseAnswer(question, result.json && result.json[id], pkg.thresholds);
+      if (!normalised) {
+        // The adapter filed this call as ok (a 200 with answers); an answer
+        // that is missing, mistyped or out of range makes it unusable, so the
+        // ledger row flips to invalid_output like any rejected dispatch leg.
+        rejectCall(result, 'invalid_output');
+        return { ok: false, reason: 'incomplete_answers', ...base, usage: result.usage };
+      }
+      answers[id] = normalised;
+    }
+    return { ok: true, answers, servedModel: result.servedModel || null, ...base, usage: result.usage || null };
+  } catch (err) {
+    logger.error(`[typed-decisions] askPackage failed: ${err.message}`);
+    return { ok: false, reason: 'error', ...base };
+  }
+}
+
+module.exports = { askPackage, normaliseAnswer };

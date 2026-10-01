@@ -95,7 +95,7 @@ const NATURE_DEFAULTS = {
  *                                         lets `recommended` below stand in for "v2 is valid".
  * @param {object|null} args.legacy       V1 flat extraction (is_lead / is_spam / is_voicemail / appointment_confirmed / quote_promised)
  * @param {object|null} args.spamVerdict  layered classifier result: { verdict: 'spam'|'not_spam'|'insufficient_signals' }
- * @param {object}      args.outcome      what the pipeline actually did: { appointmentCreated, customerId, isKnownCustomer }
+ * @param {object}      args.outcome      what the pipeline actually did: { appointmentCreated, appointmentPendingReview, customerId, isKnownCustomer }
  * @returns {{ disposition: string, reason: string }}
  */
 function decideDisposition({ extraction = null, legacy = null, spamVerdict = null, outcome = {} }) {
@@ -118,6 +118,13 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
     && !['spam_discarded', 'booked'].includes(recommended) ? recommended : null;
 
   // 1a. Reality first: if an appointment was actually created, the call is booked.
+  // A booking still awaiting the office's confirmation (a street-level address
+  // hold, owner ruling 2026-09-30) is not booked yet: the enum has no
+  // pending state, and lead_response_flow_triggered is its own home for "the
+  // automated follow-up owns it". The office confirm stamps 'booked'.
+  if (outcome.appointmentCreated && outcome.appointmentPendingReview) {
+    return done('lead_response_flow_triggered', 'appointment_pending_office_review');
+  }
   if (outcome.appointmentCreated) return done('booked', 'appointment_created');
 
   // 1b. Spam ONLY via the layered classifier — never from extraction alone.

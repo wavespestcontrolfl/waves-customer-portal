@@ -585,12 +585,17 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const drafter = require('./sms-shadow-drafter');
     const ContextAggregator = require('./context-aggregator');
     const { hasSchedulingIntent } = require('./sms-intent');
-    const context = await ContextAggregator.getContextForCustomer(customer);
+    // includeLiveEta (Codex round-2 P2, PR #5334): this Agent Review draft
+    // renders the SAME buildFactsBlock the shadow drafter does (via
+    // generateGroundedDraft below) — one of the two SMS drafting paths that
+    // actually surfaces the LIVE ETA fact — so it opts in explicitly rather
+    // than relying on getContextForCustomer's default (no LIVE ETA lookup).
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt, factsBlock, reserviceBooked } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -603,8 +608,9 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       // prompt would tell the model to offer times it was never given.
       // Same customer row + convention draftShadowReply uses.
       city: customer?.city || null,
-      // Live, sendable draft: a visit-backed offer may run with no city
-      // (GATE_SMS_OFFERS_SCHEDULER; replay/backfill callers never pass this).
+      // Live, sendable draft: an offer whose picker locates the job itself (a
+      // visit, an estimate page, the customer's booking pin) may run with no
+      // city (GATE_SMS_OFFERS_SCHEDULER; replay/backfill callers never pass this).
       liveOpenTimes: true,
       // Pre-push audit P2: the ALREADY-RESOLVED estimate (resolveEstimateContext,
       // above this call in processInboundSms) so the offered slots reflect
@@ -657,10 +663,31 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // Pre-push audit P1: the actions this draft promises (payment link,
     // booking, escalate for a follow-up) ride to the review card the same
     // way the suggestion lane's do, so /agent-draft can show them.
+    // Codex round-3 P2 (siblings sweep): this lane also creates a
+    // pending_review decision that verifyAgentDecisionForSend guards at
+    // /sms and /schedule-sms time (same as publishSuggestion's cards) — a
+    // re-service promise drafted here needs the same send-time revalidation
+    // (reservicePromiseStillEligible), which reads its promised lane(s) back
+    // from input_snapshot. Pure re-run of validateReserviceOffer's own
+    // resolution over the already-verified reply/facts/actions; null for an
+    // ordinary draft with no re-service promise.
+    const reserviceLanesSnapshot = drafter.validateReserviceOffer({
+      reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage: body,
+      // The SAME context the verification ran with, so a pronoun-only pest report resolves the same lane (Codex round-20 P2).
+      context,
+    }).promisedLanes || null;
     return {
       reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
+      // Independent review finding (PR #5334): same send-time freshness
+      // snapshot draftShadowReply persists — this lane shares the same
+      // agentDecisionSendBlockReason choke point at send time.
+      liveEtaSnapshot: drafter.buildLiveEtaSnapshot(context),
+      // Technician first name(s) independent of live entries (round-42 P2).
+      techNames: drafter.techNamesFromContext(context),
+      reserviceLanesSnapshot,
+      reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -767,6 +794,15 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // at /sms and /schedule-sms time. Absent for template drafts and for
         // any llm draft whose reply never quoted an open-times window.
         ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
+        // Codex round-3 P2 — same shape/purpose as publishSuggestion's
+        // reservice_lanes_snapshot (sms-suggest-mode.js).
+        ...(Array.isArray(llmDraft?.reserviceLanesSnapshot) && llmDraft.reserviceLanesSnapshot.length
+          ? { reservice_lanes_snapshot: llmDraft.reserviceLanesSnapshot }
+          : {}),
+        // Codex round-18 P2 — same as publishSuggestion's reservice_booked_snapshot.
+        ...(llmDraft?.reserviceBookedSnapshot && Object.keys(llmDraft.reserviceBookedSnapshot).length
+          ? { reservice_booked_snapshot: llmDraft.reserviceBookedSnapshot }
+          : {}),
         // Same sanitized shape publishSuggestion persists, read back by
         // GET /agent-draft (pre-push audit P1). Template drafts carry none.
         ...(llmDraft && Array.isArray(llmDraft.intendedActions)
@@ -778,6 +814,9 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
           ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
           : {}),
+        // Independent review finding (PR #5334) — see generateLlmReviewDraft's comment above.
+        ...(llmDraft?.liveEtaSnapshot ? { live_eta_snapshot: llmDraft.liveEtaSnapshot } : {}),
+        ...(Array.isArray(llmDraft?.techNames) && llmDraft.techNames.length ? { tech_names: llmDraft.techNames } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),

@@ -1,0 +1,86 @@
+/**
+ * Public tracker vehicle lookup honors the tracker-remap cutoff (Codex round-34 P2,
+ * PR #5334): a cached tech_status fix reported before the technician's tracker
+ * mapping last CHANGED (technicians.bouncie_imei_changed_at, set only when bouncie_imei changes) may be the OLD vehicle's, so
+ * buildVehicle passes the SAME cutoff the SMS ETA path passes — the text and the
+ * tracking page never show different vehicles. Synthetic data only.
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
+jest.mock('../services/photos', () => ({ getViewUrl: jest.fn() }));
+jest.mock('../services/tracking-vehicle-location', () => ({ resolveFreshTechPosition: jest.fn() }));
+jest.mock('../services/customer-tracking-eta', () => {
+  const actual = jest.requireActual('../services/customer-tracking-eta');
+  return { ...actual, calculateBoundedTrackingEta: jest.fn() };
+});
+
+const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
+const { calculateBoundedTrackingEta, techMappingCutoff } = require('../services/customer-tracking-eta');
+const trackPublicRouter = require('../routes/track-public');
+
+const service = (extra = {}) => ({
+  technician_id: 'tech-1', tech_mapping_changed_at: '2026-09-30T10:00:00.000Z', latitude: 27.4, longitude: -82.5, ...extra,
+});
+
+beforeEach(() => {
+  resolveFreshTechPosition.mockReset().mockResolvedValue({ lat: 27.1, lng: -82.2, lastReportedAt: new Date().toISOString(), source: 'bouncie_api' });
+  calculateBoundedTrackingEta.mockReset().mockResolvedValue({ minutes: 9, source: 'google' });
+});
+
+test('buildVehicle passes the technician row\'s mapping timestamp as the cached-fix floor', async () => {
+  const v = await trackPublicRouter._test.buildVehicle(service());
+  expect(v.etaMinutes).toBe(9);
+  expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({
+    techId: 'tech-1', cachedNotBefore: '2026-09-30T10:00:00.000Z',
+  }));
+  expect(resolveFreshTechPosition.mock.calls[0][0]).not.toHaveProperty('bouncieImei');
+});
+
+test('NO remap time (NULL) means no cutoff: an ordinary technician edit leaves the cached fix trusted', async () => {
+  await trackPublicRouter._test.buildVehicle(service({ tech_mapping_changed_at: null, tech_updated_at: new Date().toISOString() }));
+  expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBeNull();
+});
+
+test('a present-but-unreadable remap time bypasses the cache entirely (fails closed to "now")', async () => {
+  const before = Date.now();
+  await trackPublicRouter._test.buildVehicle(service({ tech_mapping_changed_at: 'not-a-date' }));
+  const floor = resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore;
+  expect(floor).toBeInstanceOf(Date);
+  expect(floor.getTime()).toBeGreaterThanOrEqual(before);
+});
+
+test('the SMS path and the public tracker share one cutoff rule', () => {
+  expect(techMappingCutoff('2026-09-30T10:00:00.000Z')).toBe('2026-09-30T10:00:00.000Z');
+  expect(techMappingCutoff(new Date('2026-09-30T10:00:00.000Z'))).toEqual(new Date('2026-09-30T10:00:00.000Z'));
+  for (const none of [null, undefined, '']) expect(techMappingCutoff(none)).toBeNull();
+  expect(techMappingCutoff('not-a-date')).toBeInstanceOf(Date);
+});
+
+test('the public query selects the technician mapping timestamp', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/track-public.js'), 'utf8');
+  expect(src).toContain("'t.bouncie_imei_changed_at as tech_mapping_changed_at'");
+});
+
+test('no technician or no destination pin: no vehicle, no lookup (unchanged)', async () => {
+  expect(await trackPublicRouter._test.buildVehicle(service({ technician_id: null }))).toBeNull();
+  expect(await trackPublicRouter._test.buildVehicle(service({ latitude: null }))).toBeNull();
+  expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+});
+
+// Codex round-37 P2: the approximate (scheduled-state, GATE_STOPS_AWAY) feed gets the same cutoff.
+test('buildApproxVehicle passes the same remap cutoff, keeps cache-only reads and rounded coordinates', async () => {
+  resolveFreshTechPosition.mockResolvedValue({ lat: 27.1234, lng: -82.2678, lastReportedAt: '2026-09-30T12:00:00.000Z' });
+  const v = await trackPublicRouter._test.buildApproxVehicle({ technician_id: 'tech-1', tech_mapping_changed_at: '2026-09-30T10:00:00.000Z' });
+  expect(v).toEqual({ lat: 27.12, lng: -82.27, lastReportedAt: '2026-09-30T12:00:00.000Z' });
+  expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({
+    techId: 'tech-1', allowBouncieFallback: false, cachedNotBefore: '2026-09-30T10:00:00.000Z',
+  }));
+});
+
+test('buildApproxVehicle: no remap time (NULL) means no cutoff; an unreadable one bypasses the cache', async () => {
+  resolveFreshTechPosition.mockResolvedValue(null);
+  await trackPublicRouter._test.buildApproxVehicle({ technician_id: 'tech-1', tech_mapping_changed_at: null });
+  expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBeNull();
+  await trackPublicRouter._test.buildApproxVehicle({ technician_id: 'tech-1', tech_mapping_changed_at: 'garbage' });
+  expect(resolveFreshTechPosition.mock.calls[1][0].cachedNotBefore).toBeInstanceOf(Date);
+});

@@ -7,6 +7,7 @@
 // customer's billing choices, as before, and rechecks ownership only.
 const db = require('../models/db');
 const logger = require('./logger');
+const { redactContact } = require('../utils/redact-contact');
 const { loadBillingEmailContext } = require('./billing-channel-email-authority');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { isDefiniteRejection } = require('./sendgrid-mail');
@@ -44,7 +45,7 @@ async function billingEmailRecipient(authorityInput, logTag) {
   try {
     context = await loadBillingEmailContext(authorityInput);
   } catch (err) {
-    logger.warn(`[${logTag}] billing email context unavailable for ${authorityInput.customerId}: ${err.message}`);
+    logger.warn(`[${logTag}] billing email context unavailable for ${authorityInput.customerId}: ${redactContact(err.message)}`);
     return { refusal: { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'billing_email_context_unavailable' } };
   }
   if (context.error) return { refusal: billingEmailRefusal(context.error) };
@@ -62,7 +63,7 @@ async function operatorEmailRecipient(customer, logTag) {
     .where({ customer_id: customer.id })
     .first()
     .catch((err) => {
-      logger.warn(`[${logTag}] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
+      logger.warn(`[${logTag}] notification_prefs lookup failed for ${customer.id}: ${redactContact(err.message)}`);
       return null;
     });
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
@@ -73,10 +74,24 @@ async function operatorEmailRecipient(customer, logTag) {
 
 // The operator send's provider handoff. Fail-closed: an unreadable invoice
 // aborts before dispatch, like every other ownership guard.
-function selfPayOnlyHandoff(invoiceId, state) {
+//
+// `holdCustomerId` (the pay-link senders' operator sends): the FINAL provider-boundary hold read, with
+// the operator's trusted exemption (ignoreDisputeHold: a plain dispute hold is skipped, a wrong-number /
+// wrong-party fallback hold still stops the send; a lookup that cannot answer holds it too). A held
+// send is the shared retryable hold outcome (one WAIT everywhere), never a failure (Codex #5424 r15 P1).
+function selfPayOnlyHandoff(invoiceId, state, { holdCustomerId = null } = {}) {
   return async (dispatch) => {
     const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoiceId, db)();
     if (verdict.ok !== true) return verdict;
+    if (holdCustomerId) {
+      const collectionHold = require('./collections/collection-hold');
+      const held = await collectionHold.messagingHeldByCollectionHold(holdCustomerId, db, { ignoreDisputeHold: true });
+      if (held.held) {
+        const outcome = collectionHold.holdDeferOutcome(held);
+        state.boundaryBlock = outcome;
+        return { ok: false, code: outcome.code, reason: outcome.reason };
+      }
+    }
     state.handoffStarted = true;
     await dispatch();
     return { ok: true };
@@ -118,7 +133,8 @@ async function billingEmailSendFailure(err, handoffStarted, log, { logTag, label
     return { ok: true };
   }
   await log({ status: 'failed', failureReason: err.message });
-  logger.error(`[${logTag}] ${label} email failed: ${err.message}`);
+  // Provider errors can echo the recipient address: the outcome below keeps the raw message, the log line does not.
+  logger.error(`[${logTag}] ${label} email failed: ${redactContact(err.message)}`);
   if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
     return { ok: false, skipped: true, reason: 'template_unavailable' };
   }

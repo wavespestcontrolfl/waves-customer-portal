@@ -36,16 +36,24 @@ jest.mock('../services/cancellation-processor', () => ({
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn().mockResolvedValue(true) }));
 
 // Minimal db mock: the accept path reads cancellation_cases (dedupe) and
-// stashes the receipt. `state.priorCase` drives the dedupe branch.
-const state = { priorCase: null, updates: [] };
+// stashes the receipt. `mockState.priorCase` drives the dedupe branch.
+// `mockState.freshCase` / `mockState.standingHold` answer the refusal-release
+// re-read (cancellation_cases under the lock, plan_holds for the case).
+const mockState = { priorCase: null, updates: [], freshCase: undefined, standingHold: null };
 jest.mock('../models/db', () => {
-  const fn = jest.fn(() => {
+  const fn = jest.fn((table) => {
     const builder = {
       where: jest.fn(() => builder),
+      whereIn: jest.fn(() => builder),
+      forUpdate: jest.fn(() => builder),
       orderBy: jest.fn(() => builder),
-      first: jest.fn(async () => state.priorCase),
-      select: jest.fn(async () => (state.priorCase ? [state.priorCase] : [])),
-      update: jest.fn(async (patch) => { state.updates.push(patch); return 1; }),
+      first: jest.fn(async () => {
+        if (table === 'plan_holds') return mockState.standingHold;
+        if (table === 'cancellation_cases' && mockState.freshCase !== undefined) return mockState.freshCase;
+        return mockState.priorCase;
+      }),
+      select: jest.fn(async () => (mockState.priorCase ? [mockState.priorCase] : [])),
+      update: jest.fn(async (patch) => { mockState.updates.push(patch); return 1; }),
     };
     return builder;
   });
@@ -56,10 +64,12 @@ jest.mock('../models/db', () => {
 
 const mockPreview = jest.fn();
 const mockOpenCase = jest.fn();
+const mockRelease = jest.fn().mockResolvedValue(true);
 jest.mock('../services/cancellation-resolution', () => ({
   cancelFlowV2Enabled: () => process.env.GATE_CANCEL_FLOW_V2 === 'true',
   previewCancellationResolution: (...a) => mockPreview(...a),
   openCancellationCase: (...a) => mockOpenCase(...a),
+  releaseUnappliedCase: (...a) => mockRelease(...a),
 }));
 const mockExecute = jest.fn();
 jest.mock('../services/cancellation-resolution/actions', () => ({
@@ -99,8 +109,10 @@ const CARD_PREVIEW = {
 
 beforeEach(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
-  state.priorCase = null;
-  state.updates.length = 0;
+  mockState.priorCase = null;
+  mockState.updates.length = 0;
+  mockState.freshCase = undefined;
+  mockState.standingHold = null;
   mockPreview.mockReset().mockResolvedValue(CARD_PREVIEW);
   mockOpenCase.mockReset().mockResolvedValue({ id: 'case-12345678', reason_code: 'away' });
   mockExecute.mockReset().mockResolvedValue({ actionType: 'hold', effects: ['Lawn Care on hold until December 1, 2026.'] });
@@ -131,7 +143,7 @@ test('happy path: re-resolves, mints accepted case, executes, confirms on both c
     params: expect.objectContaining({ resumeDate: '2026-12-01' }),
   }));
   // Receipt stashed on the case for the idempotency window.
-  expect(state.updates.length).toBeGreaterThan(0);
+  expect(mockState.updates.length).toBeGreaterThan(0);
 });
 
 test('a stale/mismatched template is refused and nothing executes', async () => {
@@ -153,8 +165,27 @@ test('an executor coded failure returns its code and sends no confirmation', asy
   expect(mockEmail).not.toHaveBeenCalled();
 });
 
+test('a pause with nothing to pause asks for its case to be released; other refusals keep it', async () => {
+  mockRelease.mockClear();
+  mockExecute.mockRejectedValueOnce(Object.assign(new Error('Your next Lawn Care visit is November 5, 2026, after you are back.'), { code: 'hold_not_needed' }));
+  expect((await accept({ reasonCode: 'away', templateId: 'away_hold' })).body.code).toBe('hold_not_needed');
+  expect(mockRelease).toHaveBeenCalledWith(expect.objectContaining({ customerId: expect.anything(), code: 'hold_not_needed' }));
+
+  // The schedule changing under the locked re-read is refused before any write: released too.
+  mockRelease.mockClear();
+  mockExecute.mockRejectedValueOnce(Object.assign(new Error('Your schedule just changed — please try again'), { code: 'hold_visits_changed' }));
+  expect((await accept({ reasonCode: 'away', templateId: 'away_hold' })).body.code).toBe('hold_visits_changed');
+  expect(mockRelease).toHaveBeenCalledWith(expect.objectContaining({ customerId: expect.anything(), code: 'hold_visits_changed' }));
+
+  mockRelease.mockClear();
+  mockExecute.mockRejectedValueOnce(Object.assign(new Error('already held'), { code: 'hold_cooldown' }));
+  await accept({ reasonCode: 'away', templateId: 'away_hold' });
+  expect(mockRelease).not.toHaveBeenCalled();
+});
+
+
 test('same accepted template inside 24h returns the original receipt, no re-execution', async () => {
-  state.priorCase = {
+  mockState.priorCase = {
     id: 'case-old',
     resolution_action: JSON.stringify({ type: 'hold', holdMaxDays: 180 }),
     scope: JSON.stringify(['lawn_care']),

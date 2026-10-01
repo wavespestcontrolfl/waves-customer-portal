@@ -592,6 +592,44 @@ describe('_composeBrief photo_slots (C3, owner ruling 2026-09-28)', () => {
   });
 });
 
+describe('_composeBrief LLM-confirmed photo subject is bound to its topic', () => {
+  const args = (query, photoSubject) => ({
+    opportunity: { id: 'opp-1', page_url: null, query, city: 'Bradenton', service: 'pest', bucket: 'customer_need', signal_metadata: {} },
+    signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+    decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 80, score_breakdown: {}, human_review_required: false, human_review_reason: null, router_notes: null },
+    existingBriefVersions: 0,
+    photoSubject,
+  });
+  const pestPhoto = (brief) => brief.voice_constraints.photo_slots.find((s) => s.slot === 'pest').photo;
+
+  test('confirmation for this exact topic fills the slot and is recorded', () => {
+    const topic = 'where do fire ants come from';
+    const brief = new ContentBriefBuilder()._composeBrief(args(topic, { slug: 'fire-ant', confirmed_by: 'llm', topic }));
+    expect(pestPhoto(brief)).not.toBeNull();
+    expect(brief.voice_constraints.photo_subject).toEqual({ slug: 'fire-ant', confirmed_by: 'llm' });
+  });
+  test('confirmation for a different topic string is ignored', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(args('where do fire ants come from', { slug: 'fire-ant', confirmed_by: 'llm', topic: 'fire ant signs and identification' }));
+    expect(pestPhoto(brief)).toBeNull();
+    expect(brief.voice_constraints.photo_subject).toBeUndefined();
+  });
+  test('no confirmation → the connector topic stays photo-less', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(args('where do fire ants come from', null));
+    expect(pestPhoto(brief)).toBeNull();
+  });
+});
+
+describe('_confirmPhotoSubject', () => {
+  test('never consults the model for a non-identification page type', async () => {
+    const confirmer = require('../services/content/photo-subject-confirmer');
+    const spy = jest.spyOn(confirmer, 'confirmPhotoSubject');
+    const out = await new ContentBriefBuilder()._confirmPhotoSubject({ query: 'where do fire ants come from' }, { page_type: 'city-service' });
+    expect(out).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});
+
 describe('_loadRelatedPosts gating', () => {
   test('compose propagates a related-post lookup failure before persistence or writer dispatch', async () => {
     const queue = require('../services/content/opportunity-queue');

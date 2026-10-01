@@ -4,8 +4,8 @@
 // owner says "build gap #12" (building), when that PR merges (fixed), or when
 // the owner rules a gap by design or not worth building (by_design /
 // dismissed). Closed statuses (fixed, by_design, dismissed) leave the gap out
-// of list_gap_reports' default view and the Monday digest; the recorder
-// reopens a fixed gap to new on its own if it happens again. Writes go through
+// of list_gap_reports' default view; the recorder reopens a fixed gap to new
+// (and rings the admin bell again) on its own if it happens again. Writes go through
 // the service's one writer (server/services/agent-gap-reports.js setGapStatus).
 //
 //   railway run --service Postgres node ops/agents/gap-status.js --gap=12 --status=building            # dry run

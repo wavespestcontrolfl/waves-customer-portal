@@ -228,7 +228,7 @@ app.use((req, res, next) => {
 // middleware terminates OPTIONS for non-allowlisted origins without an
 // Access-Control-Allow-Origin header, which would break third-party embeds.
 // (Approved public surface — see AGENTS.md.) Keep this above the global cors().
-app.use('/api/public/pest-forecast', (req, res, next) => {
+app.use(['/api/public/pest-forecast', '/api/public/yard-calendar'], (req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
@@ -269,6 +269,14 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
 // logger further down. Beacons are no-cors `text/plain` POSTs whose
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
+
+// /book "Can't find a time?" preferred-time request (GATE_BOOK_PREFERRED_TIME,
+// dark). The guard (no-store/noindex/no-referrer headers + the generic
+// unknown-route 404 while the gate is off) is mounted ABOVE the global cors()
+// (an allowed-origin OPTIONS preflight would answer 204 while dark), the global
+// `/api/` limiter (429) and the body parsers (400/413) — the same position the
+// other dark public routes use (codex P0 r1 on #5399). The route re-runs it.
+app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard);
 
 // Signed satellite image proxy (lead-form lookup, service report, portal
 // station map): serves Google imagery WITHOUT the server Maps key ever
@@ -714,6 +722,8 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
 app.use('/api/client-errors', require('./routes/client-errors'));
 app.use('/api/push', require('./routes/push'));
+// Customer activity beacons (GATE_PORTAL_ACTIVITY, dark) — authenticated, writes analytics rows only.
+app.use('/api/customer/activity', require('./routes/customer-activity'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
@@ -726,6 +736,8 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // Mounted before adminCustomerRoutes so the customer router doesn't
 // shadow the turf-profile sub-routes. Both routers share the
 // /api/admin/customers prefix; Express tries them in mount order.
+app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
+app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
@@ -823,6 +835,7 @@ app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
+app.use('/api/public/yard-calendar', require('./routes/public-yard-calendar'));
 app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));

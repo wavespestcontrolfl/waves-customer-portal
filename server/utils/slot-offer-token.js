@@ -30,9 +30,12 @@
  *     separate `slot_sig` field shaped `<exp>.<sig>` that the client passes
  *     through untouched. scopeId = '' (the funnel is anonymous; /availability
  *     is public, so the offer binds WHAT was offered, not who fetched it).
- *     /book never opts into arrivalGrace (self-serve arrival grace,
- *     scheduling/policy.js — owner ruling 2026-09-28, scoped to the estimate
- *     picker only), so its offers always take the v2 (ungraced) shape below.
+ *     /book offers take the v2 (ungraced) shape below unless GATE_BOOK_ARRIVAL_GRACE
+ *     is live (owner-approved 2026-09-29): then a slot offered under a positive
+ *     self-serve arrival grace (scheduling/policy.js) signs the v3 string and
+ *     the field becomes `<exp>.<arrivalGrace>.<sig>` — see BOOK_ARRIVAL_GRACE_
+ *     OFFER_POLICY and splitSlotOfferField below. A gate-off /book offer is
+ *     byte-identical to before that lane.
  *
  * arrivalGrace (self-serve arrival grace, owner ruling 2026-09-28, Codex
  * round 2 on #5314): the estimate surface's ONLY additional signed field,
@@ -115,6 +118,21 @@ const BOOK_INSERTION_OFFER_POLICY = 'book_insertion_2026_09_28';
 // verification (createSelfBooking) share, so the two sides cannot drift.
 function bookInsertionOfferPolicy(insertion) {
   return insertion === true ? BOOK_INSERTION_OFFER_POLICY : undefined;
+}
+
+// GATE_BOOK_ARRIVAL_GRACE (owner-approved 2026-09-29): every /book offer
+// minted while the gate is live for that build carries this tag INSTEAD of
+// BOOK_INSERTION_OFFER_POLICY (grace requires insertion, so it supersedes
+// it). Same mechanism as #5231: a flip in EITHER direction between mint and
+// confirm changes the policy the verifier computes, fails the HMAC, and the
+// customer gets the standard "pick your time again" 409 rather than a commit
+// judged by a different offer/commit rule than the one that offered the slot.
+const BOOK_ARRIVAL_GRACE_OFFER_POLICY = 'book_arrival_grace_2026_09_29';
+
+// The one mapping for both sides, extending bookInsertionOfferPolicy:
+// `graceLive` true → the grace tag; else exactly bookInsertionOfferPolicy.
+function bookOfferPolicy({ insertion, graceLive } = {}) {
+  return graceLive === true ? BOOK_ARRIVAL_GRACE_OFFER_POLICY : bookInsertionOfferPolicy(insertion);
 }
 
 // v3 is OPT-IN, per offer, on the value of arrivalGrace alone (Codex r3 on
@@ -233,17 +251,49 @@ function splitSignedSlotId(slotId) {
 
 // ---- /book-surface carrier: standalone `<exp>.<sig>` field ----
 
-function mintSlotOfferField(payload, now = Date.now()) {
-  const { exp, sig } = signSlotOffer(payload, now);
-  return `${exp}.${sig}`;
+
+// Two shapes, mirroring the estimate slotId carrier: `<exp>.<sig>` (ungraced,
+// v2 — arrivalGrace reads 0; every offer this module produced before
+// GATE_BOOK_ARRIVAL_GRACE, byte for byte) and `<exp>.<arrivalGrace>.<sig>`
+// (graced, v3 — only an offer minted under a positive grace). A base64url
+// signature never contains '.', so the segment count is unambiguous.
+const SLOT_OFFER_FIELD_RE_V3 = /^(\d+)\.(\d+)\.([A-Za-z0-9_-]+)$/;
+const SLOT_OFFER_FIELD_RE_V2 = /^(\d+)\.([A-Za-z0-9_-]+)$/;
+
+/** Split a /book `slot_sig` field → { exp, arrivalGrace, sig } or null. */
+function splitSlotOfferField(field) {
+  if (typeof field !== 'string') return null;
+  const v3 = field.match(SLOT_OFFER_FIELD_RE_V3);
+  if (v3) return { exp: Number(v3[1]), arrivalGrace: Number(v3[2]), sig: v3[3] };
+  const v2 = field.match(SLOT_OFFER_FIELD_RE_V2);
+  if (v2) return { exp: Number(v2[1]), arrivalGrace: 0, sig: v2[2] };
+  return null;
 }
 
+// An offer with no (or a non-positive) arrivalGrace is the exact `<exp>.<sig>`
+// this function always returned.
+function mintSlotOfferField(payload, now = Date.now()) {
+  const grace = Math.round(Number(payload && payload.arrivalGrace) || 0);
+  const { exp, sig } = signSlotOffer({ ...payload, arrivalGrace: grace > 0 ? grace : 0 }, now);
+  return grace > 0 ? `${exp}.${grace}.${sig}` : `${exp}.${sig}`;
+}
+
+// `payload.arrivalGrace` is IGNORED here — the grace a field claims is read
+// from the field itself and bound into the HMAC (a v3 field's cleartext grace
+// is verified, not trusted: a different value fails the signature, and a
+// stripped/added segment changes the canonical string's version tag).
 function verifySlotOfferField(payload, field, now = Date.now()) {
-  if (typeof field !== 'string' || !field.includes('.')) return false;
-  const dot = field.indexOf('.');
-  const exp = Number(field.slice(0, dot));
-  const sig = field.slice(dot + 1);
-  return verifySlotOffer({ ...payload, exp }, sig, now);
+  const parts = splitSlotOfferField(field);
+  if (!parts) return false;
+  return verifySlotOffer({ ...payload, exp: parts.exp, arrivalGrace: parts.arrivalGrace }, parts.sig, now);
+}
+
+/** The exact arrival grace (minutes) a /book slot_sig field was minted under
+ * — 0 for an ungraced/unparseable field. Call ONLY after verifySlotOfferField
+ * passed for the same field (the value is HMAC-bound there). */
+function slotOfferFieldGrace(field) {
+  const parts = splitSlotOfferField(field);
+  return parts && Number.isFinite(parts.arrivalGrace) && parts.arrivalGrace > 0 ? parts.arrivalGrace : 0;
 }
 
 // ---- calendar round-trip ----
@@ -284,6 +334,8 @@ module.exports = {
   CAPACITY_OFFER_POLICY,
   BOOK_INSERTION_OFFER_POLICY,
   bookInsertionOfferPolicy,
+  BOOK_ARRIVAL_GRACE_OFFER_POLICY,
+  bookOfferPolicy,
   SLOT_OFFER_TTL_MS,
   signSlotOffer,
   verifySlotOffer,
@@ -291,6 +343,8 @@ module.exports = {
   splitSignedSlotId,
   mintSlotOfferField,
   verifySlotOfferField,
+  splitSlotOfferField,
+  slotOfferFieldGrace,
   isRealCalendarDate,
   generateConfirmationCode,
 };

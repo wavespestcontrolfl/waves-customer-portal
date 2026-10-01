@@ -11,24 +11,27 @@ const knex = require('knex');
 const timeline = require('../services/customer-activity-timeline');
 
 const url = process.env.ACTIVITY_TIMELINE_TEST_DATABASE_URL || process.env.DATABASE_URL;
+const PUSH_NOTE = '0b6f3c1e-1f6a-4a52-9a7e-2f0f4f0f9a11';
 const pg = url ? describe : describe.skip;
 
 const TEMP_TABLES = `
-  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, deleted_at timestamp);
+  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, deleted_at timestamp, last_seen_at timestamptz);
   CREATE TEMP TABLE leads (id uuid PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp, from_phone text, metadata jsonb, twilio_sid text);
   CREATE TEMP TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), twilio_sid text, delivery_status text, updated_at timestamp);
   CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text, entity_type text, entity_id uuid);
   CREATE TEMP TABLE invoices (id uuid PRIMARY KEY, payer_id int);
   CREATE TEMP TABLE short_code_clicks (id uuid PRIMARY KEY, short_code_id uuid, clicked_at timestamp, is_bot boolean NOT NULL DEFAULT false);
-  CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, updated_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
+  CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, updated_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp, lead_id uuid, estimate_id uuid);
   CREATE TEMP TABLE automation_templates (key text PRIMARY KEY, name text);
   CREATE TEMP TABLE automation_enrollments (id uuid PRIMARY KEY, template_key text, customer_id uuid);
   CREATE TEMP TABLE automation_step_sends (id uuid PRIMARY KEY, enrollment_id uuid, step_order int, status text, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, updated_at timestamp);
   CREATE TEMP TABLE newsletter_sends (id uuid PRIMARY KEY, subject text);
   CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid, email text);
   CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY, send_id uuid, subscriber_id int, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
-  CREATE TEMP TABLE customer_page_views (id uuid PRIMARY KEY, customer_id uuid, page text, viewed_at timestamptz);
+  CREATE TEMP TABLE customer_page_views (id uuid PRIMARY KEY, customer_id uuid, page text, subject_type text, subject_id text, viewed_at timestamptz);
+  CREATE TEMP TABLE outbound_links (id uuid PRIMARY KEY, target_url text);
+  CREATE TEMP TABLE outbound_link_clicks (id uuid PRIMARY KEY, outbound_link_id uuid, clicked_at timestamptz, template_key text, surface text, customer_id uuid);
   CREATE TEMP TABLE estimates (id uuid PRIMARY KEY, customer_id uuid, address text);
   CREATE TEMP TABLE estimate_views (id uuid PRIMARY KEY, estimate_id uuid, viewed_at timestamp);
   CREATE TEMP TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid);
@@ -55,7 +58,7 @@ pg('getCustomerActivity on Postgres', () => {
     await db.raw(CALL_LOG_DDL);
 
     await db('customers').insert([
-      { id: cust, email: 'Synthetic.Person@example.test' },
+      { id: cust, email: 'Synthetic.Person@example.test', last_seen_at: T(75) },
       { id: other, email: 'other@example.test' },
     ]);
     await db('leads').insert({ id: lead, customer_id: cust });
@@ -147,7 +150,19 @@ pg('getCustomerActivity on Postgres', () => {
     await db('customer_page_views').insert([
       { id: randomUUID(), customer_id: cust, page: 'appointment', viewed_at: T(40) },
       { id: randomUUID(), customer_id: cust, page: 'portal:home', viewed_at: T(41) },
+      { id: randomUUID(), customer_id: cust, page: 'push:open', subject_type: 'ios', subject_id: `notification:${PUSH_NOTE}`, viewed_at: T(39) },
       { id: randomUUID(), customer_id: other, page: 'track', viewed_at: T(91) },
+    ]);
+    // outside-link clicks: the full URL (path, query) never reaches the feed; another customer's click is excluded
+    const olEmail = randomUUID(); const olPage = randomUUID();
+    await db('outbound_links').insert([
+      { id: olEmail, target_url: 'https://www.chewy.com/dp/123?tag=secret&x=1' },
+      { id: olPage, target_url: 'not a url' },
+    ]);
+    await db('outbound_link_clicks').insert([
+      { id: randomUUID(), outbound_link_id: olEmail, clicked_at: T(57), template_key: 'prep.flea', surface: 'email', customer_id: cust },
+      { id: randomUUID(), outbound_link_id: olPage, clicked_at: T(38), template_key: null, surface: 'page', customer_id: cust },
+      { id: randomUUID(), outbound_link_id: olEmail, clicked_at: T(93), template_key: 'prep.flea', surface: 'email', customer_id: other },
     ]);
     await db('estimates').insert({ id: est, customer_id: cust, address: '1 Synthetic Way' });
     await db('estimate_views').insert({ id: randomUUID(), estimate_id: est, viewed_at: T(42) });
@@ -178,7 +193,7 @@ pg('getCustomerActivity on Postgres', () => {
       'Text delivered (reminder)', 'Text failed (billing)', 'Replied by text',
       'Clicked the invoice link', 'Clicked the estimate link',
       'Email sent', 'Link clicked (reported by email provider — may be a scanner)', 'Email bounced',
-      'Opened the appointment page', 'Opened the portal', 'Viewed their estimate (unfiltered)', 'Viewed the prep guide (unfiltered)',
+      'Opened the appointment page', 'Opened the portal', 'Opened app from a notification', 'Viewed their estimate (unfiltered)', 'Viewed the prep guide (unfiltered)',
       'Viewed their service report (unfiltered)', 'Viewed their inspection report (unfiltered)', 'Viewed a contract (unfiltered)',
       'Viewed the price-change notice (unfiltered)', 'Called us',
     ]));
@@ -192,8 +207,14 @@ pg('getCustomerActivity on Postgres', () => {
     expect(failed.detail.length).toBeLessThanOrEqual(140);
     expect(r.events.find((e) => e.title === 'Text delivered (reminder)').detail).toBe('Reminder for your visit');
     expect(r.unavailableSources).toEqual([]);
-    // no outside-link or portal-visit source in this PR
-    expect(r.events.some((e) => e.source === 'outlink' || e.source === 'portal')).toBe(false);
+    // outside-link clicks: hostname (+ prep template) only, channel from the surface, other customers' clicks out
+    const outside = r.events.filter((e) => e.source === 'outlink');
+    expect(outside.map((e) => [e.title, e.channel, e.detail, e.engaged, e.at])).toEqual([
+      ['Outside link clicked (may be a service contact, not counted)', 'email', 'chewy.com · prep flea', false, T(57).toISOString()],
+      ['Outside link clicked (may be a service contact, not counted)', 'page', null, false, T(38).toISOString()],
+    ]);
+    expect(JSON.stringify(outside)).not.toMatch(/secret|\/dp\/123/);
+    expect(r.events.some((e) => e.source === 'portal')).toBe(false);
   });
 
   test('a read text is a delivered text with a read-receipt title, and it paginates like any other', async () => {
@@ -244,6 +265,57 @@ pg('getCustomerActivity on Postgres', () => {
     expect(subjects).toEqual(['lead-typed, customer id', 'lead-typed, linked lead', 'unowned lead mail']);
   });
 
+  describe('GATE_LEAD_EMAIL_LINKS: mail sent to the customer\'s lead / estimate before they converted', () => {
+    const saved = process.env.GATE_LEAD_EMAIL_LINKS;
+    afterEach(() => { if (saved === undefined) delete process.env.GATE_LEAD_EMAIL_LINKS; else process.env.GATE_LEAD_EMAIL_LINKS = saved; });
+
+    async function seed() {
+      const conv = randomUUID(); const stranger = randomUUID();
+      const convLead = randomUUID(); const otherLead = randomUUID();
+      const convEst = randomUUID(); const otherEst = randomUUID();
+      await db('customers').insert([{ id: conv, email: 'new.address@example.test' }, { id: stranger, email: 'stranger@example.test' }]);
+      await db('leads').insert([{ id: convLead, customer_id: conv }, { id: otherLead, customer_id: null }]);
+      await db('estimates').insert([{ id: convEst, customer_id: conv }, { id: otherEst, customer_id: null }]);
+      await db('email_messages').insert([
+        // sent to the prospect under an address the customer no longer uses; only the link ties it to them
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'linked by lead', sent_at: T(1), lead_id: convLead },
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'linked by estimate', sent_at: T(2), estimate_id: convEst },
+        // linked to somebody else's lead / estimate
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'other prospect lead', sent_at: T(3), lead_id: otherLead },
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'other prospect estimate', sent_at: T(4), estimate_id: otherEst },
+        // the estimate is theirs, but the row names another customer: ownership by id wins
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: stranger, recipient_email_snapshot: 'stranger@example.test', status: 'sent', subject_snapshot: 'names another customer', sent_at: T(5), estimate_id: convEst },
+        // customer-typed rows are owned by recipient_id, never by a link
+        { id: randomUUID(), recipient_type: 'customer', recipient_id: stranger, recipient_email_snapshot: 'stranger@example.test', status: 'sent', subject_snapshot: 'customer-typed, other customer', sent_at: T(6), estimate_id: convEst },
+        // test / admin mail never rides a link
+        { id: randomUUID(), recipient_type: 'test', recipient_id: null, recipient_email_snapshot: 'x@example.test', status: 'sent', subject_snapshot: 'test mail', sent_at: T(7), lead_id: convLead },
+      ]);
+      return conv;
+    }
+    const subjectsOf = async (id) => (await timeline.getCustomerActivity(id, { limit: 50 }, db))
+      .events.filter((e) => e.source === 'email').map((e) => e.detail.split(' · ')[0]).sort();
+
+    test('dark (default): the timeline lists exactly what it did before', async () => {
+      delete process.env.GATE_LEAD_EMAIL_LINKS;
+      const conv = await seed();
+      expect(await subjectsOf(conv)).toEqual([]);
+    });
+
+    test('on: mail linked to their lead or estimate appears; other people\'s mail and owned rows do not', async () => {
+      process.env.GATE_LEAD_EMAIL_LINKS = 'true';
+      const conv = await seed();
+      expect(await subjectsOf(conv)).toEqual(['linked by estimate', 'linked by lead']);
+    });
+
+    test('on: the feed and the summary agree (summary is built from the same predicate)', async () => {
+      process.env.GATE_LEAD_EMAIL_LINKS = 'true';
+      const conv = await seed();
+      const r = await timeline.getCustomerActivity(conv, { limit: 50 }, db);
+      expect(r.unavailableSources).toEqual([]);
+      expect(r.events.filter((e) => e.kind === 'sent')).toHaveLength(2);
+    });
+  });
+
   test('a failed email is dated at its failure time, after the queue time; automation bounces and complaints show', async () => {
     const r = await run({ limit: 200 });
     const failed = r.events.find((e) => e.source === 'email' && e.kind === 'failed');
@@ -266,7 +338,7 @@ pg('getCustomerActivity on Postgres', () => {
 
   test('a push-proof row is an app notification, not a text, and is not engagement', async () => {
     const r = await run({ limit: 200 });
-    const push = r.events.find((e) => e.channel === 'push');
+    const push = r.events.find((e) => e.channel === 'push' && e.kind === 'delivered');
     expect(push).toMatchObject({ kind: 'delivered', engaged: false, title: 'App notification delivered (appointment reminder)', at: T(6).toISOString() });
     expect(r.events.some((e) => e.channel === 'sms' && e.detail === 'Tomorrow at 9')).toBe(false);
   });
@@ -368,7 +440,9 @@ pg('getCustomerActivity on Postgres', () => {
     const r = await run({ limit: 200 });
     const engaged = r.events.filter((e) => e.engaged);
     expect(new Set(engaged.map((e) => e.source))).toEqual(new Set(['sms', 'link', 'pageview']));
-    expect(engaged.every((e) => ['replied', 'clicked', 'viewed'].includes(e.kind))).toBe(true);
+    expect(engaged.every((e) => ['replied', 'clicked', 'viewed', 'opened'].includes(e.kind))).toBe(true);
+    // the only engaged 'opened' is the verified push open (an email open never is)
+    expect(engaged.filter((e) => e.kind === 'opened').map((e) => [e.source, e.channel, e.ref])).toEqual([['pageview', 'push', { type: 'notification', id: PUSH_NOTE }]]);
     // every other event is shown but never engaged
     const rest = r.events.filter((e) => !engaged.includes(e));
     expect(rest.some((e) => e.kind === 'opened')).toBe(true);
@@ -380,6 +454,8 @@ pg('getCustomerActivity on Postgres', () => {
     // unfiltered token-page stamps (T42-T48), the call (T50), an AP-inbox click (T60).
     expect(r.summary.lastEngagedAt).toBe(T(55).toISOString()); // the human short-link click
     expect(r.summary.lastEngagedFrom).toBe('link clicks');
+    // last seen is informational: newer than every engaged event here and still not engagement
+    expect(r.summary.lastSeenAt).toBe(T(75).toISOString());
     expect(r.summary.lastEmailOpenAt).toBe(T(89).toISOString());
     expect(r.summary.lastProviderClickAt).toBe(T(91).toISOString());
     expect(r.summary.lastEmailOpenNote).toMatch(/unreliable/i);
@@ -400,6 +476,75 @@ pg('getCustomerActivity on Postgres', () => {
     expect(r.events).toHaveLength(5);
     expect(r.events.every((e) => e.engaged === false)).toBe(true);
     expect(r.summary).toMatchObject({ lastEngagedAt: null, lastEngagedFrom: null, lastEmailOpenAt: T(2).toISOString(), lastProviderClickAt: T(3).toISOString() });
+  });
+
+  test('an outside-link click alone is listed but never engagement; a never-seen customer has lastSeenAt null', async () => {
+    const solo = randomUUID(); const ol = randomUUID();
+    await db('customers').insert({ id: solo, email: 'outside.only@example.test' });
+    await db('outbound_links').insert({ id: ol, target_url: 'https://elanco.com/x' });
+    await db('outbound_link_clicks').insert({ id: randomUUID(), outbound_link_id: ol, clicked_at: T(9), template_key: 'prep.tick', surface: 'email', customer_id: solo });
+    const r = await timeline.getCustomerActivity(solo, {}, db);
+    expect(r.events.map((e) => [e.kind, e.engaged, e.detail])).toEqual([['outlink_clicked', false, 'elanco.com · prep tick']]);
+    expect(r.summary).toMatchObject({ lastEngagedAt: null, lastEngagedFrom: null, lastSeenAt: null });
+  });
+
+  describe('a provider click is collapsed into a same-tap email-surface outside-link click', () => {
+    const provider = (c, email, clickedAt, subject) => ({ id: randomUUID(), recipient_type: 'customer', recipient_id: c, recipient_email_snapshot: email, status: 'clicked', subject_snapshot: subject, sent_at: T(0), clicked_at: clickedAt });
+    const olClick = (link, c, at, surface) => ({ id: randomUUID(), outbound_link_id: link, clicked_at: at, template_key: 'prep.flea', surface, customer_id: c });
+    const fresh = async (email) => {
+      const c = randomUUID();
+      await db('customers').insert({ id: c, email });
+      const link = randomUUID();
+      await db('outbound_links').insert({ id: link, target_url: 'https://www.chewy.com/dp/1' });
+      return { c, link };
+    };
+    const providerAts = (r) => r.events.filter((e) => e.kind === 'provider_clicked').map((e) => e.at);
+    const outAts = (r) => r.events.filter((e) => e.kind === 'outlink_clicked').map((e) => e.at);
+
+    test('an email-surface click within two minutes collapses the provider click; the outside-link event stays and is not engaged', async () => {
+      const { c, link } = await fresh('collapse.a@example.test');
+      await db('email_messages').insert(provider(c, 'collapse.a@example.test', T(10), 'Prep guide'));
+      await db('outbound_link_clicks').insert(olClick(link, c, T(11, 30), 'email'));
+      const r = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r)).toEqual([]);
+      expect(outAts(r)).toEqual([T(11, 30).toISOString()]);
+      expect(r.events.every((e) => e.engaged === false)).toBe(true);
+      expect(r.summary.lastEngagedAt).toBeNull();
+    });
+
+    test('a page-surface click, one three minutes away, or another customer\'s click does not collapse it', async () => {
+      const { c, link } = await fresh('collapse.b@example.test');
+      const { c: c2, link: link2 } = await fresh('collapse.b2@example.test');
+      await db('email_messages').insert([
+        provider(c, 'collapse.b@example.test', T(10), 'Page surface'),
+        provider(c, 'collapse.b@example.test', T(20), 'Three minutes away'),
+        provider(c, 'collapse.b@example.test', T(30), 'Other customer'),
+      ]);
+      await db('outbound_link_clicks').insert([
+        olClick(link, c, T(10, 30), 'page'),
+        olClick(link, c, T(23), 'email'),
+        olClick(link2, c2, T(30, 30), 'email'),
+      ]);
+      const r = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r).sort()).toEqual([T(10), T(20), T(30)].map((d) => d.toISOString()));
+      expect(r.summary.lastProviderClickAt).toBe(T(30).toISOString());
+    });
+
+    test('NOT precedence: a short-link click far away plus an outside-link click near still collapses the provider click', async () => {
+      const { c, link } = await fresh('collapse.c@example.test');
+      const code = randomUUID();
+      await db('short_codes').insert({ id: code, customer_id: c, kind: 'invoice', channel: 'email', purpose: 'invoice' });
+      await db('short_code_clicks').insert({ id: randomUUID(), short_code_id: code, clicked_at: T(40), is_bot: false });
+      await db('email_messages').insert(provider(c, 'collapse.c@example.test', T(10), 'Prep guide'));
+      await db('outbound_link_clicks').insert(olClick(link, c, T(10, 45), 'email'));
+      const r = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r)).toEqual([]);
+      expect(outAts(r)).toEqual([T(10, 45).toISOString()]);
+      // and the far short-link click alone (no outside link near) leaves a distant provider click listed
+      await db('email_messages').insert(provider(c, 'collapse.c@example.test', T(20), 'Distant provider click'));
+      const r2 = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r2)).toEqual([T(20).toISOString()]);
+    });
   });
 
   test('summary reads the whole history, not just the visible page', async () => {

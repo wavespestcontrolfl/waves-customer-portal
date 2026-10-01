@@ -1502,8 +1502,17 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // 17 with the completion-SMS uncertainty hold (#4632): the resume-side
     // clear of completionSmsDeliveryUnverifiedAt once a marker-bound definite
     // rejection is proven, and the unverified-outcome stamp in the completion
-    // SMS catch — both key-merges, not whole-column writes.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(17);
+    // SMS catch — both key-merges, not whole-column writes. 18 with the
+    // bundled review line dropped at send time (#5367 r6): the stripped body
+    // and cleared bundle keys, merged under the review lock before the
+    // provider call — a key-merge too.
+    // 19 with the dispute-hold hand-over marker (invoiceSenderOwnsPayLinkFor) —
+    // a key-merge too. Back to 18 (#5459): that marker is now written by
+    // handOverHeldInvoiceToSender in ONE transaction with the invoice queue write
+    // (dispatch-completion-deferred markInvoiceSenderOwnsPayLink), the same atomic
+    // jsonb key-merge on the same key, so the completion no longer calls
+    // mergeRecordNotesKeys for it. Still not a whole-column write.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(18);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

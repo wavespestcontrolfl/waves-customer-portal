@@ -87,9 +87,13 @@ describe('first bell', () => {
   test('rings with bell:true so the admin bell policy cannot silence it', async () => {
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result).toMatchObject({ misses: 1, alerted: 1, repeated: 0 });
-    const [category, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    const [category, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(category).toBe('alert');
-    expect(title).toMatch(/^Confirmed appointment never booked — Robin Example, 2026-10-04 11:00 ET/);
+    expect(title).toBe("Schedule — book Robin Example's Wasp Nest Removal");
+    expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; nothing is on the calendar.');
+    expect(opts.link).toMatch(/^\/admin\/dispatch\?tab=schedule&date=\d{4}-\d{2}-\d{2}$/);
+    expect(opts.metadata).toMatchObject({ call_log_id: CALL_ID, area: 'Schedule', severity: 'needs-you', subject: { type: 'call', id: CALL_ID }, doneWhen: 'visit_booked', who: 'person' });
+    expect(opts.detail).toMatch(/2026-10-04 11:00 ET/);
     expect(opts.bell).toBe(true);
     expect(opts.dedupeKey).toBe(`call-booking-miss:${CALL_ID}`);
     expect(opts.dedupeWindowMs).toBeUndefined();
@@ -124,9 +128,10 @@ describe('repeat paging', () => {
     mockState.rung = [{ call_log_id: CALL_ID, last_at: new Date(NOW.getTime() - (REPEAT_INTERVAL_MINUTES + 10) * 60000).toISOString() }];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result).toMatchObject({ alerted: 0, repeated: 1 });
-    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(title).toMatch(/^Still not booked — Robin Example/);
-    expect(body).toMatch(/keeps ringing until the visit is booked/);
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toMatch(/^Schedule — book Robin Example/);
+    expect(why).toMatch(/^Still unbooked: confirmed /);
+    expect(opts.detail).toMatch(/keeps ringing until the visit is booked/);
     expect(opts.bell).toBe(true);
     expect(opts.dedupeKey).toBe(`call-booking-miss-repeat:${CALL_ID}`);
     expect(opts.metadata.repeat).toBe(true);

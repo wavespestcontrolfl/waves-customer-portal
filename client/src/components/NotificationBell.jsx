@@ -122,6 +122,54 @@ function reportLinkFor(n) {
   return `/admin/agents?tab=activity&focus=${encodeURIComponent(n.id)}`;
 }
 
+// An admin row's body is cut to one sentence (notification-service's brevity
+// guard) and the full original text is stored in `detail`. Every admin row
+// but an ops_digest one (its full report is the Activity feed's "Full report"
+// link above) reads that text back inline from the bell.
+function fullTextFor(n, type) {
+  if (type !== 'admin' || !n || n.category === 'ops_digest') return null;
+  return typeof n.detail === 'string' && n.detail.trim() ? n.detail : null;
+}
+
+// "Show full text" / "Hide full text": its own click and key handling, never
+// the row's — the row still navigates to its link and marks itself read only
+// on its own tap. `pre-wrap` keeps a list body's line breaks.
+// A persisted admin row can be marked done (docs/admin-notifications.md
+// section 4.3: read is not done). The `live:` dashboard overlay rows have no
+// persisted id and customer bells have no done state, so neither offers it.
+function canMarkDone(n, type) {
+  return type === 'admin' && n?.id != null && !String(n.id).startsWith('live:');
+}
+
+// "Done": its own click and key handling, never the row's (the row would
+// navigate to its link). `tall` gives the phone layout its 44px tap target.
+function DoneButton({ onDone, color, tall }) {
+  return (
+    <button type="button" className="waves-focus-ring" onClick={onDone} onKeyDown={(e) => e.stopPropagation()}
+      style={{
+        padding: tall ? '0 12px' : '2px 8px', minHeight: tall ? 44 : undefined, minWidth: tall ? 44 : undefined,
+        border: 0, background: 'none', cursor: 'pointer',
+        fontSize: 14, fontWeight: 600, textDecoration: 'underline', color,
+      }}>Done</button>
+  );
+}
+
+function FullText({ text, color, marginTop }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <button type="button" aria-expanded={shown} onClick={() => setShown((v) => !v)}
+        style={{
+          marginTop, padding: 0, border: 0, background: 'none', cursor: 'pointer',
+          fontSize: 14, fontWeight: 600, textDecoration: 'underline', color,
+        }}>{shown ? 'Hide full text' : 'Show full text'}</button>
+      {shown && (
+        <div style={{ marginTop: 4, fontSize: 14, lineHeight: 1.4, color, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</div>
+      )}
+    </div>
+  );
+}
+
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
@@ -133,10 +181,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [page, setPage] = useState(1);
+  // The server's keyset cursor for the next page: rows can leave the feed
+  // between requests (Done, an auto-close), so paging never uses offsets.
+  const [nextCursor, setNextCursor] = useState(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailed, setMoreFailed] = useState(false);
   const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
+  // "Recently done" (admin role only): done rows from the last 7 days, so an
+  // accidental Done can be reopened. doneError is 'load' | 'reopen' | null.
+  const [doneOpen, setDoneOpen] = useState(false);
+  const [doneRows, setDoneRows] = useState([]);
+  const [doneLoading, setDoneLoading] = useState(false);
+  const [doneError, setDoneError] = useState(null);
+  const [doneNext, setDoneNext] = useState(null); // the server's cursor for older done rows
+  const [doneNote, setDoneNote] = useState(null); // short inline note after a stale Reopen
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
   // hides itself once the user grants permission.
@@ -359,6 +418,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       if (seq !== loadSeqRef.current) return;
       setNotifications(d.notifications || []);
       setPage(1);
+      setNextCursor(d.next || null);
       setHasMore(type === 'admin' && d.hasMore === true);
     } catch {
       if (seq !== loadSeqRef.current) return;
@@ -372,7 +432,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setLoadingMore(true);
     setMoreFailed(false);
     try {
-      const d = await requestJson(`${basePath}?limit=30&page=${page + 1}`);
+      const d = await requestJson(`${basePath}?limit=30&page=${page + 1}${nextCursor ? `&before=${encodeURIComponent(nextCursor)}` : ''}`);
       if (seq !== loadSeqRef.current) return;
       // New alerts can shift offset pages between requests. Keep each row
       // once while preserving the read state already confirmed in this panel.
@@ -381,6 +441,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
         return [...current, ...(d.notifications || []).filter(n => !ids.has(n.id))];
       });
       setPage(page + 1);
+      setNextCursor(d.next || null);
       setHasMore(d.hasMore === true);
     } catch {
       if (seq !== loadSeqRef.current) return;
@@ -390,7 +451,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   const handleOpen = () => {
-    if (!open) loadNotifications();
+    if (!open) { loadNotifications(); setDoneOpen(false); }
     setOpen(!open);
   };
 
@@ -428,6 +489,81 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     // stamp that would beat the correct badge (codex round 14).
     setUnreadCount(prev => Math.max(0, prev - 1));
     if (type === 'admin' || nativeCustomer) fetchCount();
+  };
+
+  // Done leaves the bell: the row is removed once the server accepts it, and
+  // the badge is re-synced from the authoritative count (see markRead).
+  // `version` is the content version the list served for this row: a quiet
+  // refresh can rewrite a standing alert's text in place, and the server
+  // answers 409 when the row is no longer the text this admin saw. Then the
+  // row stays and the list reloads, so the new text is what they see next.
+  const markDone = async (e, n) => {
+    e.stopPropagation();
+    e.preventDefault();
+    try {
+      await requestJson(`${basePath}/${n.id}/done`, { method: 'PUT', body: JSON.stringify({ version: n.version }) });
+    } catch (err) {
+      if (err?.status === 409) loadNotifications();
+      return;
+    }
+    setNotifications(prev => prev.filter(x => x.id !== n.id));
+    if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
+    fetchCount();
+  };
+
+  const doneSeqRef = useRef(0);
+  // more: append the page after the last one read (keyset cursor), so every
+  // done row in the window is reachable however many closed after it.
+  const loadDone = async ({ more = false } = {}) => {
+    const seq = ++doneSeqRef.current;
+    setDoneLoading(true);
+    setDoneError(null);
+    try {
+      const d = await requestJson(`${basePath}/done${more && doneNext ? `?before=${encodeURIComponent(doneNext)}` : ''}`);
+      if (seq !== doneSeqRef.current) return;
+      setDoneRows(prev => {
+        if (!more) return d.notifications || [];
+        const ids = new Set(prev.map(n => n.id));
+        return [...prev, ...(d.notifications || []).filter(n => !ids.has(n.id))];
+      });
+      setDoneNext(d.next || null);
+    } catch {
+      if (seq !== doneSeqRef.current) return;
+      setDoneError('load');
+    }
+    setDoneLoading(false);
+  };
+
+  const toggleDone = () => {
+    const next = !doneOpen;
+    setDoneOpen(next);
+    setDoneNote(null);
+    if (next) loadDone();
+  };
+
+  // Reopen puts the row back in the bell: it leaves this list once the server
+  // accepts it, then the main list and the badge are re-read. `doneAt` is the
+  // full-precision done_at token the list served for this row: the server
+  // reopens only while the row is still done by that close, so a stale list
+  // can never clear a NEWER completion. A 409 means the row changed (or is no
+  // longer reopenable): the list is re-read and a short note says so.
+  const reopenDone = async (n) => {
+    setDoneError(null);
+    setDoneNote(null);
+    try {
+      await requestJson(`${basePath}/${n.id}/reopen`, { method: 'PUT', body: JSON.stringify({ doneAt: n.done_at_token }) });
+    } catch (err) {
+      if (err?.status === 409) {
+        loadDone();
+        setDoneNote('That alert changed \u2014 the list was refreshed.');
+        return;
+      }
+      setDoneError('reopen');
+      return;
+    }
+    setDoneRows(prev => prev.filter(x => x.id !== n.id));
+    loadNotifications();
+    fetchCount();
   };
 
   const markAllRead = async () => {
@@ -500,6 +636,59 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       <a href="/admin/communications#tab=notifications" style={{ color: colors.teal, fontSize: 14, fontWeight: 500, textDecoration: 'none' }}>
         Notification settings →
       </a>
+    </div>
+  );
+
+  // Reopen is admin-only on the server, so the list is offered to the admin
+  // role only (the local role hint gates nothing — the server enforces it).
+  const doneControl = type === 'admin' && staffRoleFromToken() === 'admin' && (
+    <div style={{ padding: '4px 20px 8px', textAlign: 'center' }}>
+      <button type="button" className="waves-focus-ring" onClick={toggleDone} aria-expanded={doneOpen} style={{
+        padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
+        color: colors.teal, fontSize: 14, fontWeight: 500,
+      }}>{doneOpen ? 'Hide recently done' : 'Recently done'}</button>
+      {doneOpen && (
+        <div style={{ textAlign: 'left' }}>
+          {doneLoading && <div style={{ padding: '8px 0', fontSize: 14, color: colors.muted }}>Loading…</div>}
+          {doneError && (
+            <div role="alert" style={{ padding: '8px 0', fontSize: 14, color: colors.text }}>
+              {doneError === 'reopen' ? 'Couldn\u2019t reopen that alert. Try again.' : 'Couldn\u2019t load recently done alerts.'}
+            </div>
+          )}
+          {doneNote && (
+            <div role="status" style={{ padding: '8px 0', fontSize: 14, color: colors.text }}>{doneNote}</div>
+          )}
+          {!doneLoading && !doneError && doneRows.length === 0 && (
+            <div style={{ padding: '8px 0', fontSize: 14, color: colors.muted }}>Nothing marked done in the last 7 days.</div>
+          )}
+          {doneRows.map(n => (
+            <div key={n.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0',
+              borderTop: `1px solid ${colors.border}`,
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayTitle(n)}</div>
+                <div style={{ fontSize: 14, color: colors.muted }}>
+                  {n.resolution || 'Marked done'} · {timeAgo(n.done_at)}
+                </div>
+              </div>
+              {/* Only a row a person marked done can be put back; a system close stays listed with its resolution. */}
+              {n.reopenable && (
+                <button type="button" className="waves-focus-ring" onClick={() => reopenDone(n)} style={{
+                  padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
+                  fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.text,
+                }}>Reopen</button>
+              )}
+            </div>
+          ))}
+          {!doneLoading && doneNext && (
+            <button type="button" className="waves-focus-ring" onClick={() => loadDone({ more: true })} style={{
+              padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
+              color: colors.teal, fontSize: 14, fontWeight: 500,
+            }}>Load more done</button>
+          )}
+        </div>
+      )}
     </div>
   );
 
@@ -645,6 +834,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 const href = linkFor(n);
                 const chip = digestKindChip(n);
                 const report = reportLinkFor(n);
+                const fullText = fullTextFor(n, type);
                 return (
                 <div key={n.id}
                   role={href ? 'link' : undefined}
@@ -711,8 +901,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                           color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
                         }}>Full report</button>
                     )}
-                    <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted, marginTop: 6 }}>
-                      {timeAgo(n.created_at)}
+                    {fullText && <FullText text={fullText} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                      <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted }}>
+                        {timeAgo(n.created_at)}
+                      </div>
+                      {canMarkDone(n, type) && <DoneButton tall onDone={(e) => markDone(e, n)} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
                     </div>
                   </div>
                   {href && (
@@ -724,6 +918,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 );
               })}
               {tab === 'account' && moreControl}
+              {doneControl}
               {settingsLink}
             </div>
           </div>
@@ -809,6 +1004,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     const href = linkFor(n);
                     const chip = digestKindChip(n);
                     const report = reportLinkFor(n);
+                    const fullText = fullTextFor(n, type);
                     const title = displayTitle(n);
                     return (
                     <div key={n.id}
@@ -867,8 +1063,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                               fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
                             }}>Full report</button>
                         )}
-                        <div style={{ fontSize: 11, color: colors.muted, marginTop: 4 }}>
-                          {timeAgo(n.created_at)}
+                        {fullText && <FullText text={fullText} marginTop={4} color={colors.text} />}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                          <div style={{ fontSize: 11, color: colors.muted }}>
+                            {timeAgo(n.created_at)}
+                          </div>
+                          {canMarkDone(n, type) && <DoneButton onDone={(e) => markDone(e, n)} color={colors.text} />}
                         </div>
                       </div>
                       {!n.read_at && (
@@ -883,6 +1083,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 </div>
               ))}
               {moreControl}
+              {doneControl}
               {settingsLink}
             </div>
           </div>
@@ -940,4 +1141,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor };
+export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor };
