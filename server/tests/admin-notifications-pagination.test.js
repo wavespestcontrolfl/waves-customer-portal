@@ -379,14 +379,14 @@ describe('GET /done (Recently done list)', () => {
     ];
   });
 
-  test('returns only recent done admin rows, newest done first, without activity-only rows', async () => {
+  test('returns only recent done admin rows, newest done first, Activity-only rows included (their one reopen path)', async () => {
     const res = await call({ techRole: 'admin' });
-    expect(res.json.mock.calls[0][0].notifications.map(n => n.id)).toEqual(['c', 'b']);
+    expect(res.json.mock.calls[0][0].notifications.map(n => n.id)).toEqual(['act', 'c', 'b']);
   });
 
   test('honors the limit', async () => {
     const rows = await NotificationService.getAdminDoneNotifications({ role: 'admin', limit: 1 });
-    expect(rows.map(n => n.id)).toEqual(['c']);
+    expect(rows.map(n => n.id)).toEqual(['act']); // the newest done row
   });
 
   test('pages by cursor: every row in the window stays reachable, even with more closed after it', async () => {

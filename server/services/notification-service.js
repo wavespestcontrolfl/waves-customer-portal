@@ -855,16 +855,19 @@ const NotificationService = {
   },
 
   // Recently done admin rows (the "Recently done" list, so an accidental Done
-  // can be reopened). Scoped exactly like the bell list; newest done first,
+  // can be reopened). Role-scoped like the bell list, but Activity-only rows
+  // are INCLUDED: Activity has its own Done and this is the one recovery
+  // path for an accidental one (a reopen puts it back pending in Activity).
+  // Newest done first,
   // keyset-paged on (done_at, id) like the bell list, so every row in the
   // window stays reachable however many closed after it. done_at_token is
   // done_at::text at full precision: the cursor source, and the fence a
   // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
   async getAdminDoneNotifications({ role, limit = 20, days = 7, before = null } = {}) {
-    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+    const query = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
       role,
-    ))
+    )
       .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
     if (before) query.whereRaw('(done_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     return query
