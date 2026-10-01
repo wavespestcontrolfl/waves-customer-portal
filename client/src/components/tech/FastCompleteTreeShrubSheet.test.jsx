@@ -27,17 +27,18 @@ afterEach(() => {
 
 const CATALOG = [
   // An insecticide: bee-sensitive and a resistance-rotation product.
-  { id: 'merit', name: 'Merit 2F', category: 'insecticide', active_ingredient: 'imidacloprid', tsFlags: { insectFamily: true, needsIracFrac: true } },
+  { id: 'merit', name: 'Merit 2F', category: 'insecticide', active_ingredient: 'imidacloprid', irac_group: '4A', tsFlags: { insectFamily: true, needsIracFrac: true } },
   // A fungicide: rotation product, no bee block.
-  { id: 'heritage', name: 'Heritage G', category: 'fungicide', active_ingredient: 'azoxystrobin', formulation: 'granular', tsFlags: { needsIracFrac: true } },
+  { id: 'heritage', name: 'Heritage G', category: 'fungicide', active_ingredient: 'azoxystrobin', formulation: 'granular', frac_group: '11', tsFlags: { needsIracFrac: true } },
   // A micronutrient spray: no flags at all.
   { id: 'iron', name: 'Chelated Iron Plus', category: 'micronutrient', tsFlags: {} },
   // An N/P fertilizer in the summer blackout.
   { id: 'palmfert', name: 'Palm Special 8-2-12', category: 'fertilizer', tsFlags: { npBlackout: true } },
   // The palm injection flow's product: never on this sheet.
   { id: 'inject', name: 'Arbor Inject Palm', category: 'insecticide', tsFlags: { injection: true, insectFamily: true } },
-  // Something the tech adds from the picker.
-  { id: 'oil', name: 'SuffOil-X', category: 'insecticide', tsFlags: { insectFamily: true } },
+  // Something the tech adds from the picker: a rotation-logged oil with no
+  // resistance group, which the app cannot rotation-check.
+  { id: 'oil', name: 'SuffOil-X', category: 'insecticide', tsFlags: { insectFamily: true, needsIracFrac: true } },
   { id: 'drench', name: 'Imidacloprid Drench', category: 'insecticide', inventory_unit: 'fl_oz', inventory_on_hand: '0.0000', tsFlags: {} },
 ];
 
@@ -90,8 +91,10 @@ function makeRequest({ context = CONTEXT, preview = PREVIEW, previewError = null
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith('/tree-shrub/fast-context')) {
-      if (context instanceof Error) throw context;
-      return context;
+      // An array answers each read in turn (the last one repeats).
+      const answer = Array.isArray(context) ? (context.length > 1 ? context.shift() : context[0]) : context;
+      if (answer instanceof Error) throw answer;
+      return answer;
     }
     if (path.endsWith('/tree-shrub/assess-preview')) {
       if (previewError) throw previewError;
@@ -221,7 +224,7 @@ describe('products', () => {
     fireEvent.click(within(how).getByRole('button', { name: 'Soil drench' }));
     // A tracked stock at zero holds Complete before the server refuses it.
     enterAmount('Imidacloprid Drench', 2);
-    expect(screen.getByText('Imidacloprid Drench shows 0 in stock. Update inventory or turn it off.')).toBeTruthy();
+    expect(screen.getByText('Imidacloprid Drench shows 0 in stock. Update inventory, then tap Check stock.')).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(within(editor).getByRole('button', { name: 'Remove' }));
     expect(screen.queryByRole('group', { name: 'Imidacloprid Drench' })).toBeNull();
@@ -253,6 +256,30 @@ describe('products', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
     fireEvent.click(screen.getByRole('button', { name: 'No blooms or no bees' }));
     expect(completeButton().disabled).toBe(false);
+  });
+});
+
+describe('recoverable states', () => {
+  test('a failed catalog read offers Try again instead of the full form', async () => {
+    const request = makeRequest({ context: [{ enabled: true, eligible: false, reason: 'catalog_unavailable', service: CONTEXT.service }, CONTEXT] });
+    render(<FastCompleteTreeShrubSheet service={SERVICE} request={request} onClose={() => {}} />);
+    expect(await screen.findByText('Couldn’t load this visit’s products. Try again.')).toBeTruthy();
+    expect(screen.queryByText('This visit needs the full form.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: /^Merit 2F/ })).toBeTruthy();
+  });
+
+  test('a product at 0 stock holds Complete until Check stock reads it restocked', async () => {
+    const zero = { ...CONTEXT, products: CONTEXT.products.map((p) => (p.id === 'iron' ? { ...p, inventory_on_hand: 0, inventory_unit: 'fl_oz' } : p)) };
+    const restocked = { ...CONTEXT, products: CONTEXT.products.map((p) => (p.id === 'iron' ? { ...p, inventory_on_hand: 64, inventory_unit: 'fl_oz' } : p)) };
+    const request = makeRequest({ context: [zero, restocked] });
+    await readyVisit(request);
+    fireEvent.click(tile('Chelated Iron Plus'));
+    expect(screen.getByText('Chelated Iron Plus shows 0 in stock. Update inventory, then tap Check stock.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Check stock' }));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
   });
 });
 
@@ -299,6 +326,22 @@ describe('compliance taps', () => {
     expect(screen.queryByText('IRAC / FRAC rotation checked & logged')).toBeNull();
     expect(screen.getByText('IRAC / FRAC rotation checked by the app.')).toBeTruthy();
     expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values.irac_frac_logged).toBe('Yes');
+  });
+
+  test('a rotation product with no resistance group (an oil) gets the tech\'s own tap', async () => {
+    const context = { ...CONTEXT, monthProducts: [...CONTEXT.monthProducts, { productId: 'oil', method: 'foliar_spray' }] };
+    const request = makeRequest({ context });
+    await readyVisit(request);
+    fireEvent.click(tile('SuffOil-X'));
+    enterAmount('SuffOil-X', 8);
+    fireEvent.click(screen.getByRole('button', { name: 'No blooms or no bees' }));
+    // The app has no group to compare, so it never claims the check.
+    expect(screen.queryByText('IRAC / FRAC rotation checked by the app.')).toBeNull();
+    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
     const body = await completeBody(request);
     expect(body.structuredFindings.values.irac_frac_logged).toBe('Yes');
   });

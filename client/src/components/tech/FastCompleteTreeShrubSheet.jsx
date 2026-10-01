@@ -94,6 +94,14 @@ const MAX_PHOTOS = PHOTO_SLOTS.length;
 
 const flagsOf = (product) => product?.tsFlags || {};
 
+// The app can only rotation-check a product that carries a resistance group;
+// one with none (a horticultural oil) gets the tech's own IRAC / FRAC tap, as
+// does every product when the server could not read the application history.
+const RESISTANCE_GROUP_FIELDS = ['irac_group', 'frac_group', 'hrac_group', 'hrac_group_secondary', 'moa_group'];
+const appCanRotationCheck = (product) => RESISTANCE_GROUP_FIELDS.some((field) => String(product?.[field] ?? '').trim());
+const needsManualIrac = (rows, ctx) => rows.some((row) => row.active && flagsOf(row.product).needsIracFrac
+  && (ctx.warningsUnavailable || !appCanRotationCheck(row.product)));
+
 // What the server called its decision, in the words its decisions list takes
 // (monitor | confirmed | hidden | edit).
 function decisionAction(action) {
@@ -201,7 +209,13 @@ function monthRows(data, products, lastVisit) {
   return rows;
 }
 
+// Reasons that are a failed read, not this visit's eligibility: a retry fixes them.
+const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
+
 function contextFrom(data, service) {
+  if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
+    return { ...EMPTY_CONTEXT, loading: false, loadError: 'Couldn’t load this visit’s products. Try again.' };
+  }
   // An injection never goes on this sheet (the server blocks it).
   const products = (Array.isArray(data?.products) ? data.products : []).filter((product) => product && !flagsOf(product).injection);
   const lastVisit = data?.lastVisit && typeof data.lastVisit === 'object' ? data.lastVisit : {};
@@ -222,13 +236,18 @@ function contextFrom(data, service) {
   };
 }
 
+const EMPTY_CONTEXT = {
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false,
+  visitIdentity: null, visit: null, lastVisit: {},
+};
+
 function useTreeShrubContext({ base, request, service }) {
-  const [ctx, setCtx] = useState({
-    loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false,
-    visitIdentity: null, visit: null, lastVisit: {},
-  });
+  const [ctx, setCtx] = useState(EMPTY_CONTEXT);
+  // Bumped by Try again: the same read, run once more.
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
+    setCtx(EMPTY_CONTEXT);
     request(`${base}/tree-shrub/fast-context`)
       .then((data) => { if (active) setCtx(contextFrom(data, service)); })
       .catch((err) => {
@@ -238,8 +257,15 @@ function useTreeShrubContext({ base, request, service }) {
         else setCtx((prev) => ({ ...prev, loading: false, loadError: err?.message || 'Failed to load this visit' }));
       });
     return () => { active = false; };
-  }, [base, request, service?.routedCustomerId, service?.routedScheduledDate, service?.routedPropertyId, service?.routedAddress]);
-  return ctx;
+  }, [base, request, attempt, service?.routedCustomerId, service?.routedScheduledDate, service?.routedPropertyId, service?.routedAddress]);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
+  // The stock on hand the server has now, for a product restocked while the
+  // sheet is open; nothing else is re-read. Resolves to the fresh rows by id.
+  const refreshStock = useCallback(async () => {
+    const data = await request(`${base}/tree-shrub/fast-context`);
+    return new Map((Array.isArray(data?.products) ? data.products : []).map((product) => [String(product.id), product]));
+  }, [base, request]);
+  return { ...ctx, retry, refreshStock };
 }
 
 // The tech's own taps on the sheet's products. One product, one row.
@@ -259,7 +285,14 @@ function useProductRows(ctx) {
     ]));
   }, [lastAmounts]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
-  return { rows, updateRow, addProduct, removeRow };
+  // A fresh stock read changes each row's stock on hand, nothing the tech set.
+  const applyStock = useCallback((fresh) => {
+    setRows((prev) => prev.map((row) => {
+      const latest = fresh.get(String(row.productId));
+      return latest ? { ...row, product: { ...row.product, inventory_on_hand: latest.inventory_on_hand, inventory_unit: latest.inventory_unit } } : row;
+    }));
+  }, []);
+  return { rows, updateRow, addProduct, removeRow, applyStock };
 }
 
 const sameSet = (analyzed, photos) => analyzed.length === photos.length && analyzed.every((data, index) => data === photos[index].data);
@@ -269,14 +302,14 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
-  const manualIrac = active.some((row) => flagsOf(row.product).needsIracFrac) && ctx.warningsUnavailable;
+  const manualIrac = needsManualIrac(rows, ctx);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
     [photoBusy, 'Wait for the photo to finish loading.'],
     [!slots.front_beds, 'Add a front beds photo.'],
     [!slots.back_landscape, 'Add a back or side landscape photo.'],
-    [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or turn it off.`],
+    [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [insect && !form.pollinator, 'Select the flowering / bee status.'],
     [insect && form.pollinator === BEES_ACTIVE, BEES_ACTIVE_MESSAGE],
@@ -386,7 +419,17 @@ function SheetBody({ service, request, ctx, submission, locked, dictationPending
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted} />;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
-  if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
+  if (ctx.loadError) {
+    return (
+      <div className="tech-visit-body">
+        <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{ctx.loadError}</ActionFeedback>
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
+  if (stop) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   return <TreeShrubForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
 }
 
@@ -422,6 +465,19 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const photoList = photos.list;
   const previewCurrent = !!photos.preview && sameSet(photos.preview.photos, photoList);
   const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending });
+  // "Update inventory, then tap Check stock": the tech re-reads the stock here
+  // instead of closing the sheet and losing the photos and note.
+  const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  const [checkingStock, setCheckingStock] = useState(false);
+  const checkStock = async () => {
+    setCheckingStock(true);
+    try {
+      products.applyStock(await ctx.refreshStock());
+    } catch {
+      // The hold stays; the tech can check again.
+    }
+    setCheckingStock(false);
+  };
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
@@ -445,7 +501,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
           <PhotosSection photos={photos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
           <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} />
           {(insect || iracRows) && (
-            <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} ctx={ctx} locked={locked} />
+            <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
           <ChoiceSection title="Plant groups serviced" columns={2}>
             {PLANT_GROUP_OPTIONS.map((label) => (
@@ -478,11 +534,15 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
-        warn={missingReason === BEES_ACTIVE_MESSAGE}
+        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow}
         label="Complete tree & shrub"
         onSubmit={submit}
         coverProps={picker.coverProps}
-      />
+      >
+        {stockRow && !locked && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
+        )}
+      </CompleteFooter>
       {picker.sheet}
     </div>
   );
@@ -798,8 +858,7 @@ function ProductEditor({ row, warnings, locked, onChange, onRemove }) {
 
 // The compliance taps the server's checks need, only when a product on the
 // sheet calls for them.
-function ComplianceSection({ form, setField, insect, iracRows, ctx, locked }) {
-  const manualIrac = iracRows && ctx.warningsUnavailable;
+function ComplianceSection({ form, setField, insect, iracRows, manualIrac, locked }) {
   return (
     <>
       {insect && (
