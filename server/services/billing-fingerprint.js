@@ -37,10 +37,11 @@ async function billingFingerprint(customerId, dbh = db) {
 }
 
 // A repeatable provider-boundary predicate: the billing rows are still exactly as they were when `fingerprint` was taken (before the
-// full recheck). `dbi` = the handoff's connection (one query, no second pool slot). Any change or read failure => retryable refusal.
-// Codex round-50 P1: a Zelle OFFER also depends on live Stripe state no row records - a card / ACH PaymentIntent the customer advances
-// to processing moves money without changing a hashed column. For a body offering Zelle, the PaymentIntent attached to the invoice the
-// full recheck resolved (`zelleInvoiceId`) is inspected live (Stripe only, no pool slot; the pay page's own inspect-only guard).
+// full recheck). `dbi` = the handoff's connection. Any change or read failure => retryable refusal.
+// ZELLE (owner ruling 2026-10-01, "rerun full check"): a Zelle offer or denial also depends on state no hashed row records (the
+// recipient env, a PaymentIntent, a deposit, payer activation, ...). Rather than a hand-kept dependency list, the boundary reruns the
+// SAME checks the full recheck ran: the recipient (outgoingZelleStale) and the invoice's live eligibility (zelleInvoiceStillEligible) for
+// the invoice the recheck resolved. Parts of that read go through the pool (a second connection for a moment, the cron-lock pattern).
 function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleInvoiceId = null, zelleDenial = null, getBody = null }) {
   const check = async ({ dbi } = {}) => {
     const dbh = dbi || db;
@@ -56,19 +57,11 @@ function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleIn
     const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
     const recheck = require('./sms-amount-recheck');
     if (recheck.hasAffirmativeZelleMention(body)) {
-      // Codex round-52 P1: the recipient is an env setting no row records - rerun the same recipient check (pure, no read)
-      const recipient = recheck.outgoingZelleStale(body);
-      if (recipient.stale) return { ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', reason: `the Zelle recipient changed (${recipient.reason})` };
-      const offer = await zelleOfferStillOpen({ customerId, zelleInvoiceId, dbh });
+      const offer = await zelleOfferStillEligible({ recheck, customerId, zelleInvoiceId, body, dbh });
       if (!offer.ok) return offer;
     }
-    // Codex round-51 P2: a scoped DENIAL can stand on a payment in flight; that PaymentIntent's state, read BEFORE the recheck judged the
-    // denial, must be the same now (a canceled / returned intent can make Zelle available again without changing a row)
     if (zelleDenial?.invoiceId && recheck.hasNegativeZelleAvailabilityClaim(body)) {
-      const now = await paymentIntentStateOf({ invoiceId: zelleDenial.invoiceId, customerId, dbh });
-      if (now !== zelleDenial.piState) {
-        return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: 'the payment on the invoice changed since the Zelle recheck', retryable: true };
-      }
+      return zelleDenialStillStands({ recheck, customerId, invoiceId: zelleDenial.invoiceId, dbh });
     }
     return { ok: true };
   };
@@ -76,33 +69,23 @@ function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleIn
   return check;
 }
 
-// The live state of the PaymentIntent attached to one of the customer's invoices: 'none' (no intent), 'open' (nothing moving), 'blocked'
-// (processing / succeeded / unverifiable - the pay page's inspect-only guard), or 'unreadable' (the invoice row could not be read).
-async function paymentIntentStateOf({ invoiceId, customerId, dbh = db }) {
-  let invoice;
-  try {
-    invoice = await dbh('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id');
-  } catch {
-    return 'unreadable';
-  }
-  if (!invoice || String(invoice.customer_id) !== String(customerId)) return 'unreadable';
-  if (!invoice.stripe_payment_intent_id) return 'none';
-  const verdict = await require('./prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly: true }).catch(() => ({ ok: false }));
-  return verdict.ok ? 'open' : 'blocked';
+async function zelleOfferStillEligible({ recheck, customerId, zelleInvoiceId, body, dbh }) {
+  const recipient = recheck.outgoingZelleStale(body);
+  if (recipient.stale) return { ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', reason: `the Zelle offer is no longer valid (${recipient.reason})` };
+  const eligibility = await recheck.zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh });
+  return eligibility.eligible
+    ? { ok: true }
+    : { ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', reason: `the Zelle offer is no longer valid (${eligibility.reason})`, retryable: true };
 }
 
-async function zelleOfferStillOpen({ customerId, zelleInvoiceId, dbh }) {
-  const refuse = (reason) => ({ ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', reason, retryable: true });
-  if (!zelleInvoiceId) return refuse('the Zelle invoice is not known at send');
-  let invoice;
-  try {
-    invoice = await dbh('invoices').where({ id: zelleInvoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id');
-  } catch {
-    return refuse('the Zelle invoice could not be re-read at send');
+// A scoped denial stands only while its invoice is still confirmed ineligible (same rule as the full recheck's zelleDenialVerdict).
+async function zelleDenialStillStands({ recheck, customerId, invoiceId, dbh }) {
+  const eligibility = await recheck.zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
+  if (eligibility.eligible) return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: 'Zelle became available for the invoice', retryable: true };
+  if (recheck.ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason)) {
+    return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: `Zelle availability could not be confirmed (${eligibility.reason})`, retryable: true };
   }
-  if (!invoice || String(invoice.customer_id) !== String(customerId)) return refuse('the Zelle invoice is not this customer\'s');
-  const verdict = await require('./prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly: true }).catch(() => ({ ok: false }));
-  return verdict.ok ? { ok: true } : refuse('a card / bank payment on the invoice is in flight or unverifiable');
+  return { ok: true };
 }
 
-module.exports = { billingFingerprint, billingUnchangedProviderPreSendCheck, paymentIntentStateOf, BILLING_FINGERPRINT_SQL };
+module.exports = { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL };

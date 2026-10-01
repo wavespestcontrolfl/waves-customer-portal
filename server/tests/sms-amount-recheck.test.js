@@ -535,7 +535,7 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     const body = 'Zelle is disabled for this account right now.';
     await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1' } });
   });
 
   test('detected as denials (not offers); the scheduler prescreen sends them to the recheck', () => {
@@ -564,8 +564,8 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false });
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for this account right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1' } });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for this account right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1' } });
   });
 
   // Codex round-44 (older thread, judged on 9f0f509): an unreadable billing leaves the open-invoice list EMPTY, which must not read as a
@@ -624,7 +624,7 @@ describe('negative Zelle availability claims are revalidated before sending', ()
         expect(out.stale).toBe(true);
         expect(out.reason).toMatch(/^(?:payer_unverifiable|credit_unverifiable|zelle_recheck_failed)$/);
       } else {
-        expect(out).toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
+        expect(out).toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1' } });
       }
     },
   );

@@ -3,9 +3,12 @@
  * provider boundary on the handoff connection.
  */
 jest.mock('../models/db', () => jest.fn());
-const mockGuard = jest.fn(async () => ({ ok: true }));
-jest.mock('../services/prepaid-pi-guard', () => ({ guardOpenPaymentIntentForPrepaid: (...a) => mockGuard(...a) }));
-const { billingFingerprint, billingUnchangedProviderPreSendCheck, paymentIntentStateOf, BILLING_FINGERPRINT_SQL } = require('../services/billing-fingerprint');
+const mockEligible = jest.fn(async () => ({ eligible: true }));
+jest.mock('../services/sms-amount-recheck', () => ({
+  ...jest.requireActual('../services/sms-amount-recheck'),
+  zelleInvoiceStillEligible: (...a) => mockEligible(...a),
+}));
+const { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL } = require('../services/billing-fingerprint');
 
 describe('billingFingerprint', () => {
   test('one content hash over every row the recheck reads: payments, invoices, plans, payer assignments', () => {
@@ -41,82 +44,47 @@ describe('billingUnchangedProviderPreSendCheck', () => {
   });
 });
 
-// Codex round-50 P1: a Zelle OFFER also depends on live Stripe state no row records
-describe('a Zelle offer at the provider boundary: the invoice\'s PaymentIntent is inspected live', () => {
-  const dbiWith = (fp, invoice) => {
-    const dbi = jest.fn(() => ({ where: () => ({ first: async () => invoice }) }));
-    dbi.raw = async () => ({ rows: [{ fingerprint: fp }] });
-    return dbi;
-  };
-  const INV = { id: 'inv-1', customer_id: 'c1', stripe_payment_intent_id: 'pi_1' };
-  const offer = (over = {}) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at pay@example.com.', ...over });
+// Owner ruling 2026-10-01 ("rerun full check"): a Zelle offer / denial reruns the SAME eligibility the full recheck ran, at the boundary
+describe('Zelle at the provider boundary: the full recheck\'s own checks run again', () => {
+  const dbiWith = () => { const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] }); return dbi; };
+  const run = (over) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', ...over });
   beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; });
-  afterEach(() => { mockGuard.mockReset(); mockGuard.mockResolvedValue({ ok: true }); delete process.env.ZELLE_RECIPIENT; });
-  test('no payment in flight => ok (inspect-only, on the invoice the recheck checked)', async () => {
-    await expect(offer()({ dbi: dbiWith('abc', INV) })).resolves.toEqual({ ok: true });
-    expect(mockGuard).toHaveBeenCalledWith(INV, { inspectOnly: true });
+  afterEach(() => { mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); delete process.env.ZELLE_RECIPIENT; });
+  test('an offer: still eligible => ok (on the invoice the recheck resolved, through the handoff connection)', async () => {
+    const dbi = dbiWith();
+    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at pay@example.com.' })({ dbi })).resolves.toEqual({ ok: true });
+    expect(mockEligible).toHaveBeenCalledWith({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbi });
   });
-  test('the customer advanced the PaymentIntent (processing / succeeded / unreadable) after the recheck => refused, retryable', async () => {
-    mockGuard.mockResolvedValue({ ok: false, reason: 'payment_in_flight' });
-    await expect(offer()({ dbi: dbiWith('abc', INV) })).resolves.toMatchObject({ ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', retryable: true });
-    mockGuard.mockRejectedValue(new Error('stripe down'));
-    await expect(offer()({ dbi: dbiWith('abc', INV) })).resolves.toMatchObject({ ok: false, retryable: true });
+  test.each(['payment_in_flight', 'zelle_invoice_ineligible', 'credit_unverifiable', 'zelle_invoice_unresolved'])(
+    'an offer whose invoice became ineligible after the recheck (%s: a deposit, a payment in flight, credit, ...) is refused', async (reason) => {
+      mockEligible.mockResolvedValue({ eligible: false, reason });
+      await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at pay@example.com.' })({ dbi: dbiWith() }))
+        .resolves.toMatchObject({ ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', retryable: true });
+    },
+  );
+  test('an offer whose recipient was removed or rotated is refused without the eligibility read', async () => {
+    process.env.ZELLE_RECIPIENT = 'new@example.com';
+    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at old@example.com.' })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false });
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at old@example.com.' })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false });
+    expect(mockEligible).not.toHaveBeenCalled();
   });
-  test('no known invoice, or another customer\'s, is refused; a body without a Zelle offer never calls Stripe', async () => {
-    await expect(offer({ zelleInvoiceId: null })({ dbi: dbiWith('abc', INV) })).resolves.toMatchObject({ ok: false });
-    await expect(offer()({ dbi: dbiWith('abc', { ...INV, customer_id: 'c2' }) })).resolves.toMatchObject({ ok: false });
-    await expect(offer({ getBody: () => 'Your account balance is $95.00.' })({ dbi: dbiWith('abc', INV) })).resolves.toEqual({ ok: true });
-    expect(mockGuard).toHaveBeenCalledTimes(0);
+  test('a denial stands while its invoice is still confirmed ineligible; Zelle available now or unverifiable => refused', async () => {
+    const denial = run({ zelleDenial: { invoiceId: 'inv-1' }, getBody: () => "Zelle isn't available for your invoice right now." });
+    mockEligible.mockResolvedValue({ eligible: false, reason: 'zelle_invoice_ineligible' });
+    await expect(denial({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
+    mockEligible.mockResolvedValue({ eligible: true });
+    await expect(denial({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', retryable: true });
+    mockEligible.mockResolvedValue({ eligible: false, reason: 'zelle_recheck_failed' });
+    await expect(denial({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, retryable: true });
+  });
+  test('a body with no Zelle claim never runs the eligibility read', async () => {
+    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'Your account balance is $95.00.' })({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
+    expect(mockEligible).not.toHaveBeenCalled();
   });
 });
 
-// Codex round-51 P1: account credit that would cover the invoice changes Zelle visibility - it is billing state too
+// Codex round-51 P1: account credit that would cover the invoice is billing state too
 test('the fingerprint hashes the customer\'s account credit and auto-apply setting', () => {
   expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit) FROM customers WHERE id = ?");
-});
-
-// Codex round-51 P2: a scoped Zelle DENIAL can stand on a payment in flight; its PaymentIntent state is re-read at the boundary
-describe('a Zelle denial at the provider boundary: the PaymentIntent baseline must still hold', () => {
-  const INV = { id: 'inv-1', customer_id: 'c1', stripe_payment_intent_id: 'pi_1' };
-  const dbiWith = (invoice) => {
-    const dbi = jest.fn(() => ({ where: () => ({ first: async () => invoice }) }));
-    dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] });
-    return dbi;
-  };
-  const denial = (piState, body = "Zelle isn't available for your invoice right now.") => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleDenial: { invoiceId: 'inv-1', piState }, getBody: () => body });
-  afterEach(() => { mockGuard.mockReset(); mockGuard.mockResolvedValue({ ok: true }); });
-  test('the payment was in flight at the recheck and still is => ok; it was canceled since (now open) => refused, retryable', async () => {
-    mockGuard.mockResolvedValue({ ok: false });
-    await expect(denial('blocked')({ dbi: dbiWith(INV) })).resolves.toEqual({ ok: true });
-    mockGuard.mockResolvedValue({ ok: true });
-    await expect(denial('blocked')({ dbi: dbiWith(INV) })).resolves.toMatchObject({ ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', retryable: true });
-  });
-  test('an intent attached since the recheck, or an unreadable invoice, refuses; a body with no denial never re-reads', async () => {
-    await expect(denial('none')({ dbi: dbiWith(INV) })).resolves.toMatchObject({ ok: false });
-    await expect(denial('none')({ dbi: dbiWith(null) })).resolves.toMatchObject({ ok: false });
-    await expect(denial('blocked', 'Your account balance is $95.00.')({ dbi: dbiWith(INV) })).resolves.toEqual({ ok: true });
-  });
-  test('paymentIntentStateOf: none / open / blocked / unreadable', async () => {
-    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c1', dbh: dbiWith({ ...INV, stripe_payment_intent_id: null }) })).resolves.toBe('none');
-    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c1', dbh: dbiWith(INV) })).resolves.toBe('open');
-    mockGuard.mockResolvedValue({ ok: false });
-    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c1', dbh: dbiWith(INV) })).resolves.toBe('blocked');
-    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c2', dbh: dbiWith(INV) })).resolves.toBe('unreadable');
-  });
-});
-
-// Codex round-52 P1: the Zelle recipient is an env setting no row records - rechecked at the boundary
-test('a Zelle offer whose recipient was removed or rotated after the recheck is refused at the boundary (no Stripe call)', async () => {
-  const prev = process.env.ZELLE_RECIPIENT;
-  const dbi = jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'inv-1', customer_id: 'c1', stripe_payment_intent_id: null }) }) }));
-  dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] });
-  const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at old@example.com.' });
-  try {
-    process.env.ZELLE_RECIPIENT = 'old@example.com';
-    await expect(check({ dbi })).resolves.toEqual({ ok: true });
-    process.env.ZELLE_RECIPIENT = 'new@example.com';
-    await expect(check({ dbi })).resolves.toMatchObject({ ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY' });
-    delete process.env.ZELLE_RECIPIENT;
-    await expect(check({ dbi })).resolves.toMatchObject({ ok: false });
-  } finally { if (prev === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = prev; }
 });

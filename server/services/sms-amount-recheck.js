@@ -325,15 +325,13 @@ async function zelleDenialVerdict({ ctx, customerId, body, inboundMessage, dbh }
     // denying — so a denial is blocked.
     return target.reason === 'no_open_invoice' ? { stale: false } : { stale: true, reason: 'zelle_target_ambiguous' };
   }
-  // Codex round-51 P2: the invoice's PaymentIntent state BEFORE the eligibility read - the provider-boundary check refuses if it differs
-  // at send (a canceled / returned intent can make Zelle available without changing a row)
-  const piState = await require('./billing-fingerprint').paymentIntentStateOf({ invoiceId: target.invoiceId, customerId, dbh });
   const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: target.invoiceId, dbh });
   if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
   // an UNVERIFIABLE state (lookup failed, payer or credit state unknown) is not a confirmed "ineligible" —
   // the denial can't be confirmed, so block (Codex round-21 P2); only confirmed reasons let it stand
   if (ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason)) return { stale: true, reason: eligibility.reason };
-  return { stale: false, zelleDenial: { invoiceId: target.invoiceId, piState } };
+  // the invoice the denial was judged for: the provider-boundary check reruns this same eligibility for it (owner ruling 2026-10-01)
+  return { stale: false, zelleDenial: { invoiceId: target.invoiceId } };
 }
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
@@ -503,5 +501,5 @@ async function statusAndAmountsStale({ customerId, text, promptVersion, inboundM
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
   hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, hasUnscopedZelleDenial, zelleClauseTexts, zelleDenialStale, classifyZelleClause,
-  paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary, bodyNeedsBillingBoundaryCheck,
+  paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary, bodyNeedsBillingBoundaryCheck, ZELLE_DENIAL_UNVERIFIABLE,
 };
