@@ -1368,7 +1368,7 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
     .whereIn('customer_id', customerIds)
     .where('batch_key', '<', batchKey)
     .orderBy([{ column: 'batch_key', order: 'desc' }, { column: 'computed_at', order: 'desc' }])
-    .select('customer_id', 'family_key', 'status', 'review_date', 'batch_key', 'computed_at');
+    .select('customer_id', 'family_key', 'status', 'review_date', 'batch_key', 'computed_at', 'flags');
   const map = new Map();
   for (const row of rows) {
     const key = `${row.customer_id}|${row.family_key}`;
@@ -1870,10 +1870,11 @@ async function batchHasSentRows(dbh, batchKey) {
   return Number(row && row.n) > 0;
 }
 
-// Every writer on a batch (a build, a row edit, an approval) takes this
-// transaction-scoped advisory lock first, so they serialize even before the
-// batch row exists (a FOR UPDATE on a row that is not there locks nothing —
-// two first builds could both pass the refusal check).
+// Every writer on a batch (a build — for its whole recompute —, a row edit,
+// an approval) takes this transaction-scoped advisory lock first, so they
+// serialize even before the batch row exists (a FOR UPDATE on a row that is
+// not there locks nothing — two first builds could both pass the refusal
+// check).
 async function lockBatch(conn, batchKey) {
   await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rate_review_batch:${batchKey}`]);
 }
@@ -2084,7 +2085,10 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
     entry.carriedFrom = null;
     if (!anniversary.date || entry.reviewDate) { selected.push(entry); continue; }
     const latest = latestByLine.get(`${entry.customer.id}|${entry.familyKey}`);
-    if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status)) continue;
+    // An owner's skip (admin_skipped: Include unticked / Skip this cycle) is a
+    // decision for that cycle, not a hold to carry — the line returns at its
+    // next anniversary (or a catch-up build), as the screen says.
+    if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || (parseJson(latest.flags) || []).includes('admin_skipped')) continue;
     const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
     if (!anchor || anchor < carryFloor || anchor > to) continue;
     entry.reviewDate = anchor;
@@ -2232,7 +2236,13 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   assertYmd(anniversaryTo, 'anniversaryTo');
   if (anniversaryFrom && anniversaryTo) assertWindowOrder(anniversaryFrom, anniversaryTo); // before any read
 
-  const dbh = trx || db;
+  // The whole recompute — every read, the ranking and the write — runs in
+  // ONE transaction that holds the batch's advisory lock from the start, so
+  // an admin edit or approval (lockBatch too) can never land between the
+  // ranking and the write that would discard it.
+  if (!trx) return db.transaction((conn) => buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor, trx: conn, now, deps }));
+  const dbh = trx;
+  await lockBatch(dbh, batchKey);
   const refusal = await batchRebuildRefusal(dbh, batchKey);
   if (refusal) return { ok: false, reason: refusal, batchKey };
 
@@ -2265,17 +2275,6 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   // closed on a mutation chain behind a dynamic table expression. Reads
   // keep the constants.
   const write = async (conn) => {
-    // Serialize with the admin screen's row edits and approval (lockBatch)
-    // and re-check under the lock: a decision taken while this build was
-    // computing is never overwritten.
-    await lockBatch(conn, batchKey);
-    const lateRefusal = await batchRebuildRefusal(conn, batchKey);
-    if (lateRefusal) {
-      const err = new Error(lateRefusal);
-      err.code = 'batch_rebuild_refused';
-      err.reason = lateRefusal;
-      throw err;
-    }
     await conn('rate_review_batches').insert({
       batch_key: batchKey, window_from: from, window_to: to,
       allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson),
@@ -2286,12 +2285,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
       await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
     }
   };
-  try {
-    if (trx) await write(trx); else await db.transaction(write);
-  } catch (err) {
-    if (err && err.code === 'batch_rebuild_refused') return { ok: false, reason: err.reason, batchKey };
-    throw err;
-  }
+  await write(dbh);
 
   const summary = summarizeRows(rows);
   logger.info(`[rate-review] batch ${batchKey} built: ${rows.length} rows (${summary.green} green, ${summary.exception} exceptions, ${summary.no_change} no-change, ${summary.skipped} skipped) from ${book.length} active plan lines`);
@@ -2341,7 +2335,7 @@ async function getBatch(batchKey, dbh = db) {
     batch: batch ? { ...batch, allowances: parseJson(batch.allowances) || {}, config: parseJson(batch.config) || {}, line_rph: parseJson(batch.line_rph) || {} } : null,
     rows: shaped,
     summary: summarizeRows(shaped),
-    digest: batchDigest(shaped),
+    approvalDigest: batchDigest(shaped),
   };
 }
 
@@ -2388,9 +2382,10 @@ const MAX_COST_BLOCK_CHARS = 4000;
 // ($1,170 for $117), not a review — the bands never move an account that far.
 const MAX_PROPOSED_MULTIPLE = 2;
 
-// Stable fingerprint of what the owner approves: every row's id, proposed
-// cents and status, order-independent. The approve route refuses when the
-// batch moved under the screen (expectedDigest ≠ this).
+// Stable fingerprint of what the owner approves (`approvalDigest` on the
+// batch read — distinct from the batch's owner DIGEST email): every row's
+// id, proposed cents and status, order-independent. The approve route
+// refuses when the batch moved under the screen (expectedDigest ≠ this).
 function batchDigest(rows) {
   const lines = rows.map((r) => `${r.id}:${Number(r.proposed_rate_cents) || 0}:${r.status}`).sort();
   return crypto.createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 16);
@@ -2432,58 +2427,48 @@ async function readConfig(dbh = db) {
   };
 }
 
+// Every editable setting with its bounds — the one loop below validates
+// them all. Percentages keep three decimals; cents and counts are whole
+// numbers; the cost block is the owner's plain text.
 const CONFIG_RULES = Object.freeze({
-  pass_through_pct: { kind: 'pct' },
-  band_b_tolerance_pct: { kind: 'pct' },
-  band_c_max_pct: { kind: 'pct' },
-  cap_pct: { kind: 'pct' },
-  cap_cents: { kind: 'int', max: 100000 }, // $1,000 per application
+  pass_through_pct: { kind: 'number', min: 0, max: 100 },
+  band_b_tolerance_pct: { kind: 'number', min: 0, max: 100 },
+  band_c_max_pct: { kind: 'number', min: 0, max: 100 },
+  cap_pct: { kind: 'number', min: 0, max: 100 },
+  cap_cents: { kind: 'integer', min: 0, max: 100000 }, // $1,000 per application
   // A minimum of zero would make an unchanged rate a "change" (delta 0 ≥ 0)
   // and let a band-A row be approved as a notice: at least one cent.
-  min_delta_cents: { kind: 'int', min: 1, max: 100000 },
-  min_usable_visits: { kind: 'int', max: 100 },
-  lock_months: { kind: 'int', max: 120 },
-  exception_callback_days: { kind: 'int', max: 3650 },
-  exception_manual_edit_months: { kind: 'int', max: 120 },
+  min_delta_cents: { kind: 'integer', min: 1, max: 100000 },
+  min_usable_visits: { kind: 'integer', min: 0, max: 100 },
+  lock_months: { kind: 'integer', min: 0, max: 120 },
+  exception_callback_days: { kind: 'integer', min: 0, max: 3650 },
+  exception_manual_edit_months: { kind: 'integer', min: 0, max: 120 },
+  cost_block: { kind: 'text', max: MAX_COST_BLOCK_CHARS },
 });
 
+// One setting against its rule: the cleaned value, or the message.
+function checkSetting(key, rule, raw) {
+  if (rule.kind === 'text') {
+    if (raw != null && typeof raw !== 'string') return { error: `${key} must be text` };
+    const text = String(raw || '').replace(/\r\n/g, '\n').trim();
+    return text.length > rule.max ? { error: `${key} must be at most ${rule.max} characters` } : { value: text };
+  }
+  const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
+  if (!Number.isFinite(n)) return { error: `${key} must be a number` };
+  if (rule.kind === 'integer' && !Number.isInteger(n)) return { error: `${key} must be a whole number` };
+  if (n < rule.min) return { error: `${key} must be at least ${rule.min}` };
+  if (n > rule.max) return { error: `${key} must be at most ${rule.max}` };
+  return { value: rule.kind === 'integer' ? n : Math.round(n * 1000) / 1000 };
+}
+
 function validateConfigPatch(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { errors: ['Settings must be an object'], clean: {} };
   const errors = [];
   const clean = {};
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { errors: ['Settings must be an object'], clean };
   for (const [key, raw] of Object.entries(patch)) {
-    if (key === 'cost_block') {
-      if (raw != null && typeof raw !== 'string') {
-        errors.push('cost_block must be text');
-        continue;
-      }
-      const text = String(raw || '').replace(/\r\n/g, '\n').trim();
-      if (text.length > MAX_COST_BLOCK_CHARS) errors.push(`cost_block must be at most ${MAX_COST_BLOCK_CHARS} characters`);
-      else clean.cost_block = text;
-      continue;
-    }
-    const rule = CONFIG_RULES[key];
-    if (!rule) {
-      errors.push(`${key} is not a rate review setting`);
-      continue;
-    }
-    const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
-    if (!Number.isFinite(n) || n < 0) {
-      errors.push(`${key} must be a number of at least 0`);
-      continue;
-    }
-    if (rule.kind === 'pct') {
-      if (n > 100) errors.push(`${key} must be at most 100`);
-      else clean[key] = Math.round(n * 1000) / 1000;
-    } else if (!Number.isInteger(n)) {
-      errors.push(`${key} must be a whole number`);
-    } else if (rule.min != null && n < rule.min) {
-      errors.push(`${key} must be at least ${rule.min}`);
-    } else if (n > rule.max) {
-      errors.push(`${key} must be at most ${rule.max}`);
-    } else {
-      clean[key] = n;
-    }
+    const checked = CONFIG_RULES[key] ? checkSetting(key, CONFIG_RULES[key], raw) : { error: `${key} is not a rate review setting` };
+    if (checked.error) errors.push(checked.error);
+    else clean[key] = checked.value;
   }
   return { errors, clean };
 }
@@ -2512,7 +2497,7 @@ async function updateConfig({ patch, actorId = null, dbh = db } = {}) {
       numericBefore[key] = n != null && n >= 0 ? n : DEFAULT_CONFIG[key];
     }
     const merged = { ...numericBefore };
-    for (const key of Object.keys(CONFIG_RULES)) if (clean[key] != null) merged[key] = clean[key];
+    for (const key of Object.keys(DEFAULT_CONFIG)) if (clean[key] != null) merged[key] = clean[key];
     if (merged.band_b_tolerance_pct > merged.band_c_max_pct) {
       return { ok: false, reason: 'invalid', errors: ['Band B tolerance must not exceed the band C maximum'] };
     }
@@ -2536,8 +2521,9 @@ async function updateConfig({ patch, actorId = null, dbh = db } = {}) {
     if (!Object.keys(changed).length) return { ok: true, changed };
     update.updated_at = now;
     update.updated_by = actorId;
-    if (existing) await trx(CONFIG).where({ id: 1 }).update(update);
-    else await trx(CONFIG).insert({ id: 1, ...DEFAULT_CONFIG, ...update, created_at: now });
+    // literal table names on every writer — see the note in buildBatch
+    if (existing) await trx('rate_review_config').where({ id: 1 }).update(update);
+    else await trx('rate_review_config').insert({ id: 1, ...DEFAULT_CONFIG, ...update, created_at: now });
     await auditLog().recordAuditEvent({
       actor_type: 'technician',
       actor_id: actorId,
@@ -2576,6 +2562,39 @@ function rowEditRefusal(row, { includeException, status }) {
   return null;
 }
 
+// The row after an edit — the proposal, its deltas, the status and the flags
+// that record how it got there — as one pure rule (the Include and Proposed
+// controls on the screen rely on exactly this).
+function nextRowState(row, { proposed, status, config }) {
+  const current = Number(row.current_rate_cents);
+  const monthly = row.rate_unit === 'month';
+  const vpy = Number(row.visits_per_year) || 0;
+  const delta = proposed - current;
+  // A notice needs a real increase: strictly positive AND at least the
+  // minimum (which a stored config could, in principle, carry as 0). A
+  // monthly line's dues are a whole-dollar per-application amount spread
+  // over 12, so the minimum is spread the same way, rounded DOWN — an
+  // already-ranked boundary proposal (33¢ a month for $1 per application
+  // on a quarterly line) stays green across an Include toggle.
+  const minDelta = monthly && vpy > 0 ? Math.floor((config.min_delta_cents * vpy) / 12) : config.min_delta_cents;
+  const isChange = delta > 0 && delta >= minDelta;
+  // A status-less amount edit keeps the row in or out of the batch as it was.
+  const out = status === 'skipped' || (status == null && row.status === 'skipped');
+  const flags = new Set(parseJson(row.flags) || []);
+  if (proposed !== Number(row.proposed_rate_cents)) flags.add('admin_edited');
+  if (row.status === 'exception' && !out) flags.add('exception_included');
+  // An owner's skip is a decision for this cycle, never a carry-forward hold
+  // (selectReviewEntries leaves an admin_skipped line out of the next batch).
+  if (out) flags.add('admin_skipped'); else flags.delete('admin_skipped');
+  return {
+    proposed_rate_cents: proposed,
+    delta_cents: delta,
+    annual_delta_cents: Math.round(delta * (monthly ? 12 : vpy)),
+    status: out ? 'skipped' : (isChange ? 'green' : 'no_change'),
+    flags: [...flags],
+  };
+}
+
 // PUT /batches/:key/rows/:id. Recomputes delta, annual delta and status
 // from the (possibly new) proposed amount; the row's band and list rate are
 // the ranking's and never change here. Refused once the batch has a sent
@@ -2592,59 +2611,23 @@ async function updateRow({ batchKey, rowId, proposedRateCents, status, includeEx
   // and roll the row update and its audit back.
   const liveConfig = await loadConfig(dbh);
   return dbh.transaction(async (trx) => {
-    // The writers' shared lock (a rebuild takes it too), so an edit and a
-    // recompute never interleave.
+    // The writers' shared lock (a rebuild holds it for its whole recompute),
+    // so an edit and a recompute never interleave.
     await lockBatch(trx, batchKey);
     const batchRow = await trx(BATCHES).where({ batch_key: batchKey }).first();
     if (await batchHasSentRows(trx, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', error: 'This batch already has rows that were sent to customers — it can no longer be edited.' };
     const row = await trx(SNAPSHOTS).where({ id: rowId, batch_key: batchKey }).forUpdate().first();
     const refusal = rowEditRefusal(row, { includeException, status });
     if (refusal) return refusal;
-    const wasException = row.status === 'exception';
-    const current = Number(row.current_rate_cents) || 0;
-    const monthly = row.rate_unit === 'month';
-
-    const config = configForBatch(batchRow, liveConfig);
-    let proposed = Number(row.proposed_rate_cents) || 0;
-    const flags = parseJson(row.flags) || [];
-    if (proposedRateCents != null) {
-      const checked = validateProposedCents(proposedRateCents, current, { wholeDollars: !monthly });
-      if (checked.error) return { ok: false, reason: checked.reason, error: checked.error };
-      if (checked.cents !== proposed) {
-        proposed = checked.cents;
-        if (!flags.includes('admin_edited')) flags.push('admin_edited');
-      }
-    }
-    const delta = proposed - current;
-    const vpy = Number(row.visits_per_year) || 0;
-    const unitMultiplier = monthly ? 12 : vpy;
-    const annual = Math.round(delta * unitMultiplier);
-    // The minimum change is per application: monthly dues are judged on
-    // their per-application equivalent (× 12 ÷ applications), as the
-    // ranking judged them.
-    // A notice needs a real increase: strictly positive AND at least the
-    // minimum (which a stored config could, in principle, carry as 0). A
-    // monthly line's dues are a whole-dollar per-application amount spread
-    // over 12, so the minimum is spread the same way, rounded DOWN — an
-    // already-ranked boundary proposal (33¢ a month for $1 per application
-    // on a quarterly line) stays green across an Include toggle.
-    const minDelta = monthly && vpy > 0 ? Math.floor((config.min_delta_cents * vpy) / 12) : config.min_delta_cents;
-    const isChange = delta > 0 && delta >= minDelta;
-    let nextStatus;
-    if (status === 'skipped') nextStatus = 'skipped';
-    else if (status === 'green' || row.status !== 'skipped') nextStatus = isChange ? 'green' : 'no_change';
-    else nextStatus = 'skipped';
-    if (wasException && !flags.includes('exception_included')) flags.push('exception_included');
+    const checked = proposedRateCents == null
+      ? { cents: Number(row.proposed_rate_cents) }
+      : validateProposedCents(proposedRateCents, Number(row.current_rate_cents), { wholeDollars: row.rate_unit !== 'month' });
+    if (checked.error) return { ok: false, reason: checked.reason, error: checked.error };
+    const next = nextRowState(row, { proposed: checked.cents, status, config: configForBatch(batchRow, liveConfig) });
 
     const now = new Date();
-    await trx(SNAPSHOTS).where({ id: row.id }).update({
-      proposed_rate_cents: proposed,
-      delta_cents: delta,
-      annual_delta_cents: annual,
-      status: nextStatus,
-      flags: JSON.stringify(flags),
-      updated_at: now,
-    });
+    // literal table name on the writer — see the note in buildBatch
+    await trx('rate_review_snapshots').where({ id: row.id }).update({ ...next, flags: JSON.stringify(next.flags), updated_at: now });
     await auditLog().recordAuditEvent({
       actor_type: 'technician',
       actor_id: actorId,
@@ -2653,16 +2636,16 @@ async function updateRow({ batchKey, rowId, proposedRateCents, status, includeEx
       resource_id: row.id,
       metadata: {
         batch_key: batchKey,
-        from: { proposed_rate_cents: Number(row.proposed_rate_cents) || 0, status: row.status },
-        to: { proposed_rate_cents: proposed, status: nextStatus },
-        include_exception: wasException,
+        from: { proposed_rate_cents: Number(row.proposed_rate_cents), status: row.status },
+        to: { proposed_rate_cents: next.proposed_rate_cents, status: next.status },
+        include_exception: row.status === 'exception',
       },
       critical: true,
       trx,
     });
     const updated = await trx(`${SNAPSHOTS} as r`).leftJoin('customers as c', 'c.id', 'r.customer_id').where('r.id', row.id).select('r.*', 'c.first_name', 'c.last_name', 'c.city').first();
     const batchRows = await trx(SNAPSHOTS).where({ batch_key: batchKey }).select('id', 'proposed_rate_cents', 'status', 'annual_delta_cents');
-    return { ok: true, row: shapeSnapshotRow(updated), summary: summarizeRows(batchRows), digest: batchDigest(batchRows) };
+    return { ok: true, row: shapeSnapshotRow(updated), summary: summarizeRows(batchRows), approvalDigest: batchDigest(batchRows) };
   });
 }
 
@@ -2679,13 +2662,14 @@ async function approveBatch({ batchKey, expectedDigest, actorId = null, dbh = db
     if (!rows.length) return { ok: false, reason: 'batch_not_found', error: 'Batch not found' };
     if (rows.some((r) => SENT_STATUSES.includes(r.status))) return { ok: false, reason: 'batch_has_sent_rows', error: 'This batch already has rows that were sent to customers.' };
     const digest = batchDigest(rows);
-    if (digest !== expectedDigest.trim()) return { ok: false, reason: 'digest_mismatch', error: 'The batch changed since this screen loaded — review it again before approving.', digest };
+    if (digest !== expectedDigest.trim()) return { ok: false, reason: 'digest_mismatch', error: 'The batch changed since this screen loaded — review it again before approving.', approvalDigest: digest };
     const green = rows.filter((r) => r.status === 'green');
-    if (!green.length) return { ok: false, reason: 'nothing_to_approve', error: 'No green rows to approve.', digest };
+    if (!green.length) return { ok: false, reason: 'nothing_to_approve', error: 'No green rows to approve.', approvalDigest: digest };
     const now = new Date();
     const annualDeltaCents = green.reduce((sum, r) => sum + (Number(r.annual_delta_cents) || 0), 0);
-    await trx(SNAPSHOTS).whereIn('id', green.map((r) => r.id)).update({ status: 'approved', approved_at: now, approved_by: actorId, updated_at: now });
-    await trx(BATCHES).where({ batch_key: batchKey }).update({ approved_at: now, approved_by: actorId, approval_digest: digest, updated_at: now });
+    // literal table names on the writers — see the note in buildBatch
+    await trx('rate_review_snapshots').whereIn('id', green.map((r) => r.id)).update({ status: 'approved', approved_at: now, approved_by: actorId, updated_at: now });
+    await trx('rate_review_batches').where({ batch_key: batchKey }).update({ approved_at: now, approved_by: actorId, approval_digest: digest, updated_at: now });
     await auditLog().recordAuditEvent({
       actor_type: 'technician',
       actor_id: actorId,
@@ -2697,7 +2681,7 @@ async function approveBatch({ batchKey, expectedDigest, actorId = null, dbh = db
       trx,
     });
     const after = rows.map((r) => (r.status === 'green' ? { ...r, status: 'approved' } : r));
-    return { ok: true, approved: green.length, annual_delta_cents: annualDeltaCents, approved_at: now, digest: batchDigest(after), summary: summarizeRows(after) };
+    return { ok: true, approved: green.length, annual_delta_cents: annualDeltaCents, approved_at: now, approvalDigest: batchDigest(after), summary: summarizeRows(after) };
   });
 }
 
@@ -2991,7 +2975,7 @@ module.exports = {
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
-    gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows, validateConfigPatch, validateProposedCents,
+    gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows, validateConfigPatch, validateProposedCents, nextRowState,
     resolveAnniversary, resolveCurrentRate, matchPrepayTerm, familyOfCoverage, consolidatePlanLines, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer, engineInputsFromEstimate,
     loadActivePlanLines, loadFirstCompletedVisits, loadCompletedVisitRows, loadExceptionSignals, loadPriorReviews, loadLedgerSlices, ledgerSliceForLine, loadEstimates, loadCustomers,
     loadSettledDues, duesPerVisitCents,

@@ -10,7 +10,6 @@
  *   PUT  /api/admin/rate-review/batches/:key/rows/:id      proposed amount / green ↔ skipped (409 once sent, on a locked
  *                                                          row, or on an exception without includeException)
  *   POST /api/admin/rate-review/batches/:key/approve       { expectedDigest } → green rows become 'approved' (NO send)
- *   POST /api/admin/rate-review/batches/:key/email         re-send the batch ops digest to contact@
  *   PUT  /api/admin/rate-review/config                     the knobs + the owner's cost block (audit_log row)
  *
  * No customer sends and no rate writes here — the notices (letter preview
@@ -79,7 +78,7 @@ const REASON_STATUS = {
 function refuse(res, result) {
   const status = REASON_STATUS[result.reason] || 400;
   const body = { error: result.error || 'Request refused', reason: result.reason };
-  if (result.digest) body.digest = result.digest;
+  if (result.approvalDigest) body.approvalDigest = result.approvalDigest;
   if (result.errors) body.errors = result.errors;
   return res.status(status).json(body);
 }
@@ -98,7 +97,7 @@ router.put('/batches/:key/rows/:id', async (req, res) => {
       actorId: req.technicianId || null,
     });
     if (!result.ok) return refuse(res, result);
-    return res.json({ ok: true, row: result.row, summary: result.summary, digest: result.digest });
+    return res.json({ ok: true, row: result.row, summary: result.summary, approvalDigest: result.approvalDigest });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] row update failed for ${key}: ${err.message}`);
@@ -113,28 +112,11 @@ router.post('/batches/:key/approve', async (req, res) => {
   try {
     const result = await rateReview.approveBatch({ batchKey: key, expectedDigest, actorId: req.technicianId || null });
     if (!result.ok) return refuse(res, result);
-    return res.json({ ok: true, approved: result.approved, annual_delta_cents: result.annual_delta_cents, approved_at: result.approved_at, digest: result.digest, summary: result.summary });
+    return res.json({ ok: true, approved: result.approved, annual_delta_cents: result.annual_delta_cents, approved_at: result.approved_at, approvalDigest: result.approvalDigest, summary: result.summary });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] approve failed for ${key}: ${err.message}`);
     return res.status(500).json({ error: 'Could not approve the rate review batch' });
-  }
-});
-
-// Re-send the batch's ops digest (the ACT:/OK: email the monthly job sends
-// once). Owner/internal inboxes only — sendBatchEmail refuses anything else.
-router.post('/batches/:key/email', async (req, res) => {
-  const key = validBatchKey(req, res);
-  if (!key) return;
-  try {
-    const existing = await rateReview.getBatch(key);
-    if (!existing.batch) return res.status(404).json({ error: 'Batch not found', reason: 'batch_not_found' });
-    const result = await rateReview.sendBatchEmail({ batchKey: key });
-    return res.json({ ok: true, ...result });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    logger.error(`[admin-rate-review] batch email failed for ${key}: ${err.message}`);
-    return res.status(500).json({ error: 'Could not send the batch email' });
   }
 });
 

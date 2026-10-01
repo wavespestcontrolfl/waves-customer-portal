@@ -113,7 +113,7 @@ const CONFIG_ROW = { id: 1, pass_through_pct: '3.500', band_b_tolerance_pct: '5.
 function seed() {
   return {
     rate_review_config: [{ ...CONFIG_ROW }],
-    rate_review_batches: [{ batch_key: '2027-01', window_from: '2027-01-01', window_to: '2027-01-31', email_sent_at: null }],
+    rate_review_batches: [{ batch_key: '2027-01', window_from: '2027-01-01', window_to: '2027-01-31', email_sent_at: null, computed_at: '2026-11-27T11:20:00.000Z' }],
     rate_review_snapshots: [
       snapshot(ROW_A),
       snapshot(ROW_B, { customer_id: CUST(2), band: 'A', current_rate_cents: 13000, list_rate_cents: 11700, proposed_rate_cents: 13000, delta_cents: 0, annual_delta_cents: 0, status: 'no_change' }),
@@ -149,7 +149,7 @@ describe('batchDigest', () => {
     db.tables.rate_review_snapshots[0].anniversary_date = '2026-01-06'; // the line started Jan 6, 2026 …
     db.tables.rate_review_snapshots[0].review_date = '2027-01-06'; // … and this batch reviews its 2027 occurrence
     const out = await rateReview.getBatch('2027-01', db);
-    expect(out.digest).toBe(rateReview.batchDigest(out.rows));
+    expect(out.approvalDigest).toBe(rateReview.batchDigest(out.rows));
     // The batch row and its rows are read from ONE repeatable-read snapshot.
     expect(db.transactions).toEqual([{ isolationLevel: 'repeatable read' }]);
     expect(db.reads.filter((r) => ['rate_review_batches', 'rate_review_snapshots'].includes(r.table)).every((r) => r.inTx)).toBe(true);
@@ -181,7 +181,7 @@ describe('updateRow', () => {
     expect(db.reads.filter((r) => r.table === 'rate_review_config').every((r) => !r.inTx)).toBe(true);
     expect(out.row).toMatchObject({ id: ROW_A, proposed_rate_cents: 11200, delta_cents: 700, annual_delta_cents: 2800, status: 'green', customer_name: 'Fixture One', city: 'Bradenton' });
     expect(out.row.flags).toContain('admin_edited');
-    expect(out.digest).toMatch(/^[0-9a-f]{16}$/);
+    expect(out.approvalDigest).toMatch(/^[0-9a-f]{16}$/);
     expect(out.summary).toMatchObject({ green: 2, no_change: 1, exception: 1 });
     expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({
       action: 'rate_review.row.update', actor_id: ADMIN, resource_type: 'rate_review_snapshot', resource_id: ROW_A, critical: true,
@@ -241,10 +241,13 @@ describe('updateRow', () => {
     const db = fakeDb(seed());
     const off = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_A, status: 'skipped', dbh: db });
     expect(off.row.status).toBe('skipped');
+    expect(off.row.flags).toContain('admin_skipped'); // an owner's skip, never a carry-forward hold
     const edited = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_A, proposedRateCents: 11500, dbh: db });
     expect(edited.row).toMatchObject({ status: 'skipped', proposed_rate_cents: 11500 });
+    expect(edited.row.flags).toContain('admin_skipped');
     const on = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_A, status: 'green', dbh: db });
     expect(on.row).toMatchObject({ status: 'green', proposed_rate_cents: 11500, delta_cents: 1000 });
+    expect(on.row.flags).not.toContain('admin_skipped');
   });
 
   test('ticking include on a band-A row records no_change (there is no letter to send) — even under a zero minimum', async () => {
@@ -285,6 +288,7 @@ describe('updateRow', () => {
     const db2 = fakeDb(seed());
     const skipped = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_C, status: 'skipped', includeException: true, dbh: db2 });
     expect(skipped.row.status).toBe('skipped');
+    expect(skipped.row.flags).toEqual(['callback_recent', 'admin_skipped']);
   });
 
   test('refused once the batch has a sent row, and on an approved row', async () => {
@@ -304,7 +308,7 @@ describe('approveBatch', () => {
   test('green rows become approved with who/when; the batch is stamped; everything else is untouched; audited', async () => {
     const db = fakeDb(seed());
     const before = await rateReview.getBatch('2027-01', db);
-    const out = await rateReview.approveBatch({ batchKey: '2027-01', expectedDigest: before.digest, actorId: ADMIN, dbh: db });
+    const out = await rateReview.approveBatch({ batchKey: '2027-01', expectedDigest: before.approvalDigest, actorId: ADMIN, dbh: db });
     expect(out).toMatchObject({ ok: true, approved: 2, annual_delta_cents: 8400 });
     // The writers' shared advisory lock, keyed by batch, taken first.
     expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['rate_review_batch:2027-01']);
@@ -316,18 +320,18 @@ describe('approveBatch', () => {
     expect(rows.find((r) => r.id === ROW_B).status).toBe('no_change');
     expect(rows.find((r) => r.id === ROW_B).approved_at).toBeUndefined();
     expect(rows.find((r) => r.id === ROW_C).status).toBe('exception');
-    expect(db.tables.rate_review_batches[0]).toMatchObject({ approved_by: ADMIN, approval_digest: before.digest });
-    expect(out.digest).toBe((await rateReview.getBatch('2027-01', db)).digest);
-    expect(out.digest).not.toBe(before.digest);
+    expect(db.tables.rate_review_batches[0]).toMatchObject({ approved_by: ADMIN, approval_digest: before.approvalDigest });
+    expect(out.approvalDigest).toBe((await rateReview.getBatch('2027-01', db)).approvalDigest);
+    expect(out.approvalDigest).not.toBe(before.approvalDigest);
     expect(out.summary).toMatchObject({ approved: 2, green: 0, no_change: 1, exception: 1 });
-    expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'rate_review.batch.approve', actor_id: ADMIN, critical: true, metadata: { batch_key: '2027-01', digest: before.digest, approved: 2, annual_delta_cents: 8400 } }));
+    expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'rate_review.batch.approve', actor_id: ADMIN, critical: true, metadata: { batch_key: '2027-01', digest: before.approvalDigest, approved: 2, annual_delta_cents: 8400 } }));
   });
 
   test('a stale digest refuses and returns the fresh one; nothing is written', async () => {
     const db = fakeDb(seed());
-    const fresh = (await rateReview.getBatch('2027-01', db)).digest;
+    const fresh = (await rateReview.getBatch('2027-01', db)).approvalDigest;
     const out = await rateReview.approveBatch({ batchKey: '2027-01', expectedDigest: 'stale0000stale00', dbh: db });
-    expect(out).toMatchObject({ ok: false, reason: 'digest_mismatch', digest: fresh });
+    expect(out).toMatchObject({ ok: false, reason: 'digest_mismatch', approvalDigest: fresh });
     expect(db.tables.rate_review_snapshots.every((r) => r.status !== 'approved')).toBe(true);
     expect(mockAudit).not.toHaveBeenCalled();
   });
@@ -341,8 +345,8 @@ describe('approveBatch', () => {
     const nothing = seed();
     nothing.rate_review_snapshots = nothing.rate_review_snapshots.filter((r) => r.status !== 'green');
     const db = fakeDb(nothing);
-    const digest = (await rateReview.getBatch('2027-01', db)).digest;
-    expect(await rateReview.approveBatch({ batchKey: '2027-01', expectedDigest: digest, dbh: db })).toMatchObject({ ok: false, reason: 'nothing_to_approve', digest });
+    const digest = (await rateReview.getBatch('2027-01', db)).approvalDigest;
+    expect(await rateReview.approveBatch({ batchKey: '2027-01', expectedDigest: digest, dbh: db })).toMatchObject({ ok: false, reason: 'nothing_to_approve', approvalDigest: digest });
   });
 });
 
@@ -400,7 +404,7 @@ describe('readConfig / updateConfig', () => {
     expect(bad.ok).toBe(false);
     expect(bad.errors).toEqual(expect.arrayContaining([
       'bogus is not a rate review setting', 'cap_pct must be at most 100', 'lock_months must be a whole number',
-      'min_delta_cents must be a number of at least 0', 'cost_block must be at most 4000 characters',
+      'min_delta_cents must be at least 1', 'cost_block must be at most 4000 characters',
     ]));
     expect(await rateReview.updateConfig({ patch: {}, dbh: db })).toMatchObject({ ok: false, errors: ['Nothing to change'] });
     expect(await rateReview.updateConfig({ patch: { min_delta_cents: 0 }, dbh: db })).toMatchObject({ ok: false, errors: ['min_delta_cents must be at least 1'] });
@@ -420,6 +424,22 @@ describe('readConfig / updateConfig', () => {
   });
 });
 
+// ── an owner's skip never carries forward ───────────────────────────────
+
+describe('selectReviewEntries vs admin_skipped', () => {
+  test('a line whose latest snapshot the owner skipped is not carried into the next batch; a ranking skip still is', () => {
+    const { selectReviewEntries } = rateReview._private;
+    const customer = { id: CUST(1), member_since: '2024-03-10', created_at: '2024-03-10T12:00:00Z' };
+    const entry = () => ({ customer, familyKey: 'pest_control', first: { completed_dates: ['2024-03-15'], first_visit: '2024-03-15' }, acceptedAt: null, visitsPerYear: 4 });
+    const latest = (flags) => new Map([[`${CUST(1)}|pest_control`, { status: 'skipped', review_date: '2027-01-10', batch_key: '2027-01', computed_at: '2026-12-01T11:20:00Z', flags: JSON.stringify(flags) }]]);
+    const args = { from: '2027-02-05', to: '2027-03-07', now: new Date('2027-01-31T11:20:00Z'), firstVisits: null };
+    const carried = selectReviewEntries([entry()], { ...args, latestByLine: latest([]) });
+    expect(carried.map((e) => e.carriedFrom)).toEqual(['2027-01']);
+    const owned = selectReviewEntries([entry()], { ...args, latestByLine: latest(['admin_skipped']) });
+    expect(owned).toEqual([]);
+  });
+});
+
 // ── a decided batch is never recomputed ─────────────────────────────────
 
 describe('rebuild vs decisions', () => {
@@ -429,13 +449,18 @@ describe('rebuild vs decisions', () => {
     db.raw.mockImplementation(async () => { throw new Error('no build SQL expected'); });
   }
 
-  test('buildBatch refuses a batch with approved rows before any ranking query runs', async () => {
+  test('buildBatch refuses a batch with approved rows before any ranking query runs — under the batch lock, taken first', async () => {
     const approved = seed();
     approved.rate_review_snapshots[0].status = 'approved';
-    useModuleDb(fakeDb(approved));
+    const fake = fakeDb(approved);
+    useModuleDb(fake);
     const out = await rateReview.buildBatch({ batchKey: '2027-01' });
     expect(out).toEqual({ ok: false, reason: 'batch_has_approved_rows', batchKey: '2027-01' });
     expect(db.raw).not.toHaveBeenCalled();
+    // The recompute runs inside one transaction that holds the lock from its first read.
+    expect(fake.transactions).toHaveLength(1);
+    expect(fake.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['rate_review_batch:2027-01']);
+    expect(fake.reads.filter((r) => r.table === 'rate_review_snapshots').every((r) => r.inTx)).toBe(true);
     const sent = seed();
     sent.rate_review_snapshots[0].status = 'sent';
     useModuleDb(fakeDb(sent));

@@ -2,9 +2,9 @@
  * /api/admin/rate-review — admin-only, dark behind GATE_RATE_REVIEW.
  * Gate off = 404 on every route before any service call; a technician is
  * 403; an unauthenticated caller 401; a batch with sent rows refuses the
- * recompute with 409. The admin-screen routes (row edit, approve, email
- * resend, config) map the service's refusal reasons to 400/404/409 and pass
- * the acting admin's id through.
+ * recompute with 409. The admin-screen routes (row edit, approve, config)
+ * map the service's refusal reasons to 400/404/409 and pass the acting
+ * admin's id through; the owner digest is the parent's POST …/digest.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -12,6 +12,7 @@ const mockListBatches = jest.fn();
 const mockGetBatch = jest.fn();
 const mockBuildBatch = jest.fn();
 const mockReadConfig = jest.fn();
+const mockLoadConfig = jest.fn(); // the parent's numeric-knobs read; GET /batches answers the screen's readConfig
 const mockUpdateRow = jest.fn();
 const mockApproveBatch = jest.fn();
 const mockSendBatchEmail = jest.fn();
@@ -35,7 +36,6 @@ jest.mock('../middleware/admin-auth', () => ({
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
-const mockSendBatchEmail = jest.fn();
 const mockBatchEmailed = jest.fn(async () => false);
 const mockRunExclusive = jest.fn(async (_name, fn) => fn());
 jest.mock('../utils/cron-lock', () => ({
@@ -85,10 +85,10 @@ beforeEach(() => {
   process.env.GATE_RATE_REVIEW = 'true';
   mockListBatches.mockResolvedValue([{ batch_key: '2026-12', rows: 6, statuses: { green: 3 } }]);
   mockReadConfig.mockResolvedValue({ pass_through_pct: 3.5, cost_block: '' });
-  mockGetBatch.mockResolvedValue({ batchKey: '2026-12', rows: [], summary: { rows: 0 }, batch: null, digest: 'abc' });
+  mockGetBatch.mockResolvedValue({ batchKey: '2026-12', rows: [], summary: { rows: 0 }, batch: null, approvalDigest: 'abc' });
   mockBuildBatch.mockResolvedValue({ ok: true, batchKey: '2026-12', window: { from: '2026-12-01', to: '2026-12-31' }, rows: 6, summary: { rows: 6 }, allowances: {} });
-  mockUpdateRow.mockResolvedValue({ ok: true, row: { id: ROW, status: 'green' }, summary: { green: 1 }, digest: 'd1' });
-  mockApproveBatch.mockResolvedValue({ ok: true, approved: 3, annual_delta_cents: 26200, approved_at: '2026-12-01T12:00:00.000Z', digest: 'd2', summary: { approved: 3 } });
+  mockUpdateRow.mockResolvedValue({ ok: true, row: { id: ROW, status: 'green' }, summary: { green: 1 }, approvalDigest: 'd1' });
+  mockApproveBatch.mockResolvedValue({ ok: true, approved: 3, annual_delta_cents: 26200, approved_at: '2026-12-01T12:00:00.000Z', approvalDigest: 'd2', summary: { approved: 3 } });
   mockSendBatchEmail.mockResolvedValue({ sent: true, channel: 'email', subject: 'ACT: Rate review', rows: 6 });
   mockUpdateConfig.mockResolvedValue({ ok: true, config: { pass_through_pct: 4 }, changed: { pass_through_pct: { from: 3.5, to: 4 } } });
 });
@@ -274,7 +274,7 @@ describe('PUT /batches/:key/rows/:id', () => {
     await withServer(async (base) => {
       const out = await call(base, 'PUT', `/api/admin/rate-review/batches/2026-12/rows/${ROW}`, { body: { proposed_rate_cents: 11700, status: 'green', includeException: true } });
       expect(out.status).toBe(200);
-      expect(out.body).toEqual({ ok: true, row: { id: ROW, status: 'green' }, summary: { green: 1 }, digest: 'd1' });
+      expect(out.body).toEqual({ ok: true, row: { id: ROW, status: 'green' }, summary: { green: 1 }, approvalDigest: 'd1' });
       expect(mockUpdateRow).toHaveBeenCalledWith({ batchKey: '2026-12', rowId: ROW, proposedRateCents: 11700, status: 'green', includeException: true, actorId: 'admin-1' });
     });
   });
@@ -308,16 +308,16 @@ describe('POST /batches/:key/approve', () => {
     await withServer(async (base) => {
       const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/approve', { body: { expectedDigest: 'abc123' } });
       expect(out.status).toBe(200);
-      expect(out.body).toMatchObject({ ok: true, approved: 3, annual_delta_cents: 26200, digest: 'd2' });
+      expect(out.body).toMatchObject({ ok: true, approved: 3, annual_delta_cents: 26200, approvalDigest: 'd2' });
       expect(mockApproveBatch).toHaveBeenCalledWith({ batchKey: '2026-12', expectedDigest: 'abc123', actorId: 'admin-1' });
     });
   });
   test('a digest mismatch is 409 and hands back the fresh digest', async () => {
-    mockApproveBatch.mockResolvedValue({ ok: false, reason: 'digest_mismatch', error: 'moved', digest: 'fresh' });
+    mockApproveBatch.mockResolvedValue({ ok: false, reason: 'digest_mismatch', error: 'moved', approvalDigest: 'fresh' });
     await withServer(async (base) => {
       const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/approve', { body: { expectedDigest: 'stale' } });
       expect(out.status).toBe(409);
-      expect(out.body).toEqual({ error: 'moved', reason: 'digest_mismatch', digest: 'fresh' });
+      expect(out.body).toEqual({ error: 'moved', reason: 'digest_mismatch', approvalDigest: 'fresh' });
     });
   });
   test('nothing to approve / missing digest are 400, an unknown batch 404', async () => {
@@ -330,29 +330,6 @@ describe('POST /batches/:key/approve', () => {
       expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/approve', { body: { expectedDigest: 'x' } })).status).toBe(404);
     });
     expect(mockApproveBatch).toHaveBeenNthCalledWith(2, expect.objectContaining({ expectedDigest: '' }));
-  });
-});
-
-describe('POST /batches/:key/email', () => {
-  test('re-sends the ops digest and reports the channel', async () => {
-    mockGetBatch.mockResolvedValue({ batchKey: '2026-12', rows: [], summary: { rows: 0 }, batch: { batch_key: '2026-12' }, digest: 'abc' });
-    await withServer(async (base) => {
-      const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/email');
-      expect(out.status).toBe(200);
-      expect(out.body).toEqual({ ok: true, sent: true, channel: 'email', subject: 'ACT: Rate review', rows: 6 });
-      expect(mockSendBatchEmail).toHaveBeenCalledWith({ batchKey: '2026-12' });
-    });
-  });
-  test('an unknown batch is 404 before any send; an unconfigured mailer is reported, not an error', async () => {
-    mockSendBatchEmail.mockResolvedValueOnce({ sent: false, skipped: 'unconfigured', subject: 'ACT: Rate review' });
-    await withServer(async (base) => {
-      expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/email')).status).toBe(404);
-      expect(mockSendBatchEmail).not.toHaveBeenCalled();
-      mockGetBatch.mockResolvedValue({ batchKey: '2026-12', rows: [], summary: { rows: 0 }, batch: { batch_key: '2026-12' }, digest: 'abc' });
-      const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/email');
-      expect(out.status).toBe(200);
-      expect(out.body).toMatchObject({ ok: true, sent: false, skipped: 'unconfigured' });
-    });
   });
 });
 

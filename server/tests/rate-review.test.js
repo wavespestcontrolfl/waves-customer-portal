@@ -38,6 +38,14 @@ afterEach(() => {
   process.env.GATE_RATE_REVIEW = 'true';
   jest.clearAllMocks();
 });
+// buildBatch runs its whole recompute inside one transaction (the batch
+// lock is held from the first read), and getBatch reads in one snapshot:
+// every test goes through db.transaction, dispatching to the scenario the
+// test scripted (a stale implementation from an earlier test would read
+// that test's book).
+beforeEach(() => {
+  db.transaction.mockImplementation((fn) => fn(db));
+});
 
 // ── band math ───────────────────────────────────────────────────────────
 
@@ -1728,7 +1736,8 @@ describe('buildBatch over the synthetic December book', () => {
       expect(row.status).toBe('exception');
       expect(JSON.parse(row.flags)).toContain('reviewed_within_12mo');
       // the read itself is keyed on batch months, exclusive at 12 back
-      const snapshotReads = db.mock.calls.filter(([t]) => t === 'rate_review_snapshots');
+      // the build reads on its transaction connection (the batch lock is held for the whole recompute)
+      const snapshotReads = reviewed.mock.calls.filter(([t]) => t === 'rate_review_snapshots');
       expect(snapshotReads.length).toBeGreaterThan(0);
       const priorCall = reviewed.mock.results.map((r) => r.value).find((q) => q && q.calls && q.calls.some(([name, args]) => name === 'where' && args[0] === 'batch_key' && args[1] === '>'));
       expect(priorCall).toBeDefined();
@@ -1871,6 +1880,7 @@ describe('runMonthlyRateReview', () => {
     // no batch row at all → nothing to describe, nothing sent
     const empty = fixture.scriptedDb({ priorReviews: [], batchRow: null });
     db.mockImplementation((table) => empty(table));
+    db.transaction.mockImplementation((fn) => empty.transaction(fn)); // getBatch reads the batch and its rows in one snapshot
     expect(await rateReview.sendBatchEmail({ batchKey: '2026-11' })).toEqual({ sent: false, skipped: 'no_batch' });
   });
   test('a tick whose digest was not delivered (mailer unconfigured, external recipient) is a FAILED tick, not a healthy one', async () => {

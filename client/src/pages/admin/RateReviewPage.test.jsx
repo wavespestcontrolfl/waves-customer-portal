@@ -48,7 +48,7 @@ function batchPayload(rows) {
     batch: { batch_key: "2027-01", window_from: "2027-01-01", window_to: "2027-01-31", config: CONFIG, approved_at: null },
     rows,
     summary: { rows: rows.length },
-    digest: DIGEST,
+    approvalDigest: DIGEST,
   };
 }
 
@@ -66,6 +66,8 @@ let approveStatus;
 
 let secondBatchStatus;
 let batchGetStatusAfterFirst;
+let digestResponse;
+let putStatus;
 
 function installFetch() {
   calls = [];
@@ -73,6 +75,8 @@ function installFetch() {
   approveStatus = 200;
   secondBatchStatus = 200;
   batchGetStatusAfterFirst = 200;
+  digestResponse = null;
+  putStatus = 200;
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
     const path = String(url);
     const method = (options.method || "GET").toUpperCase();
@@ -86,7 +90,7 @@ function installFetch() {
     }
     if (method === "GET" && path.endsWith("/admin/rate-review/batches/2026-12")) {
       if (secondBatchStatus !== 200) return jsonResponse({ error: "Could not read the rate review batch" }, secondBatchStatus);
-      return jsonResponse({ batchKey: "2026-12", batch: { batch_key: "2026-12", window_from: "2026-12-01", window_to: "2026-12-31", config: CONFIG, approved_at: null }, rows: [], summary: {}, digest: "0000111122223333" });
+      return jsonResponse({ batchKey: "2026-12", batch: { batch_key: "2026-12", window_from: "2026-12-01", window_to: "2026-12-31", config: CONFIG, approved_at: null }, rows: [], summary: {}, approvalDigest: "0000111122223333" });
     }
     if (method === "GET" && path.endsWith("/admin/rate-review/batches/2027-01")) {
       batchGets += 1;
@@ -95,6 +99,7 @@ function installFetch() {
     }
     if (method === "GET" && /\/letter-preview$/.test(path)) return jsonResponse({ error: "Not found" }, 404);
     if (method === "PUT" && /\/rows\//.test(path)) {
+      if (putStatus !== 200) return jsonResponse({ error: "This batch already has rows that were sent to customers — it can no longer be edited.", reason: "batch_has_sent_rows" }, putStatus);
       const id = path.split("/rows/")[1];
       const target = rows.find((r) => r.id === id);
       const next = { ...target };
@@ -107,14 +112,17 @@ function installFetch() {
       if (body.status === "skipped") next.status = "skipped";
       if (body.status === "green") next.status = next.delta_cents >= 300 ? "green" : "no_change";
       rows = rows.map((r) => (r.id === id ? next : r));
-      return jsonResponse({ ok: true, row: next, summary: {}, digest: "ffff0000ffff0000" });
+      return jsonResponse({ ok: true, row: next, summary: {}, approvalDigest: "ffff0000ffff0000" });
     }
     if (method === "POST" && path.endsWith("/approve")) {
-      if (approveStatus !== 200) return jsonResponse({ error: "The batch changed since this screen loaded — review it again before approving.", reason: "digest_mismatch", digest: "1111222233334444" }, approveStatus);
+      if (approveStatus !== 200) return jsonResponse({ error: "The batch changed since this screen loaded — review it again before approving.", reason: "digest_mismatch", approvalDigest: "1111222233334444" }, approveStatus);
       rows = rows.map((r) => (r.status === "green" ? { ...r, status: "approved" } : r));
-      return jsonResponse({ ok: true, approved: 2, annual_delta_cents: 11100, digest: "9999888877776666", summary: {} });
+      return jsonResponse({ ok: true, approved: 2, annual_delta_cents: 11100, approvalDigest: "9999888877776666", summary: {} });
     }
-    if (method === "POST" && path.endsWith("/email")) return jsonResponse({ ok: true, sent: true, channel: "email", subject: "ACT: Rate review — January 2027 batch", rows: 5 });
+    if (method === "POST" && path.endsWith("/digest")) {
+      if (digestResponse) return jsonResponse(digestResponse.body, digestResponse.status);
+      return jsonResponse({ ok: true, batchKey: "2027-01", sent: true, stamped: true, skipped: null, subject: "ACT: Rate review — January 2027 batch" });
+    }
     if (method === "PUT" && path.endsWith("/admin/rate-review/config")) {
       return jsonResponse({ ok: true, config: { ...CONFIG, ...body, cost_block_set_at: "2026-10-28T14:00:00.000Z", cost_block_set_by_name: "Owner Fixture" }, changed: {} });
     }
@@ -410,15 +418,15 @@ describe("RateReviewPage", () => {
     const gate = new Promise((_, rej) => { reject = rej; });
     const original = fetch;
     vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
-      if ((options.method || "GET") === "POST" && /\/email$/.test(String(url))) await gate;
+      if ((options.method || "GET") === "POST" && /\/digest$/.test(String(url))) await gate;
       return original(url, options);
     }));
     fireEvent.click(screen.getByRole("button", { name: "Email me this batch" }));
     fireEvent.change(screen.getByLabelText("Batch"), { target: { value: "2026-12" } });
     await screen.findByText("No accounts in this batch.");
-    reject(Object.assign(new Error("Could not send the batch email"), { status: 500 }));
+    reject(Object.assign(new Error("Could not send the batch digest"), { status: 502 }));
     await new Promise((r) => setTimeout(r, 30));
-    expect(screen.queryByText("Could not send the batch email")).not.toBeInTheDocument();
+    expect(screen.queryByText("Could not send the batch digest")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Email me this batch" })).toBeEnabled();
   });
 
@@ -476,11 +484,64 @@ describe("RateReviewPage", () => {
     expect(within(sheet).getByText("Letter · Fixture Whitfield")).toBeInTheDocument();
   });
 
-  it("Email me this batch re-sends the ops digest and reports where it went", async () => {
+  it("Email me this batch sends the owner digest through the ranking's digest route and reports an already-sent one", async () => {
     await renderLoaded();
     fireEvent.click(screen.getByRole("button", { name: "Email me this batch" }));
-    await screen.findByText("Batch digest emailed to contact@: ACT: Rate review — January 2027 batch");
-    expect(calls.find((c) => c.method === "POST").path).toMatch(/\/batches\/2027-01\/email$/);
+    await screen.findByText("Batch digest sent to contact@: ACT: Rate review — January 2027 batch");
+    expect(calls.find((c) => c.method === "POST").path).toMatch(/\/batches\/2027-01\/digest$/);
+    digestResponse = { status: 200, body: { ok: true, batchKey: "2027-01", sent: false, stamped: false, skipped: "already_sent", subject: null } };
+    fireEvent.click(screen.getByRole("button", { name: "Email me this batch" }));
+    await screen.findByText("This batch's digest already went out; a rebuild sends an updated one.");
+    digestResponse = { status: 409, body: { error: "A rate review build is running — try again in a moment.", reason: "build_in_progress" } };
+    fireEvent.click(screen.getByRole("button", { name: "Email me this batch" }));
+    await screen.findByText("A rate review build is running — try again in a moment.");
+  });
+
+  it("a row edit refused with 409 re-reads the batch as it is now", async () => {
+    await renderLoaded();
+    putStatus = 409;
+    fireEvent.click(screen.getByLabelText("Include Fixture Whitfield"));
+    await screen.findByText("This batch already has rows that were sent to customers — it can no longer be edited.");
+    await waitFor(() => expect(batchGets).toBe(2));
+  });
+
+  it("a 409 on approve whose reload then fails leaves nothing stale actionable", async () => {
+    await renderLoaded();
+    approveStatus = 409;
+    batchGetStatusAfterFirst = 500;
+    fireEvent.click(screen.getByRole("button", { name: "Approve batch · send 3 notices" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Approve 3 notices" }));
+    await screen.findByText("The batch changed since this screen loaded — review it again before approving.");
+    await screen.findByText("Could not read the rate review batch");
+    expect(screen.queryByText("Fixture Whitfield")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Approve batch/ })).toBeDisabled();
+  });
+
+  it("a line filter the next batch does not offer falls back to all lines", async () => {
+    await renderLoaded();
+    fireEvent.change(screen.getByLabelText("Line"), { target: { value: "lawn_care" } });
+    expect(screen.getByLabelText("Line")).toHaveValue("lawn_care");
+    fireEvent.change(screen.getByLabelText("Batch"), { target: { value: "2026-12" } });
+    await screen.findByText("No accounts in this batch.");
+    expect(screen.getByLabelText("Line")).toHaveValue("all");
+  });
+
+  it("closing the letter sheet before its request answers keeps it closed", async () => {
+    await renderLoaded();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const original = fetch;
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      if (/letter-preview$/.test(String(url))) await gate;
+      return original(url, options);
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Letter for Fixture Whitfield" }));
+    const sheet = await screen.findByRole("dialog", { name: "Letter preview" });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog", { name: "Letter preview" })).not.toBeInTheDocument();
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByRole("dialog", { name: "Letter preview" })).not.toBeInTheDocument();
   });
 
   it("filters are client-side: Line and Band narrow the table without a request", async () => {
@@ -517,6 +578,24 @@ describe("RateReviewPage", () => {
     renderPage("/admin/pricing-logic?area=rate-review&batch=2099-12");
     await screen.findByText("Fixture Whitfield");
     expect(screen.getByLabelText("Batch")).toHaveValue("2027-01");
+  });
+});
+
+describe("RateReviewPage before the first batch", () => {
+  it("renders Settings (knobs + cost block) when there are no batches yet", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const method = (options.method || "GET").toUpperCase();
+      if (method === "GET" && String(url).endsWith("/admin/rate-review/batches")) return jsonResponse({ enabled: true, batches: [], config: CONFIG });
+      if (method === "PUT" && String(url).endsWith("/admin/rate-review/config")) return jsonResponse({ ok: true, config: { ...CONFIG, ...JSON.parse(options.body) }, changed: {} });
+      return jsonResponse({}, 404);
+    }));
+    renderPage("/admin/pricing-logic?area=rate-review");
+    await screen.findByText("No batches yet. The monthly job ranks next month's anniversaries on the 1st and emails you the batch.");
+    fireEvent.click(screen.getByRole("button", { name: /^Settings/ }));
+    fireEvent.change(screen.getByLabelText("Pass-through (%)"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await screen.findByText(/Settings saved\./);
+    expect(screen.queryByRole("button", { name: /^Approve batch/ })).not.toBeInTheDocument();
   });
 });
 
