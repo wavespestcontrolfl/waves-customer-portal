@@ -1356,3 +1356,16 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
     expect(src).toContain('JSON.stringify({ consent_withheld: true })');
   });
 });
+
+// Pre-push codex P1: an unconsented phone write must re-assert, in the UPDATE's
+// own WHERE, that the row is still unstamped — the read that decided
+// phoneWithheld=false can be overtaken by a portal attestation.
+describe('unconsented phone write re-checks the consent stamp atomically (#5467)', () => {
+  test('the slot UPDATE carries whereNull(service_contacts_consent_at) for an unconsented phone, and not for a consented one', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = src.indexOf("let write = db('customers').where({ id: customerId });");
+    expect(at).toBeGreaterThan(-1);
+    const block = src.slice(at, at + 1500);
+    expect(block).toContain("if (effectivePhone && !smsConsentExplicit) {\n    write = write.whereNull('service_contacts_consent_at');");
+  });
+});

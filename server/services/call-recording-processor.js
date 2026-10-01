@@ -3094,6 +3094,15 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
+  // The consent-stamp state was ALSO read before this write, and the decision
+  // to put an UNCONSENTED phone on the row rests on it being unstamped. A
+  // portal attestation or another call stamping the row in between would
+  // otherwise land that phone on a stamped row — exactly what phoneWithheld
+  // exists to prevent (pre-push codex P1). Re-assert it in the WHERE so the
+  // race is a 0-row no-op (reported as skipped_slot_race, like the slot race).
+  if (effectivePhone && !smsConsentExplicit) {
+    write = write.whereNull('service_contacts_consent_at');
+  }
   const contactRole = String(contact.role || '').trim().toLowerCase();
   // The consent artifact is ACCOUNT-WIDE: "every slot phone is consented".
   // An unconsented phone must therefore never JOIN a stamped row. The old
