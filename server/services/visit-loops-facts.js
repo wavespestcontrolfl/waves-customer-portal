@@ -196,6 +196,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
     // Which of today's visits this is about (a customer can have two today).
     visitId: String(visit.id),
     techId: String(visit.technician_id),
+    windowStart: visit.window_start || null,
     visitType: visit.service_type || null,
     windowDisplay: windowLabel(visit, deriveWindow),
   };
@@ -237,7 +238,7 @@ async function loadLateAlert(todayRows, { conn, deriveWindow }) {
     return visit && alertMatchesOccurrence(payload, visit);
   });
   if (!alert) return null;
-  const where = { visitId: String(visit.id), visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
+  const where = { visitId: String(visit.id), windowStart: visit.window_start || null, visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
   // no-show-detector raises the same two types on missing tracking alone (stage 1
   // is 45 min into an open window): that is a tracking gap, not confirmed lateness.
   if (payload?.evidence === 'missing_tracking') {
@@ -267,7 +268,7 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
     if (done.has(String(row.id))) continue;
     const endMin = customerWindowEndMinutes(row);
     if (endMin == null || endMin >= nowMin) continue;
-    return { visitId: String(row.id), type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
+    return { visitId: String(row.id), windowStart: row.window_start || null, type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
   }
   return null;
 }
@@ -455,19 +456,23 @@ async function loadCommitments({ conn, customerId, now }) {
  * @param {Function} [args.deriveWindow]  row -> customer-facing window label (the aggregator's own deriveWindow)
  * @param {Function} [args.conn]          knex handle (tests)
  */
-async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db } = {}) {
+// strict (the send-time rebuild): a failed read throws instead of becoming an
+// empty field, so an outage is a retryable recheck failure, never "the facts changed".
+// Commitments are skipped there (they have their own recheck).
+async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false } = {}) {
   const out = emptyVisitLoops();
   if (!customerId) return out;
   const ctx = { conn, now, deriveWindow, customerId };
+  const read = strict ? (_field, _fallback, fn) => fn() : safely;
 
-  const todayRows = await safely('today visits', [], () => loadTodayRows(customerId, ctx));
-  const pastWindow = await safely('past window', null, () => findPastWindow(todayRows, ctx));
+  const todayRows = await read('today visits', [], () => loadTodayRows(customerId, ctx));
+  const pastWindow = await read('past window', null, () => findPastWindow(todayRows, ctx));
 
   const [techPosition, lateAlert, missedVisit, commitments] = await Promise.all([
-    safely('tech position', null, () => loadTechPosition(todayRows, ctx)),
-    safely('late alert', null, () => loadLateAlert(todayRows, ctx)),
-    safely('missed visit', null, () => loadMissedVisit(ctx)),
-    safely('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
+    read('tech position', null, () => loadTechPosition(todayRows, ctx)),
+    read('late alert', null, () => loadLateAlert(todayRows, ctx)),
+    read('missed visit', null, () => loadMissedVisit(ctx)),
+    strict ? { weOwe: [], customerWaiting: [] } : safely('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
   ]);
 
   out.techPosition = techPosition;
@@ -480,18 +485,19 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 }
 
 // The time-sensitive VISIT STATUS facts a reply can restate, as one comparable
-// string (null when none): a fresh tech position (its visit, status, at-this-visit,
-// stop count), a delay or tracking gap (its visit and kind), a passed window (its
-// visit), a missed visit (type, day, reason). The send boundary rebuilds the facts
+// string (null when none): a fresh tech position (its visit, window, tech, status,
+// at-this-visit, stop count), a delay or tracking gap (its visit, window and kind),
+// a passed window (its visit and window), a missed visit (type, day, reason). Raw
+// window_start, never the display label (the rebuild has no deriveWindow). The send boundary rebuilds the facts
 // for the customer and refuses when this changed — a reschedule, a completion, a
 // resolved alert or a moved route all show up here, with no recheck per fact.
 function visitStatusSignature(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const tp = v.techPosition && v.techPosition.status !== 'stale' ? v.techPosition : null;
   const parts = [
-    tp && `pos:${tp.visitId}:${tp.status}:${tp.atThisVisit === true}:${tp.stopsAhead ?? ''}`,
-    v.lateAlert && `late:${v.lateAlert.visitId}:${v.lateAlert.type}:${v.lateAlert.missingTracking === true}`,
-    v.pastWindow && `past:${v.pastWindow.visitId}`,
+    tp && `pos:${tp.visitId}@${tp.windowStart ?? ''}:${tp.techId}:${tp.status}:${tp.atThisVisit === true}:${tp.stopsAhead ?? ''}`,
+    v.lateAlert && `late:${v.lateAlert.visitId}@${v.lateAlert.windowStart ?? ''}:${v.lateAlert.type}:${v.lateAlert.missingTracking === true}`,
+    v.pastWindow && `past:${v.pastWindow.visitId}@${v.pastWindow.windowStart ?? ''}`,
     v.missedVisit && `missed:${v.missedVisit.type}:${v.missedVisit.date}:${v.missedVisit.reason}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;

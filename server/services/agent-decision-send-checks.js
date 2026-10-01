@@ -350,7 +350,7 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
     if (signature) {
       if (!customerId) return 'visit_status_changed';
       const facts = require('./visit-loops-facts');
-      const fresh = await facts.loadVisitLoops({ customerId, conn });
+      const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true });
       if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
     }
     return null;

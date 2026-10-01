@@ -83,6 +83,21 @@ describe('loadVisitLoops basics', () => {
     expect(out).toEqual(emptyVisitLoops());
   });
 
+  test('strict (send-time rebuild): a failed read throws instead of reading as empty', async () => {
+    const conn = () => { throw new Error('db down'); };
+    await expect(loadVisitLoops({ customerId: 'c1', now: NOW, conn, strict: true })).rejects.toThrow('db down');
+  });
+
+  test('the signature changes on a reassignment or a same-day window move, not on display labels', () => {
+    const { visitStatusSignature } = require('../services/visit-loops-facts');
+    const tp = { visitId: 'v1', techId: 't1', windowStart: '09:00:00', status: 'en_route', atThisVisit: false, stopsAhead: 2, windowDisplay: '9–11' };
+    const base = visitStatusSignature({ techPosition: tp });
+    expect(visitStatusSignature({ techPosition: { ...tp, techId: 't2' } })).not.toBe(base);
+    expect(visitStatusSignature({ techPosition: { ...tp, windowStart: '13:00:00' } })).not.toBe(base);
+    expect(visitStatusSignature({ techPosition: { ...tp, windowDisplay: '9:00 AM–11:00 AM' } })).toBe(base);
+    expect(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00' } })).not.toBe(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '10:00:00' } }));
+  });
+
   test('a db that throws on every call never throws out: all fields empty, warnings logged', async () => {
     const conn = () => { throw new Error('db down'); };
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
@@ -106,7 +121,7 @@ describe('techPosition', () => {
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn, deriveWindow });
     expect(out.techPosition).toEqual({
       techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
-      visitId: 'visit-1', techId: 'tech-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
+      visitId: 'visit-1', techId: 'tech-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
     });
     const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'where', (a) => a[0] === 'route_order'));
     // stops, not rows: a visit group counts once
@@ -191,7 +206,7 @@ describe('lateAlert', () => {
   });
 
   test('an open alert carries type, severity and minutes from the payload (string or object)', async () => {
-    const which = { visitId: 'visit-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
+    const which = { visitId: 'visit-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: JSON.stringify({ delay_minutes: 35 }) })).lateAlert)
       .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35, missingTracking: false, ...which });
     expect((await run({ type: 'unassigned_overdue', severity: 'critical', job_id: 'visit-1', payload: { delay_minutes: '12' } })).lateAlert)
@@ -201,7 +216,7 @@ describe('lateAlert', () => {
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
     const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50 };
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload })).lateAlert)
-      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitId: 'visit-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
+      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitId: 'visit-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
   });
 
   test('with two visits today the alert names the visit it was raised on', async () => {
@@ -255,7 +270,7 @@ describe('pastWindow', () => {
   test('a pending visit past its customer-facing window (start + 2h, not the internal block) reads passed', async () => {
     // window_start 09:00, internal window_end 10:00, customer window 9-11; it is 12:00.
     const out = await run({ status: 'pending' });
-    expect(out.pastWindow).toEqual({ visitId: 'visit-1', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60 });
+    expect(out.pastWindow).toEqual({ visitId: 'visit-1', windowStart: '09:00:00', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60 });
   });
 
   test('inside the customer-facing window (even past the internal window_end) is not passed', async () => {

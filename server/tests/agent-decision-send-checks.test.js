@@ -556,6 +556,17 @@ describe('open-loop commitments recheck', () => {
       await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
     });
 
+    test('a real read failure during the rebuild is a retryable recheck failure, not "changed"', async () => {
+      await expect(openLoopsBlockReason({ decision: withStatus(), dbh: () => { throw new Error('tech_status down'); } }))
+        .resolves.toBe('open_loops_recheck_failed');
+    });
+
+    test('the rebuild runs strict', async () => {
+      nowFacts(drafted);
+      await openLoopsBlockReason({ decision: withStatus() });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true }));
+    });
+
     test('no customer: refused (the facts cannot be rebuilt)', async () => {
       nowFacts(drafted);
       await expect(openLoopsBlockReason({ decision: withStatus({ customer_id: null }) })).resolves.toBe('visit_status_changed');
