@@ -32,7 +32,7 @@
 const db = require("../models/db");
 const logger = require("./logger");
 const MODELS = require("../config/models");
-const { dispatchWithFallback } = require("./llm/call");
+const { dispatchWithFallback, rejectCall } = require("./llm/call");
 const { isEnabled } = require("../config/feature-gates");
 const { redactAccessCodes } = require("./context-aggregator");
 const { etDateString, etCalendarDayOf: etCalendarDayOfUtil } = require("../utils/datetime-et");
@@ -150,6 +150,17 @@ function normalizeSmsPunctuation(text) {
  * Deterministic post-draft verification. Returns null when the body is clean,
  * else a short reject reason (for the log line).
  */
+// Neutral wording (owner rulings 2026-09-30 / 10-01), enforced in code for
+// every auto-sent draft, the older personalized drafter included: no
+// satisfaction condition, no reply-instead-of-review steer, no office phrasing.
+function neutralityReject(text) {
+  if (OFFICE_PHRASE_RE.test(text)) return "office_phrase";
+  if (STEER_RE.test(text)) return "steers_from_review";
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  if (sentences.some((s) => /review/i.test(s) && SATISFACTION_CONDITION_RE.test(s))) return "satisfaction_condition";
+  return null;
+}
+
 function verifyDraftBody(body, { firstName } = {}) {
   const text = String(body || "").trim();
   if (!text) return "empty";
@@ -166,6 +177,8 @@ function verifyDraftBody(body, { firstName } = {}) {
   if (firstName && !containsNameAsWord(text, firstName)) {
     return "missing_name";
   }
+  const unneutral = neutralityReject(text);
+  if (unneutral) return unneutral;
   // Segment gate on the RENDERED preview — what actually leaves Twilio after
   // the short link substitutes in (policy review_request.maxSegments = 2).
   const rendered = text.replace(/\{review_url\}/g, SAMPLE_RENDERED_LINK);
@@ -311,7 +324,7 @@ function verifyEmailIntro(body, { firstName } = {}) {
   if (firstName && !containsNameAsWord(text, firstName)) {
     return "missing_name";
   }
-  return null;
+  return neutralityReject(text);
 }
 
 // Step-aware email instruction (codex #3235 r1 P2): the email touch is
@@ -439,9 +452,15 @@ async function customerOwnEmails(customerId) {
       .where("received_at", ">", new Date(Date.now() - GROUNDING_WINDOW_DAYS * 86400000))
       .orderBy("received_at", "desc")
       .limit(TECH_VOICE_MAX_EMAILS)
-      .select("id", "subject", "gmail_thread_id", "received_at", "body_text", "body_html");
-    const ownSubjects = await ownSubjectsInThreads(db, rows);
-    return rows.map((r) => ({
+      .select("id", "subject", "gmail_thread_id", "received_at", "body_text", "body_html", "from_address", "authentication_results");
+    // A From header is attacker-typed: only mail that authenticated as its
+    // own domain (DKIM / SPF aligned) is the customer's words, same as every
+    // other inbound-email evidence reader.
+    const { hasAlignedAuth } = require("./email/inbox-hygiene");
+    const { domainFromAddress } = require("./email/spam-blocker");
+    const authentic = rows.filter((r) => hasAlignedAuth(r.authentication_results, domainFromAddress(r.from_address)));
+    const ownSubjects = await ownSubjectsInThreads(db, authentic);
+    return authentic.map((r) => ({
       date: r.received_at,
       subject: redactAccessCodes(String(ownSubjects.get(r.id) || "")).slice(0, 160),
       text: redactAccessCodes(stripQuotedAndSignature(emailPlainText(r))).slice(0, TECH_VOICE_EMAIL_CHARS),
@@ -837,13 +856,37 @@ function isGreetingOnlySentence(sentence, names) {
   return words.length > 0 && words.every((w) => GREETING_WORDS.has(w) || names.has(w));
 }
 
-async function factCheckTechVoice(body, { record, firstName, techName, deadline }) {
+// One checker verdict against the sentence it names. Returns a reject reason
+// or null.
+function sentenceVerdictReject(j, sentence, names, normRecord) {
+  // Each verdict must be about the sentence actually being sent.
+  if (normalizeForMatch(j.sentence) !== normalizeForMatch(sentence)) return "fact_check_bad_answer";
+  // Off-limits topics are judged as a class (health, money, products,
+  // household members' role in the visit); the word lists are a floor.
+  if (j.off_limits !== false) return "off_limits_topic";
+  // A bare request or a bare greeting / thanks states nothing to back, so it
+  // needs no quote; code confirms it really is only that.
+  if (j.ask_only) return isAskOnlySentence(sentence, names) ? null : "fact_check_bad_answer";
+  if (j.greeting_only) return isGreetingOnlySentence(sentence, names) ? null : "fact_check_bad_answer";
+  const quote = normalizeForMatch(j.quote);
+  return j.supported && quote.length >= 3 && normRecord.includes(quote) ? null : "unsupported_sentence";
+}
+
+// The fact check starts on the provider the writer did NOT use, so a writer
+// fallback never leaves one provider checking its own output first.
+function factCheckPolicy(writerProvider) {
+  const policy = MODELS.TEXT_POLICIES.fastStructured;
+  if (writerProvider !== policy.primary.provider) return policy;
+  return Object.freeze({ name: policy.name, primary: policy.fallback, fallback: policy.primary });
+}
+
+async function factCheckTechVoice(body, { record, firstName, techName, deadline, writerProvider }) {
   const timeoutMs = deadline - Date.now();
   if (timeoutMs < TECH_VOICE_MIN_STAGE_MS) return "out_of_time";
   const sentences = techVoiceSentences(body);
   // Split names the way sentences are split ("Mary-Jane" → mary, jane).
   const names = new Set([firstName, techName].join(" ").toLowerCase().match(/[a-z']+/g) || []);
-  const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+  const result = await dispatchWithFallback(factCheckPolicy(writerProvider), {
     laneId: "review_ask_fact_check",
     // Rules ride the system channel; the user message is data only, so a
     // customer text that reads like an instruction cannot steer the check.
@@ -855,30 +898,14 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline 
   }, { reserveFallbackBudget: true, hardDeadline: true });
   if (!result.ok) return "fact_check_unavailable";
   const judged = Array.isArray(result.json?.sentences) ? result.json.sentences : null;
-  if (!judged || judged.length !== sentences.length) return "fact_check_bad_answer";
   const normRecord = normalizeForMatch(record);
-  for (let i = 0; i < sentences.length; i += 1) {
-    const j = judged[i] || {};
-    // Each verdict must be about the sentence actually being sent.
-    if (normalizeForMatch(j.sentence) !== normalizeForMatch(sentences[i])) return "fact_check_bad_answer";
-    // Off-limits topics are judged as a class (health, money, products,
-    // household members' role in the visit); the word lists are a floor.
-    if (j.off_limits !== false) return "off_limits_topic";
-    if (j.ask_only) {
-      if (!isAskOnlySentence(sentences[i], names)) return "fact_check_bad_answer";
-      continue;
-    }
-    // A bare greeting or thanks states nothing to back, so it needs no quote;
-    // code confirms it really is only that.
-    if (j.greeting_only) {
-      if (!isGreetingOnlySentence(sentences[i], names)) return "fact_check_bad_answer";
-      continue;
-    }
-    if (!j.supported) return "unsupported_sentence";
-    const quote = normalizeForMatch(j.quote);
-    if (quote.length < 3 || !normRecord.includes(quote)) return "unsupported_sentence";
-  }
-  return null;
+  const reject = !judged || judged.length !== sentences.length
+    ? "fact_check_bad_answer"
+    : sentences.map((sentence, i) => sentenceVerdictReject(judged[i] || {}, sentence, names, normRecord)).find(Boolean) || null;
+  // A malformed answer is the checker's failure, so its ledger row says so;
+  // a well-formed "unsupported" verdict is the checker doing its job.
+  if (reject === "fact_check_bad_answer") rejectCall(result, reject);
+  return reject;
 }
 
 // One draft: write, run the code checks, then the fact check. Returns
@@ -895,12 +922,21 @@ async function techVoiceAttempt({ system, facts, channel, check, record }, note,
     timeoutMs,
   }, { reserveFallbackBudget: true, hardDeadline: true });
   if (!result.ok) return { reject: "provider_unavailable" };
-  const draft = parseTechVoiceJson(result.text);
-  if (!draft || typeof draft.body !== "string") return { reject: "bad_json" };
+  // The dispatcher's tolerant parse (fences, preambles, trailing commas)
+  // first; the raw text only when it produced nothing.
+  const draft = result.json && typeof result.json === "object" ? { ...result.json } : parseTechVoiceJson(result.text);
+  if (!draft || typeof draft.body !== "string") {
+    rejectCall(result, "bad_json");
+    return { reject: "bad_json" };
+  }
   const flat = normalizeSmsPunctuation(draft.body);
   draft.body = (channel === "email" ? flat.replace(/\s*\n+\s*/g, " ") : flat).trim();
   const reject = verifyTechVoiceDraft(draft, check)
-    || await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline });
+    || await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline, writerProvider: result.provider });
+  // A draft the checks refused is a failed writer call on the ledger, so the
+  // lane's success rate shows systematic bad output; an unavailable checker
+  // or an exhausted budget says nothing about the draft.
+  if (reject && !["fact_check_unavailable", "out_of_time"].includes(reject)) rejectCall(result, reject);
   return reject ? { reject } : { body: draft.body };
 }
 

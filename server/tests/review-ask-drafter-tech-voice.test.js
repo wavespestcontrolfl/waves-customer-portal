@@ -12,8 +12,10 @@ const mockTables = {};
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The writer and the fact check share the dispatcher; route by lane.
+const mockRejectCall = jest.fn();
 jest.mock('../services/llm/call', () => ({
   dispatchWithFallback: (...a) => (a[1]?.laneId === 'review_ask_fact_check' ? mockFactCheck(...a) : mockDispatch(...a)),
+  rejectCall: (...a) => mockRejectCall(...a),
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => !!mockGates[g], gates: mockGates }));
 jest.mock('../services/messaging/review-ask-reservation', () => ({ excludeUnresolvedSendReservations: (q) => q }));
@@ -53,6 +55,7 @@ function builder(table) {
 
 beforeEach(() => {
   mockDispatch.mockReset();
+  mockRejectCall.mockReset();
   mockFactCheck.mockReset().mockImplementation(async (_p, req) => approveAll(req));
   mockGetRecentCalls.mockReset().mockResolvedValue([]);
   mockGates.reviewAskTechVoice = true;
@@ -296,6 +299,47 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Mary-Jane', customer: { id: 'cust-1', first_name: 'Mary-Jane' } })).toBe(hi.body);
   });
 
+  test('GitHub r1: the fact check starts on the provider the writer did not use', async () => {
+    mockDispatch.mockResolvedValueOnce({ ...reply(GOOD), provider: 'anthropic' });
+    await Drafter.draftTechVoice(INPUT);
+    expect(mockFactCheck.mock.calls[0][0].primary.provider).toBe('openai');
+    mockFactCheck.mockClear();
+    mockDispatch.mockResolvedValueOnce({ ...reply(GOOD), provider: 'openai' });
+    await Drafter.draftTechVoice(INPUT);
+    const policy = mockFactCheck.mock.calls[0][0];
+    expect(policy.primary.provider).toBe('anthropic');
+    expect(policy.fallback.provider).toBe('openai');
+  });
+
+  test('GitHub r1: a refused draft is marked failed on the call ledger; an unavailable checker is not', async () => {
+    const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
+    mockDispatch.mockResolvedValue(reply(ungrounded));
+    await Drafter.draftTechVoice(INPUT);
+    expect(mockRejectCall).toHaveBeenCalledWith(expect.anything(), 'ungrounded_detail');
+    mockRejectCall.mockClear();
+    mockDispatch.mockReset().mockResolvedValue(reply(GOOD));
+    mockFactCheck.mockReset().mockResolvedValue({ ok: false });
+    await Drafter.draftTechVoice(INPUT);
+    expect(mockRejectCall).not.toHaveBeenCalled();
+  });
+
+  test("GitHub r1: the writer's answer is read from the dispatcher's tolerant parse", async () => {
+    mockDispatch.mockResolvedValueOnce({ ok: true, text: 'Here you go:\n```json\n{"body": "x",}\n```', json: { ...GOOD } });
+    expect(await Drafter.draftTechVoice(INPUT)).toBe(GOOD.body);
+  });
+
+  test('GitHub r1: an email that did not authenticate as its own domain is not the customer\'s words', async () => {
+    mockTables.emails = [
+      { id: 'e1', subject: null, from_address: 'marta@example.com', authentication_results: 'mx.google.com; dkim=pass header.i=@example.com; spf=pass smtp.mailfrom=example.com', body_text: 'Authentic note about the garage door.', received_at: new Date() },
+      { id: 'e2', subject: null, from_address: 'marta@example.com', authentication_results: 'mx.google.com; dkim=fail; spf=fail', body_text: 'Spoofed: congrats on the new baby.', received_at: new Date() },
+    ];
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    const text = mockDispatch.mock.calls[0][1].text;
+    expect(text).toContain('Authentic note about the garage door.');
+    expect(text).not.toContain('Spoofed');
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);
@@ -309,7 +353,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
   });
 
   test('Codex r1: the customer email evidence drops quoted Waves history', async () => {
-    mockTables.emails = [{ id: 'e1', subject: null, body_text: 'Sounds good, see you Sunday.\n\nOn Tue, Sep 29, 2026 at 9:00 AM Waves <contact@wavespestcontrol.com> wrote:\n> We sealed every gap in the garage.', received_at: new Date() }];
+    mockTables.emails = [{ id: 'e1', subject: null, from_address: 'marta@example.com', authentication_results: 'mx.google.com; dkim=pass header.i=@example.com', body_text: 'Sounds good, see you Sunday.\n\nOn Tue, Sep 29, 2026 at 9:00 AM Waves <contact@wavespestcontrol.com> wrote:\n> We sealed every gap in the garage.', received_at: new Date() }];
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     await Drafter.draftTechVoice(INPUT);
     expect(mockDispatch.mock.calls[0][1].text).toContain('Sounds good, see you Sunday.');

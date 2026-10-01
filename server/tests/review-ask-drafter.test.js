@@ -21,7 +21,7 @@ const Drafter = require('../services/review-ask-drafter');
 const CUSTOMER = { id: 'cust-1', first_name: 'Aaron', last_name: 'Boss' };
 // One-segment budget (owner spec 2026-08-06): pre-render ≤145 chars, and the
 // rendered preview (43-char link) must fit a single GSM segment.
-const CLEAN_BODY = 'Hi Aaron, Adam here - centipedes backing off? Quick review: {review_url} Reply if anything is off.';
+const CLEAN_BODY = 'Hi Aaron, Adam here - centipedes backing off? Quick Google review: {review_url}';
 
 function mockDb(smsRows = []) {
   db.mockImplementation(() => ({
@@ -41,6 +41,13 @@ beforeEach(() => {
 
 describe('verifyDraftBody — the auto-send safety net', () => {
   const verify = (body) => Drafter.verifyDraftBody(body, { firstName: 'Aaron' });
+
+  test('#5511 GitHub r1: neutral wording is enforced in code, not only the prompt', () => {
+    expect(verify('Aaron, if we earned it, a Google review helps: {review_url}')).toBe('satisfaction_condition');
+    expect(verify("Aaron, a Google review helps: {review_url} Reply if anything's off.")).toBe('office_phrase');
+    expect(verify('Aaron, text me instead of posting if something is wrong: {review_url}')).toBe('steers_from_review');
+    expect(Drafter.verifyEmailIntro('Aaron, if you were happy with the visit, a review would help.', { firstName: 'Aaron' })).toBe('satisfaction_condition');
+  });
 
   test('a clean grounded draft passes', () => {
     expect(verify(CLEAN_BODY)).toBeNull();
@@ -306,7 +313,7 @@ describe('name matching is word-bounded (codex #3235 r7)', () => {
 
   test('the name as its own word passes', () => {
     expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick review: {review_url} Reply if off.', { firstName: 'Al' })).toBeNull();
-    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out. Reply if anything is off.', { firstName: 'Al' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out.', { firstName: 'Al' })).toBeNull();
   });
 });
 
