@@ -1150,6 +1150,10 @@ async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
     // so the sweep leaves it alone and only recovers one that has been quiet that long.
     .whereRaw("COALESCE((ti.payload->>'activation_pending_at')::timestamptz, 'epoch'::timestamptz) < NOW() - make_interval(mins => ?)", [HOLD_ACTIVATION_RESUME_AFTER_MINUTES])
     .where('ss.customer_confirmed', true)
+    // FAIR, like the bounded legacy sweep below (which samples at random so poisoned rows cannot monopolize its
+    // batch): oldest marker first, and a resume that fails bumps its own timestamp (below), sending the row to
+    // the back of the line. A row whose legs keep failing therefore cannot starve the visits behind it.
+    .orderByRaw("COALESCE((ti.payload->>'activation_pending_at')::timestamptz, 'epoch'::timestamptz) ASC")
     .limit(limit)
     .select('ss.id', 'ss.status', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.source_call_log_id', 'ss.source_action',
       // The same row shape the lazy activation hands the hook (callback / pricing / field-confirm fields).
@@ -1167,9 +1171,12 @@ async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
         await setHoldActivationPending(dbh, row.source_call_log_id, row.id, false);
         await reconcileStreetLevelHoldAfterStamp(dbh, row);
         resumed += 1;
+      } else {
+        await setHoldActivationPending(dbh, row.source_call_log_id, row.id, true).catch(() => {});   // back of the line (new timestamp)
       }
     } catch (e) {
       logger.warn(`[hold-activation-resume] ${row.id} failed: ${e.message}`);
+      await setHoldActivationPending(dbh, row.source_call_log_id, row.id, true).catch(() => {});
     }
   }
   if (rows.length) logger.info(`[hold-activation-resume] resumed ${resumed}/${rows.length} interrupted hold activations`);

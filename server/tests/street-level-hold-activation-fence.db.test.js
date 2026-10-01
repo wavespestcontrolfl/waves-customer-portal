@@ -190,6 +190,31 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect((await state(b.visitId, b.callId)).confirmed).toBe(true);
   });
 
+  test('a poisoned head of the queue cannot starve the recovery: with 30 markers whose first 25 keep failing, the rest are resumed on the next tick', async () => {
+    const actual = jest.requireActual('../services/appointment-reminders').registerAppointment;
+    const seeded = [];
+    for (let i = 0; i < 30; i += 1) {
+      const h = await seedApprovedHold();
+      await _test.stampCustomerConfirmed(knex, h.svc, { bindAddress: true, markActivationPending: true });
+      // Oldest markers first: spread them an hour apart so the order is unambiguous (the first 25 are "poisoned").
+      await knex('triage_items').where({ call_log_id: h.callId }).update({
+        payload: knex.raw("payload || jsonb_build_object('activation_pending_at', to_char(NOW() AT TIME ZONE 'UTC' - (? || ' minutes')::interval, 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))", [String(600 - i)]),
+      });
+      seeded.push(h);
+    }
+    const poisoned = new Set(seeded.slice(0, 25).map((h) => h.visitId));
+    reminders.registerAppointment.mockImplementation(async (visitId, ...rest) => (poisoned.has(visitId) ? null : actual(visitId, ...rest)));
+
+    const tick1 = await resumePendingHoldActivations(knex);
+    expect(tick1).toEqual({ candidates: 25, resumed: 0 });          // the whole batch was the poisoned head
+    // The failed rows moved to the back of the line (fresh timestamps, leased); the visits behind them are next.
+    const tick2 = await resumePendingHoldActivations(knex);
+    expect(tick2.candidates).toBe(5);
+    expect(tick2.resumed).toBe(5);
+    for (const h of seeded.slice(25)) expect((await state(h.visitId, h.callId)).card).toBe('resolved');
+    for (const h of seeded.slice(0, 25)) expect(await marker(h.callId)).toBe(true);   // still owed, retried after their lease
+  });
+
   test('a FRESH marker is leased: the sweep leaves a running activation (and its failure rollback) alone', async () => {
     const { callId, svc } = await seedApprovedHold();
     await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: true });
