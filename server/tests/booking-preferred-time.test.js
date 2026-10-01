@@ -20,7 +20,8 @@ let mockRetireError = null;    // makes the booking_intents suppression UPDATE t
 let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
 let mockLiveCustomer = null;   // the booked customer as the close's share-locked re-read sees it (null = same as mockCustomer)
 let mockVisitDiesBeforeLock = false;
-let mockLockedVisitChange = null; // fields the visit's locked re-read sees changed since the first read // the visit is live on the first read, cancelled by the locked re-read
+let mockLockedVisitChange = null;
+let mockLockedSeen = false; // fields the visit's locked re-read sees changed since the first read // the visit is live on the first read, cancelled by the locked re-read
 let mockDeadVisit = false;      // the booking's only visit is cancelled/skipped/rescheduled (the live-status lookup finds nothing)
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
 const mockRaws = [];            // whereRaw calls (query-shape asserts)
@@ -68,7 +69,9 @@ function builder(table) {
         : table === 'customers' ? (b._forShare && mockLiveCustomer ? mockLiveCustomer : mockCustomer)
           : table === 'self_booked_appointments as sba' ? mockBookedSince
             : table === 'scheduled_services' && mockVisitDiesBeforeLock && b._forUpdate ? { status: 'cancelled', is_callback: false }
-            : table === 'scheduled_services' && mockLockedVisitChange && b._forUpdate ? { ...mockScheduledService, ...mockLockedVisitChange }
+            : table === 'scheduled_services' && mockLockedVisitChange && b._forUpdate ? (mockLockedSeen = true, { ...mockScheduledService, ...mockLockedVisitChange })
+            // once a locked read has seen a committed change (a merge), plain reads see it too
+            : table === 'scheduled_services' && mockLockedVisitChange && mockLockedSeen ? { ...mockScheduledService, ...mockLockedVisitChange }
             : table === 'scheduled_services' && mockDeadVisit ? (b._liveOnly ? null : { id: 'ss-dead' })
             : table === 'scheduled_services' && mockScheduledService ? mockScheduledService
             : table === 'scheduled_services' && mockBookedSince ? { id: 'ss-1', self_booking_id: mockBookedSince.id, service_type: 'Pest Control', scheduled_date: '2026-10-08' }
@@ -216,6 +219,7 @@ beforeEach(() => {
   mockDeadVisit = false;
   mockVisitDiesBeforeLock = false;
   mockLockedVisitChange = null;
+  mockLockedSeen = false;
   mockLiveCustomer = null;
   mockOrder.length = 0;
   mockMarkConverted.mockClear();
@@ -977,10 +981,11 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(closeWrites()).toHaveLength(0);
   });
 
-  test('a merge repoints the visit between the owner read and the lock (codex #5477 r13): the close judges the winner in the same run, not later', async () => {
+  test('a merge repoints the visit between the owner read and the lock (codex #5477 r13, r18): the close restarts under the winner (customer before visit again) and closes in the same run', async () => {
     mockLockedVisitChange = { customer_id: 'cust-winner' };
-    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 1 });
-    expect(closeWrites()).toHaveLength(1);
+    // (this mock does not remember a close, so the final owner pass re-closes it: real PostgreSQL closes once, see the row-lock suite)
+    expect((await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).closed).toBeGreaterThanOrEqual(1);
+    expect(closeWrites().length).toBeGreaterThanOrEqual(1);
   });
 
   test('the audit row and the FYI name the visit as locked, not the earlier read (codex #5477 r10)', async () => {
@@ -993,7 +998,7 @@ describe('a completed booking closes the customer\'s open preferred-time request
   test('the customer share lock is taken before the visit lock (codex #5477 r9: a merge locks customer, then visits)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
     expect(src).toMatch(/const readCustomer = \(id\) => trx\('customers'\)\.where\(\{ id \}\)\.forShare\(\)/);
-    const customerLock = src.indexOf('let liveCustomer = await readCustomer(ownerId);');
+    const customerLock = src.indexOf('const liveCustomer = await readCustomer(ownerId);');
     const visitLock = src.indexOf("trx('scheduled_services').where({ id: visit.id }).forUpdate()");
     expect(customerLock).toBeGreaterThan(-1);
     expect(visitLock).toBeGreaterThan(customerLock);

@@ -11,7 +11,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
 const leadAttribution = require('../lead-attribution');
-const { scopeToProspects } = require('../lead-statuses');
+const { scopeToProspects, unlessHandledSince } = require('../lead-statuses');
 
 const LEAD_STATUSES = [
   'new',
@@ -551,6 +551,10 @@ async function updateLeadStatus(input) {
       .where('id', lead.id)
       .where('status', oldStatus)
       .whereNull('deleted_at')
+      // Leaving 'handled' only from the very close the card showed (codex #5477 r18):
+      // a request reopened and closed again by a later booking, or a call with no
+      // pinned version, matches nothing.
+      .where(unlessHandledSince('handled', input._expected_updated_at))
       .update(updates, ['id', 'customer_id']);
     if (!rows || rows.length === 0) return rows;
     await trx('lead_activities').insert({
@@ -709,6 +713,9 @@ async function bulkUpdateLeads(input) {
       throw err;
     }
   } else {
+    // An unpinned bulk move never takes leads off 'handled' (codex #5477 r18): only a
+    // confirmed card, which pins every lead's version above, can.
+    if (current_status === 'handled') return { blocked: true, updated: 0, note: "Handled requests move only from a confirmed card (each one's version pinned)." };
     rows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
       .update(updates, ['id']);
   }

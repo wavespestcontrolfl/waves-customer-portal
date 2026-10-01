@@ -1842,7 +1842,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         // Every contact field the conversion uses comes from THIS locked row
         // (matching inputs, customer payload, estimate link) — never from the
         // unlocked pre-read, which can be stale by the time we hold the lock.
-        .first('id', 'customer_id', 'converted_at', 'status', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
+        .first('id', 'customer_id', 'converted_at', 'status', 'updated_at', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
       if (!lockedLead) {
         const gone = new Error('Lead was deleted while booking — appointment not created');
         gone.status = 409;
@@ -1866,6 +1866,14 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // after the first commit sees converted_at on its pre-read too).
       if (lockedLead.converted_at && !rebook) {
         throw alreadyConverted('This lead was already converted — reload the lead (or book a repeat visit from the linked customer).');
+      }
+      // A request the customer's own /book booking closed ('handled') after this form
+      // opened is already booked (codex #5477 r18): a second, staff booking from that
+      // stale view is refused before anything is inserted. Judged on the status and
+      // version the page showed, under the lead lock.
+      const handledRefusal = handledStatusRefusal('won', req.body.seen_status, lockedLead.status, req.body.seen_updated_at, lockedLead.updated_at);
+      if (handledRefusal) {
+        throw Object.assign(new Error(handledRefusal.error), { statusCode: handledRefusal.code, status: handledRefusal.code, isOperational: true, code: 'LEAD_HANDLED' });
       }
       if (!customerId && lockedLead.customer_id) {
         // Customer discovered only under the lead lock (rebook on a lead

@@ -1414,6 +1414,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // window, updateLeadStatus refuses (preview_changed) instead of
       // overwriting a state the card never showed.
       params._expected_status = lead.status;
+      // ...and its version (codex #5477 r18): a handled request reopened and closed
+      // again by a later booking during the pending window is a different close.
+      params._expected_updated_at = lead.updated_at ? new Date(lead.updated_at).toISOString() : null;
       preview = { ...preview, pinned_lead: { id: lead.id, name: params.lead_name, current_status: lead.status } };
     }
     if (toolUse.name === 'bulk_update_leads') {

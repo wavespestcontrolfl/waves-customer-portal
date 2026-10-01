@@ -145,6 +145,21 @@ describe("lead status 'handled'", () => {
     expect(src).toMatch(/const stillOpen = await trx\('leads'\)\.where\(\{ id: lead\.id \}\)\s*\.whereNotIn\('status', CLOSED_LEAD_STATUSES\)\.forShare\(\)\.first\('id'\);\s*if \(!stillOpen\) return \{ closed: true \};/);
   });
 
+  test('Add Appt and the Intelligence Bar never act on a request a booking closed after the view was built (codex #5477 r18)', () => {
+    const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
+    // Add Appt: refused under the lead lock, before any visit is inserted
+    expect(route).toMatch(/const handledRefusal = handledStatusRefusal\('won', req\.body\.seen_status, lockedLead\.status, req\.body\.seen_updated_at, lockedLead\.updated_at\);/);
+    expect(route.indexOf('const handledRefusal = handledStatusRefusal(')).toBeLessThan(route.indexOf("trx('scheduled_services').insert(", route.indexOf('const handledRefusal')) === -1 ? Infinity : route.indexOf("trx('scheduled_services').insert(", route.indexOf('const handledRefusal')));
+    const ui = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
+    expect(ui).toMatch(/seen_status: lead\.status,\s*seen_updated_at: lead\.updated_at,\s*date: apptForm\.date,/);
+    // Intelligence Bar: the card pins the version; the single write re-asserts it; an unpinned bulk never moves handled
+    const ibRoute = fs.readFileSync(path.join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
+    expect(ibRoute).toMatch(/params\._expected_updated_at = lead\.updated_at \? new Date\(lead\.updated_at\)\.toISOString\(\) : null;/);
+    const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/leads-tools.js'), 'utf8');
+    expect(ib).toMatch(/\.where\(unlessHandledSince\('handled', input\._expected_updated_at\)\)/);
+    expect(ib).toMatch(/if \(current_status === 'handled'\) return \{ blocked: true, updated: 0,/);
+  });
+
   test('the Intelligence Bar lead overview keeps handled out of the conversion denominator (a cohort containing a handled request)', async () => {
     mockRows.length = 0;
     mockRows.push({ status: 'won' }, { status: 'new' }, { status: 'lost' }, { status: 'handled' }, { status: 'handled' });

@@ -2916,6 +2916,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                   method: "POST",
                                                   body: {
                                                     ...extra,
+                                                  // the lead as this page shows it: a request the
+                                                  // customer's booking closed since is refused
+                                                  seen_status: lead.status,
+                                                  seen_updated_at: lead.updated_at,
                                                   date: apptForm.date,
                                                   time: apptForm.time,
                                                   serviceType:
