@@ -163,6 +163,23 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
   });
 
+  test('a left-out family still on the shared first invoice keeps its share of the invoice total', () => {
+    const three = invoice([setupFee, firstApp(150, 'Quarterly Pest Control'), firstApp(100, 'Lawn Care'), firstApp(60, 'Tree & Shrub')]);
+    const verdict = run([PEST, LAWN, TREE], [...pestRows(), ...lawnRows(), ...treeRows()],
+      { invoice: three, scheduleSkippedFamilies: new Set(['tree_shrub']) });
+    expect(verdict.problems).toEqual([]);
+    expect(verdict.ok).toBe(true);
+  });
+
+  test('children on the earliest live date are price-checked when the first visits were cancelled', () => {
+    const rows = [...pestRows(), ...lawnRows()].map((row) => (row.recurring_parent_id ? row : { ...row, status: 'cancelled' }));
+    const zeroChild = rows.map((row) => (row.id === 'parent-lawn_care_recurring-c1' ? { ...row, estimated_price: 0 } : row));
+    const earliest = zeroChild.filter((row) => row.status !== 'cancelled')
+      .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))[0];
+    expect(earliest.id).toBe('parent-lawn_care_recurring-c1');
+    expect(codes(run([PEST, LAWN], zeroChild))).toEqual(['price_missing']);
+  });
+
   test('an estimate the classifier did not judge is never OK, but its own problems still report', () => {
     const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleUnjudged: true });
     expect(verdict.ok).toBe(false);

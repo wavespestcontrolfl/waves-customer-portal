@@ -246,12 +246,14 @@ function checkTimeAndTech(dated, programs) {
   return untimed.size ? [{ code: 'missing_time_tech', text: `${listFamilies(untimed, programs)} visits missing time/tech` }] : [];
 }
 
-// 2. price on every row after the first day.
+// 2. price on every series child (whatever its date: with the first visits
+// cancelled, a child can be the earliest live row) and every top-level row
+// after the first day.
 function checkLaterPrices(dated, programs, firstDay) {
   const zero = new Map();
   const off = new Map();
   const offDetail = [];
-  for (const row of dated.filter((r) => r.day > firstDay)) {
+  for (const row of dated.filter((r) => r.recurring_parent_id || r.day > firstDay)) {
     if (isPrepaid(row)) continue;
     // A parent stamped into a combined first-application invoice is covered
     // by it (the converter leaves such companions unpriced on purpose).
@@ -350,10 +352,18 @@ function evaluateCombinedBooking(ctx) {
     .filter(([family]) => !excludedFamilies.has(family) && !skipped.has(family)));
   if (programs.size < 2) return null;
 
-  const planRows = (ctx.rows || []).filter((row) => !row.is_callback && !row.followup_included
+  const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
-    && rowFamilies(row).some((family) => programs.has(family)));
+    && rowFamilies(row).some((family) => scope.has(family));
+  const planRows = (ctx.rows || []).filter((row) => isPlanRow(row, programs));
   const rows = planRows.filter((row) => !NOT_LIVE.has(row.status));
+  // A combined first-application invoice still bills a family left out above
+  // (a held tree program's first visit stays on it), so the invoice is judged
+  // against every accepted family it covers, not only the ones still checked.
+  const stamped = (ctx.rows || []).filter((row) => isPlanRow(row, accepted.programs) && !NOT_LIVE.has(row.status)
+    && !row.recurring_parent_id && row.first_application_invoice_id);
+  const invoicePrograms = new Map([...accepted.programs]
+    .filter(([family]) => programs.has(family) || stamped.some((row) => rowFamilies(row).includes(family))));
   // Rows were created and every one was cancelled: the customer or office
   // cancelled the plan. Nothing left to verify, so nothing to say.
   if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
@@ -369,7 +379,7 @@ function evaluateCombinedBooking(ctx) {
   // shape and never declares the booking OK. Neither does an estimate the
   // classifier did not judge, nor one with no accepted per-visit price to
   // compare against (its problems below are still reported).
-  const pricesUnverifiable = [...programs.values()].some((program) => program.perVisit == null);
+  const pricesUnverifiable = [...invoicePrograms.values()].some((program) => program.perVisit == null);
   const deferred = !rows.length || (ctx.scheduleGaps || []).length > 0 || ctx.scheduleUnjudged === true
     || pricesUnverifiable;
   if (!rows.length) return { ok: false, deferred, problems: [], facts };
@@ -385,13 +395,13 @@ function evaluateCombinedBooking(ctx) {
 
   // The converter stamps EVERY program a combined first-application invoice
   // covers, even a seasonal companion whose first visit lands on a later date,
-  // so the invoice is judged against all live top-level rows carrying a stamp.
-  const stamped = dated.filter((row) => !row.recurring_parent_id && row.first_application_invoice_id);
+  // so the invoice is judged against all live top-level rows carrying a stamp
+  // (`stamped`, above).
   const unstamped = firstDayRows.filter((row) => !row.first_application_invoice_id && !isPrepaid(row));
   const problems = [
     ...checkTimeAndTech(dated, programs),
     ...checkLaterPrices(dated, programs, firstDay),
-    ...(stamped.length ? checkStampedFirstDay(stamped, programs, invoices, facts) : []),
+    ...(stamped.length ? checkStampedFirstDay(stamped, invoicePrograms, invoices, facts) : []),
     ...(unstamped.length ? checkUnstampedFirstDay(unstamped, programs, facts) : []),
   ];
   return { ok: problems.length === 0 && !deferred, deferred, problems, facts };
