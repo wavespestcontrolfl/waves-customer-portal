@@ -3031,7 +3031,10 @@ const ReviewService = {
     return !!cleared;
   },
 
-  async sendInlineEmailCopy(requestId) {
+  // skipClickGuard: the staff composer's Quick Links ask only (owner ruling:
+  // the Quick Links link is the "send anytime" link, so its email leg is not
+  // suppressed by an earlier tap either). Default false.
+  async sendInlineEmailCopy(requestId, { skipClickGuard = false } = {}) {
     if (!requestId) return { sent: false, reason: "no_request" };
     let request = null;
     // onQueued fires immediately before the provider call: a throw after it
@@ -3046,7 +3049,7 @@ const ReviewService = {
       request = await db("review_requests").where({ id: requestId }).first();
       if (!request) return { sent: false, reason: "no_request" };
       // Send-time guard: the customer already tapped a tracked review link.
-      if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) return { sent: false, reason: "review_link_clicked" };
+      if (!skipClickGuard && OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) return { sent: false, reason: "review_link_clicked" };
       const who = await this._inlineEmailRecipient(request);
       if (who.reason) return { sent: false, reason: who.reason };
       const { customer, contact } = who;
@@ -5682,10 +5685,10 @@ const ReviewService = {
    *
    * isAsk=false (private no-link check-ins) bypasses everything by design.
    *
-   * staffComposer=true (the staff Messages composer's review link only): a
-   * person deliberately sending a review link skips the active-cadence block
-   * and the 30-day cooldown. The 3-in-180-day cap and the queued/in-flight
-   * checks still apply. Default false: every other caller is unchanged.
+   * staffComposer=true (the staff Messages composer's Quick Links review link
+   * only; owner ruling "send anytime"): skips the active-cadence block, the
+   * 30-day cooldown and the 3-in-180-day cap. The queued/in-flight checks still
+   * apply. Default false: every other caller is unchanged.
    *
    * @returns {{allowed: boolean, outcome?: string, nextAllowedAt?: *}}
    */
@@ -5693,12 +5696,14 @@ const ReviewService = {
     if (!isAsk) return { allowed: true };
     if (!staffComposer && await this._activeCadenceFor(customerId)) return { allowed: false, outcome: "in_cadence" };
 
-    const thirtyDaysAgo = Date.now() - 30 * 86400000;
-    // No .catch → a DB error throws instead of silently reading as zero asks.
-    const stats = await this.getDeliveredAskStats(customerId);
-    if (stats.count >= 3) return { allowed: false, outcome: "at_cap" };
-    if (!staffComposer && stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
-      return { allowed: false, outcome: "cooldown" };
+    if (!staffComposer) {
+      const thirtyDaysAgo = Date.now() - 30 * 86400000;
+      // No .catch → a DB error throws instead of silently reading as zero asks.
+      const stats = await this.getDeliveredAskStats(customerId);
+      if (stats.count >= 3) return { allowed: false, outcome: "at_cap" };
+      if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+        return { allowed: false, outcome: "cooldown" };
+      }
     }
 
     const pendingOneOff = await this._pendingOneOffAsk(customerId);

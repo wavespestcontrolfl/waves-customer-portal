@@ -1393,10 +1393,9 @@ describe('admin communications SMS route', () => {
     });
   });
 
-  test('a tracked review click since the draft was added blocks the send at the seam (send-time click guard)', async () => {
-    const ReviewService = require('../services/review-request');
+  test('a tracked review click since the draft was added does NOT block a Quick Links send (owner: send anytime)', async () => {
     const ClickGuard = require('../services/review-click-guard');
-    ClickGuard.askSuppressedByClick.mockResolvedValueOnce(true);
+    ClickGuard.askSuppressedByClick.mockResolvedValue(true);
     db.mockImplementation((table) => {
       const first = jest.fn();
       if (table === 'review_requests') {
@@ -1411,25 +1410,23 @@ describe('admin communications SMS route', () => {
       builder.first = first;
       return builder;
     });
-
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
-        method: 'POST',
-        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: '+15551234567',
-          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
-          messageType: 'manual',
-          reviewRequestId: 'rr-1',
-        }),
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            to: '+15551234567',
+            body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+            messageType: 'manual',
+            reviewRequestId: 'rr-1',
+          }),
+        });
+        expect(res.status).toBe(200);
+        expect(ClickGuard.askSuppressedByClick).not.toHaveBeenCalled();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       });
-
-      expect(res.status).toBe(409);
-      expect((await res.json()).error).toMatch(/already tapped their Google review link/);
-      expect(ClickGuard.askSuppressedByClick).toHaveBeenCalledWith(expect.objectContaining({ id: 'rr-1', triggered_by: 'auto_inline' }));
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
-      expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();
-    });
+    } finally { ClickGuard.askSuppressedByClick.mockReset().mockResolvedValue(false); }
   });
 
   test('an email-only review preference set after the mint refuses the SMS send', async () => {
@@ -1654,7 +1651,7 @@ describe('admin communications SMS route', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toMatchObject({ reviewEmail: { sent: true } });
         expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
-        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1', { skipClickGuard: true });
         // Both stamps the owed email leg on the claim — the Quick Links
         // retry path's persisted evidence this ask asked for an email.
         expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: true });
@@ -1675,7 +1672,7 @@ describe('admin communications SMS route', () => {
         expect(res.status).toBe(500);
         expect((await res.json()).error).toMatch(/text was accepted; the review email was sent too/);
         expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
-        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1', { skipClickGuard: true });
         expect(ReviewService.releaseInlineClaim).not.toHaveBeenCalled();
       });
     });
@@ -3010,14 +3007,46 @@ describe('Communications review ask serialization', () => {
     expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledTimes(1);
     expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledWith('cust-A', { staffComposer: true });
   });
-  test('a Quick Links link at the cap is still refused by the seam gate', async () => {
-    reviews.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome: 'at_cap' });
+  test.each([
+    ['already_queued', /already queued/],
+    ['in_flight', /being sent right now/],
+  ])('a Quick Links link is still refused by the duplicate-send gate (%s)', async (outcome, message) => {
+    reviews.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome });
     await withServer(async baseUrl => {
       const response = await send(baseUrl, inline);
       expect(response.status).toBe(409);
-      expect((await response.json()).error).toMatch(/3 review requests/);
+      expect((await response.json()).error).toMatch(message);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
+  });
+  test('a Quick Links link sends for a customer who already tapped a tracked link, without consulting the click guard', async () => {
+    const ClickGuard = require('../services/review-click-guard');
+    ClickGuard.askSuppressedByClick.mockResolvedValue(true);
+    try {
+      await withServer(async baseUrl => {
+        expect((await send(baseUrl, inline)).status).toBe(200);
+      });
+      expect(ClickGuard.askSuppressedByClick).not.toHaveBeenCalled();
+    } finally { ClickGuard.askSuppressedByClick.mockReset().mockResolvedValue(false); }
+  });
+  test.each([
+    ['review_off'], ['sms_off'], ['email_only'], ['already_reviewed'],
+  ])('a Quick Links link is still refused when the customer cannot receive review texts (%s)', async reason => {
+    reviews.reviewSmsAllowedNow.mockResolvedValue({ allowed: false, reason });
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(422);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('a pasted link keeps the 72-hour spacing even for a tapped customer and is never staff-composer gated', async () => {
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+    });
+    expect(reviews.checkUnscheduledAskGates).not.toHaveBeenCalled();
   });
   test('a non-review message never consults the unscheduled-ask gate', async () => {
     await withServer(async baseUrl => {

@@ -1,5 +1,7 @@
-// checkUnscheduledAskGates: the staffComposer option skips ONLY the
-// active-cadence block and the 30-day cooldown. Default behavior is unchanged.
+// checkUnscheduledAskGates: the staffComposer option (Quick Links "send
+// anytime") skips the active-cadence block, the 30-day cooldown and the
+// 3-ask cap, and keeps the queued/in-flight checks. Default behavior is
+// unchanged.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({
@@ -23,11 +25,13 @@ describe('checkUnscheduledAskGates staffComposer option', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  test('default: an active cadence and a 30-day cooldown still refuse', async () => {
+  test('default: an active cadence, the cap and a 30-day cooldown still refuse', async () => {
     cadence = true;
     expect(await ReviewService.checkUnscheduledAskGates('c1')).toEqual({ allowed: false, outcome: 'in_cadence' });
     cadence = false;
     expect(await ReviewService.checkUnscheduledAskGates('c1')).toEqual({ allowed: false, outcome: 'cooldown' });
+    stats = { count: 3, lastAt: new Date(Date.now() - 60 * day) };
+    expect(await ReviewService.checkUnscheduledAskGates('c1')).toEqual({ allowed: false, outcome: 'at_cap' });
   });
 
   test('staffComposer: an active cadence and a recent ask no longer refuse', async () => {
@@ -36,9 +40,10 @@ describe('checkUnscheduledAskGates staffComposer option', () => {
     expect(ReviewService._activeCadenceFor).not.toHaveBeenCalled();
   });
 
-  test('staffComposer: the 3-ask cap still refuses', async () => {
+  test('staffComposer: the 3-ask cap no longer refuses, and delivery stats are not read', async () => {
     stats = { count: 3, lastAt: new Date(Date.now() - 60 * day) };
-    expect(await ReviewService.checkUnscheduledAskGates('c1', { staffComposer: true })).toEqual({ allowed: false, outcome: 'at_cap' });
+    expect(await ReviewService.checkUnscheduledAskGates('c1', { staffComposer: true })).toEqual({ allowed: true });
+    expect(ReviewService.getDeliveredAskStats).not.toHaveBeenCalled();
   });
 
   test('staffComposer: a queued or in-flight one-off ask still refuses', async () => {
@@ -48,8 +53,8 @@ describe('checkUnscheduledAskGates staffComposer option', () => {
     expect(await ReviewService.checkUnscheduledAskGates('c1', { staffComposer: true })).toMatchObject({ allowed: false, outcome: 'already_queued' });
   });
 
-  test('staffComposer: a stats read failure still fails closed', async () => {
+  test('default: a stats read failure still fails closed', async () => {
     ReviewService.getDeliveredAskStats.mockRejectedValue(new Error('db down'));
-    await expect(ReviewService.checkUnscheduledAskGates('c1', { staffComposer: true })).rejects.toThrow('db down');
+    await expect(ReviewService.checkUnscheduledAskGates('c1')).rejects.toThrow('db down');
   });
 });

@@ -31,7 +31,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const ClickGuard = require('./review-click-guard');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
@@ -59,10 +58,9 @@ async function buildReviewRequestLink(customerId) {
   if (customer?.has_left_google_review) {
     return { url: null, line: '', reason: 'This customer is already marked as having left a review' };
   }
-  // Already tapped a tracked review link since their newest completed visit.
-  if (await ClickGuard.touchSuppressedByClick(customerId, { newestVisitFallback: true })) {
-    return { url: null, line: '', reason: ClickGuard.REVIEW_LINK_CLICKED_REASON };
-  }
+  // No click guard by owner ruling: the Quick Links link is the staff "send
+  // anytime" link, so an earlier tap does not suppress a fresh one. A tap on the
+  // new link still records and stops the cadence (review-gate /go).
 
   // A composer mint is an unscheduled ask like /trigger — it must pass the
   // SAME gate stack (cadence, 3-in-180d cap, 30-day cooldown, already-queued)

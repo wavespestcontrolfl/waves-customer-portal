@@ -406,12 +406,16 @@ describe('resolveConfirmationEstimate (call-booking confirmation accept line)', 
 });
 
 describe('buildReviewRequestLink', () => {
-  test('a customer who already tapped a tracked review link gets the reason, not a mint', async () => {
+  test('a customer who already tapped a tracked review link still gets a fresh Quick Links mint (owner: send anytime)', async () => {
     mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
-    require('../services/review-click-guard').touchSuppressedByClick.mockResolvedValueOnce(true);
-    const r = await buildReviewRequestLink('c1');
-    expect(r).toMatchObject({ url: null, reason: expect.stringMatching(/already tapped their Google review link/) });
-    expect(ReviewService.createInline).not.toHaveBeenCalled();
+    const guard = require('../services/review-click-guard');
+    guard.touchSuppressedByClick.mockResolvedValue(true);
+    ReviewService.createInline.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/l/rv9', requestId: 'rr-9', token: 'tok' });
+    try {
+      const r = await buildReviewRequestLink('c1');
+      expect(r).toMatchObject({ url: expect.stringContaining('/l/rv9'), requestId: 'rr-9' });
+      expect(guard.touchSuppressedByClick).not.toHaveBeenCalled();
+    } finally { guard.touchSuppressedByClick.mockReset().mockResolvedValue(false); }
   });
 
   test('already-reviewed customers short-circuit before any mint', async () => {
