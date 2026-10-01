@@ -218,10 +218,16 @@ async function runInner({ now = new Date() } = {}) {
         });
       if (!persisted(notif)) return { ...result, unannounced: overdue.length, aggregate: true };
       // Rows are picked by done_at, not read_at: a reminder someone only
-      // opened is still open work, and the batch now carries it.
-      await noticeRows().whereNull('done_at').whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
+      // opened is still open work, and the batch now carries it. A reminder a
+      // person marked Done is absorbed too (openToCloser), so it can't be
+      // reopened beside the summary; if it later comes back out of the batch,
+      // the un-batch re-arms it as live work.
+      await require('./notification-service')._private.openToCloser(noticeRows(), 'call-commitments-watchdog')
+        .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
         .whereIn(trx.raw("metadata->>'commitment_id'"), ids)
-        .update({ ...closeDone('Included in the overdue promises summary'), metadata: trx.raw("metadata || jsonb_build_object('batchedBy', ?::text)", [notif.id]) });
+        // batchedUnread: whether the absorb found it unread (SET reads the old
+        // row), so the un-batch undoes only the read this close added.
+        .update({ ...closeDone('Included in the overdue promises summary'), metadata: trx.raw("metadata || jsonb_build_object('batchedBy', ?::text, 'batchedUnread', read_at IS NULL)", [notif.id]) });
       await openToCloser(noticeRows()).whereNot('id', notif.id)
         .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
         .update({ ...closeDone('Replaced by a newer overdue promises summary'), metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
@@ -246,8 +252,12 @@ async function runInner({ now = new Date() } = {}) {
         // batched row must not keep a still-overdue promise out of the bell.
         // A batch-absorbed row was closed done by this watchdog; taking it back
         // out of the batch reopens it. A person's own done is never undone.
+        // Back out of the batch, the read the absorb added is undone; a staff
+        // member's own earlier read (an acknowledgment) stands. A row absorbed
+        // before batchedUnread existed keeps the old behaviour (unread).
         await noticeRows().where({ id: notif.id }).update({
-          read_at: acknowledged ? priorAggregate.read_at : null,
+          read_at: acknowledged ? priorAggregate.read_at
+            : trx.raw("CASE WHEN metadata->>'batchedUnread' = 'false' THEN read_at ELSE NULL END"),
           ...(acknowledged
             ? (meta?.batchedBy ? {
               done_at: trx.raw("CASE WHEN done_by = 'call-commitments-watchdog' THEN NULL ELSE done_at END"),
@@ -255,7 +265,7 @@ async function runInner({ now = new Date() } = {}) {
               resolution: trx.raw("CASE WHEN done_by = 'call-commitments-watchdog' THEN NULL ELSE resolution END"),
             } : {})
             : { done_at: null, done_by: null, resolution: null }),
-          metadata: trx.raw("metadata - 'batchedBy'"),
+          metadata: trx.raw("metadata - 'batchedBy' - 'batchedUnread'"),
         });
       }
       if (!acknowledged) result.alerted += 1;
