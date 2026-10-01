@@ -83,10 +83,46 @@ function isReadOnlyCollisionArchiveReference(file, src, literal, matchIndex) {
     && archiveContractForSource(src);
 }
 
+// Pushed (frozen) migrations that only READ another migration's tag and own no
+// system_settings state or pricing_config_audit row for it. Each exemption is
+// pinned to the file's exact content and to the declaration of the foreign tag.
+//  - 20260930010000 back-fills the audit_log publish events of two earlier
+//    signup migrations: it reads the template versions each one tagged
+//    (validation_snapshot.source) and writes a `<tag>:publish` audit_log
+//    action, skipped if already present.
+//  - 20260930100100 compares a template's active version source with the
+//    first billing-details migration's tag to leave that version alone.
+const PINNED_FOREIGN_TAG_READS = Object.freeze([
+  Object.freeze({
+    file: '20260930010000_signup_email_template_names_and_audit.js',
+    sha256: '98b7baceabe5956e31093215390d7cc5b583f203be8b084f75558beb75b6659c',
+    declarations: Object.freeze({
+      'migration:20260929220000': "const STREAMS = 'migration:20260929220000';",
+      'migration:20260930000000': "const DROP_PAYMENT = 'migration:20260930000000';",
+    }),
+  }),
+  Object.freeze({
+    file: '20260930100100_billing_email_detail_rows_fill_missing.js',
+    sha256: 'e5496ae22e4bf87f4390d6476d1ede4a167ecd26ef47c58065f3d6799aea5eb5',
+    declarations: Object.freeze({
+      'migration:20260930090000': "const FIRST_MARKER = 'migration:20260930090000';",
+    }),
+  }),
+]);
+
+function isPinnedForeignTagRead(file, src, literal, matchIndex) {
+  const pin = PINNED_FOREIGN_TAG_READS.find((p) => p.file === file);
+  const declaration = pin?.declarations[literal];
+  return Boolean(declaration)
+    && sha256(src) === pin.sha256
+    && matchIndex === src.indexOf(declaration) + declaration.indexOf("'");
+}
+
 function derivedKeys(file, src) {
   return [...src.matchAll(DERIVED_KEY)]
     .filter((match) => !isReadOnlySeedAuditReference(file, src, match[1], match.index)
-      && !isReadOnlyCollisionArchiveReference(file, src, match[1], match.index))
+      && !isReadOnlyCollisionArchiveReference(file, src, match[1], match.index)
+      && !isPinnedForeignTagRead(file, src, match[1], match.index))
     .map(([, literal, stamp]) => ({ literal, stamp }));
 }
 
@@ -118,6 +154,21 @@ describe('migration-derived state keys and audit tags', () => {
       "  await knex('pricing_config_audit').insert({ changed_by: 'migration:20260911000020' });\n  const existing =");
     expect(derivedKeys(file, literalMutation)).toContainEqual({ literal: 'migration:20260911000020', stamp: '20260911000020' });
   });
+
+  test.each(PINNED_FOREIGN_TAG_READS.map((pin) => [pin.file, pin]))(
+    'the pinned foreign-tag read in %s is exempt only while its content is unchanged', (file, pin) => {
+      const src = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+      const own = file.slice(0, 14);
+      const foreign = (keys) => keys.filter((k) => k.stamp !== own);
+      expect(foreign(derivedKeys(file, src))).toEqual([]);
+      const [tag] = Object.keys(pin.declarations);
+      const edited = src.replace('exports.up = async function up(knex) {',
+        `exports.up = async function up(knex) {\n  await knex('system_settings').insert({ key: '${tag}' });`);
+      expect(edited).not.toBe(src);
+      expect(foreign(derivedKeys(file, edited))).toContainEqual({ literal: tag, stamp: tag.slice(-14) });
+      expect(foreign(derivedKeys('20261001000000_copy.js', src))).toHaveLength(Object.keys(pin.declarations).length);
+    },
+  );
 
   test('every derived key carries the stamp of the file that owns it', () => {
     const stale = [];

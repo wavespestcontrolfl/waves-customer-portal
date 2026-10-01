@@ -21,7 +21,7 @@ let payerInvoiceIds;
 
 function thenableBuilder(resolveRows, resolveFirst) {
   const builder = {};
-  for (const method of ['where', 'whereNotNull', 'select', 'count', 'orderBy', 'leftJoin', 'limit', 'offset']) {
+  for (const method of ['where', 'whereNotNull', 'whereRaw', 'select', 'count', 'orderBy', 'leftJoin', 'limit', 'offset']) {
     builder[method] = jest.fn(() => builder);
   }
   builder.first = jest.fn(async () => resolveFirst());
@@ -117,6 +117,41 @@ test('filters third-party payer rows while keeping visible cursor pagination com
     const second = await fetch(`${baseUrl}/billing?limit=2&cursor=${first.nextCursor}`)
       .then((response) => response.json());
     expect(second.payments[0].id).toBe('payment-4');
+  });
+});
+
+// B10: the collections-hold deferral row (armed, or left 'failed' after the retry sweep
+// collected it through its own paid row) is a placeholder, not a payment. The history query (stripe.getPaymentHistory) and BOTH total-count queries apply
+// the shared predicate, so the customer never sees a FAILED row for a charge that was never
+// attempted and `total` still matches what pagination serves.
+describe('hold-deferral placeholders (armed or collected) stay out of the customer payment history', () => {
+  const predicateCalls = (builder) => builder.whereRaw.mock.calls.filter(([sql]) => /deferred_reason/.test(sql));
+
+  test('the count query (no payer invoices) excludes them', async () => {
+    const builders = [];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = base(table); if (table === 'payments') builders.push(b); return b; });
+    await withServer((baseUrl) => fetch(`${baseUrl}/billing?limit=50&cursor=0`).then((r) => r.json()));
+    expect(builders).toHaveLength(1);
+    const calls = predicateCalls(builders[0]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toEqual(['collection_hold', 'absorbed_annual_prepay']);
+  });
+
+  test('the payer-filtered count query excludes them too', async () => {
+    payerInvoiceIds = ['payer-invoice'];
+    const builders = [];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = base(table); if (table === 'payments') builders.push(b); return b; });
+    await withServer((baseUrl) => fetch(`${baseUrl}/billing?limit=50&cursor=0`).then((r) => r.json()));
+    expect(builders).toHaveLength(1);
+    expect(predicateCalls(builders[0])).toHaveLength(1);
+  });
+
+  test('the history query in stripe.js applies the shared predicate', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/stripe.js'), 'utf8');
+    const body = src.slice(src.indexOf('async getPaymentHistory('), src.indexOf('// REFUND'));
+    expect(body).toContain("excludeHoldDeferralPlaceholders(q, 'payments')");
   });
 });
 

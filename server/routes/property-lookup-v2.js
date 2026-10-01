@@ -19,7 +19,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
-const { isInServiceAreaBox } = require('../services/service-area');
+const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -734,7 +734,7 @@ async function performPropertyLookupCore(address, options = {}) {
     lng = geo.lng;
 
     // Validate within SWFL service area
-    if (!isInServiceAreaBox(lat, lng)) {
+    if (!isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })) {
       result.errors.push({ source: 'geo', message: 'Outside SWFL service area' });
     }
 
@@ -784,7 +784,7 @@ async function performPropertyLookupCore(address, options = {}) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        inServiceArea: isInServiceAreaBox(lat, lng),
+        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
@@ -1106,7 +1106,19 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     propertyRecord: record,
     rentcast: record,
     avm: null,
-    satellite: buildSatelliteUrlSet(lat, lng),
+    // A cache hit judges the rectangle overlap on the same county/ZIP evidence
+    // the fresh path passes (geo.county / geo.zip), so cache state never
+    // changes the in-area verdict.
+    satellite: buildSatelliteUrlSet(lat, lng, {
+      county: record?._parcel?.county || record?.county || null,
+      // AI-only records carry zipCode '' — fall back to the formatted
+      // address, the cache row's normalized address, then the typed one.
+      zip: record?.zipCode
+        || zipFromAddressText(record?.formattedAddress)
+        || zipFromAddressText(row?.normalized_address)
+        || zipFromAddressText(address)
+        || null,
+    }),
     aiAnalysis,
     enriched,
     errors: [],
@@ -1122,7 +1134,7 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
 
 // Client-facing satellite URL set (no vision base64s — cache hits skip the
 // vision pipeline entirely; the stored aiAnalysis already covers it).
-function buildSatelliteUrlSet(lat, lng) {
+function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   if (!mapsKey) return null;
@@ -1135,7 +1147,7 @@ function buildSatelliteUrlSet(lat, lng) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: isInServiceAreaBox(lat, lng),
+    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence),
   };
 }
 

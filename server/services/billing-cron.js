@@ -20,6 +20,7 @@ const {
   deriveMonthlyChargeIdempotencyKey,
 } = require('./retry-collectibility');
 const { isEnabled } = require('../config/feature-gates');
+const { isCollectionHoldRefusal } = require('./collections/collection-hold');
 
 /**
  * Billing Cron Service
@@ -232,7 +233,16 @@ function collectMonthlyDuesUnderLock(customer, period) {
     // whichever of the two collectors attempts a customer's obligation
     // SECOND today always advances past a FIRST attempt's key.
     const idempotencyKey = await deriveMonthlyChargeIdempotencyKey(customer.id, period.monthKey, db);
-    const paymentResult = await service.chargeMonthly(customer.id, idempotencyKey);
+    let paymentResult;
+    try {
+      paymentResult = await service.chargeMonthly(customer.id, idempotencyKey);
+    } catch (err) {
+      // A collections DISPUTE hold (or a failed hold lookup) refused the
+      // charge before Stripe: not a failure of the obligation. Surface it as
+      // a skip so the caller defers instead of running the failure ladder.
+      if (isCollectionHoldRefusal(err)) return { holdSkipped: err };
+      throw err;
+    }
     return { paymentResult };
   }, {
     // This loop IS the 'billing-monthly' job (scheduler.js wraps
@@ -273,6 +283,7 @@ async function retryOnContention(fn, { attempts, delayMs, label }) {
 // sweep actually attempts it.
 async function deferMonthlyCollection(customer, monthKey, now) {
   logger.error(`[billing-cron] Monthly charge for customer ${customer.id} could not confirm exclusive collection after ${MONTHLY_LOCK_RETRY_ATTEMPTS} attempts — deferring to the retry sweep; billing_day only recurs next month, so this must not rely on tomorrow's tick alone`);
+  let persisted = false;
   try {
     await db('payments').insert({
       customer_id: customer.id,
@@ -285,19 +296,114 @@ async function deferMonthlyCollection(customer, monthKey, now) {
       next_retry_at: new Date(),
       metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: monthKey, tier: customer.waveguard_tier || '', deferred_reason: 'lock_contention' }),
     });
+    persisted = true;
+    // Durably deferred: the retry sweep owns the month now, so no catch-up marker is needed.
+    pendingHoldDeferrals.delete(String(customer.id));
   } catch (insertErr) {
-    logger.error(`[billing-cron] Could not persist deferred-collection retry row for customer ${customer.id}: ${insertErr.message} — falling back to the alert only`);
+    // NOT durably deferred: billing_day recurs only once a month, so the month's dues would
+    // be lost. Keep (set) the catch-up marker so tomorrow's daily run treats this customer as
+    // due again for the same month, and say so loudly (same handling as a hold deferral).
+    logger.error(`[billing-cron] Could not persist deferred-collection retry row for customer ${customer.id} (${monthKey}): ${insertErr.message} — dues NOT durably deferred; marking for catch-up on the next daily run`);
+    pendingHoldDeferrals.set(String(customer.id), monthKey);
   }
-  await insertHealthAlert(customer.id, {
+  await insertHealthAlert(customer.id, persisted ? {
     alert_type: 'billing_collection_deferred',
     severity: 'high',
     title: 'Monthly dues collection deferred — collection lock held elsewhere',
     description: `The daily dues cron could not confirm exclusive collection for this customer after ${MONTHLY_LOCK_RETRY_ATTEMPTS} short retries (another process held the same customer's billing lock the whole time — expected only during a deploy overlap). A retry row was armed for the 10 AM retry sweep to pick up; if it also fails, a "final retry failed" SMS/alert will follow that ladder. Customer 360 "Charge now" can also collect ${monthKey} manually at any time.`,
     trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_lock_contention' }),
-  }, 'Deferred-collection');
+  } : {
+    alert_type: 'billing_collection_deferred',
+    severity: 'high',
+    title: 'Monthly dues NOT collected and NOT durably deferred — collection lock held elsewhere',
+    description: `The daily dues cron could not confirm exclusive collection for ${monthKey} (another process held the customer's billing lock) and could not write the retry row. The next daily run retries this customer automatically while the app stays up; if it restarts first, collect ${monthKey} from Customer 360 "Charge now".`,
+    trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_lock_contention_unpersisted' }),
+  }, persisted ? 'Deferred-collection' : 'Lock-defer-unpersisted');
   await logAutopay(customer.id, 'skipped_lock_contention', {
-    details: { source: 'autopay', billed_month: monthKey },
+    details: { source: 'autopay', billed_month: monthKey, persisted },
   });
+  return persisted;
+}
+
+const HOLD_DEFER_PERSIST_ATTEMPTS = 3;
+const HOLD_DEFER_PERSIST_DELAY_MS = 250;
+// customerId -> billed month whose hold deferral could NOT be written. The
+// monthly job only bills on billing_day, so the daily run treats a marked
+// customer as due again (same month only) until the deferral persists or the
+// month is collected. In-memory: covers a DB blip; a process restart drops it
+// (the office bell above names the manual recovery).
+const pendingHoldDeferrals = new Map();
+
+// Collections DISPUTE hold (collection-hold.js, B10): the customer disputed a
+// bill on a collections call and was told all billing follow-up is on hold,
+// so monthly dues are NOT charged — and NOT failed: no payment-failed SMS, no
+// autopay_charge_failed, no retry-count burn. Like a lock-contention defer,
+// an armed never-attempted row is written so the retry sweep collects the
+// month once the office releases the hold (the sweep leaves the row armed
+// while the hold is active — see processPaymentRetries). A hold-lookup
+// failure defers the same way (fail closed). Idempotent per month: an armed
+// row for this obligation is not duplicated on a re-run.
+async function deferMonthlyForCollectionHold(customer, monthKey, now, err) {
+  logger.warn(`[billing-cron] Monthly charge for customer ${customer.id} deferred — collections hold (${err.code}); collecting after release`);
+  // The deferral is "complete" ONLY when the durable retry row exists (already
+  // present, or written now). A hold-lookup failure is often a DB outage, in
+  // which case this read/insert fails too; billing_day recurs only once a
+  // month, so a swallowed failure here would lose the month's dues. Bounded
+  // in-tick retry, then surface + leave a marker the next daily run picks up.
+  let persisted = false;
+  let lastError = null;
+  for (let attempt = 1; attempt <= HOLD_DEFER_PERSIST_ATTEMPTS && !persisted; attempt++) {
+    try {
+      const existing = await db('payments')
+        .where({ customer_id: customer.id, status: 'failed' })
+        .whereNull('superseded_by_payment_id')
+        .whereRaw("metadata->>'billed_month' = ?", [monthKey])
+        .whereRaw("metadata->>'deferred_reason' = 'collection_hold'")
+        .first('id');
+      if (!existing) {
+        await db('payments').insert({
+          customer_id: customer.id,
+          status: 'failed',
+          payment_date: etDateString(now),
+          amount: customer.monthly_rate,
+          // The ordinary monthly description, no hold marker: the retry sweep
+          // reuses it verbatim as the Stripe charge's description and the
+          // customer portal lists it, so a collected month must read like any
+          // other. The hold shows in metadata.deferred_reason + failure_reason.
+          description: `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name}`,
+          failure_reason: 'Not charged: the customer has an active collections dispute hold. Collected automatically after the office releases the hold.',
+          retry_count: 0,
+          next_retry_at: new Date(),
+          metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: monthKey, tier: customer.waveguard_tier || '', deferred_reason: 'collection_hold' }),
+        });
+      }
+      persisted = true;
+    } catch (persistErr) {
+      lastError = persistErr;
+      if (attempt < HOLD_DEFER_PERSIST_ATTEMPTS) await new Promise((r) => setTimeout(r, HOLD_DEFER_PERSIST_DELAY_MS));
+    }
+  }
+  if (!persisted) {
+    logger.error(`[billing-cron] Could not persist collection-hold retry row for customer ${customer.id} (${monthKey}): ${lastError?.message} — dues NOT durably deferred; marking for catch-up on the next daily run`);
+    pendingHoldDeferrals.set(String(customer.id), monthKey);
+    await insertHealthAlert(customer.id, {
+      alert_type: 'billing_collection_deferred',
+      severity: 'high',
+      title: 'Monthly dues NOT collected and NOT durably deferred — collections hold check failed',
+      description: `The daily dues cron could not charge ${monthKey} (a collections hold is active or could not be verified) and could not write the retry row (${lastError?.message}). The next daily run retries this customer automatically while the app stays up; if it restarts first, collect ${monthKey} from Customer 360 "Charge now" once the hold is cleared.`,
+      trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_hold_defer_unpersisted', code: err.code }),
+    }, 'Hold-defer-unpersisted');
+  } else {
+    pendingHoldDeferrals.delete(String(customer.id));
+  }
+  try {
+    await logAutopay(customer.id, 'skipped_collection_hold', {
+      details: { source: 'autopay', billed_month: monthKey, code: err.code, persisted },
+    });
+  } catch (logErr) {
+    logger.warn(`[billing-cron] skipped_collection_hold log failed for customer ${customer.id}: ${logErr.message}`);
+  }
+  return persisted;
 }
 
 // Codex round-2 P0 + pre-push fallback audit P1: a sibling attempt for this
@@ -430,7 +536,10 @@ const BillingCron = {
         // shapes "charge today vs. skip" for every customer regardless
         // of their billing_day. See isBillingDayMatch for the NULL-default
         // contract.
-        if (!isBillingDayMatch(customer.billing_day, todayDay)) {
+        const catchUpMonth = pendingHoldDeferrals.get(String(customer.id));
+        const holdCatchUp = catchUpMonth === `${year}-${String(month).padStart(2, '0')}`;
+        if (catchUpMonth && !holdCatchUp) pendingHoldDeferrals.delete(String(customer.id));
+        if (!holdCatchUp && !isBillingDayMatch(customer.billing_day, todayDay)) {
           continue;
         }
 
@@ -522,9 +631,20 @@ const BillingCron = {
         );
         const lockOutcome = attempt.ok ? attempt.value : { claimHeldElsewhere: true };
 
+        // The catch-up marker is cleared only once the month is resolved. A held-elsewhere
+        // claim keeps it until a confirmed collection or a durable deferral row (below); a
+        // hold skip manages it inside deferMonthlyForCollectionHold.
+        if (!lockOutcome.holdSkipped && !lockOutcome.claimHeldElsewhere) pendingHoldDeferrals.delete(String(customer.id));
+
         if (lockOutcome.unresolvedOutcome) {
           await alertUnresolvedMonthlyOutcome(customer, monthKey, lockOutcome.unresolvedOutcome);
           skipped++;
+          continue;
+        }
+
+        if (lockOutcome.holdSkipped) {
+          const deferred = await deferMonthlyForCollectionHold(customer, monthKey, now, lockOutcome.holdSkipped);
+          if (deferred) skipped++; else failed++;
           continue;
         }
 
@@ -542,8 +662,12 @@ const BillingCron = {
           if (collectedMeanwhile) {
             logger.info(`[billing-cron] Monthly charge for customer ${customer.id} was collected by the competing collector (payment ${collectedMeanwhile.id}) while this tick waited — nothing to defer`);
             await logAutopay(customer.id, 'skipped_already_paid', { paymentId: collectedMeanwhile.id });
+            pendingHoldDeferrals.delete(String(customer.id));
           } else {
-            await deferMonthlyCollection(customer, monthKey, now);
+            // Not collected and possibly not durably deferred: an unpersisted deferral keeps
+            // the catch-up marker (set inside deferMonthlyCollection) and counts as failed.
+            const deferred = await deferMonthlyCollection(customer, monthKey, now);
+            if (!deferred) { failed++; continue; }
           }
           skipped++;
           continue;
@@ -952,6 +1076,10 @@ const BillingCron = {
             failure_reason: db.raw(
               "COALESCE(failure_reason, '') || ' — resolved: absorbed by active annual prepay coverage'",
             ),
+            // Marks the resolution so a collections-hold placeholder resolved
+            // this way stays out of history and failure counts
+            // (collection-hold.js isNeverAttemptedHoldDeferral).
+            metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ deferred_resolution: 'absorbed_annual_prepay' })]),
           }).catch((updErr) => logger.error(`[billing-cron] retry absorb (annual prepay) failed for payment ${payment.id}: ${updErr.message}`));
         await logAutopay(payment.customer_id, 'skipped_annual_prepay', {
           paymentId: payment.id,
@@ -1126,6 +1254,9 @@ const BillingCron = {
           : (originalMeta.base_amount != null ? parseFloat(originalMeta.base_amount) : parseFloat(payment.amount));
         const description = payment.description
           .replace(' — FAILED', '')
+          // A deferral row's "— DEFERRED (…)" marker (lock contention, or a
+          // legacy hold row) is bookkeeping, never part of the charge label.
+          .replace(/ — DEFERRED \([^)]*\)/, '')
           .replace(/ \(includes \$[\d.]+ credit card surcharge\)/, '');
 
         // Key on the failed payment + ladder rung: overlapping sweep
@@ -1220,6 +1351,27 @@ const BillingCron = {
         }
 
       } catch (err) {
+        // Collections DISPUTE hold (B10): the charge was refused before
+        // Stripe. Nothing failed — leave the row armed exactly as it is (no
+        // retry_count bump, no failure SMS, no supersede); every later tick
+        // re-checks and collects once the office releases the hold.
+        if (isCollectionHoldRefusal(err)) {
+          logger.warn(`[billing-cron] Retry for payment ${payment.id} skipped for customer ${payment.customer_id} — collections hold (${err.code}); left armed`);
+          // Log once per payment, not once per sweep tick.
+          let alreadyLogged = false;
+          try {
+            alreadyLogged = !!(await db('autopay_log')
+              .where({ customer_id: payment.customer_id, event_type: 'skipped_collection_hold', payment_id: payment.id })
+              .first('id'));
+          } catch (dedupeErr) { /* log-only: worst case one extra row */ }
+          if (!alreadyLogged) {
+            await logAutopay(payment.customer_id, 'skipped_collection_hold', {
+              paymentId: payment.id,
+              details: { source: 'autopay_retry', code: err.code },
+            });
+          }
+          continue;
+        }
         // STRIPE_CHARGED_DB_FAILED — Stripe accepted the retry charge but
         // the ledger write failed. The customer WAS billed (orphan row
         // already recorded by the service), so the ladder must STOP: the

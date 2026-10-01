@@ -6,7 +6,7 @@
  * could not do because no tool fits, grouped by domain, for deciding what to
  * build next. The rows are written by the server, never by a model tool —
  * the route's per-request collector — and read through listRecentGaps()
- * (server/services/agent-gap-reports.js), which the Monday digest shares.
+ * (server/services/agent-gap-reports.js).
  */
 
 const logger = require('../logger');

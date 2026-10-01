@@ -265,10 +265,13 @@ function withSelfServeNotice(elig, svc, now = new Date()) {
   return elig;
 }
 
-async function loadByToken(token) {
+// One column list for every loader of this page's visit row: the token route
+// (loadByToken) and the id loader the texting AI's offers use (loadById), so
+// both read the visit through exactly the same booked-property COALESCEs.
+function selectSvc(column, value) {
   return db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
-    .where('s.reschedule_token', token)
+    .where(column, value)
     .first(
       's.id',
       's.customer_id',
@@ -306,6 +309,23 @@ async function loadByToken(token) {
       // and a surviving visit's reschedule link must not stay a side door.
       'c.active as customer_active'
     );
+}
+
+async function loadByToken(token) {
+  return selectSvc('s.reschedule_token', token);
+}
+
+async function loadById(id) {
+  return selectSvc('s.id', id);
+}
+
+// The page's own GET verdict (account state, eligibility incl. grouped
+// visits, then the self-serve move notice window) as one call — the texting
+// AI's offers must refuse exactly the visits this page refuses.
+async function pageEligibility(svc, now = new Date()) {
+  return withSelfServeNotice(accountInactive(svc)
+    ? { ok: false, reason: 'account_inactive' }
+    : await eligibilityAsync(svc, now), svc, now);
 }
 
 // FAIL CLOSED on the account, not just the appointment (C4, codex GH r4
@@ -520,9 +540,7 @@ router.get('/:token', async (req, res, next) => {
     // Customer-page-view log (bots/staff skipped, deduped, never blocks).
     void recordPageView({ req, page: 'reschedule', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
-    const elig = withSelfServeNotice(accountInactive(svc)
-      ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc), svc);
+    const elig = await pageEligibility(svc);
     const base = {
       state: elig.ok ? 'reschedulable' : 'not_reschedulable',
       reason: elig.ok ? null : elig.reason,
@@ -610,9 +628,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = withSelfServeNotice(accountInactive(svc)
-      ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc), svc);
+    const elig = await pageEligibility(svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
@@ -894,7 +910,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail
             // before reaching the rebooker's capacity check — grace is
-            // estimate-picker only.
+            // estimate-picker and /book only (GATE_BOOK_ARRIVAL_GRACE,
+            // 2026-09-29); this page never opts into the /book grace.
           }
         );
     } catch (err) {
@@ -1086,6 +1103,16 @@ router._test = {
 };
 
 module.exports = router;
+// The reschedule link's own picker, for callers that offer times for ONE
+// existing visit outside this router (the texting AI, GATE_SMS_OFFERS_SCHEDULER):
+// load the visit, take the page's eligibility verdict, and build availability
+// over the page's own booking range — never a mirror of any of them.
+module.exports._internals = {
+  loadById,
+  pageEligibility,
+  bookingRange,
+  buildAvailabilityForService,
+};
 // Shared with the logged-in schedule payload (codex #3609 r25 P2): the same
 // grouped verdict that makes this page refuse, so the portal never advertises
 // a self-serve link this route will turn away.

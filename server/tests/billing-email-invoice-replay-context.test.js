@@ -56,6 +56,29 @@ describe('direct invoice Email replay context', () => {
     expect(context).toEqual(expected('invoice_send_deferred'));
   });
 
+  // A queued invoice notice keeps the trusted dispute-hold exemption its immediate send carried (an
+  // operator's send, the customer's own estimate accept) so a provider retry of its Email does not wait
+  // out a plain dispute hold (Codex #5424 r14). Only those two values, only on a direct invoice source.
+  test.each(['operator', 'customer'])('the queued replay stores the trusted %s hold exemption (scheduler forwards it as metadata.hold_exempt)', (exempt) => {
+    const input = { ...scheduled('invoice_send_deferred'), metadata: { ...scheduled('invoice_send_deferred').metadata, hold_exempt: exempt } };
+    expect(buildBillingReplayContext(input, authority(), eventKey)).toEqual({ ...expected('invoice_send_deferred'), hold_exempt: exempt });
+    expect(buildBillingReplayContext({ ...immediate, holdExempt: exempt }, authority(), eventKey))
+      .toEqual({ ...expected('invoice_send_via_sms'), hold_exempt: exempt });
+  });
+
+  test.each(['system', 'admin', '', 7])('an untrusted hold_exempt (%p) is never stored; a stored one is refused outright', (value) => {
+    const input = { ...scheduled('invoice_send_deferred'), metadata: { ...scheduled('invoice_send_deferred').metadata, hold_exempt: value } };
+    expect(buildBillingReplayContext(input, authority(), eventKey)).toEqual(expected('invoice_send_deferred'));
+    expect(sanitizeBillingReplayContext({ ...expected('invoice_send_deferred'), hold_exempt: value })).toBeNull();
+  });
+
+  test('the exemption is stored for a direct invoice source only - never for a dunning source', () => {
+    expect(sanitizeBillingReplayContext({
+      schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'invoice', source_entry_point: 'late_payment_checker',
+      notificationEventKey: eventKey, collections_ledger_id: 'led-1', hold_exempt: 'customer',
+    })).toBeNull();
+  });
+
   test('collections sources still require their reservation id', () => {
     expect(sanitizeBillingReplayContext({
       ...expected('late_payment_checker'), category: 'invoice',

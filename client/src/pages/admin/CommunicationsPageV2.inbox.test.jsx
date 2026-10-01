@@ -928,3 +928,129 @@ it("Analyze photos offers Tree & shrub and posts a tree_shrub assessment, then d
   expect(JSON.parse(postInit.body).message_photos).toEqual([{ message_id: "photo-hedge", key: "sms-media/inbound/hedge" }]);
   expect(mockNavigate).toHaveBeenCalledWith("/admin/lawn-assessments?open=tree_shrub:assessment-ts1");
 });
+
+// Alert deep links: the sms_reply bell opens ?thread=<customerId> for a known
+// sender and ?message=<MessageSid> for an unknown one (no phone in a link).
+// Either must open the conversation even when it is not in the loaded page.
+const inboundFrom = (id, body, phone, extra = {}) => ({ ...inbound(id, body, phone), ...extra });
+const logFor = (byQuery) => (url) => response({ messages: byQuery(url.searchParams), hasMore: false, page: 1 });
+const openedConversation = () => screen.queryByRole("button", { name: "Text back" });
+
+it("opens a thread deep link for a customer beyond the loaded page by fetching that customer's messages", async () => {
+  const loaded = inboundFrom("l", "Newer text from someone else", "+19415550111", { customerId: "cust-other", customerName: "Other Person" });
+  const older = inboundFrom("t", "Gate is stuck again", "+19415550122", { customerId: "cust-target", customerName: "Target Person" });
+  loadLog = logFor((q) => (q.get("customerId") === "cust-target" ? [older] : [loaded]));
+  window.history.replaceState({}, "", "/?thread=cust-target");
+  setup(); await tick();
+  expect(logRequests().some(([url]) => String(url).includes("customerId=cust-target"))).toBe(true);
+  expect(openedConversation()).toBeInTheDocument();
+  expect(screen.getAllByText("Gate is stuck again").length).toBeGreaterThan(0);
+  expect(screen.queryByText("Newer text from someone else")).not.toBeInTheDocument();
+});
+
+it("opens a thread deep link for a customer already in the loaded page without another fetch", async () => {
+  const mine = inboundFrom("m", "Already loaded text", "+19415550133", { customerId: "cust-here", customerName: "Here Person" });
+  loadLog = logFor(() => [mine]);
+  window.history.replaceState({}, "", "/?thread=cust-here");
+  setup(); await tick();
+  expect(openedConversation()).toBeInTheDocument();
+  expect(logRequests().some(([url]) => String(url).includes("customerId="))).toBe(false);
+});
+
+it("opens an unknown sender's message deep link by the message id, with no phone number in the request", async () => {
+  const loaded = inboundFrom("l", "Newer text from someone else", "+19415550111", { customerId: "cust-other", customerName: "Other Person" });
+  const stranger = inboundFrom("s", "Is this the pest company?", "+19415550144");
+  loadLog = logFor((q) => (q.get("twilioSid") === "SMsynthetic1" ? [stranger] : [loaded]));
+  window.history.replaceState({}, "", "/?message=SMsynthetic1");
+  setup(); await tick();
+  const lookup = logRequests().find(([url]) => String(url).includes("twilioSid=SMsynthetic1"));
+  expect(lookup).toBeDefined();
+  expect(String(lookup[0])).not.toContain("19415550144");
+  expect(openedConversation()).toBeInTheDocument();
+  expect(screen.getAllByText("Is this the pest company?").length).toBeGreaterThan(0);
+});
+
+it("stays on the list when a deep link names a conversation that is not there", async () => {
+  loadLog = logFor(() => []);
+  window.history.replaceState({}, "", "/?message=SMgone");
+  setup(); await tick();
+  expect(openedConversation()).not.toBeInTheDocument();
+});
+
+it("scrolls to and marks the message the alert was about, not the newest one, when a later message has arrived", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const alerted = inboundFrom("m-alerted", "The gate is stuck", "+19415550155", { customerId: "cust-x", customerName: "X Person", twilioSid: "SMalerted", createdAt: "2024-07-01T12:00:00Z" });
+  const later = inboundFrom("m-later", "Never mind, fixed", "+19415550155", { customerId: "cust-x", customerName: "X Person", twilioSid: "SMlater", createdAt: "2024-07-01T12:05:00Z" });
+  loadLog = logFor(() => [later, alerted]);
+  window.history.replaceState({}, "", "/?thread=cust-x&message=SMalerted");
+  const { container } = setup(); await tick();
+  expect(openedConversation()).toBeInTheDocument();
+  expect(scrolled).toEqual(["sms-message-m-alerted"]);
+  expect(container.querySelector("#sms-message-m-alerted .ring-2")).not.toBeNull();
+  expect(container.querySelector("#sms-message-m-later .ring-2")).toBeNull();
+  await tick(3500); // the mark is brief
+  expect(container.querySelector("#sms-message-m-alerted .ring-2")).toBeNull();
+});
+
+it("falls back to the newest message when the alerted message id is not in the thread", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const older = inboundFrom("m-old", "Older text", "+19415550156", { customerId: "cust-y", customerName: "Y Person", twilioSid: "SMold", createdAt: "2024-07-01T12:00:00Z" });
+  const newest = inboundFrom("m-new", "Newest text", "+19415550156", { customerId: "cust-y", customerName: "Y Person", twilioSid: "SMnew", createdAt: "2024-07-01T12:05:00Z" });
+  loadLog = logFor(() => [newest, older]);
+  window.history.replaceState({}, "", "/?thread=cust-y&message=SMgone");
+  setup(); await tick();
+  expect(scrolled).toEqual(["sms-message-m-new"]);
+});
+
+it("scrolls an unknown sender's deep link to the alerted message too", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const first = inboundFrom("s-first", "Hello?", "+19415550157", { twilioSid: "SMfirst", createdAt: "2024-07-01T12:00:00Z" });
+  const second = inboundFrom("s-second", "Anyone there?", "+19415550157", { twilioSid: "SMsecond", createdAt: "2024-07-01T12:05:00Z" });
+  loadLog = logFor((q) => (q.get("twilioSid") === "SMfirst" ? [second, first] : []));
+  window.history.replaceState({}, "", "/?message=SMfirst");
+  setup(); await tick();
+  expect(scrolled).toEqual(["sms-message-s-first"]);
+});
+
+it("asks the log for the customer AND the sid together, so an alerted message older than the loaded page is recovered", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const other = inboundFrom("o", "Newer text from someone else", "+19415550111", { customerId: "cust-other", customerName: "Other Person" });
+  const newer = inboundFrom("z-newer", "Later follow-up", "+19415550166", { customerId: "cust-z", customerName: "Z Person", twilioSid: "SMnewer", createdAt: "2024-07-01T12:05:00Z" });
+  const anchor = inboundFrom("z-anchor", "Original alert text", "+19415550166", { customerId: "cust-z", customerName: "Z Person", twilioSid: "SM+odd/sid=1", createdAt: "2024-07-01T12:00:00Z" });
+  loadLog = logFor((q) => (q.get("customerId") === "cust-z" ? [newer, anchor] : [other]));
+  window.history.replaceState({}, "", `/?thread=cust-z&message=${encodeURIComponent("SM+odd/sid=1")}`);
+  setup(); await tick();
+  const lookup = logRequests().find(([url]) => String(url).includes("customerId=cust-z"));
+  expect(lookup).toBeDefined();
+  expect(new URL(String(lookup[0]), "http://localhost").searchParams.get("twilioSid")).toBe("SM+odd/sid=1");
+  expect(scrolled).toEqual(["sms-message-z-anchor"]);
+});
+
+it("fetches the anchor when the customer's thread is loaded but the alerted message is not among its messages, merging rather than replacing", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const loadedOnly = inboundFrom("w-new", "Newest loaded text", "+19415550177", { customerId: "cust-w", customerName: "W Person", twilioSid: "SMw2", createdAt: "2024-07-01T12:05:00Z" });
+  const old = inboundFrom("w-old", "Old alerted text", "+19415550177", { customerId: "cust-w", customerName: "W Person", twilioSid: "SMw1", createdAt: "2024-07-01T12:00:00Z" });
+  loadLog = logFor((q) => (q.get("twilioSid") === "SMw1" ? [loadedOnly, old] : [loadedOnly]));
+  window.history.replaceState({}, "", "/?thread=cust-w&message=SMw1");
+  setup(); await tick();
+  expect(logRequests().some(([url]) => String(url).includes("customerId=cust-w") && String(url).includes("twilioSid=SMw1"))).toBe(true);
+  expect(scrolled).toEqual(["sms-message-w-old"]);
+  expect(screen.getAllByText("Newest loaded text").length).toBeGreaterThan(0); // still there
+});
+
+it("opens the thread that holds the alerted message when the customer texts from two numbers, with no extra fetch", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const a = inboundFrom("v-a", "From the cell", "+19415550188", { customerId: "cust-v", customerName: "V Person", twilioSid: "SMv-a", createdAt: "2024-07-01T12:10:00Z" });
+  const b = inboundFrom("v-b", "From the landline", "+19415550199", { customerId: "cust-v", customerName: "V Person", twilioSid: "SMv-b", createdAt: "2024-07-01T12:00:00Z" });
+  loadLog = logFor(() => [a, b]);
+  window.history.replaceState({}, "", "/?thread=cust-v&message=SMv-b");
+  setup(); await tick();
+  expect(scrolled).toEqual(["sms-message-v-b"]);
+  expect(logRequests().some(([url]) => String(url).includes("twilioSid="))).toBe(false);
+});

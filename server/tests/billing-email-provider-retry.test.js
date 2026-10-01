@@ -11,7 +11,7 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/billing-channel-email-authority', () => ({ dispatchUnderBillingEmailAuthority: jest.fn() }));
-jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn() }));
+jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn(), replayHoldRefusal: jest.fn(async () => null) }));
 jest.mock('../services/billing-email-reservation', () => ({
   BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX: 'Billing email terminal refusal: ',
   BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX: 'Billing email re-quote required: ',
@@ -220,6 +220,20 @@ test('a temporary eligibility failure stays on the bounded retry schedule withou
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, error: expect.any(Error) });
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: expect.any(Date) }));
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ provider_handoff_phase: 'pending' }));
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
+});
+
+test('a collections dispute hold waits on the retry rail WITHOUT spending an attempt (refunded), never exhausted or blocked', async () => {
+  billingEmailReplayEligible.mockResolvedValue({
+    eligible: false, reason: 'collection-hold', retryable: true, holdDefer: true, held: { held: true, reason: 'hold' },
+  });
+  const before = Date.now();
+  await expect(retryOne(storedMessage({ provider_retry_count: 3 }))).resolves.toMatchObject({ sent: false, held: true });
+  const patch = query.update.mock.calls.find(([arg]) => arg.provider_retry_next_at)[0];
+  expect(patch).toMatchObject({ status: 'failed', provider_retry_exhausted_at: null, provider_handoff_phase: 'pending' });
+  expect(patch.provider_retry_count).toBe('GREATEST(provider_retry_count - 1, 0)');
+  expect(patch.provider_retry_next_at.getTime()).toBeGreaterThan(before + 3 * 60 * 1000);
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
   expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });

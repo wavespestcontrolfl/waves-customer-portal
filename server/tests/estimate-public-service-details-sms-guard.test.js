@@ -1,14 +1,18 @@
 /**
  * estimate-public.js's service-details SMS send (~POST /:token/service-details
- * /send, channel 'sms') deliberately bypasses sendCustomerMessage and calls
- * TwilioService.sendSMS directly — so it composes the annual-offer guard
- * into its own preSendCheck (Codex round 1 on #4608, P1) instead of getting
- * it for free at the send-customer-message.js chokepoint. This pins that
- * composition: checkSendWindow runs first (unchanged priority/shape), then
- * annualHandoffGuard on the estimate itself; a blocked verdict returns the
- * same not-ok shape checkSendWindow does, so TwilioService.sendSMS withholds
- * the send exactly like a window hold (no Twilio call), and the route reports
- * the generic "could not send" failure. estimate-annual-guard.js and
+ * /send, channel 'sms') used to bypass sendCustomerMessage and call
+ * TwilioService.sendSMS directly, composing the annual-offer guard into its
+ * own preSendCheck (Codex round 1 on #4608, P1). It now goes through
+ * sendCustomerMessage (B01: the direct call never read messaging_suppression
+ * or sms_enabled — see estimate-public-service-details-sms-suppression.test.js
+ * for the real-chain proof). THIS file pins the route's claim/dedupe/withhold
+ * response machinery, so sendCustomerMessage is replaced below by a thin
+ * adapter that reproduces what the real chokepoint hands the provider
+ * (annualHandoffGuard as preSendCheck) and maps the provider result back into
+ * the chokepoint's result shape; the chokepoint's own behavior (window, link
+ * wrap, suppression, consent) is pinned in its own suites. A blocked
+ * annual verdict makes the provider withhold the send (no Twilio call), and
+ * the route reports the generic "could not send" failure. estimate-annual-guard.js and
  * services/messaging/validators/send-window run FOR REAL here — only db and
  * services/twilio (the actual SDK boundary) are mocked, so the guard's own
  * DB lookup exercises the real loadAnnualOfferRow/annualPlanPublicReplayBlocked
@@ -23,6 +27,27 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // tests exercise.
 jest.mock('express-rate-limit', () => () => (req, res, next) => next());
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+// Adapter double for the chokepoint (see header). Records the exact input the
+// route hands sendCustomerMessage in `sendCustomerMessage.mock.calls`.
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async (input) => {
+    const TwilioService = require('../services/twilio');
+    const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+    const mockedDb = require('../models/db');
+    const result = await TwilioService.sendSMS(input.to, input.body, {
+      preSendCheck: async () => {
+        const verdict = await annualHandoffGuard({ db: mockedDb, estimateIds: [input.estimateId] })();
+        return verdict.blocked
+          ? { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false }
+          : { ok: true };
+      },
+    });
+    if (result && result.success) {
+      return { sent: true, blocked: false, deliveryOutcome: result.deliveryOutcome, providerMessageId: result.sid, ...(result.deduped ? { deduped: true } : {}) };
+    }
+    return { sent: false, blocked: !!result?.preSendBlocked, code: result?.code, retryable: result?.retryable === true, deliveryOutcome: 'not_sent' };
+  }),
+}));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/short-url', () => ({
   ...jest.requireActual('../services/short-url'),
@@ -165,6 +190,7 @@ beforeEach(() => {
   // both are bare jest.fn() with no default implementation to lose) clears
   // that queue too.
   require('../services/twilio').sendSMS.mockReset();
+  require('../services/messaging/send-customer-message').sendCustomerMessage.mockClear();
   require('../services/email-template-library').sendTemplate.mockReset();
   mockDb.__claimAcquired = true;
   mockDb.__claimOutcome = null;
@@ -297,8 +323,10 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(body).toEqual({ ok: true, channel: 'sms' });
   });
 
-  describe('GATE_SMS_LINK_WRAP (Codex round 3 on #5332, P2: this send bypasses the choke point)', () => {
+  describe('GATE_SMS_LINK_WRAP dedupe (the wrap itself now runs inside sendCustomerMessage)', () => {
     const PDF_URL = `https://portal.wavespestcontrol.com/api/estimates/${TOKEN}/service-details/pest_control/pdf`;
+    // sendCustomerMessage strips the https:// from SMS links, so the logged body has the bare form.
+    const PDF_URL_BARE = PDF_URL.replace(/^https:\/\//, '');
     function deliveredRow(phone) {
       const draft = baseEstimateRow({ customer_phone: phone });
       draft.status = 'sent';
@@ -311,51 +339,6 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
       body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
     });
     const flushTimers = () => new Promise((resolve) => setImmediate(resolve));
-
-    test('gate off: the body carries the raw packet URL, nothing is minted', async () => {
-      const TwilioService = require('../services/twilio');
-      const { createShortCode } = require('../services/short-url');
-      TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: `SM${'c3'.repeat(16)}`, deliveryOutcome: 'accepted' });
-      currentRow = deliveredRow('+19415550311');
-      const res = await post();
-      expect(res.status).toBe(200);
-      expect(TwilioService.sendSMS.mock.calls[0][1]).toMatch(/details packet you requested/);
-      expect(TwilioService.sendSMS.mock.calls[0][1].endsWith(PDF_URL)).toBe(true);
-      expect(createShortCode).not.toHaveBeenCalled();
-    });
-
-    test('gate on: the packet link is wrapped to /l/<code> for the exact pdf target and the code is stamped after an accepted send', async () => {
-      process.env.GATE_SMS_LINK_WRAP = 'true';
-      const TwilioService = require('../services/twilio');
-      const { createShortCode } = require('../services/short-url');
-      const SID = `SM${'c4'.repeat(16)}`;
-      createShortCode.mockResolvedValue({ code: 'pktcode01', shortUrl: 'https://portal.wavespestcontrol.com/l/pktcode01' });
-      TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: SID, deliveryOutcome: 'accepted' });
-      currentRow = deliveredRow('+19415550312');
-      const res = await post();
-      await flushTimers();
-      expect(res.status).toBe(200);
-      const sentBody = TwilioService.sendSMS.mock.calls[0][1];
-      expect(sentBody).toMatch(/details packet you requested/);
-      expect(sentBody.endsWith('portal.wavespestcontrol.com/l/pktcode01')).toBe(true);
-      expect(sentBody).not.toContain(PDF_URL);
-      expect(createShortCode).toHaveBeenCalledWith(PDF_URL, expect.objectContaining({ channel: 'sms', purpose: 'sms_link_wrap' }));
-      expect(mockDb.__shortCodeLog).toContainEqual({ whereIn: ['code', ['pktcode01']] });
-      expect(mockDb.__shortCodeLog).toContainEqual({ update: expect.objectContaining({ message_ref: `twilio_sid:${SID}` }) });
-    });
-
-    test('gate on: a refused send (preSendCheck block) stamps nothing', async () => {
-      process.env.GATE_SMS_LINK_WRAP = 'true';
-      const TwilioService = require('../services/twilio');
-      const { createShortCode } = require('../services/short-url');
-      createShortCode.mockResolvedValue({ code: 'pktcode02', shortUrl: 'https://portal.wavespestcontrol.com/l/pktcode02' });
-      TwilioService.sendSMS.mockResolvedValueOnce({ success: false, sid: null, preSendBlocked: true, code: 'QUIET_HOURS_HOLD' });
-      currentRow = deliveredRow('+19415550313');
-      const res = await post();
-      await flushTimers();
-      expect(res.status).toBe(502);
-      expect(mockDb.__shortCodeLog).toEqual([]);
-    });
 
     test('the cross-restart dedupe query also matches a wrapped body by the code minted for the exact pdf target', async () => {
       process.env.GATE_SMS_LINK_WRAP = 'true';
@@ -383,7 +366,7 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
         const res = await post();
         expect(res.status).toBe(200);
         expect(TwilioService.sendSMS).not.toHaveBeenCalled();
-        expect(smsLogCalls).toContainEqual({ sql: expect.stringContaining('strpos(COALESCE(message_body'), binds: [PDF_URL] });
+        expect(smsLogCalls).toContainEqual({ sql: expect.stringContaining('strpos(COALESCE(message_body'), binds: [PDF_URL_BARE] });
         expect(smsLogCalls).toContainEqual({ sql: expect.stringMatching(/short_codes sc WHERE sc\.target_url = \?.*'\/l\/' \|\| sc\.code/), binds: [PDF_URL] });
       } finally {
         mockDb.mockImplementation(realDb);
@@ -576,7 +559,7 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     // shorter window — otherwise it would only ever be reclaimable after
     // the full 10 minutes, and a legitimate retap moments later (once a
     // fresh delivery makes the offer eligible again) could never send.
-    expect(sql).toMatch(/outcome = 'withheld'/);
+    expect(sql).toMatch(/outcome IN \('withheld', 'policy_blocked'\)/);
     expect(sql).toMatch(/created_at < NOW\(\) - interval '\d+ seconds'/);
   });
 

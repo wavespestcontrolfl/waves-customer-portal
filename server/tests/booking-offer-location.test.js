@@ -10,14 +10,25 @@ const firstResults = {};
 const listResults = {};
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
-    const q = {};
-    for (const m of ['where', 'whereNot', 'andWhere', 'whereIn', 'whereNull', 'whereRaw', 'andWhereRaw', 'orWhere', 'orWhereRaw', 'select', 'limit']) {
+    const q = { filters: {} };
+    // Object-form where() filters are remembered so a row the query's own
+    // filter would exclude (active: true vs an inactive row) is not returned.
+    q.where = (arg) => {
+      if (typeof arg === 'function') arg.call(q, q);
+      else if (arg && typeof arg === 'object') Object.assign(q.filters, arg);
+      return q;
+    };
+    for (const m of ['whereNot', 'andWhere', 'whereIn', 'whereNull', 'whereRaw', 'andWhereRaw', 'orWhere', 'orWhereRaw', 'select', 'limit']) {
       q[m] = (arg) => {
         if (typeof arg === 'function') arg.call(q, q);
         return q;
       };
     }
-    q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
+    q.first = async () => {
+      const row = firstResults[table] !== undefined ? firstResults[table] : null;
+      if (row && q.filters.active === true && row.active === false) return null;
+      return row;
+    };
     q.then = (onOk, onErr) => Promise.resolve(listResults[table] || []).then(onOk, onErr);
     return q;
   };
@@ -255,4 +266,58 @@ test('a malformed estimate_id is never queried', async () => {
   await expect(resolveOfferCoords({ ...CALLER, address: TYPED, estimate_id: 'not-a-uuid' }))
     .resolves.toEqual({ lat: 27.3, lng: -82.5, disclosable: true });
   expect(db.mock.calls.map(([table]) => table)).not.toContain('estimates');
+});
+
+// The texting AI's OPEN TIMES for a new visit (GATE_SMS_OFFERS_SCHEDULER):
+// what /book would offer this customer for one funnel service, or nothing
+// when /book has nothing to commit against.
+describe('availabilityForExistingCustomer — refusals before any picker runs', () => {
+  const { availabilityForExistingCustomer } = require('../routes/booking')._internals;
+
+  test('no customer id or a service the funnel does not book (empty / rodent bait / unknown) → null with no lookup at all', async () => {
+    await expect(availabilityForExistingCustomer({ customerId: null, serviceKey: 'pest_control' })).resolves.toBeNull();
+    for (const serviceKey of ['', null, 'rodent_bait', 'termite_bait', 'nonsense']) {
+      await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey })).resolves.toBeNull();
+    }
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('/book off (the selfBooking gate) → null before the customer is even loaded', async () => {
+    jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((gate) => gate !== 'selfBooking');
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('customer gone, or no resolvable pin (no coordinates, address does not geocode, staff review holds it) → null', async () => {
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    firstResults.customers = customerRow();
+    jest.spyOn(geocoder, 'geocodeAddress').mockResolvedValue(null);
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'lawn_care' })).resolves.toBeNull();
+  });
+
+  // The bearer resolver (middleware/auth.js resolveBearerCustomer) only signs
+  // in { active: true } customers — an inactive one could not commit a /book
+  // offer, so the texting AI must not be handed one.
+  test('an INACTIVE customer (active = false) → null: the lookup requires active: true, and no pin is even resolved', async () => {
+    firstResults.customers = customerRow({ latitude: 27.3, longitude: -82.5, active: false });
+    const geocode = jest.spyOn(geocoder, 'geocodeAddress').mockResolvedValue({ lat: 27.3, lng: -82.5 });
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(geocode).not.toHaveBeenCalled();
+    const customersQuery = db.mock.results.map((r, i) => ({ table: db.mock.calls[i][0], chain: r.value })).find((c) => c.table === 'customers');
+    expect(customersQuery.chain.filters).toEqual({ id: CUSTOMER_ID, active: true });
+  });
+
+  // createSelfBooking refuses a pre-customer pipeline stage under
+  // bookingCustomersOnly (Codex #5406 r2), so no offer is made either.
+  test('bookingCustomersOnly on + a pre-customer stage (new_lead) → null before any pin; gate off → the stage does not block', async () => {
+    const gates = jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation(() => true);
+    firstResults.customers = customerRow({ pipeline_stage: 'new_lead' });
+    const geocode = jest.spyOn(geocoder, 'geocodeAddress').mockResolvedValue(null);
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(geocode).not.toHaveBeenCalled();
+    gates.mockImplementation((gate) => gate !== 'bookingCustomersOnly');
+    firstResults.customers = customerRow({ pipeline_stage: 'new_lead' });
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(geocode).toHaveBeenCalled();
+  });
 });

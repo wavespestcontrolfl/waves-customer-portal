@@ -17,7 +17,8 @@ import { createPortal } from 'react-dom';
 import useIsMobile from '../hooks/useIsMobile';
 import useModalFocus from '../hooks/useModalFocus';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
-import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
+import { isMlUnit } from '../lib/measure-units';
+import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
 import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
@@ -50,16 +51,9 @@ function catalogRatePrefill(p, serviceType) {
   const resolved = resolveRatePrefill(p, { applicationMethod, serviceLine: 'pest' });
   const rate = Number(resolved.rate);
   if (!Number.isFinite(rate) || rate <= 0 || !resolved.rateUnit) return null;
-  // The label ceiling for the inline high-rate warning (codex P1 r18):
-  // per-basis bands carry their upper bound from the resolver; per-1,000
-  // rates use the verified catalog max. Neither applies to the 4-oz house
-  // default (its 'oz' unit is not the catalog rate's basis).
-  const maxRaw = resolved.perBasisUnit
-    ? resolved.labelMaxRate
-    : resolved.usePestSprayDefault
-      ? null
-      : parseFloat(String(p.max_label_rate_per_1000 ?? ''));
-  const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
+  // The label ceiling for the inline high-rate warning (codex P1 r18); none
+  // for the 4-oz house default (prefillRateCeiling).
+  const max = prefillRateCeiling(resolved, p);
   return { rate: String(rate), unit: resolved.rateUnit, ...(max != null ? { max } : {}) };
 }
 
@@ -179,6 +173,12 @@ export default function ServiceRecapModal({
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
             if (rp.application_rate != null && Number(rp.application_rate) > 0) {
+              // Except a rate recorded in mL, which is never shown (owner
+              // ruling 2026-09-29: nothing a tech sees on a completion is in
+              // mL). With no rate row the submission leaves the rate
+              // unconfirmed, and the server keeps the recorded one (see
+              // rate_confirmed below).
+              if (isMlUnit(rp.rate_unit)) return;
               // A recorded rate missing its unit (legacy rows) falls back
               // to the catalog unit — an empty unit would hide the rate
               // editor while rate_confirmed still marked the field

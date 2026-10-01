@@ -2,7 +2,8 @@
  * Visit prep photos — read RECOVERY SWEEP (GATE_VISIT_PREP_READ_SWEEP,
  * dark). Second-order lane on top of the visit prep reads (pest:
  * services/visit-prep-pest-read.js; lawn / tree & shrub:
- * services/visit-prep-plant-read.js): the in-process fire-and-forget
+ * services/visit-prep-plant-read.js; both at once for a combined Lawn & Pest
+ * stop: services/visit-prep-combo-read.js): the in-process fire-and-forget
  * dispatch is never retried by itself, so two classes of
  * `visit_prep_submissions` rows can be stuck with a read that never
  * happened:
@@ -14,7 +15,10 @@
  *       stop (office reclassified it after the photos arrived);
  *   (d) read_status 'done' or 'failed' whose engine / subject no longer
  *       matches the read the stop wants now (pest -> lawn, lawn -> tree &
- *       shrub after the read settled, on the same day or a later one). The
+ *       shrub, pest -> combo when the stop gains a lawn part, combo -> pest
+ *       when it loses it, after the read settled, on the same day or a later
+ *       one; a combo read made while both gates were live is NOT stale just
+ *       because one gate later went dark). The
  *       tech display already hides such a read; the sweep releases it to
  *       'none' and re-reads the stop once per settled attempt (Codex #5320
  *       r10, r12, r13). Its first attempt stays counted in read_attempts,
@@ -60,7 +64,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { dispatchVisitPrepRead, _internal: { currentReadKey, storedReadKey } } = require('./visit-prep-read-dispatch');
+const { dispatchVisitPrepRead } = require('./visit-prep-read-dispatch');
+const { currentReadKey, storedReadKey, keyForShape } = require('./visit-prep-read-key');
+const { stopReadShape } = require('./visit-prep-plant-applicability');
 const { etDayStart, withLockedStop } = require('./visit-prep-read-claim');
 const { visitPrepReadSweepLive, visitPrepPestReadLive, visitPrepPlantReadLive } = require('../config/feature-gates');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
@@ -168,9 +174,22 @@ const SETTLED = ['done', 'failed'];
 // by the wrong engine / subject for the stop as it is now. A failed read on
 // an unchanged line is never retried.
 async function needsReadNow(conn, row, live) {
-  const want = await currentReadKey({ id: row.scheduled_service_id, visit_id: row.visit_id }, conn, live);
+  const stop = { id: row.scheduled_service_id, visit_id: row.visit_id };
+  const want = await currentReadKey(stop, conn, live);
   if (!want) return false;
-  return SETTLED.includes(row.read_status) ? storedReadKey(row.read_result) !== want : true;
+  if (!SETTLED.includes(row.read_status)) return true;
+  const stored = storedReadKey(row.read_result);
+  if (stored === want) return false;
+  // A combo read holds BOTH parts. When one gate later goes dark the stop's
+  // key degrades to the one live engine, but nothing about the stop changed:
+  // the stored combo is not stale (re-reading would spend paid calls for a
+  // result the tech already has). It is stale only once the stop is no
+  // longer that combo (lost its pest or plant part, or changed subject).
+  if (stored.startsWith('combo:') && (want === 'pest' || want.startsWith('plant:'))) {
+    const full = keyForShape(await stopReadShape(stop, conn), { pestLive: true, plantLive: true });
+    if (full === stored) return false;
+  }
+  return true;
 }
 
 async function selectCandidates(conn, now) {

@@ -434,6 +434,32 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     }
   });
 
+  // The annual-prepay switch locks a visit, then the customer. A decision
+  // holds the customer and used to WAIT for that visit, so the two could
+  // deadlock (40P01). It now takes visit rows without waiting.
+  test('a decision that finds a visit row held refuses at once, and the holder can then take the customer', async () => {
+    const visitId = randomUUID();
+    await database('scheduled_services').insert(visitRow(visitId, { property_id: PRIMARY_ID }));
+    const holder = await database.transaction();
+    try {
+      await holder('scheduled_services').where({ id: visitId }).forUpdate().first();
+      const started = Date.now();
+      await expect(resolveCustomerGeocodeReview(CUSTOMER_ID, {
+        revision: (await reviewStore.getReviewDetail(CUSTOMER_ID, database)).revision,
+        action: 'verify_pin', ...PIN, confirmed: true,
+        source: 'site_visit', evidence: 'Synthetic held visit',
+      }, ACTOR_ID, database)).rejects.toMatchObject({ statusCode: 409, code: 'visit_changed', isOperational: true });
+      expect(Date.now() - started).toBeLessThan(5000);
+      // The decision let go of the customer row, so the prepay-shaped holder
+      // finishes its visit -> customer order instead of deadlocking.
+      await holder.raw('SET LOCAL lock_timeout = 3000');
+      await expect(holder('customers').where({ id: CUSTOMER_ID }).forUpdate().first()).resolves.toBeTruthy();
+    } finally {
+      await holder.rollback();
+      await database('scheduled_services').where({ id: visitId }).del();
+    }
+  });
+
   test('an editor holding the preference lock can lock the customer while a decision waits', async () => {
     const revision = (await reviewStore.getReviewDetail(CUSTOMER_ID, database)).revision;
     const editor = await database.transaction();

@@ -1,3 +1,9 @@
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -372,6 +378,55 @@ describe('payment lifecycle email sender', () => {
     await expect(PaymentLifecycleEmail.sendPaymentRetryNotice({
       customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23',
     })).resolves.toMatchObject({ ok: false, retryable: true, deliveryOutcome: 'not_sent' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a dispute hold that commits between the up-front check and the provider handoff returns the coded retryable defer, not a bare not-sent (#5424 round 10)', async () => {
+    const Hold = require('../services/collections/collection-hold');
+    const prefs = { payment_issue_channels: ['email'] };
+    setDbQueues({
+      payments: [chain({ first: payment() })],
+      payment_methods: [chain({ first: paymentMethod() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
+      customer_interactions: [chain()],
+    });
+    // Clear at the up-front read; held by the time the handoff re-reads it.
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
+    const provider = jest.fn();
+    const beforeProviderHandoff = jest.fn(async () => true);
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      await withProviderHandoff(provider);
+      return { sent: false, aborted: true, reason: 'provider_handoff_aborted' };
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentRetryNotice({
+      customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23', beforeProviderHandoff,
+    });
+
+    expect(result).toMatchObject({
+      ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+    });
+    expect(Hold.isHoldSuppression(result)).toBe(true);
+    expect(provider).not.toHaveBeenCalled();
+    expect(beforeProviderHandoff).not.toHaveBeenCalled();
+  });
+
+  test('a hold already standing at the lifecycle PREFLIGHT is the same coded retryable defer (a replay handler recognises only COLLECTION_HOLD_DEFER; Codex #5424 r14)', async () => {
+    const Hold = require('../services/collections/collection-hold');
+    setDbQueues({
+      payments: [chain({ first: payment() })],
+      payment_methods: [chain({ first: paymentMethod() })],
+      customers: [chain({ first: customer() })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email'] } })],
+    });
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'hold' });
+    const result = await PaymentLifecycleEmail.sendPaymentRetryNotice({
+      customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23',
+    });
+    expect(result).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+    expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
+    expect(Hold.isHoldSuppression(result)).toBe(true);
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 

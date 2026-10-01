@@ -46,13 +46,14 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
-import { defaultApplicationMethodForLine, resolveRatePrefill } from '../../lib/product-rate-prefill';
+import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, isOutOfStock, productUnits, seededAmount, stockHolds, submittedAmount,
+  UNIT_CHOICES, amountText, categoryLabel, isOutOfStock, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
+import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import DictationButton from './DictationButton';
 import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
 import RATE_UNITS from '../../../../shared/rate-units.json';
@@ -87,7 +88,7 @@ const ROW_METHOD_CHOICES = [
 // is not one they confirmed. Any other unit (a catalog oddity such as
 // "percent_solution") leaves the row without a rate rather than have the
 // server refuse the whole visit.
-const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => unit.split('/')[0].trim() !== 'ml'));
+const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => !isMlUnit(unit)));
 export const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
 // With no method of its own in the catalog, the shared pest resolver calls
 // anything outside a bait category a spray, which then follows the How row.
@@ -276,10 +277,7 @@ function rowRate(row, sprayMethod) {
   const labelRate = !(row.added && (resolved.usePestSprayDefault || !row.labelUnit));
   const rateUnit = labelRate && isSendableRateUnit(resolved.rateUnit) ? resolved.rateUnit : '';
   const prefill = !row.added && Number(resolved.rate) > 0 && rateUnit ? String(Number(resolved.rate)) : '';
-  const maxRaw = resolved.perBasisUnit
-    ? resolved.labelMaxRate
-    : resolved.usePestSprayDefault ? null : parseFloat(String(row.product?.max_label_rate_per_1000 ?? ''));
-  const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
+  const max = prefillRateCeiling(resolved, row.product);
   return { rate: row.rateInput ?? prefill, rateUnit, max };
 }
 

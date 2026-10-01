@@ -258,6 +258,30 @@ test('number_unknown wrong party writes the wrong_number flag', async () => {
   expect(flags.flagWrongNumber).toHaveBeenCalledWith('cust-1', expect.anything());
 });
 
+test('number_unknown wrong party hands the flag writer the DIALED phone, call id and caller words for the canonical suppression (B14)', async () => {
+  // Dialed number differs from customers.phone: the dialed one reached the stranger.
+  setDb({ callRow: { ...CALL_ROW, to_phone: '+19415550000' } });
+  const { convo } = makeConvo();
+  mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party', number_unknown: true }));
+  await turn(convo, 'There is no Pat at this number.');
+  expect(flags.flagWrongNumber).toHaveBeenCalledWith('cust-1', expect.objectContaining({
+    phone: '+19415550000',
+    callLogId: convo._ctx.callLogId,
+    capturedBody: 'There is no Pat at this number.',
+  }));
+  expect(convo._ctx.callLogId).toBeTruthy();
+});
+
+test('number_unknown wrong party falls back to customers.phone only when the call row has no dialed number (B14)', async () => {
+  setDb({ callRow: { ...CALL_ROW, to_phone: null } });
+  const { convo } = makeConvo();
+  mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party', number_unknown: true }));
+  await turn(convo, 'There is no Pat at this number.');
+  expect(flags.flagWrongNumber).toHaveBeenCalledWith('cust-1', expect.objectContaining({
+    phone: CUSTOMER.phone,
+  }));
+});
+
 test('verification: match on customer-supplied ZIP unlocks DISCLOSE; expected values never leak', async () => {
   const { convo } = makeConvo();
   mockScriptedMessages.push(
@@ -413,8 +437,11 @@ test('send_pay_link: rail-guard consulted first, RECORD-THEN-SEND ordering, once
   mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('Sent — check your texts.'));
   await turn(convo, 'Yes please text it.');
   expect(order).toEqual(['guard', 'ledger', 'send']);
-  expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true });
+  expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: 'customer' });
   expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', invoiceId: 'inv-1' }));
+  // The customer asked for this link on the call: the rail-guard consult (and the send below) carry
+  // the trusted customer exemption, so a dispute-hold wait does not refuse a link they requested.
+  expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ holdExempt: 'customer' }));
 
   // Second attempt on the same call is refused without another send.
   mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('It is already on its way.'));

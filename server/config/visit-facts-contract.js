@@ -1133,6 +1133,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   reviewScheduledFor: 'Review-ask scheduling bookkeeping (the computed send time).',
   customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
   incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
+  propertyServiceArea: 'Frozen job-coverage bookkeeping (area treated vs the reviewed property area at completion) for job quantities and product-area math; not rendered on the customer report.',
   visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
   invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',
@@ -1395,7 +1396,7 @@ const VISIT_FACTS_CONTRACT = {
       ...typedFormFacts('cockroach', {
         notes: {
           evidence_observed: 'Evidence can reconcile the status away from the activity select ("Signs found").',
-          work_completed: 'buildWork reads ONLY these chips — see gap cockroach_work_from_products.',
+          work_completed: 'autoFilled: hidden from the tech form and DERIVED at completion from the submitted product rows (cockroach-work-from-products.js, called by complete-scheduled-service.js before the snapshot freezes) — see cockroach_work_from_products. Records completed before the change keep the chips the tech picked.',
         },
       }),
       ...typedSharedCompletionFacts(),
@@ -1405,14 +1406,19 @@ const VISIT_FACTS_CONTRACT = {
       ...photoFacts(),
       {
         key: 'cockroach_work_from_products',
-        label: 'Products applied, as a source for the cockroach "What we did" section',
-        capture: ['voice', 'tap'],
+        label: 'Products applied, as the source of the cockroach work_completed chips',
+        capture: ['derived'],
         storage: 'service_products.product_name',
         writers: [COMPLETE_SERVICE],
-        readers: [],
+        readers: [
+          {
+            file: 'server/services/service-report/cockroach-work-from-products.js',
+            section: 'Derives the autoFilled work_completed chips (deriveCockroachWorkChips) from each submitted product row\'s catalog category / recorded method / active ingredient / application area',
+            readerSymbol: 'deriveCockroachWorkChips',
+          },
+        ],
         whenMissing: 'hidden',
-        status: 'gap',
-        notes: 'cockroach-report-v2.js buildWork(chips(values.work_completed)) never falls back to the visit\'s service_products rows: a visit completed without work_completed chips shows no work even though products were recorded.',
+        notes: 'Owner ruling 2026-09-26: the cockroach form no longer asks for work chips; the products the tech recorded ARE the work. Bait (Advion gel / bait method), IGR (Gentrol / IGR category or active) and Alpine (crack & crevice) map to the same chip labels the tech used to tap; an exterior application area adds Exterior perimeter treatment. An unrecognised product derives no chip. The derived chips freeze into the typed snapshot, so the report, Today\'s Result, treatment evidence and trace eligibility read them exactly as before. A stale posted value is stripped and replaced by the derivation. A companion cockroach section (residual pre-retirement combined visits) is not derived: the shared products list cannot be attributed per line.',
       },
     ],
   },

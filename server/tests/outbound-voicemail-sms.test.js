@@ -34,6 +34,7 @@ jest.mock('../services/outbound-call-reason', () => ({
   visitInProgress: jest.fn(async () => false),
   nonServiceCaller: jest.fn(async () => false),
 }));
+jest.mock('../services/messaging/auto-text-holds', () => ({ saidNoTextsOnAnyCall: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -41,6 +42,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const logger = require('../services/logger');
 const { visitInProgress, nonServiceCaller } = require('../services/outbound-call-reason');
+const { saidNoTextsOnAnyCall } = require('../services/messaging/auto-text-holds');
 const {
   MESSAGE_TYPE,
   GENERIC_TEMPLATE_KEY,
@@ -87,6 +89,7 @@ beforeEach(() => {
   isEnabled.mockImplementation(() => true);
   visitInProgress.mockImplementation(async () => false);
   nonServiceCaller.mockImplementation(async () => false);
+  saidNoTextsOnAnyCall.mockImplementation(async () => false);
   installDb();
 });
 
@@ -163,6 +166,21 @@ describe('precheck — decided before the customer leg is hung up', () => {
     await expect(precheck({ phone: PHONE, customerId: 'cust-1', relatedCallId: 'in-7' })).resolves.toEqual({ ok: false, skipped: 'non_service_caller' });
     expect(nonServiceCaller).toHaveBeenCalledWith({ customerId: 'cust-1', phone: PHONE, relatedCallId: 'in-7', before: IN_WINDOW });
     expect(smsLogFirst).not.toHaveBeenCalled();
+  });
+
+  test('a caller who said no to texts on a call with this number → no text (owner 2026-09-30)', async () => {
+    saidNoTextsOnAnyCall.mockResolvedValueOnce(true);
+    await expect(precheck({ phone: PHONE, customerId: 'cust-1', relatedCallId: 'in-7' })).resolves.toEqual({ ok: false, skipped: 'said_no_texts' });
+    expect(saidNoTextsOnAnyCall).toHaveBeenCalledWith(PHONE, { originCallId: 'in-7' });
+    expect(smsLogFirst).not.toHaveBeenCalled();
+    saidNoTextsOnAnyCall.mockResolvedValueOnce(true);
+    await expect(sendOutboundVoicemailText({ phone: PHONE, relatedCallId: 'in-7' })).resolves.toEqual(expect.objectContaining({ sent: false, skipped: 'said_no_texts' }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a no-texts read failure fails CLOSED', async () => {
+    saidNoTextsOnAnyCall.mockRejectedValueOnce(Object.assign(new Error('down'), { code: 'ETIMEDOUT' }));
+    await expect(precheck({ phone: PHONE })).resolves.toEqual({ ok: false, skipped: 'visit_probe_failed' });
   });
 
   test('a visit-probe failure fails CLOSED', async () => {

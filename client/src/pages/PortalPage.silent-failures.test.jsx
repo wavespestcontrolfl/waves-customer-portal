@@ -60,7 +60,7 @@ beforeEach(() => {
   api.getServiceStats.mockResolvedValue({});
   api.getBalance.mockResolvedValue({ currentBalance: 0 });
   api.getServices.mockResolvedValue({ services: [] });
-  api.getPendingSatisfaction.mockResolvedValue({ pending: null });
+  api.getGoogleReviewCard.mockResolvedValue({ card: null });
   api.getReferrals.mockResolvedValue({ stats: null });
   api.getBlogPosts.mockResolvedValue({ posts: [] });
   api.getNewsletterPosts.mockResolvedValue({ posts: [] });
@@ -282,63 +282,72 @@ describe('tracker polls from step 1', () => {
   });
 });
 
-describe('satisfaction note failures', () => {
-  it('keeps the feedback form open instead of a false thank-you', async () => {
-    api.getPendingSatisfaction.mockResolvedValue({
-      pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],
-    });
-    api.submitSatisfaction
-      .mockResolvedValueOnce({ action: 'feedback' }) // the rating itself
-      .mockRejectedValueOnce(new Error('network down')); // the written note
+describe('Google review card (the 1-10 rating is retired)', () => {
+  const card = { serviceRecordId: 'svc-9', serviceType: 'Pest Control', technicianName: 'Alex', reviewLink: 'https://portal.test/api/rate/tok/go', officeName: 'Bradenton' };
 
+  beforeEach(() => { localStorage.clear(); });
+
+  it('shows the neutral line and one Open Google button — no rating, no feedback form', async () => {
+    api.getGoogleReviewCard.mockResolvedValue({ card });
     render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: '3' }));
-
-    const noteBox = await screen.findByPlaceholderText(/anything we could do better/i);
-    fireEvent.change(noteBox, { target: { value: 'Tech left the gate open' } });
-    fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
-
-    expect(await screen.findByText(/your note could not be sent/i)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/anything we could do better/i)).toHaveValue('Tech left the gate open');
-    expect(screen.queryByText(/we appreciate the note/i)).not.toBeInTheDocument();
+    expect(await screen.findByText(/a quick google review helps neighbors find the bradenton team/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Google' })).toHaveAttribute('href', card.reviewLink);
+    expect(screen.queryByRole('button', { name: '3' })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/anything we could do better/i)).not.toBeInTheDocument();
   });
 
-  it('treats a duplicate 409 on the note as already saved', async () => {
-    api.getPendingSatisfaction.mockResolvedValue({
-      pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],
-    });
-    const dupe = new Error('Already rated this service');
-    dupe.status = 409;
-    api.submitSatisfaction
-      .mockResolvedValueOnce({ action: 'feedback' })
-      .mockRejectedValueOnce(dupe);
+  it('tapping Open Google ends the card for that visit (remembered across loads)', async () => {
+    api.getGoogleReviewCard.mockResolvedValue({ card });
+    const first = render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    const link = await screen.findByRole('link', { name: 'Open Google' });
+    link.addEventListener('click', (e) => e.preventDefault());
+    fireEvent.click(link);
+    first.unmount();
 
     render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
-
-    fireEvent.click(await screen.findByRole('button', { name: '3' }));
-    const noteBox = await screen.findByPlaceholderText(/anything we could do better/i);
-    fireEvent.change(noteBox, { target: { value: 'Second tab double-submit' } });
-    fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
-
-    expect(await screen.findByText(/we appreciate the note/i)).toBeInTheDocument();
-    expect(screen.queryByText(/your note could not be sent/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(api.getGoogleReviewCard).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
   });
 
-  it('skips the POST entirely for an empty note', async () => {
-    api.getPendingSatisfaction.mockResolvedValue({
-      pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],
-    });
-    api.submitSatisfaction.mockResolvedValueOnce({ action: 'feedback' });
-
+  it('tapping Open Google hides the card IMMEDIATELY (same handler), while the link still points at Google', async () => {
+    api.getGoogleReviewCard.mockResolvedValue({ card });
     render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    const link = await screen.findByRole('link', { name: 'Open Google' });
+    expect(link).toHaveAttribute('href', card.reviewLink);
+    link.addEventListener('click', (e) => e.preventDefault()); // jsdom cannot navigate
+    fireEvent.click(link);
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open Google' })).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves.googleReviewCardDone'))).toEqual(['svc-9']);
+  });
 
-    fireEvent.click(await screen.findByRole('button', { name: '3' }));
-    await screen.findByPlaceholderText(/anything we could do better/i);
-    fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
+  it('a record-less visit card (no serviceRecordId) is dismissed and remembered under its scheduled visit id', async () => {
+    const recordless = { ...card, serviceRecordId: null, scheduledServiceId: 'ss-9' };
+    api.getGoogleReviewCard.mockResolvedValue({ card: recordless });
+    const first = render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss feedback prompt/i }));
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves.googleReviewCardDone'))).toEqual(['ss-9']);
+    first.unmount();
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    await waitFor(() => expect(api.getGoogleReviewCard).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
+  });
 
-    expect(await screen.findByText(/we appreciate the note/i)).toBeInTheDocument();
-    expect(api.submitSatisfaction).toHaveBeenCalledTimes(1); // rating only
+  it('dismissing the card hides it and remembers it', async () => {
+    api.getGoogleReviewCard.mockResolvedValue({ card });
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss feedback prompt/i }));
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves.googleReviewCardDone'))).toEqual(['svc-9']);
+  });
+
+  it('renders nothing when the server offers no card', async () => {
+    api.getGoogleReviewCard.mockResolvedValue({ card: null });
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    await waitFor(() => expect(api.getGoogleReviewCard).toHaveBeenCalled());
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
   });
 });
 

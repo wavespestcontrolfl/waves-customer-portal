@@ -25,7 +25,9 @@ let reentryDefaultsFromEvidence;
 let completionActions;
 let actionsGate;
 let failActions;
+let propertyAreas;
 beforeEach(async () => {
+  propertyAreas = null;
   reentryDefaultsFromEvidence = false;
   delayFlags = false;
   flagResolvers = [];
@@ -54,6 +56,7 @@ beforeEach(async () => {
       if (delayFlags) await new Promise((resolve) => { flagResolvers.push(resolve); });
       data = { flags: { 'lawn-completion-improvements': improvementsEnabled } };
     }
+    if (url.includes('property-areas')) data = propertyAreas || { enabled: false };
     if (url.includes('turf-profile')) data = { profile: { lawn_sqft: 5000 } };
     if (url.includes('lawn-assessment/service')) data = { assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
     if (url.includes('lawn-assessment/history')) data = { history };
@@ -858,7 +861,7 @@ it('an initial plan outage cannot fall back to customer-wide history or static l
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
 });
 
-it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measured-zones'])('a manually added product keeps area and quantity aligned: %s', async mode => {
+it.each(['calculated', 'manual-amount', 'manual-unit', 'spoons', 'partial-zones', 'measured-zones'])('a manually added product keeps area and quantity aligned: %s', async mode => {
   enableDefaults();
   const added = { id: 'manual-product', name: 'Fixture optional product', category: 'adjuvant', rate_unit: 'fl_oz' };
   render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
@@ -870,6 +873,12 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   expect(totals()[2].value).toBe('5');
   if (mode === 'manual-amount') fireEvent.change(totals()[2], { target: { value: '7' } });
   if (mode === 'manual-unit') fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[1], { target: { value: 'gal' } });
+  // spoons: under lawn defaults tsp is a unit change like any other, so the
+  // derived 5 fl oz is withdrawn for the actual, never kept under tsp.
+  if (mode === 'spoons') {
+    fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[1], { target: { value: 'tsp' } });
+    expect(totals()[2].value).toBe('');
+  }
   if (mode === 'measured-zones') {
     fireEvent.change(within(totals()[2].parentElement).getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
     fireEvent.click(screen.getAllByRole('button', { name: 'Back yard', exact: true }).at(-1));
@@ -884,9 +893,43 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe(mode === 'partial-zones' ? '' : mode === 'measured-zones' ? '1000' : '4000'));
   // manual-unit: the derived 5 was fl oz; under the tech's gallons it is
   // withdrawn rather than kept or re-derived (Codex r8 P1).
-  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '', 'partial-zones': '', 'measured-zones': '1' }[mode];
+  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '', spoons: '', 'partial-zones': '', 'measured-zones': '1' }[mode];
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12', '8', expectedAmount]));
   if (mode === 'manual-unit') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('gal');
+  if (mode === 'spoons') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('tsp');
+});
+
+// A row can read in tsp without that pick being a governed edit: the tech
+// picked tsp while the lawn plan was unavailable (defaults off), on a row
+// that follows the visit area. When the plan is back and the visit area
+// moves, the recalculated total stays in spoons: never the fl oz number
+// under the tsp label, a 6x under-record (Codex P1 on #5341).
+it('a hand-added row read in tsp follows a visit-area change in tsp', async () => {
+  enableDefaults();
+  const added = { id: 'manual-product', name: 'Fixture optional product', category: 'adjuvant', rate_unit: 'fl_oz' };
+  const panel = () => <CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />;
+  const view = render(panel());
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Rate')[2], { target: { value: '1' } });
+  const key = `waves_completion_draft_${service.id}`;
+  const savedRow = () => JSON.parse(localStorage.getItem(key) || '{}').selectedProducts?.find((p) => p.productId === added.id);
+  await waitFor(() => expect(Number(savedRow()?.totalAmount)).toBe(5));
+  view.unmount();
+  const draft = JSON.parse(localStorage.getItem(key));
+  draft.selectedProducts = draft.selectedProducts.map((p) => (p.productId === added.id
+    ? { ...p, amountUnit: 'tsp', totalAmount: 30, lawnPlanManualFields: (p.lawnPlanManualFields || []).filter((f) => f !== 'amountUnit') }
+    : p));
+  localStorage.setItem(key, JSON.stringify(draft));
+  render(panel());
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(totals()[2].value).toBe('30');
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[2].value).toBe('24'));
+  expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('tsp');
 });
 
 // A hand-added product is ungoverned: its catalog per-1k rate and the derived
@@ -1891,4 +1934,58 @@ it('changing visits after a partial-zone edit gives the next visit its own full 
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].products.map(row => row.applicationArea)).toEqual(['Front yard, Back yard, Side yards', 'Front yard, Back yard, Side yards']);
+});
+
+
+it('shared reviewed area drives lawn defaults while a partial visit and manual total stay separate', async () => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, beds: null, mosquito: null,
+  } };
+  mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12.6', '8.4']));
+  expect(screen.queryByLabelText('Area for this visit (sq ft)')).toBeNull();
+  fireEvent.change(totals()[0], { target: { value: '8' } });
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['8', '4']));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 2000, explicitVisitArea: true });
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion.treatedSqft).toBe(2000);
+  expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts.method === 'PUT')).toBe(false);
+});
+
+it('a palm feed added by hand never takes or follows the shared lawn area under lawn defaults', async () => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, beds: null, mosquito: null,
+  } };
+  const palm = { id: 'palm-feed', name: 'Fixture 8-0-12 Palm', category: 'fertilizer', application_method: 'granular_broadcast', rate_unit: 'lb', default_rate_per_1000: 1.3 };
+  render(<CompletionPanel service={service} products={[...catalog, palm]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: palm.name } });
+  fireEvent.click(screen.getByText(palm.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('2000'));
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
+});
+
+it.each([null, { sqft: 4200, source: 'imagery', reviewedAt: null }, { sqft: 0, source: 'field', reviewedAt: '2026-09-27' }])('a missing, unreviewed or zero shared lawn area clears planner quantities without an invalid request: %j', async lawn => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn, beds: null, mosquito: null,
+  } };
+  mount();
+  await screen.findByRole('button', { name: 'Review areas' });
+  // The real planner accepts null and rejects 0; server route tests pin that
+  // contract. Do not let the permissive UI fixture hide invalid serialization.
+  await waitFor(() => {
+    const requests = fetch.mock.calls.filter(([url, options]) => url.includes('treatment-plans') && options?.body);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(JSON.parse(requests.at(-1)[1].body).lawnSqft).toBeNull();
+  });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  expect(screen.getByLabelText('Area treated today (sq ft)').value).toBe(lawn?.reviewedAt ? String(lawn.sqft) : '');
 });

@@ -381,6 +381,207 @@ function checkTcpaConsent(extraction, opts = {}) {
 const V2_DECISION_VERSION = 'v2-1.50.0';
 const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0', 'v2-1.47.0', 'v2-1.48.0', 'v2-1.49.0', 'v2-1.50.0'];
 
+// Columns a later pass REFRESHES on an existing route_decisions row. The audit
+// key (call, version, mode, recording) used to make a reprocess a no-op
+// (ON CONFLICT DO NOTHING), so a pass that decided DIFFERENTLY — a dark gate
+// flipped on or off, a rule changed without a version bump — left the first
+// pass's recommendation, blocked reasons and created_at standing, and every
+// "newest decision per call" reader (admin-triage's DISTINCT ON ... created_at
+// DESC, the feedback and resolution readers) kept showing the superseded
+// verdict. A version bump only papered over that for ONE flip direction. The
+// write now refreshes the DECISION columns and created_at on conflict, so the
+// newest row for a call/mode/recording is always the latest pass, whatever the
+// version. Outcome linkage (created_scheduled_service_id, sms_enqueued) is
+// deliberately NOT refreshed: a booking made by an earlier pass still exists,
+// and a held reprocess must not orphan it.
+const ROUTE_DECISION_REFRESH_COLUMNS = [
+  'validator_recommendation',
+  'final_action_taken',
+  'blocked_reasons',
+  'allowed_reasons',
+  'ai_validation_model',
+  'ai_validation_prompt_version',
+  'ai_validation_schema_version',
+  'created_at',
+];
+
+// EVERY writer of route_decisions takes the CALL row lock first, then the decision
+// rows (codex #5446 r1 + r2 P1): FOR UPDATE on the decision rows that exist now
+// cannot stop another writer INSERTING a new decision row, so the verdict writers
+// (withLockedRouteDecisions) lock the call and every route_decisions writer must
+// too, in the same order: call_log -> route_decisions. The writers:
+//   - upsertRouteDecision      (both processor lanes; insert + refresh)
+//   - updateUnreviewedRouteDecisions (the same-run outcome update; also the refresh)
+//   - insertRouteDecisionLocked (the legacy shadow decision writer and the backfill)
+async function lockCallRow(trx, callLogId) {
+  return trx('call_log').where({ id: callLogId }).forUpdate().first('id');
+}
+
+// A route_decisions INSERT that honors the lock order above: lock the call row,
+// then insert (targetless, rolling-deploy safe, exactly as every writer does).
+// Returns the inserted rows (`returning`) or [].
+async function insertRouteDecisionLocked(conn, payload, { returning = null } = {}) {
+  return conn.transaction(async (trx) => {
+    await lockCallRow(trx, payload.call_log_id);
+    const q = trx('route_decisions').insert(payload).onConflict().ignore();
+    return returning ? q.returning(returning) : q;
+  });
+}
+
+// The revision of a decision row as the database sees it: Postgres's `xmin`
+// system column (the id of the transaction that last wrote the row). It changes on
+// EVERY update of the row — a reprocess refresh, the same-run outcome update, any
+// later writer — without anyone remembering to bump a column, and needs no
+// migration. Cast to text so it survives the driver (xid is not a JS number).
+// Equality only; a frozen tuple reads as 2, which only ever errs toward a 409.
+const ROUTE_DECISION_XMIN_TEXT = 'route_decisions.xmin::text';
+const ROUTE_DECISION_REVISION_SQL = `${ROUTE_DECISION_XMIN_TEXT} AS revision`;
+
+// The decisions the auto-routed review LISTS and judges: one definition for the
+// list query (routeDecisionsListedScope, SQL) and the verdict writer's pick of the
+// current decision (isListedRouteDecision, JS), so they cannot disagree (codex
+// #5446 r2 P2).
+const LISTED_ROUTE_DECISION_MODE = 'enforce';
+const isListedRouteDecision = (row) => !!row && row.mode === LISTED_ROUTE_DECISION_MODE
+  && V2_DECISION_VERSIONS.includes(row.decision_version);
+function routeDecisionsListedScope(query) {
+  return query.whereIn('decision_version', V2_DECISION_VERSIONS).where('mode', LISTED_ROUTE_DECISION_MODE);
+}
+
+// Every write to an existing route_decisions row (the refresh above and the
+// processor's same-run outcome update) skips a row a human has reviewed:
+// route_feedback points at the row by id and calibration joins the row's
+// CURRENT action, reasons and outcome to the verdict (codex #5371 r6 + r7 P1).
+// The predicate alone is NOT enough (codex #5371 r9 P1): under READ COMMITTED a
+// verdict can commit between the predicate and the UPDATE landing. Every
+// mutation therefore goes through updateUnreviewedRouteDecisions, which takes
+// the row lock first, and every route_feedback writer takes the SAME row lock
+// (withLockedRouteDecisions) before it inserts, so the two are serialized on the
+// route_decisions row: whichever gets the lock first wins, and the other sees
+// its result (a refresh after a verdict finds the feedback and skips; a verdict
+// after a refresh attaches to the refreshed row it now reads).
+function excludeReviewedDecisions(query, conn) {
+  return query.whereNotExists(function reviewed() {
+    this.select(conn.raw('1')).from('route_feedback').whereRaw('route_feedback.route_decision_id = route_decisions.id');
+  });
+}
+
+// Lock the route_decisions rows matching `scope`, then update those of them a
+// human has not reviewed. Must run inside a transaction (`trx`) so the lock
+// spans both statements; the second statement takes a fresh READ COMMITTED
+// snapshot after the lock is granted, so a verdict committed while this waited
+// is seen by the NOT EXISTS predicate. Returns rows updated.
+async function updateUnreviewedRouteDecisions(trx, scope, patch) {
+  // Call row first, like every route_decisions writer (lockCallRow).
+  if (scope.call_log_id && !Array.isArray(scope.call_log_id)) await lockCallRow(trx, scope.call_log_id);
+  const locked = await trx('route_decisions').where(scope).forUpdate().select('id');
+  if (!locked.length) return 0;
+  return excludeReviewedDecisions(
+    trx('route_decisions').whereIn('id', locked.map((r) => r.id)).update(patch),
+    trx,
+  );
+}
+
+// The ONLY door for route_feedback writes: locks the call's route_decisions rows
+// FOR UPDATE inside a transaction, hands the locked rows to `fn(trx, rows)`, and
+// commits. `fn` picks the decision the verdict attaches to (from the rows it now
+// holds the lock on, so they cannot change underneath it) and writes the
+// route_feedback row on `trx`. Optional narrowing: `decisionId` (a specific row
+// the reviewer named) and `mode`.
+async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mode = null }, fn) {
+  return conn.transaction(async (trx) => {
+    // Lock the CALL row first (codex #5446 r1 P1): FOR UPDATE on the decision rows
+    // that exist now cannot stop a reprocess from INSERTING a new decision row (a
+    // new version or recording key) after this snapshot, and a displayed-decision
+    // check against a stale snapshot would pass. The fenced upsertRouteDecision
+    // takes call_log FOR UPDATE before it touches route_decisions, so every writer
+    // serializes on the call, in the same order: call_log -> route_decisions.
+    await lockCallRow(trx, callLogId);
+    const q = trx('route_decisions').where({ call_log_id: callLogId }).forUpdate();
+    if (decisionId) q.where({ id: decisionId });
+    if (mode) q.where({ mode });
+    // + the revision (xmin), read under the lock, for the displayed-revision check
+    const rows = await q.select('*', trx.raw(ROUTE_DECISION_REVISION_SQL));
+    return fn(trx, rows);
+  });
+}
+
+// Which decision does a verdict attach to? The reviewer judged a DISPLAYED
+// decision; a reprocess since the page loaded may have written a newer one, and a
+// verdict silently landing on it would judge a decision nobody looked at. Called
+// with the call's decision rows AFTER the row lock (withLockedRouteDecisions) and
+// `newestOf(rows)` (each reader's own "the current decision" pick):
+//   - no displayed id (an older client): today's behavior, the newest row;
+//   - the displayed row is not among the locked rows: { missing: true };
+//   - the displayed row is no longer the newest (or is a different decision than
+//     the one the pick names): { stale: true } — the caller answers 409 and the
+//     client reloads;
+//   - the displayed row's REVISION moved: a decision row is updated IN PLACE after
+//     it is displayed — a reprocess refresh (same id; action, reasons replaced) or
+//     the same-run outcome update (booked / skipped) — so the id alone cannot tell
+//     the reviewer's evidence from a changed one. The client sends the `revision`
+//     (xmin) it displayed and a different one under the lock is { stale: true }
+//     too. Absent (an older client): the id check alone;
+//   - otherwise the displayed row.
+function resolveDisplayedRouteDecision(rows, displayedId, newestOf, displayedRevision = null) {
+  const newest = newestOf(rows) || null;
+  if (!displayedId) return { decision: newest };
+  const shown = rows.find((r) => r.id === displayedId);
+  if (!shown) return { missing: true };
+  if (!newest || newest.id !== shown.id) return { stale: true, decision: newest };
+  if (displayedRevision && String(shown.revision) !== String(displayedRevision)) return { stale: true, decision: newest };
+  return { decision: shown };
+}
+const STALE_ROUTE_DECISION = 'STALE_ROUTE_DECISION';
+
+// Insert-or-refresh in two statements, so the INSERT stays TARGETLESS
+// (ON CONFLICT DO NOTHING names no constraint: tolerant of BOTH the legacy
+// three-column constraint and the recording-keyed index during a rolling
+// deploy, Codex #3736 r9 P1 — Postgres cannot do a targetless DO UPDATE):
+//   1. INSERT ... ON CONFLICT DO NOTHING (the first pass for a key lands here);
+//   2. a keyed, ROW-LOCKED UPDATE of the refresh columns (a later pass lands
+//      here) — see updateUnreviewedRouteDecisions.
+// `fence` ({ callLogId, processingToken }) makes BOTH statements conditional on
+// this pass still owning the call's processing_token: the ownership row is
+// locked FOR UPDATE and re-read in the same transaction as the writes (the
+// processor's own fence shape), so a superseded worker can neither insert a
+// first decision nor overwrite a newer pass's (codex #5371 r8 P1). A fence that
+// was ASKED FOR but is incomplete fails closed: nothing is written. Refreshes
+// also skip a decision a human already reviewed. The unfenced path runs in a
+// transaction too: the row lock needs one.
+// Returns rows refreshed / 0 / null (null = fence not held: nothing written).
+async function upsertRouteDecision(conn, decision, fence = null) {
+  const write = async (c) => {
+    // Call row first (lockCallRow): the unfenced path (audit/backfill) takes the
+    // lock too; the fenced path already holds it from the ownership read below.
+    await lockCallRow(c, decision.call_log_id);
+    await c('route_decisions').insert(decision).onConflict().ignore();
+    const refresh = {};
+    for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
+    // A REVIEWED decision is never refreshed (codex #5371 r6 P1): route_feedback
+    // points at a decision row by id and calibration joins that row's CURRENT
+    // action / reasons to the human's verdict, so mutating a reviewed row would
+    // re-attach an old verdict to a decision the reviewer never saw.
+    return updateUnreviewedRouteDecisions(c, {
+      call_log_id: decision.call_log_id,
+      decision_version: decision.decision_version,
+      mode: decision.mode,
+      recording_sid: decision.recording_sid,
+    }, refresh);
+  };
+  if (!fence) return conn.transaction(write);
+  if (!fence.callLogId || !fence.processingToken) return null;
+  return conn.transaction(async (trx) => {
+    const owned = await trx('call_log')
+      .where({ id: fence.callLogId })
+      .where('processing_token', fence.processingToken)
+      .forUpdate()
+      .first('id');
+    if (!owned) return null;
+    return write(trx);
+  });
+}
+
 function buildRouteDecision({
   callLogId,
   extraction,
@@ -837,12 +1038,25 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 ]);
 
 module.exports = {
+  excludeReviewedDecisions,
+  updateUnreviewedRouteDecisions,
+  withLockedRouteDecisions,
+  lockCallRow,
+  insertRouteDecisionLocked,
+  ROUTE_DECISION_XMIN_TEXT,
+  ROUTE_DECISION_REVISION_SQL,
+  isListedRouteDecision,
+  routeDecisionsListedScope,
+  resolveDisplayedRouteDecision,
+  STALE_ROUTE_DECISION,
   SUPERSEDE_KEPT_REASON_CODES,
   onFileAddressSnapshot,
   computeAppointmentIdempotencyKey,
   computeAddressHash,
   checkTcpaConsent,
   buildRouteDecision,
+  upsertRouteDecision,
+  ROUTE_DECISION_REFRESH_COLUMNS,
   buildTriageItem,
   V2_DECISION_VERSION,
   V2_DECISION_VERSIONS,

@@ -290,6 +290,94 @@ function loadOpsRules() {
   return docs;
 }
 
+// ── species / species_tech: the owner-approved species catalog ─────
+// server/data/species-catalog-v1 is the fact-checked, UF/IFAS-cited store
+// that wins every species disagreement (owner ruling 2026-09-28). Two
+// sources split it by audience so a customer-facing reader can allowlist
+// `species` alone: `species` carries only the customer copy (traits, what
+// it means, verdict, safety, season, look-alikes, citations);
+// `species_tech` carries tech_notes (products, methods) for staff readers.
+// Approved entries only — isApproved() re-checks the approval hash, so a
+// draft or an entry edited after approval never reaches an agent.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function monthList(months) {
+  const valid = [...new Set((Array.isArray(months) ? months : []).filter((m) => Number.isInteger(m) && m >= 1 && m <= 12))];
+  if (valid.length === 12) return 'year-round';
+  return valid.sort((a, b) => a - b).map((m) => MONTHS[m - 1]).join(', ');
+}
+
+function approvedSpeciesEntries() {
+  const catalog = require('../species-catalog');
+  const { isApproved } = require('../species-catalog-approval');
+  return catalog.listEntries().filter(isApproved);
+}
+
+const speciesTitle = (e) => (e.scientific_name ? `${e.common_name} (${e.scientific_name})` : e.common_name);
+
+function speciesMetadata(e) {
+  return { slug: e.slug, kind: e.kind, group: e.group, verdict: e.verdict || null, sources: Array.isArray(e.sources) ? e.sources : [] };
+}
+
+function renderSpeciesCustomer(e) {
+  const catalog = require('../species-catalog');
+  const { isApproved } = require('../species-catalog-approval');
+  const names = [...new Set([...(e.aliases || []), ...(e.aka || [])].map(clean).filter(Boolean))];
+  const flags = Object.entries(e.safety || {}).filter(([, v]) => v === true).map(([k]) => k.replace(/_/g, ' '));
+  const lookAlikes = (e.look_alikes || [])
+    .map((l) => {
+      // The target's own fields count only while IT is approved: this
+      // entry's hash covers the slug and difference, not the target's name.
+      const other = catalog.getEntry(l.slug);
+      return l.difference && other && isApproved(other) ? `${other.common_name}: ${l.difference}` : '';
+    })
+    .filter(Boolean);
+  const service = e.service && e.service.label
+    ? `${e.service.label}${e.service.inspection_first ? ' (inspection first)' : ''}`
+    : '';
+  // Authoritative fields first: search results carry a 500-character
+  // snippet, so verdict, safety and meaning must lead the document.
+  return joinParts([
+    e.verdict ? `Verdict: ${e.verdict}${e.urgency ? ` (urgency ${e.urgency})` : ''}` : '',
+    e.safety_line ? `Safety: ${e.safety_line}` : '',
+    flags.length ? `Safety flags: ${flags.join(', ')}` : '',
+    e.copy && e.copy.what_it_means ? `What it means: ${e.copy.what_it_means}` : '',
+    service ? `Waves service: ${service}` : '',
+    monthList(e.active_months) ? `Active: ${monthList(e.active_months)}${monthList(e.peak_months) ? `; peak ${monthList(e.peak_months)}` : ''}` : '',
+    names.length ? `Also called: ${names.join(', ')}` : '',
+    e.site_category ? `Category: ${e.site_category}` : '',
+    (e.traits || []).length ? `How to recognize it: ${e.traits.join('; ')}` : '',
+    e.copy && e.copy.fact ? `Fact: ${e.copy.fact}` : '',
+    lookAlikes.length ? `Look-alikes: ${lookAlikes.join(' ')}` : '',
+    (e.sources || []).length ? `Sources: ${e.sources.join(' ')}` : '',
+  ]);
+}
+
+function loadSpeciesCatalog() {
+  return approvedSpeciesEntries().map((e) => ({
+    sourceId: e.slug,
+    title: speciesTitle(e),
+    content: renderSpeciesCustomer(e),
+    metadata: { ...speciesMetadata(e), audience: 'customer' },
+    sourceUpdatedAt: null,
+  }));
+}
+
+function renderSpeciesTech(e) {
+  return joinParts([`Tech notes: ${e.tech_notes}`, (e.sources || []).length ? `Sources: ${e.sources.join(' ')}` : '']);
+}
+
+function loadSpeciesTechNotes() {
+  return approvedSpeciesEntries()
+    .filter((e) => clean(e.tech_notes))
+    .map((e) => ({
+      sourceId: e.slug,
+      title: `${speciesTitle(e)} — tech notes`,
+      content: renderSpeciesTech(e),
+      metadata: { ...speciesMetadata(e), audience: 'staff' },
+      sourceUpdatedAt: null,
+    }));
+}
+
 const CONNECTORS = [
   { source: 'wiki', load: loadWiki },
   { source: 'kb', load: loadKb },
@@ -302,6 +390,8 @@ const CONNECTORS = [
   { source: 'ops_rule', load: loadOpsRules },
   { source: 'resolution', load: loadResolutions },
   { source: 'call_research', load: loadCallResearch },
+  { source: 'species', load: loadSpeciesCatalog },
+  { source: 'species_tech', load: loadSpeciesTechNotes },
 ];
 
 async function loadCorpus(connector) {
@@ -314,4 +404,4 @@ async function loadCorpus(connector) {
   }
 }
 
-module.exports = { CONNECTORS, loadCorpus };
+module.exports = { CONNECTORS, loadCorpus, speciesTitle, renderSpeciesCustomer, renderSpeciesTech };

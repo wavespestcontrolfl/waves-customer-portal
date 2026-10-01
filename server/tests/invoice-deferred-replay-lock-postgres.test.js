@@ -43,6 +43,10 @@ postgres('queued invoice notice replay holds the invoice lock (PostgreSQL)', () 
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
     await mockPg.schema.createTable('customers', (table) => { table.uuid('id').primary(); });
+    // The dispute-hold read (collections/collection-hold.js) - no rows: no active hold.
+    await mockPg.schema.createTable('collections_flags', (table) => {
+      table.increments('id'); table.uuid('customer_id'); table.text('flag'); table.text('reason'); table.timestamp('released_at', { useTz: true });
+    });
     await mockPg.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.text('status'); table.uuid('source_estimate_id');
     });

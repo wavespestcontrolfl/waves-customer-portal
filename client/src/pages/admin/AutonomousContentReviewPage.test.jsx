@@ -12,7 +12,11 @@ function item(id = 'blog-1') {
     run: { id: `run-${revision}`, gate_summary: { quality_ok: true, uniqueness_ok: true, topic_ok: false,
       topic_findings: [{ code: 'TOPIC_ENTITY_OWNED', message: 'Another article owns this topic.' }] } },
     draft: { title: 'Seasonal ants', body_preview: `Draft revision ${revision}`, body: `Full draft revision ${revision}` },
-    review_actions: { can_approve_named_competitor: true, can_requeue: true, can_dismiss: true },
+    // Mirrors the server: an engine-managed blog row offers no decisions;
+    // other lanes carry their usual review actions.
+    review_actions: id === 'other-1'
+      ? { can_approve_named_competitor: true, can_requeue: true, can_dismiss: true }
+      : { can_approve_named_competitor: false, can_requeue: false, can_dismiss: false },
   };
 }
 function linkItem(id = 'link-1', detailRevision = 1) {
@@ -67,6 +71,23 @@ describe('autonomous blog monitor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Content' }));
     await screen.findByText('1–50 of 51');
     expect(screen.queryByRole('button', { name: 'Requeue' })).toBeNull();
+  });
+  it('an interrupted blog approval offers Dismiss only, and submits it', async () => {
+    const hold = (id) => ({ ...item(id), skip_reason: 'named_competitor_publish_interrupted',
+      review_actions: { can_requeue: false, can_dismiss: true, can_approve_named_competitor: false } });
+    fetch.mockImplementation(async (url, opts) => {
+      let data = { items: [], counts: {}, totals: {} };
+      if (opts?.method === 'POST') data = { item: { ...hold('blog-1'), status: 'skipped', review_actions: {} } };
+      else if (url.includes('/autonomous/review?')) data = { items: [hold('blog-1')], counts: { pending_review: 1 }, total: 1 };
+      else if (url.includes('/autonomous/review/')) data = { item: hold('blog-1') };
+      return { ok: true, json: async () => data };
+    });
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText(/may already be on GitHub/);
+    expect(screen.queryByRole('button', { name: 'Requeue' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve & publish' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    await waitFor(() => expect(fetch.mock.calls.some(([url, opts]) => url.includes('/blog-1/decision') && opts?.method === 'POST' && JSON.parse(opts.body).decision === 'dismiss')).toBe(true));
   });
   it('refreshes the selected detail even when its opportunity id is unchanged', async () => {
     render(<AutonomousContentReviewPage embedded />);

@@ -1073,8 +1073,15 @@ class CollectionsConversation {
       const saysUnknownHere = /\b(wrong number|never heard of|no (?:one|body) (?:named|called|by that name|here)|no \w+ (?:at|on) this (?:number|phone)|don'?t know (?:a |any )?(?:him|her|them|that (?:person|name)|who that is)|no such person|doesn'?t live here|not (?:his|her|their) (?:number|phone)|(?:just )?(?:got|took over) this (?:number|phone))\b/i
         .test(this._lastCallerText());
       if (input.number_unknown === true && saysUnknownHere) {
+        // Suppress the number this call was DIALED to (it reached the
+        // stranger), falling back to the customer's phone only when the
+        // call row carried none — the canonical messaging_suppression row
+        // stops every other SMS rail, not just the collections lane (B14).
         const wn = await flags.flagWrongNumber(this._ctx.customer.id, {
           detail: 'answerer said the customer is not known at this number',
+          phone: this._ctx.dialedPhone || this._ctx.customer.phone || null,
+          callLogId: this._ctx.callLogId,
+          capturedBody: this._lastCallerText(),
         }).catch(() => ({ ok: false }));
         if (!wn || wn.ok === false) {
           // The wrong-number report must survive (gh prb-r6): the durable
@@ -1586,6 +1593,10 @@ class CollectionsConversation {
       excludeCollectionCaseId: this._ctx.caseId,
       source: 'collections_voice_paylink',
       logTag: 'collections-voice-paylink',
+      // The customer asked for this link on the call (the fence above proved their agreement),
+      // so it is not automated follow-up and the dispute-hold wait does not apply; the policy
+      // verdict still does. The send below carries the same exemption.
+      holdExempt: 'customer',
     });
     if (!permitted) return 'A text cannot be sent to this customer. Offer the office number for payment instead.';
 
@@ -1642,7 +1653,7 @@ class CollectionsConversation {
       // call in that window must not double-send. Only a PROVIDER-REPORTED
       // failure re-opens it; ambiguous outcomes (throw, timeout) keep it.
       this.payLinkSent = true;
-      const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
+      const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, holdExempt: 'customer' });
       if (result && result.covered_by_credit) {
         // Account credit settled the ANCHOR invoice — nothing was texted.
         // The balance is the account's (hook r3 P1): re-read the eligible

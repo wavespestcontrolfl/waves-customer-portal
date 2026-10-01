@@ -94,4 +94,79 @@ function suppressionCoversColumnSql(suppressionColumn, recipientColumn) {
     + ` AND ${GOOGLE_MAILBOX_SQL.mailbox(suppressionColumn)} = ${GOOGLE_MAILBOX_SQL.mailbox(recipientColumn)}))`;
 }
 
-module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, GOOGLE_DOT_INSENSITIVE_DOMAINS };
+/**
+ * Which newsletter_subscribers rows a bounce lands on. Takes a fresh
+ * `db('newsletter_subscribers')` builder and the delivery's subscriber id and
+ * mailed address.
+ *
+ * - No recorded mailed address: the plain id match (nothing to fence on).
+ * - A Google mailed address: EVERY row on that Gmail mailbox (dots, +tag,
+ *   googlemail spellings), matched by identity and not by id. The inbox is
+ *   what bounced, so every subscriber row for it takes the bounce, and a late
+ *   bounce for one spelling still lands when the row was stored under another.
+ *   An address on another mailbox (a merged-away typo) still does not match.
+ * - A Google address with invalid dot placement: treated like any other
+ *   address (exact fence), never widened to the valid mailbox.
+ * - Any other address: the delivery's row, fenced to the exact LOWER/TRIM
+ *   address, as before (dots and +tags are significant off Google).
+ *
+ * Bounce writes only. Opt-outs stay unfenced at their call sites.
+ */
+function subscriberRowsForBounce(query, subscriberId, mailedEmail) {
+  const mailed = String(mailedEmail || '').trim().toLowerCase();
+  const { GOOGLE_MAILBOX_SQL } = require('./customer-comms-lock');
+  // A malformed Gmail address (.john@, jo..hn@, two '@') is not an alias of
+  // the valid mailbox; Gmail rejects it, which is often why it bounced. It
+  // keeps the exact-address fence below.
+  const mailbox = bounceMailbox(mailed);
+  if (mailbox) {
+    const column = 'TRIM(email)';
+    const [wellFormedSql, wellFormedBindings] = wellFormedAddressSql(column);
+    return query.whereRaw(
+      // The same well-formedness rule on the stored side: a malformed stored
+      // spelling is not an alias of the valid mailbox either.
+      `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?
+        AND ${wellFormedSql})`,
+      [mailbox.split('@')[0], ...wellFormedBindings],
+    );
+  }
+  // No subscriber id (the delivery lost it in a merge) and no Gmail mailbox
+  // to match by: nothing to bounce-count.
+  if (!subscriberId) return query.whereRaw('FALSE');
+  const byId = query.where({ id: subscriberId });
+  return mailed ? byId.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : byId;
+}
+
+// ONE rule for "a well-formed Gmail address the mailbox widening may apply
+// to", JS and SQL built from the same pattern: an ALLOW-list, not a list of
+// bad shapes. The mailbox name (before any +tag) is letters and digits with
+// single interior dots, which is all Gmail accepts; then an optional +tag;
+// then exactly one '@' and a Google domain. Anything else — ".john@",
+// "jo..hn@", "john.+promo@", "john@gmail.com@invalid.test" — is not an alias
+// of a valid mailbox and keeps the exact-address fence (codex #5413 r1-r4).
+const GMAIL_WELL_FORMED = '^[a-z0-9]+(\\.[a-z0-9]+)*(\\+[^@[:space:]]*)?@(gmail|googlemail)\\.com$';
+const GMAIL_WELL_FORMED_RE = new RegExp(GMAIL_WELL_FORMED.replace('[:space:]', '\\s'));
+
+function wellFormedAddress(email) {
+  return GMAIL_WELL_FORMED_RE.test(String(email || ''));
+}
+
+// Bound, never inlined: the pattern holds '?', which knex reads as a
+// placeholder. Returns [sql, bindings].
+function wellFormedAddressSql(column) {
+  return [`(LOWER(${column}) ~ ?)`, [GMAIL_WELL_FORMED]];
+}
+
+/**
+ * The Gmail mailbox a bounce for this mailed address widens to, or null
+ * (exact-address fence). Callers use it to decide whether a delivery whose
+ * subscriber id was cleared by a merge can still reach the surviving row.
+ */
+function bounceMailbox(mailedEmail) {
+  const mailed = String(mailedEmail || '').trim().toLowerCase();
+  if (!mailed || !wellFormedAddress(mailed)) return null;
+  const { googleMailboxIdentity } = require('./customer-comms-lock');
+  return googleMailboxIdentity(mailed);
+}
+
+module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, subscriberRowsForBounce, bounceMailbox, GOOGLE_DOT_INSENSITIVE_DOMAINS };

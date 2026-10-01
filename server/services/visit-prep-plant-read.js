@@ -10,14 +10,15 @@
  * same as the pest read.
  *
  * Trigger rule, mirroring the pest read's: the visit's service line
- * decides, via visit-prep-plant-applicability.js's plantSubjectForStop — a
- * stop whose live members include a strict lawn-only or tree & shrub-only
- * service type (never WDO, termite, or a Waves Assessment — those carry
- * neither token) is read for that subject; a stop that is ALSO a pest stop
- * (visit-prep-pest-applicability.js isPestStop) defers entirely to the
- * pest read — "pest wins" (own design decision, documented in
- * visit-prep-plant-applicability.js) — never both engines on one
- * submission. Anything else is 'unsupported': no engine call, no cap spent.
+ * decides, via visit-prep-read-key.js — a stop whose live members include a
+ * strict lawn-only or tree & shrub-only service type (never WDO, termite, or
+ * a Waves Assessment — those carry neither token) is read for that subject.
+ * A stop that is ALSO a pest stop (a combined Lawn & Pest label, or separate
+ * pest and lawn members) gets BOTH reads under one claim from
+ * visit-prep-combo-read.js while both gates are live (owner ruling
+ * 2026-09-30, replacing "pest wins, never both"); this engine reads such a
+ * stop alone only while the pest gate is dark. Anything else is
+ * 'unsupported': no engine call, no cap spent.
  *
  * Dispatched by visit-prep-read-dispatch.js — the ONE place that picks an
  * engine for a submission (from createVisitPrepSubmission, fire-and-forget
@@ -43,7 +44,7 @@ const logger = require('./logger');
 const PhotoService = require('./photos');
 const { identifyPlantV2 } = require('./photo-id-v2/plant-engine');
 const { visitPrepPlantReadLive } = require('../config/feature-gates');
-const { plantSubjectForStop } = require('./visit-prep-plant-applicability');
+const { currentReadKey, engineOfKey, subjectOfKey } = require('./visit-prep-read-key');
 
 // The daily cap and the locked claim are the SAME ones the pest read uses
 // (visit-prep-read-claim.js): one cap across both engines.
@@ -52,15 +53,24 @@ const {
   UNCLAIMED_STATUSES,
 } = require('./visit-prep-read-claim');
 
+// 'lawn' | 'tree_shrub' when the router's key for the stop, with the gates as
+// they are NOW, is this engine's own 'plant:<subject>' (a combined lawn +
+// pest stop with both gates live is the combo read's instead; a stop with a
+// pest part and the pest gate dark is read here alone); null otherwise.
+async function plantApplicable(svc, conn) {
+  const key = await currentReadKey(svc, conn);
+  return engineOfKey(key) === 'plant' ? subjectOfKey(key) : null;
+}
+
 // 'lawn' | 'tree_shrub' | 'unsupported'.
 async function resolveApplicability(svc, conn) {
-  return (await plantSubjectForStop(svc, conn)) || 'unsupported';
+  return (await plantApplicable(svc, conn)) || 'unsupported';
 }
 
 // Returns { claimed: true, subject } | 'unsupported' | 'refused'.
 async function claimReadSlot(conn, submissionId, svc, { now = new Date(), expectStatus } = {}) {
   const out = await claimSharedReadSlot(conn, submissionId, svc, {
-    applicable: (stop, trx) => plantSubjectForStop(stop, trx),
+    applicable: plantApplicable,
     // read_result carries the engine marker from the claim on, so the tech
     // display can tell a plant read from a pest one (Codex #5320 r1 P2).
     // ...with the subject it was claimed for, so a pending lawn read on a
@@ -180,7 +190,7 @@ async function settle(args, subject, result) {
     : { read_status: 'failed', read_result: JSON.stringify({ ...PLANT_MARKER, subject_type: subject }) };
   try {
     const settled = await settleClaimedRead(conn, submissionId, svc, {
-      applicable: (stop, trx) => plantSubjectForStop(stop, trx),
+      applicable: plantApplicable,
       matches: (now) => now === subject,
       store: (trx) => trx('visit_prep_submissions').where({ id: submissionId }).update(patch),
     });

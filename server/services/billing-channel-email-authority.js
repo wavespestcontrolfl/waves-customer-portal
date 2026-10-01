@@ -78,7 +78,7 @@ async function readContextRows(input, database, lockRecipients, lockedInvoice) {
   return { customer, prefs, invoice };
 }
 
-async function contextBlock(input, category, { customer, prefs, invoice }, database) {
+async function contextBlock(input, category, { customer, prefs, invoice }, database, bypassPreferences = false) {
   if (!customer || customer.deleted_at) return { error: blocked('CUSTOMER_NOT_FOUND', 'Customer is unavailable') };
   // Only an explicit billing channel choice without Email refuses. A
   // customer who never chose (no explicit selection for this category, or no
@@ -86,7 +86,9 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
   // sender follows, which this authority now serves too (owner ruling
   // 2026-09-27). The routed Email leg only exists once Email was chosen, so
   // it never reaches this with no choice.
-  if (billingChannelAllowed(prefs || {}, category, 'email') === false) {
+  // `bypassPreferences` is the deliberate OPERATOR send only (customer-dunning send-now): it skips this one gate and
+  // nothing else - recipient, suppression, hold and ownership checks all still run. Every other caller leaves it off.
+  if (!bypassPreferences && billingChannelAllowed(prefs || {}, category, 'email') === false) {
     // This fires both on the FIRST read (loadBillingEmailContext at the top
     // of sendBillingChannelEmail) and on the LOCKED recheck immediately
     // before the provider handoff (verifyAndDispatch below). Only the
@@ -120,13 +122,13 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
   return null;
 }
 
-async function loadBillingEmailContext(input, database = db, { lockRecipients = false, invoice: lockedInvoice = null } = {}) {
+async function loadBillingEmailContext(input, database = db, { lockRecipients = false, invoice: lockedInvoice = null, bypassPreferences = false } = {}) {
   const category = clean(input?.metadata?.billingDeliveryCategory);
   if (!CATEGORY_LABELS[category]) return { error: blocked('INVALID_BILLING_CATEGORY', 'Unknown billing delivery category') };
   if (!input?.customerId) return { error: blocked('CUSTOMER_REQUIRED', 'Billing email requires a customer') };
 
   const rows = await readContextRows(input, database, lockRecipients, lockedInvoice);
-  const invalid = await contextBlock(input, category, rows, database);
+  const invalid = await contextBlock(input, category, rows, database, bypassPreferences);
   if (invalid) return invalid;
 
   const [recipient] = getInvoiceEmailRecipients(rows.customer, rows.prefs || {}).filter((entry) => isEmailLike(entry.email));
@@ -191,11 +193,35 @@ async function suppressionBlock(trx, recipientEmail, category, customer, templat
   return blocked('EMAIL_SUPPRESSED', `Suppressed: ${detail || 'active suppression'}`);
 }
 
+// Collections DISPUTE hold at the email provider boundary (owner ruling 2026-09-30). The machine-
+// initiated dunning emails (collection-hold HOLD_GATED_EMAIL_TEMPLATES: the Day 3-90 follow-up
+// ladder, the late-payment reminders, the bank-verification re-nudge, the previsit balance
+// reminder) carry a pay / billing link, and their senders consult the hold early and then await
+// rendering, credit application and ledger writes before reaching here. This re-reads it on the
+// locked handle, twice: before dispatch and again right before the provider request. The refusal
+// is retryable and never terminal - the owed touch stays due and goes out after the release; a
+// lookup that cannot answer holds it too (fail closed). Payer-billed invoices and the explicit
+// operator / customer exemptions skip it.
+async function dunningHoldBlock({ input, database, invoice, templateKey, holdExempt }) {
+  const collectionHold = require('./collections/collection-hold');
+  if (!templateKey || !collectionHold.HOLD_GATED_EMAIL_TEMPLATES.has(templateKey)) return null;
+  if (invoice?.payer_id || !input?.customerId) return null;
+  // A trusted operator / customer exemption skips a plain dispute hold only; a wrong-number /
+  // wrong-party fallback hold still stops the pay link.
+  const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database,
+    { ignoreDisputeHold: collectionHold.holdExemptionApplies(holdExempt) });
+  if (!held.held) return null;
+  return blocked(collectionHold.HOLD_DEFER_CODE, held.reason === 'lookup_failed'
+    ? 'The collections dispute-hold lookup failed; billing email deferred'
+    : 'Customer has an active collections dispute hold; billing email deferred until it is released',
+  { retryable: true });
+}
+
 async function verifyAndDispatch({
   input, trx, invoice, phone, recipientEmail, authorityRecipientEmail,
-  templateKey, emailSuppression, preSendCheck, dispatch, state,
+  templateKey, emailSuppression, preSendCheck, dispatch, state, holdExempt = null, operatorBypassPreferences = false,
 }) {
-  const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
+  const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice, bypassPreferences: operatorBypassPreferences });
   if (fresh.error) state.boundaryBlock = fresh.error;
   else if (toE164(clean(fresh.customer.phone)) !== phone) {
     state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
@@ -208,6 +234,9 @@ async function verifyAndDispatch({
       { retryable: true },
     );
   }
+  if (!state.boundaryBlock) {
+    state.boundaryBlock = await dunningHoldBlock({ input, database: trx, invoice, templateKey, holdExempt });
+  }
   if (!state.boundaryBlock) state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (!state.boundaryBlock) {
     state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer,
@@ -219,7 +248,9 @@ async function verifyAndDispatch({
   // preparation step. Once it passes, sendOne reaches fetch without another
   // await while this transaction and its locks remain held.
   const providerBoundaryCheck = async ({ database } = {}) => {
-    state.boundaryBlock = await preSendBlock(preSendCheck, database || trx, true);
+    state.boundaryBlock = await dunningHoldBlock({
+      input, database: database || trx, invoice, templateKey, holdExempt,
+    }) || await preSendBlock(preSendCheck, database || trx, true);
     if (state.boundaryBlock) {
       const refusal = new Error(state.boundaryBlock.reason);
       refusal.code = state.boundaryBlock.code;
@@ -239,7 +270,7 @@ async function verifyAndDispatch({
 
 async function dispatchUnderBillingEmailAuthority({
   input, recipientEmail, authorityRecipientEmail = recipientEmail,
-  templateKey = null, emailSuppression = null, preSendCheck, dispatch, state,
+  templateKey = null, emailSuppression = null, preSendCheck, dispatch, state, holdExempt = null, operatorBypassPreferences = false,
 }) {
   try {
     const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
@@ -250,7 +281,7 @@ async function dispatchUnderBillingEmailAuthority({
       if (phone) await lockSmsPhone(trx, phone);
       const verifiedDispatch = (database, invoice) => verifyAndDispatch({
         input, trx: database, invoice, phone, recipientEmail, authorityRecipientEmail,
-        templateKey, emailSuppression, preSendCheck, dispatch, state,
+        templateKey, emailSuppression, preSendCheck, dispatch, state, holdExempt, operatorBypassPreferences,
       });
       return input.invoiceId
         ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)

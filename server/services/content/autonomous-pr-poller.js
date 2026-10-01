@@ -476,6 +476,17 @@ function relatedPostSurfacePaths(content, fmHead, frozen) {
   return [...new Set([...rail, ...linked])];
 }
 
+// The registry is only as fresh as its daily sweep; each host's deployed
+// sitemap is checked too, so a post unpublished since then withholds. An
+// unreadable sitemap withholds this tick (transient).
+async function relatedPostsSitemapVerdict(paths, hosts, { getSitemapLiveRelatedPaths, normalizePathForCompare }) {
+  const inSitemap = await getSitemapLiveRelatedPaths(paths, hosts ? { hosts } : {});
+  if (inSitemap === null) return { ok: false, transient: true, reason: 'related-post sitemap recheck could not read a publish host\'s sitemap' };
+  const unlisted = paths.filter((p) => !inSitemap.has(normalizePathForCompare(p)));
+  if (unlisted.length) return { ok: false, reason: `related posts no longer in the live sitemap: ${unlisted.join(', ')}` };
+  return { ok: true };
+}
+
 async function relatedPostsLivenessVerdict(head, frozen = { paths: [] }) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
   if (frozen?.unavailable) return { ok: false, transient: true, reason: 'related-post brief lookup failed' };
@@ -498,14 +509,14 @@ async function relatedPostsLivenessVerdict(head, frozen = { paths: [] }) {
   }
   if (!paths.length) return { ok: true };
   try {
-    const { getLiveRelatedPaths, _internals } = require('./related-posts');
+    const { getLiveRelatedPaths, getSitemapLiveRelatedPaths, _internals } = require('./related-posts');
     const hosts = Array.isArray(fmHead.domains) && fmHead.domains.length ? fmHead.domains : frozen?.hosts;
     const live = await getLiveRelatedPaths(paths, hosts ? { hosts } : {});
     const stale = paths.filter((p) => !live.has(_internals.normalizePathForCompare(p)));
     if (stale.length) {
       return { ok: false, reason: `frontmatter related_posts no longer live: ${stale.join(', ')}` };
     }
-    return { ok: true };
+    return await relatedPostsSitemapVerdict(paths, hosts, { getSitemapLiveRelatedPaths, normalizePathForCompare: _internals.normalizePathForCompare });
   } catch (err) {
     return { ok: false, transient: true, reason: `related-post liveness recheck failed: ${err.message}` };
   }

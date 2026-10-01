@@ -202,12 +202,35 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
       // weekly plan after a move; the form re-sends every loaded field, so
       // an unchanged value proves nothing (same lesson as the county —
       // codex #3565 gh-r32/r41).
-      const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
+      const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type', 'lawn_sqft');
       const rows = await trx('customer_turf_profiles')
         .insert(insertRow)
         .onConflict('customer_id')
         .merge({ ...fields, updated_at: new Date() })
         .returning('*');
+      const nextLawnSqft = fields.lawn_sqft == null ? null : Number(fields.lawn_sqft);
+      if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft !== (priorRow?.lawn_sqft ?? null)
+        // Ships dark: before the service-areas migration there is no review
+        // to withdraw and the column predicate below would error.
+        && await require('../services/property-service-areas').hasAreaMeasurementsColumn(trx)) {
+        // This older editor does not review service areas. A changed turf
+        // amount withdraws any lawn review (its stamp must not sit on a
+        // different number) and moves the lawn mirrors — property and
+        // customer property_sqft — to the same amount on every edit, so no
+        // reader keeps pricing a former value. Only the primary property at
+        // the customer's own address carries those mirrors (the shared
+        // editor's rule). Same customer fence as the shared editor.
+        const { addressKey } = require('../services/customer-properties');
+        const customer = await trx('customers').where({ id: customerId }).first();
+        const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
+        if (primary && customer && addressKey(customer) === addressKey(primary)) {
+          await trx('customer_properties').where({ id: primary.id }).update({
+            service_area_measurements: trx.raw("service_area_measurements #- '{areas,lawn}'"),
+            property_sqft: nextLawnSqft, updated_at: trx.fn.now(),
+          });
+          await trx('customers').where({ id: customerId }).update({ property_sqft: nextLawnSqft, updated_at: trx.fn.now() });
+        }
+      }
       // The fence already holds the prefs advisory lock, so this read is
       // serialized against the address fan-out's stamp write (gh-r44).
       const prefsRow = await trx('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at');

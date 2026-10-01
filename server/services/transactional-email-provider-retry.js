@@ -328,6 +328,28 @@ async function markRetryFailure(message, err, now = new Date(), { rejectedAfterS
   return updated || null;
 }
 
+// A queued row held by a collections dispute hold before any provider request:
+// back to the retry queue one hold interval out with the attempt this claim
+// consumed REFUNDED, so a long dispute never exhausts the ladder and the
+// pay-link email sends after the release.
+async function markRetryHeld(message, reason, now = new Date(), { rejectedAfterStart = false } = {}) {
+  const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
+  const [updated] = await db('email_messages')
+    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
+      provider_handoff_attempt_token: message.send_attempt_token, provider_handoff_phase: expectedPhase })
+    .update({
+      status: 'failed',
+      error_message: emailTemplates.redactEmailAddresses(String(reason || 'collections dispute hold')).slice(0, 1000),
+      provider_retry_next_at: new Date(now.getTime() + require('./collections/collection-hold').HOLD_DEFER_MS),
+      provider_retry_count: db.raw('GREATEST(provider_retry_count - 1, 0)'),
+      provider_retry_exhausted_at: null,
+      provider_handoff_phase: rejectedAfterStart ? HANDOFF_PHASE_REJECTED : HANDOFF_PHASE_PENDING,
+      updated_at: now,
+    })
+    .returning('*');
+  return updated || null;
+}
+
 // A thrown provider request after the handoff began is ambiguous: SendGrid
 // may hold the message despite the lost response. A bearer-link summary is
 // never requeued from that state; its row settles as an uncertain delivery
@@ -508,6 +530,34 @@ async function recordRetrySend(message, result) {
   return finishRetrySend(message, await settleRetrySend(message, result));
 }
 
+// A held lifecycle notice older than this when the hold ends is not re-sent from its stored copy:
+// the provider ladder itself never re-sends a notice older than ~7 hours (RETRY_DELAYS_MS), and a
+// "your payment failed" snapshot that has sat through a multi-day dispute can describe a balance
+// that has since changed. It settles as a definite non-delivery instead; the dunning ladder after
+// the release covers the customer.
+const HOLD_GATED_RETRY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// null = go ahead and dispatch. Otherwise the retryOne outcome. While a dispute hold stands (or
+// its lookup cannot be answered - fail closed) the row goes back on the queue one hold interval
+// out with the claim's attempt refunded: a hold is a WAIT, never a spent retry or a terminal
+// failure.
+async function holdGateLifecycleRetry(message) {
+  const collectionHold = require('./collections/collection-hold');
+  const held = await collectionHold.storedLifecycleEmailHeld(message);
+  if (!held.held) {
+    const bornAt = new Date(message.created_at || message.queued_at || Date.now()).getTime();
+    const wasHeld = /dispute[- ]hold/i.test(String(message.error_message || ''));
+    if (wasHeld && Number.isFinite(bornAt) && Date.now() - bornAt > HOLD_GATED_RETRY_MAX_AGE_MS) {
+      return stopRetry(message, { status: 'failed', reason: 'Stale after a collections dispute hold; not re-sent from the stored copy.' });
+    }
+    return null;
+  }
+  const outcome = collectionHold.holdDeferOutcome(held);
+  logger.info(`[email-provider-retry] ${message.template_key} ${message.id} held: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+  await markRetryHeld(message, outcome.reason);
+  return { sent: false, held: true };
+}
+
 async function retryOne(message) {
   // A row scheduled before the ruling took effect settles the same way.
   if (isSenderRenderedEmail(message)) {
@@ -613,7 +663,10 @@ async function retryOne(message) {
         suppressErrorLog: true,
         templateKey: message.template_key,
         database,
-        ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
+        // A billing replay's authority boundary wins; a plain stored pay-link lifecycle notice
+        // carries the hold recheck as its own FINAL boundary (state.holdBoundaryCheck below).
+        ...((providerBoundaryCheck || state.holdBoundaryCheck)
+          ? { providerBoundaryCheck: providerBoundaryCheck || state.holdBoundaryCheck } : {}),
       });
       if (providerBoundaryCheck) {
         state.acceptedMessage = await settleRetrySend(
@@ -666,6 +719,12 @@ async function retryOne(message) {
           return { sent: false, stopped: true, reason: 'claim_lost' };
         }
         const requote = handoff.code === 'BILLING_REPLAY_REQUOTE_REQUIRED';
+        // A collections dispute hold: wait, never spend a retry (a hold can
+        // outlast the whole ladder) - the row sends after the release.
+        if (handoff.code === require('./collections/collection-hold').HOLD_DEFER_CODE) {
+          await markRetryHeld(message, handoff.reason, new Date(), { rejectedAfterStart: state.rejected });
+          return { sent: false, held: true };
+        }
         if (handoff.retryable) {
           const err = new Error(handoff.reason);
           err.code = handoff.code;
@@ -693,7 +752,32 @@ async function retryOne(message) {
         return await finishRetrySend(message, accepted);
       }
     } else {
+      // A stored pay / update-card lifecycle snapshot (payment.failed, payment.retry_notice,
+      // payment.method_expiring) re-checks the collections dispute hold before it goes back to
+      // SendGrid, exactly as a fresh send does (payment-lifecycle-email.js): the retry waits.
+      const holdOutcome = await holdGateLifecycleRetry(message);
+      if (holdOutcome) return holdOutcome;
+      // The same hold, read again as sendOne's FINAL boundary check (after the block-clear and
+      // marker awaits and SendGrid's own request preparation, right before the fetch): a dispute
+      // committed since the read above still stops the stored copy. A WAIT, never a spent retry.
+      const collectionHold = require('./collections/collection-hold');
+      if (collectionHold.HOLD_GATED_EMAIL_TEMPLATES.has(String(message.template_key || '').trim())) {
+        state.holdBoundaryCheck = async ({ database: handoffDb } = {}) => {
+          const heldNow = await collectionHold.storedLifecycleEmailHeld(message, handoffDb);
+          if (heldNow.held) {
+            state.holdRefusal = heldNow;
+            throw Object.assign(new Error('Customer has an active collections dispute hold'), {
+              code: collectionHold.HOLD_DEFER_CODE, retryable: true, providerBoundaryBlocked: true,
+            });
+          }
+          return { ok: true };
+        };
+      }
       await dispatchToProvider();
+      if (state.holdRefusal) {
+        await markRetryHeld(message, collectionHold.holdDeferOutcome(state.holdRefusal).reason, new Date(), { rejectedAfterStart: true });
+        return { sent: false, held: true };
+      }
     }
     if (state.blocked) {
       return await stopRetry(message, { status: 'blocked', reason: 'annual_offer_withheld', rejectedAfterStart: true });
@@ -753,6 +837,7 @@ module.exports = {
   recoverStaleClaims,
   claimDueRetries,
   markRetryFailure,
+  markRetryHeld,
   retryClaimAtProviderBoundary,
   retryOne,
   runDueRetries,
