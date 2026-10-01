@@ -60,6 +60,14 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.problems.map((problem) => problem.families)).toEqual([['lawn_care'], ['tree_shrub']]);
   });
 
+  test('only upcoming visits are judged: a past visit with no time or technician is history', () => {
+    const lawn = lawnRows({ parentOverrides: untimed });
+    const rows = [...pestRows(), ...lawn];
+    expect(codes(run([PEST, LAWN], rows))).toEqual(['missing_time_tech']);
+    const later = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN]), rows, todayET: addDays(DAY0, 1) });
+    expect(later.ok).toBe(true);
+  });
+
   test('a time without a technician (or the reverse) still fails', () => {
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows({ childOverrides: { technician_id: null } })]))).toEqual(['missing_time_tech']);
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows({ childOverrides: { window_start: null } })]))).toEqual(['missing_time_tech']);
@@ -144,8 +152,8 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict).toMatchObject({ deferred: true, heldFamilies: ['pest_control'], problems: [] });
     const pestOpen = { code: 'missing_time_tech', families: ['pest_control'], text: '2 pest visits missing time/tech' };
     const lawnOpen = { code: 'missing_time_tech', families: ['lawn_care'], text: '5 lawn visits missing time/tech' };
-    expect(outcomeOf(verdict, [pestOpen, lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...pestOpen, held: true }], onHold: true });
-    expect(outcomeOf(verdict, [lawnOpen])).toMatchObject({ outcome: 'deferred', onHold: true });
+    expect(outcomeOf(verdict, [pestOpen, lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...pestOpen, held: true }] });
+    expect(outcomeOf(verdict, [lawnOpen])).toMatchObject({ outcome: 'deferred' });
   });
 
   test('a seasonal mosquito series rolled past the first day is unslotted on purpose; same-day or monthly is still checked', () => {
@@ -226,7 +234,7 @@ describe('outcomeOf', () => {
 
   test('a finding about a service that went on hold stays on the bell, marked, instead of closing as fixed', () => {
     const clean = { ok: true, deferred: false, heldFamilies: ['lawn_care'], problems: [] };
-    expect(outcomeOf(clean, [lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...lawnOpen, held: true }], onHold: true });
+    expect(outcomeOf(clean, [lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...lawnOpen, held: true }] });
     // Not on hold: a clean verdict closes it.
     expect(outcomeOf({ ...clean, heldFamilies: [] }, [lawnOpen]).outcome).toBe('ok');
     const why = composeAdminAlert(composeAlert({ labels: ['Pest'], problems: [{ ...lawnOpen, held: true }] }, ALERT_IDS)).why;

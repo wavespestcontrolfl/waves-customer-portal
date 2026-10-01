@@ -129,8 +129,8 @@ postgres('combined-booking check through the real conversion', () => {
       expect(closed[0].read_at).not.toBeNull();
       expect(closed[0].metadata.dedupeKey).toBeUndefined();
 
-      // Still OK next run: nothing new is written, nothing reopens.
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ ok: 1, problems: 0, closed: 0 });
+      // Next run: fixed and no open bell, so not even a candidate; nothing reopens.
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0, problems: 0, closed: 0 });
       expect(await alertsOf(trx, estimateId)).toHaveLength(1);
     } finally {
       mockPg = pool;
@@ -210,7 +210,8 @@ postgres('combined-booking check through the real conversion', () => {
       // The watchdog's own 24h-settled call does not see a 20-minute-old accept yet.
       expect(await require('../services/recurring-schedule-audit').findAcceptedRecurringScheduleGaps({}, trx)
         .then((all) => all.filter((gap) => gap.estimateId === est.estimateId))).toEqual([]);
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, deferred: 1, problems: 0, ok: 0, failed: 0 });
+      // Every upcoming visit is timed: this check has nothing to say (the gap is the classifier's alert).
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0, problems: 0, ok: 0, failed: 0 });
       expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
     } finally {
       mockPg = pool;
@@ -236,41 +237,31 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
-  test('past the ring budget, problems wait on one standing overflow bell and never age out of it', async () => {
+  test('past the ring budget a problem is left for a later run, where the same upcoming problem is found again', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
-    const overflowRows = () => trx('notifications').where({ recipient_type: 'admin', category: 'alert' })
-      .whereRaw("metadata->>'dedupeKey' = 'combined-booking-check:overflow'");
     try {
       const all = [];
       for (let i = 0; i < 3; i += 1) all.push(await acceptedEstimate(trx, lines));
-      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 1 })).toMatchObject({ problems: 1, overflow: 2 });
-      const [overflow] = await overflowRows();
-      expect(overflow.title).toBe('Schedule — fix 2 more combined bookings');
-      // The one ring was spent on the individual bell: the count bell is written quietly (Activity feed).
-      expect(overflow.metadata).toMatchObject({ quiet: true, feed: 'activity' });
-      const owed = overflow.metadata.itemKeys;
-      expect(owed).toHaveLength(2);
-      // The owed bookings age past the 72h lookback: still judged, and with budget they get their own bells.
-      await trx('estimates').whereIn('id', owed).update({ accepted_at: new Date(Date.now() - 100 * 3600 * 1000) });
-      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 3, overflow: 0 });
-      for (const id of owed) expect(await alertsOf(trx, id)).toHaveLength(1);
-      expect((await trx('notifications').whereRaw("metadata->>'resolvedBy' = 'combined-booking-check'")
-        .whereRaw("metadata->'subject'->>'type' = 'check'")).length).toBe(1);
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 1 })).toMatchObject({ problems: 1, held: 2 });
+      const bells = async () => (await Promise.all(all.map((est) => alertsOf(trx, est.estimateId)))).map((rows) => rows.length);
+      expect((await bells()).reduce((a, b) => a + b, 0)).toBe(1);
+      // Days later (accepted well past any window): the held ones still have the problem, so they ring now.
+      await trx('estimates').whereIn('id', all.map((est) => est.estimateId)).update({ accepted_at: new Date(Date.now() - 100 * 3600 * 1000) });
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 3, held: 0 });
+      expect(await bells()).toEqual([1, 1, 1]);
     } finally {
       mockPg = pool;
       await trx.rollback();
     }
   });
 
-  test('a standing bell gaining a problem past the budget waits (owed) and rings later; a failed write stays owed', async () => {
+  test('a standing bell gaining a problem past the budget is left untouched until a run with room rings it', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
     const { raiseAdminAlert } = jest.requireActual('../services/admin-alert-compose');
-    const owedIds = async () => ((await trx('notifications').where({ recipient_type: 'admin', category: 'alert' })
-      .whereRaw("metadata->>'dedupeKey' = 'combined-booking-check:overflow'").first('metadata'))?.metadata.itemKeys || []);
     try {
       const est = await acceptedEstimate(trx, lines);
       await repair(trx, est);
@@ -283,25 +274,15 @@ postgres('combined-booking check through the real conversion', () => {
       await trx('notifications').where({ id: before.id }).update({ read_at: new Date() });
       // A new service family goes untimed (a pest visit) with no budget left.
       await trx('scheduled_services').where({ id: childOf(/pest/i).id }).update({ technician_id: null });
-      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ overflow: 1 });
-      expect(await owedIds()).toEqual([est.estimateId]);
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ held: 1 });
       expect((await alertsOf(trx, est.estimateId))[0].read_at).not.toBeNull(); // not refreshed in silence
 
-      expect(await require('../services/combined-booking-check').owedEstimateIds(trx)).toEqual([est.estimateId]);
+      // A failed write is counted and logged; the problem is found again next run.
+      const failing = jest.fn(async () => null);
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: failing })).toMatchObject({ failed: 1 });
 
-      // Its bell write fails: it stays on the record, typed as a failed check (not a confirmed defect).
-      const failing = jest.fn(async (category, spec, opts) => (spec.subject.type === 'check' ? raiseAdminAlert(category, spec, opts) : null));
-      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: failing })).toMatchObject({ failed: 1, overflow: 1 });
-      expect(await owedIds()).toEqual([est.estimateId]);
-      expect(await require('../services/combined-booking-check').owedEstimateIds(trx)).toEqual([]);
-      expect(await require('../services/combined-booking-check').failedCheckEstimateIds(trx)).toEqual([est.estimateId]);
-
-      // The overflow bell's own write fails: the sweep fails loudly, never silently.
-      const lost = jest.fn(async () => null);
-      await expect(runCombinedBookingCheck({ conn: trx, ringBudget: 0, raise: lost })).rejects.toThrow(/overflow bell write failed/);
-
-      // With budget: it rings, and nothing is owed.
-      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 1, overflow: 0 });
+      // With budget: it rings.
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: raiseAdminAlert })).toMatchObject({ problems: 1, held: 0 });
       const [after] = await alertsOf(trx, est.estimateId);
       expect(after.read_at).toBeNull();
       expect(after.metadata.itemKeys).toEqual(['missing_time_tech:pest_control', 'missing_time_tech:lawn_care']);
@@ -311,7 +292,7 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
-  test('an open bell keeps its estimate checked past the 72h lookback, so a later fix still closes it', async () => {
+  test('an open bell keeps its estimate judged whenever it was accepted, so a later fix still closes it', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
@@ -328,14 +309,31 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
-  test('an internal test customer is never judged, so it can never reach the overflow record', async () => {
+  test('a booking with every upcoming visit timed is not even a candidate; a past untimed visit is history', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0 });
+      const anyRow = (await rowsOf(trx, est.estimateId))[0];
+      await trx('scheduled_services').where({ id: anyRow.id }).update({ technician_id: null, scheduled_date: '2020-01-06' });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0 });
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('an internal test customer is never judged', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
     try {
       const est = await acceptedEstimate(trx, lines);
       mockTestCustomerIds.add(est.customerId);
-      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ candidates: 0, overflow: 0, problems: 0 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0, problems: 0 });
       expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
     } finally {
       mockTestCustomerIds.clear();
@@ -344,36 +342,29 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
-  test('a service on hold at the first check stays a candidate (held, not an Action Inbox item) and is judged after the hold, past the lookback', async () => {
+  test('a finding about a service that goes on hold stays on its bell; after the hold the service is judged again', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
-    const check = require('../services/combined-booking-check');
     try {
       const est = await acceptedEstimate(trx, lines);
       await repair(trx, est);
+      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
       const today = new Date().toISOString().slice(0, 10);
       const later = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
       const [hold] = await trx('plan_holds').insert({ customer_id: est.customerId, family_key: 'lawn_care',
         starts_on: new Date(Date.now() - 86400000).toISOString().slice(0, 10), resume_on: later, status: 'active' }).returning('id');
-      // A pest problem first: its bell rings; fixing it while lawn is on hold
-      // closes the bell AND keeps the booking tracked as held.
-      const pestChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
-      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: null });
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
-      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: (await rowsOf(trx, est.estimateId))[0].technician_id });
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, closed: 1, overflow: 1 });
-      expect((await check.overflowEntries(trx)).held).toEqual(new Set([est.estimateId]));
-      expect(await check.owedEstimateIds(trx)).toEqual([]); // no known problem: not an Action Inbox item
-
-      // The hold ends after the lookback, and a lawn visit has no technician.
-      await trx('estimates').where({ id: est.estimateId }).update({ accepted_at: new Date(Date.now() - 100 * 3600 * 1000) });
+      // Lawn on hold, pest clean: the lawn finding is kept (marked), not closed as fixed.
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1, closed: 0 });
+      const [held] = await alertsOf(trx, est.estimateId);
+      expect(held.done_at).toBeNull();
+      expect(held.body).toMatch(/on hold/);
+      // The hold ends with the lawn visit fixed: the bell closes.
       await trx('plan_holds').where({ id: hold.id || hold }).update({ status: 'resumed', resumed_at: new Date(), resume_on: today });
-      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
-      await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null });
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1, overflow: 0 });
-      const open = (await alertsOf(trx, est.estimateId)).filter((row) => !row.done_at);
-      expect(open.map((row) => row.metadata.itemKeys)).toEqual([['missing_time_tech:lawn_care']]);
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: (await rowsOf(trx, est.estimateId))[0].technician_id });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ ok: 1, closed: 1 });
     } finally {
       mockPg = pool;
       await trx.rollback();
@@ -406,7 +397,7 @@ postgres('combined-booking check through the real conversion', () => {
     try {
       const est = await acceptedEstimate(trx, lines);
       await repair(trx, est);
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, ok: 1, problems: 0, failed: 0 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0, problems: 0, failed: 0 });
       expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
     } finally {
       mockPg = pool;

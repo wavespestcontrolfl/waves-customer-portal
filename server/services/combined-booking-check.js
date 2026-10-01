@@ -2,11 +2,13 @@
  * Combined-booking check (owner request 2026-09-29; narrowed to time and
  * technician by owner ruling 2026-10-01).
  *
- * Every time a customer accepts an estimate with MORE THAN ONE recurring
- * service (pest + lawn, pest + lawn + tree & shrub, pest + rodent, ...), this
- * verifies that every visit the booking created has a time and a technician,
- * and posts ONE admin bell when one does not. The 2026-09-28 defect it guards:
- * companion services were booked with no time and no technician.
+ * For every accepted estimate with MORE THAN ONE recurring service (pest +
+ * lawn, pest + lawn + tree & shrub, pest + rodent, ...), this verifies that
+ * every UPCOMING visit the booking created has a time and a technician, and
+ * posts ONE admin bell when one does not (owner rulings 2026-10-01: time and
+ * technician only; upcoming visits, whenever the estimate was accepted). The
+ * 2026-09-28 defect it guards: companion services were booked with no time and
+ * no technician.
  *
  * NOT THIS CHECK'S (each has its own owner, and a second bell would conflict):
  *   - prices and invoices (an unpriced visit is the watchdog's unpriced-series
@@ -22,7 +24,8 @@
  *
  * WHERE IT RUNS: inside the schedule-integrity watchdog (its daily tick, under
  * that job's runExclusive and GATE_SCHEDULE_INTEGRITY_WATCHDOG), over accepted
- * estimates that settled at least SETTLE_MINUTES ago — not a hook in the
+ * estimates that settled at least SETTLE_MINUTES ago and still have an
+ * upcoming visit with no time or technician (or an open bell) — not a hook in the
  * accept route (a money path: a hook could only add latency or a new way to
  * fail it, and is lost if the process dies right after the commit). The sweep
  * derives everything from committed rows: a crash just means the next run
@@ -42,12 +45,10 @@
  * family joins it. A fixed problem, a cancelled plan, or a customer / estimate
  * that left for good closes the bell as DONE. An OK result is an `fyi` fact and
  * writes no row. Rings share the watchdog run's budget (at most 10 a day):
- * past it a booking waits on ONE quiet overflow record, whose list the next
- * run re-reads (so nothing ages out unreported) and whose count is a standing
- * item in the dashboard Action Inbox (combined_bookings_owed). An estimate
- * with an open bell stays a candidate past the lookback, and a finding about
- * a service that went on hold stays on its bell until that service is judged
- * again.
+ * anything past it is simply left for a later run, where the same upcoming
+ * problem is found again. An estimate with an open bell is always judged, and
+ * a finding about a service that went on hold stays on its bell until that
+ * service is judged again.
  */
 
 const db = require('../models/db');
@@ -61,20 +62,12 @@ const AREA = 'Schedule';
 const DONE_WHEN = 'combined_booking_verified';
 const RESOLVED_FIXED = 'Fixed: the combined booking now checks out';
 const RESOLVED_GONE = 'Closed: the plan was cancelled, or the estimate or customer is no longer active or current';
-// The standing count bell for problems past the ring budget (its itemKeys are
-// the estimates still owed their own bell).
-const OVERFLOW_ID = 'overflow';
 // Without a caller's budget (a direct run), the same 10 a day the watchdog
 // keeps (docs/admin-notifications.md, Budget).
 const DEFAULT_RING_BUDGET = 10;
 
 // Let the accept transaction and its follow-on writes settle before judging.
 const SETTLE_MINUTES = 3;
-// Estimates accepted longer ago than this are not newly checked: an old
-// problem the office has lived with is not news, and a first run after deploy
-// must not turn into a backlog scan. (A booking the overflow bell owes stays.)
-const LOOKBACK_HOURS = 72;
-
 const CANCELLED = new Set(['cancelled', 'canceled']);
 const NOT_LIVE = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
 
@@ -181,7 +174,8 @@ function checkTimeAndTech(dated, families, { firstDay, byId }) {
 /**
  * Pure verdict for one accepted estimate.
  *   ctx: { estimate, rows, excludedFamilies: Set, scheduleGaps,
- *          scheduleSkippedFamilies: Set, scheduleOnHoldFamilies: Set, scheduleUnjudged: bool }
+ *          scheduleSkippedFamilies: Set, scheduleOnHoldFamilies: Set, scheduleUnjudged: bool,
+ *          todayET: only visits on or after it are judged }
  * Returns null when the accept is not a multi-service recurring accept, or
  * every row of the plan was cancelled (no alert at all); else
  * { ok, deferred, heldFamilies, problems: [{ code, families, text }], labels }.
@@ -190,6 +184,7 @@ function evaluateCombinedBooking(ctx) {
   const {
     estimate, rows: allRows = [], excludedFamilies = new Set(),
     scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleOnHoldFamilies = new Set(), scheduleUnjudged = false,
+    todayET = null,
   } = ctx;
   const accepted = acceptedFamilies(estimate);
   if (!accepted || accepted.size < 2) return null;
@@ -226,8 +221,11 @@ function evaluateCombinedBooking(ctx) {
   // No live rows: the schedule shape is the accepted-schedule alert's.
   if (!rows.length) return { ok: false, deferred: true, heldFamilies, problems: [], labels };
 
-  const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
-    a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
+  // Only UPCOMING visits are judged (todayET; none given = every visit): a
+  // past visit with no time or technician is history, not something to fix.
+  const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) }))
+    .filter((row) => !todayET || row.day >= todayET)
+    .sort((a, b) => a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
   const byId = new Map(allRows.map((row) => [String(row.id), row]));
   const problems = checkTimeAndTech(dated, families, { firstDay, byId });
   // A schedule gap, or an estimate the classifier did not judge, is never OK.
@@ -306,10 +304,11 @@ async function loadContext(conn, estimate) {
 
 // `coverage` is the classifier's { skipped, onHold } for this estimate;
 // undefined when it did not judge the estimate (never declared OK then).
-async function checkEstimate(conn, estimate, { scheduleGaps = [], coverage } = {}) {
+async function checkEstimate(conn, estimate, { scheduleGaps = [], coverage, todayET = null } = {}) {
   const ctx = {
     ...await loadContext(conn, estimate),
     scheduleGaps,
+    todayET,
     scheduleSkippedFamilies: coverage ? coverage.skipped : new Set(),
     scheduleOnHoldFamilies: coverage ? coverage.onHold : new Set(),
     scheduleUnjudged: !coverage,
@@ -419,44 +418,15 @@ function heldProblems(verdict, standingProblems = []) {
 //   problems — post / refresh the bell (current findings plus held ones)
 //   ok       — verified: close a standing bell as fixed
 //   deferred — nothing of this check's own to say: close
-// `onHold`: a service of this booking could not be judged for a plan hold.
 function outcomeOf(verdict, standingProblems = []) {
-  if (!verdict) return { outcome: 'skipped', problems: [], onHold: false };
+  if (!verdict) return { outcome: 'skipped', problems: [] };
   const problems = [...verdict.problems, ...heldProblems(verdict, standingProblems)];
-  const onHold = verdict.heldFamilies.length > 0;
-  if (problems.length) return { outcome: 'problems', problems, onHold };
-  return { outcome: verdict.ok ? 'ok' : 'deferred', problems, onHold };
+  if (problems.length) return { outcome: 'problems', problems };
+  return { outcome: verdict.ok ? 'ok' : 'deferred', problems };
 }
 
-// The overflow record's entries: every estimate it keeps a candidate
-// (`all`), and the subsets with no confirmed problem: waiting for a service's
-// hold to end (`held`), or whose check / alert write failed (`failed`).
-async function overflowEntries(conn) {
-  const row = await conn('notifications').where({ recipient_type: 'admin', category: CATEGORY })
-    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKeyFor(OVERFLOW_ID)]).first('metadata');
-  const list = (value) => (Array.isArray(value) ? value.map(String) : []);
-  return {
-    all: list(row?.metadata?.itemKeys),
-    held: new Set(list(row?.metadata?.heldIds)),
-    failed: new Set(list(row?.metadata?.failedIds)),
-  };
-}
-
-// The bookings owed their own alert for a CONFIRMED problem (the dashboard
-// Action Inbox count, dashboard-alerts.js combined_bookings_owed).
-async function owedEstimateIds(conn) {
-  const { all, held, failed } = await overflowEntries(conn);
-  return all.filter((id) => !held.has(id) && !failed.has(id));
-}
-
-// The bookings whose check or alert write failed: surfaced on their own
-// (dashboard-alerts.js combined_booking_checks_failed), never as a defect.
-async function failedCheckEstimateIds(conn) {
-  return [...(await overflowEntries(conn)).failed];
-}
-
-// The estimates with an open bell of this check: they stay candidates past
-// the lookback, so a bell is only ever closed by a run that judged it.
+// The estimates with an open bell of this check: always judged, so a bell is
+// only ever closed by a run that looked at its booking.
 async function standingEstimateIds(conn) {
   const rows = await conn('notifications').where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [`${OPS_KEY}:`])
@@ -465,18 +435,32 @@ async function standingEstimateIds(conn) {
   return rows.map((row) => String(row.estimate_id));
 }
 
-// Accepted multi-service estimates to judge: those accepted inside the
-// lookback, plus any with an open bell or that the overflow row still owes a
-// bell (so nothing open or owed ages out unjudged).
-function candidateQuery(conn, { now, owed }) {
+// Accepted estimates to judge: every one that still has an UPCOMING live
+// visit with no time or no technician (whenever it was accepted: a problem
+// still ahead is worth a bell; one in the past is history), plus every one
+// with an open bell (so a fix or a cancelled plan closes it).
+function candidateQuery(conn, { now, todayET, standing }) {
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const settled = new Date(now.getTime() - SETTLE_MINUTES * 60 * 1000);
-  const since = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
   return conn('estimates as e')
     .join('customers as c', 'c.id', 'e.customer_id')
     .where('e.status', 'accepted').whereNull('e.archived_at')
     .where('e.accepted_at', '<=', settled)
-    .where(function window() { this.where('e.accepted_at', '>', since).orWhereIn('e.id', owed); })
+    .where(function upcomingGapOrOpenBell() {
+      this.whereIn('e.id', standing).orWhereExists(function untimedUpcoming() {
+        this.select(conn.raw('1')).from('scheduled_services as s')
+          .whereRaw('s.customer_id = e.customer_id')
+          .where(function linkedToEstimate() {
+            this.whereRaw('s.source_estimate_id = e.id').orWhereExists(function parentLinked() {
+              this.select(conn.raw('1')).from('scheduled_services as p')
+                .whereRaw('p.id = s.recurring_parent_id AND p.source_estimate_id = e.id AND p.customer_id = e.customer_id');
+            });
+          })
+          .where('s.scheduled_date', '>=', todayET)
+          .whereNotIn('s.status', [...NOT_LIVE])
+          .where(function untimed() { this.whereNull('s.window_start').orWhereNull('s.technician_id'); });
+      });
+    })
     .where('c.active', true).whereNull('c.deleted_at')
     // A former customer's leftover work is the churned-live-work alert's
     // (cancel it), never a repair bell here; the shared classifier skips the
@@ -492,45 +476,6 @@ function candidateQuery(conn, { now, owed }) {
     .orderBy('e.accepted_at', 'asc');
 }
 
-// The record of bookings past the ring budget: one row listing each (its
-// itemKeys are what the next run re-reads), closed as done once nothing is
-// owed. It is a standing condition (docs/admin-notifications.md section 1), so
-// it never rings: it is always written quietly, and the count shows in the
-// dashboard Action Inbox (dashboard-alerts.js, combined_bookings_owed).
-async function postOverflow(conn, owed, { raise } = {}) {
-  if (!owed.length) return retireStanding(conn, [OVERFLOW_ID], RESOLVED_FIXED);
-  const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
-  const ids = owed.map((entry) => entry.id);
-  const idsOf = (kind) => owed.filter((entry) => entry.kind === kind).map((entry) => entry.id);
-  const heldIds = idsOf('held');
-  const failedIds = idsOf('failed');
-  const toFix = idsOf('owed').length;
-  const row = await raiseAdminAlert(CATEGORY, {
-    area: AREA,
-    action: toFix
-      ? `fix ${toFix} more combined booking${toFix === 1 ? '' : 's'}`
-      : `recheck ${ids.length} combined booking${ids.length === 1 ? '' : 's'}`,
-    why: 'Each booking listed here is checked again every run until it is judged and, if needed, gets its own alert.',
-    severity: 'needs-you',
-    link: '/admin/customers',
-    subject: { type: 'check', id: OPS_KEY },
-    doneWhen: 'combined_booking_overflow_cleared',
-    who: 'person',
-  }, {
-    bell: true,
-    detail: owed.map((entry) => `- ${entry.line}`).join('\n'),
-    dedupeKey: dedupeKeyFor(OVERFLOW_ID),
-    refreshOnDedupe: true,
-    ringGate: async () => false,
-    ringOnRefresh: () => false,
-    metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids, heldIds, failedIds },
-  });
-  // This row is the only record of what is owed: a lost write fails the
-  // sweep loudly (the watchdog logs COMBINED-BOOKING-CHECK-FAILED).
-  if (!row) throw new Error(`overflow bell write failed; ${ids.length} owed booking(s) unrecorded`);
-  return 0;
-}
-
 // A bell that actually rang this run (created, or a refresh that rang): what
 // the budget counts. A silent refresh or a suppressed test row costs nothing.
 const rang = (row) => !!row && !row.suppressed && (!row.deduped || row.rung === true);
@@ -538,23 +483,24 @@ const rang = (row) => !!row && !row.suppressed && (!row.deduped || row.rung === 
 /**
  * One sweep. Returns counts; never throws for a single bad estimate.
  * `conn` and `raise` are injectable for tests. `ringBudget` is what is left
- * of the run's shared budget (the watchdog passes its remainder); anything
- * that would ring past it goes on the overflow bell instead.
+ * of the run's shared budget (the watchdog passes its remainder): anything
+ * that would ring past it is left for a later run, where the same upcoming
+ * problem is found again (nothing to persist, nothing ages out).
  */
 async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, ringBudget = DEFAULT_RING_BUDGET } = {}) {
-  const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, overflow: 0 };
+  const { etDateString } = require('../utils/datetime-et');
+  const todayET = etDateString(now);
+  const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, held: 0 };
   result.closed += await retireAbandoned(conn);
-  const owedBefore = new Set((await overflowEntries(conn)).all);
   // An internal test / demo customer never gets an admin artifact (the
-  // notification service suppresses its bells); it is left out before any
-  // budgeting, so it can never land on the overflow record either.
+  // notification service suppresses its bells): left out up front.
   const { isInternalTestCustomerId } = require('./internal-test-customers');
-  const candidates = (await candidateQuery(conn, { now, owed: [...owedBefore, ...await standingEstimateIds(conn)] }))
+  const candidates = (await candidateQuery(conn, { now, todayET, standing: await standingEstimateIds(conn) }))
     .filter((estimate) => !isInternalTestCustomerId(estimate.customer_id));
   result.candidates = candidates.length;
 
-  // An OK verdict writes nothing (an `fyi` fact), so every candidate is judged
-  // each run. A standing bell's itemKeys say what it already rang for.
+  // A standing bell's itemKeys say what it already rang for; its problems are
+  // what a service on hold keeps (heldProblems).
   const standing = new Map((await conn('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [candidates.map((estimate) => dedupeKeyFor(estimate.id))])
@@ -564,14 +510,6 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       keys: new Set(Array.isArray(row.item_keys) ? row.item_keys : []),
       problems: Array.isArray(row.problems) ? row.problems : [],
     }]));
-  // A booking that could not be judged, or whose bell could not be written,
-  // goes on the overflow bell: it stays a candidate until it is.
-  const owed = [];
-  // kind: 'owed' (a confirmed problem past the budget), 'held' (a service on
-  // hold, nothing known yet) or 'failed' (the check or its write failed).
-  const owe = (estimate, why, kind = 'failed') => owed.push({
-    id: String(estimate.id), kind, line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}`,
-  });
   // No longer a combined booking (the accepted snapshot was corrected to one
   // service, or no longer converts): an open bell for it is closed.
   const notCombined = [];
@@ -582,12 +520,10 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       if (standing.has(String(estimate.id))) notCombined.push(String(estimate.id));
     } catch (err) {
       result.failed += 1;
-      owe(estimate, 'could not be read this run');
       logger.warn(`[combined-booking-check] estimate ${estimate.id} could not be read: ${err.message}`);
     }
     return false;
   });
-
   result.closed += await retireStanding(conn, notCombined, RESOLVED_GONE);
 
   // The shared accepted-plan classifier, with no 24h wait: the same findings
@@ -605,47 +541,32 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       const checked = await checkEstimate(conn, estimate, {
         scheduleGaps: gaps.filter((gap) => String(gap.estimateId) === id),
         coverage: coverage.get(id),
+        todayET,
       });
-      const { outcome, problems, onHold } = outcomeOf(checked?.verdict, known?.problems);
+      const { outcome, problems } = outcomeOf(checked?.verdict, known?.problems);
       if (outcome !== 'problems') {
         result[outcome] += 1;
         if (known) result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
-        // A service on hold could not be judged, and this branch leaves no open
-        // bell (any standing one was just closed): the overflow record keeps
-        // the booking a candidate (as `held`, no known problem), so it is
-        // judged when the hold ends even past the lookback.
-        if (onHold) owe(estimate, 'a service is on hold; it is checked again when the hold ends', 'held');
         continue;
       }
       result.checked += 1;
-      const verdict = { ...checked.verdict, problems };
-      const { ctx } = checked;
       // Anything that would ring (a new bell, or a standing one gaining a
-      // family it did not carry) spends the budget; past it the booking waits
-      // on the overflow record and rings on a later run, never refreshed into
-      // a read bell in silence.
+      // family it did not carry) spends the budget; past it the booking is
+      // left as it is and found again on a later run.
       const wouldRing = !known || problems.flatMap(problemKeys).some((key) => !known.keys.has(key));
       if (wouldRing && rings >= ringBudget) {
-        owe(estimate, `${ctx.customerName}: ${problems.map((problem) => problem.text).join('; ')}`, 'owed');
+        result.held += 1;
         continue;
       }
-      const row = await postAlert(estimate, verdict, ctx, { raise });
-      if (!row) {
-        result.failed += 1;
-        owe(estimate, 'its alert could not be written this run');
-        logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`);
-        continue;
-      }
+      const row = await postAlert(estimate, { ...checked.verdict, problems }, checked.ctx, { raise });
+      if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
       if (rang(row)) rings += 1;
       result.problems += 1;
     } catch (err) {
       result.failed += 1;
-      owe(estimate, 'could not be checked this run');
       logger.warn(`[combined-booking-check] estimate ${id} check failed: ${err.message}`);
     }
   }
-  result.overflow = owed.length;
-  result.closed += await postOverflow(conn, owed, { raise });
   return result;
 }
 
@@ -659,9 +580,6 @@ module.exports = {
   problemKeys,
   outcomeOf,
   heldProblems,
-  owedEstimateIds,
-  failedCheckEstimateIds,
-  overflowEntries,
   acceptedFamilies,
   shortName,
   OPS_KEY,

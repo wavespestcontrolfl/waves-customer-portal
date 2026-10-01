@@ -279,33 +279,6 @@ describe('Action Inbox generators', () => {
     expect(quiet.find((a) => a.id === 'builder_warranty_expiring')).toBeUndefined();
   });
 
-  test('combined_bookings_owed: a standing count of bookings past the alert budget; absent when none are owed', async () => {
-    const combined = require('../services/combined-booking-check');
-    const owed = jest.spyOn(combined, 'owedEstimateIds').mockResolvedValue(['est-b', 'est-a']);
-    let { alerts } = await computeDashboardAlertsUncached();
-    expect(alerts.find((a) => a.id === 'combined_bookings_owed')).toMatchObject({
-      kind: 'action', severity: 'warn', count: 2, members: ['est-a', 'est-b'], href: '/admin/customers',
-      label: '2 combined bookings missing a time or technician',
-    });
-    owed.mockResolvedValue([]);
-    ({ alerts } = await computeDashboardAlertsUncached());
-    expect(alerts.find((a) => a.id === 'combined_bookings_owed')).toBeUndefined();
-    owed.mockRestore();
-  });
-
-  test('combined_booking_checks_failed: a failed check is its own item, never counted as a booking defect', async () => {
-    const combined = require('../services/combined-booking-check');
-    const owed = jest.spyOn(combined, 'owedEstimateIds').mockResolvedValue([]);
-    const failed = jest.spyOn(combined, 'failedCheckEstimateIds').mockResolvedValue(['est-f']);
-    const { alerts } = await computeDashboardAlertsUncached();
-    expect(alerts.find((a) => a.id === 'combined_bookings_owed')).toBeUndefined();
-    expect(alerts.find((a) => a.id === 'combined_booking_checks_failed')).toMatchObject({
-      kind: 'action', count: 1, members: ['est-f'], label: '1 combined booking could not be checked',
-    });
-    owed.mockRestore();
-    failed.mockRestore();
-  });
-
   test('at_risk_mrr: reuses the shared at-risk account list; absent when nothing is at risk', async () => {
     listAtRiskMrrAccounts.mockResolvedValue([
       atRiskAccount('cust-b', 400),
@@ -719,8 +692,11 @@ describe('Action Inbox generators', () => {
       leads: () => { throw new Error('boom'); },
       'estimates as e': [{ id: 'est-1', at_stake: '99' }],
     });
-    const { alerts } = await computeDashboardAlertsUncached();
+    const { alerts, failures } = await computeDashboardAlertsUncached();
 
+    // The failed generators are reported, so a reader can tell a missing queue from an empty one.
+    expect(failures.map((f) => f.id)).toEqual(expect.arrayContaining(['leads_awaiting_contact', 'leads_unattributed_7d']));
+    expect(failures.map((f) => f.id)).not.toContain('estimates_expiring');
     expect(alerts.find((a) => a.id === 'leads_awaiting_contact')).toBeUndefined();
     expect(alerts.find((a) => a.id === 'leads_unattributed_7d')).toBeUndefined();
     expect(alerts.find((a) => a.id === 'estimates_expiring')).toBeDefined();
@@ -768,6 +744,14 @@ describe('computeDashboardAlerts memo', () => {
 
 describe('cards_expiring_7d — prepay-covered customers are not "autopay breaks this week"', () => {
   const cardsCalls = (capture) => capture.filter((c) => c.table === 'payment_methods');
+
+  test('a failed expiry query is reported in failures, never read as an empty queue', async () => {
+    getCardExpiryExemptions.mockResolvedValue(exemptions([]));
+    primeDb({ payment_methods: () => { throw new Error('boom'); }, leads: { count: 0 } });
+    const { alerts, failures } = await computeDashboardAlertsUncached();
+    expect(failures.map((f) => f.id)).toContain('cards_expiring_7d');
+    expect(alerts.find((a) => a.id === 'cards_expiring_7d')).toBeUndefined();
+  });
 
   test('asks coverage at the 7-day horizon and excludes covered customers from the count', async () => {
     getCardExpiryExemptions.mockResolvedValue(exemptions(['cust-prepaid']));
