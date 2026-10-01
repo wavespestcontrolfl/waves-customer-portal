@@ -342,6 +342,12 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('We applied fipronil at the slab.', { activeIngredients: ['Fipronil 9.1%, Pyriproxyfen'] })).toBe('active_ingredient');
   });
 
+  test('a long unclosed quote is screened in linear time (no backtracking stall)', () => {
+    const started = Date.now();
+    expect(writerRulesRejection(`"${'ants are back '.repeat(6000)}`)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   test("the catalog's taxonomic Bti name still screens the Bti alias", () => {
     expect(writerRulesRejection('We placed Bti larvicide in the pond.', { activeIngredients: ['Bacillus thuringiensis subsp. israelensis solids'] })).toBe('active_ingredient');
   });

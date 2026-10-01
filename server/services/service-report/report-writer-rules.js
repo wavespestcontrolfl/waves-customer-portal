@@ -272,8 +272,14 @@ const TIMEFRAME_RE = new RegExp(
 // ("You said, “ants are everywhere”", "you texted 'roaches again'") or any
 // double-quoted run of three or more words. An apostrophe ("the customer's
 // kitchen") opens no quote, and a paraphrase ("You mentioned ants near the
-// dishwasher") passes.
-const QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told\s+us|reported|asked|noted)\b[^.!?]{0,20}?(?:[:,]\s*|\s+)["“‘']\w|["“](?:[^"”\n]*\s){2,}[^"”\n]*["”]/i;
+// dishwasher") passes. Each quoted span is found once and its words counted
+// in code, so a long unclosed quote costs one linear scan.
+const ATTRIBUTED_QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told\s+us|reported|asked|noted)\b[^.!?]{0,20}?(?:[:,]\s*|\s+)["“‘']\w/i;
+const QUOTED_SPAN_RE = /["“]([^"”\n]*)["”]/g;
+function quotesCustomer(copy) {
+  if (ATTRIBUTED_QUOTE_RE.test(copy)) return true;
+  return [...copy.matchAll(QUOTED_SPAN_RE)].some((match) => match[1].trim().split(/\s+/).length >= 3);
+}
 // The activity gauge's number or scale (rule 12) in any form: "the rating
 // was 2", "rated two out of five", "2 on the five-point scale". The level in
 // words ("activity was light") and a count of a set ("2 of 5 stations",
@@ -406,7 +412,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [REENTRY_RE, 'reentry'],
   [TIMEFRAME_RE, 'timeframe'],
   [GAUGE_RE, 'gauge'],
-  [QUOTE_RE, 'quote'],
+  [quotesCustomer, 'quote'],
   [PRICE_RE, 'price'],
   [ENTITLEMENT_RE, 'price'],
   [(copy) => forwardMention(copy, MONTH_DAY_RE), 'date'],
