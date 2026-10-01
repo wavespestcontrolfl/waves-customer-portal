@@ -911,6 +911,16 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
     // answers a label question); older-prompt drafts run it only when they carry a snapshot.
     if (claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12'))) {
       const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
+      if (labelReason && require('./agent-decision-send-checks').isLabelRecheckInfrastructureFailure(labelReason)) {
+        // The latest visit could not be READ (Codex #5416 r31 P2): nothing is known to be stale, so the claim is RELEASED
+        // like the live-ETA case below - reservation settled, parked siblings reopened, the draft falls through to a
+        // human-visible suggestion that the reviewer-send seam rechecks again. Never recorded as a failed auto-send.
+        logger.warn(`[sms-auto-send] label facts recheck unreadable (decision ${claim.decisionId}); releasing the claim (retryable)`);
+        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+        await releaseClaim(claim.decisionId);
+        await reopenParked('Auto-send paused: the label timing could not be rechecked — suggestion reopened.');
+        return { sent: false, reason: labelReason, retryable: true };
+      }
       if (labelReason) {
         logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
         const outcome = await notSent(labelReason);

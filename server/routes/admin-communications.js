@@ -188,7 +188,8 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
       // A recheck that could not READ the live state (round-42 P2) refuses this attempt but
       // does NOT retire the card: nothing is known to be stale, so the reviewer can retry.
-      if (!require('../services/agent-decision-send-checks').blockReasonIsEtaInfrastructure(blockReason)) {
+      // (a label-facts recheck that could not read the latest visit is the same case, Codex #5416 r31 P2)
+      if (!require('../services/agent-decision-send-checks').blockReasonIsRecheckInfrastructure(blockReason)) {
         await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       }
       return null;

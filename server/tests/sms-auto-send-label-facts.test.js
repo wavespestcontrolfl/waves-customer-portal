@@ -118,7 +118,7 @@ test('no label snapshot (the reply copies no label sentence) -> the recheck neve
   expect(labelFacts.labelFactsSendBlockReason).not.toHaveBeenCalled();
 });
 
-test.each(['label_facts_visit_changed', 'label_facts_no_longer_current', 'label_facts_changed', 'label_facts_recheck_failed'])(
+test.each(['label_facts_visit_changed', 'label_facts_no_longer_current', 'label_facts_changed'])(
   'a recheck that refuses (%s) blocks the send, fails the claim and reopens parked suggestions',
   async (reason) => {
     labelFacts.labelFactsSendBlockReason.mockResolvedValue(reason);
@@ -149,4 +149,14 @@ describe('r29: EVERY real-answers auto-send dispatch runs the label reply guard,
     await expect(attempt({ reply: 'Yes, they can go out.', promptVersion: 'house_voice_v8', inboundMessage: 'Can the dogs go out now?' })).resolves.toMatchObject({ sent: true });
     expect(labelFacts.labelFactsSendBlockReason).not.toHaveBeenCalled();
   });
+});
+
+// Codex #5416 r31 P2: an unreadable latest visit says nothing about the message - the claim is RELEASED, never failed.
+test('a recheck that could not read the visit releases the claim (retryable), reopens parked suggestions, and never fails the decision', async () => {
+  labelFacts.labelFactsSendBlockReason.mockResolvedValue('label_facts_recheck_failed');
+  await expect(attempt({ labelFactsSnapshot: LABEL_SNAPSHOT })).resolves.toEqual({ sent: false, reason: 'label_facts_recheck_failed', retryable: true });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(decisions.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+  expect(suggest.settleReplyHoldingReservation).toHaveBeenCalled();
+  expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
 });
