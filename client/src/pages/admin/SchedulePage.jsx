@@ -1088,6 +1088,16 @@ export function completionReconcilePrompt(error) {
   return `${lead}\n\nOK — complete anyway (the recorded values stay authoritative on the report).\nCancel — go back to fix the fields or regenerate the AI report.`;
 }
 
+// Whether the notes still carry a generated report's titles: the two-section
+// paragraph or the four-section report (writer rules), each title on its own
+// line or written inline with its text ("WHAT WE FOUND: You mentioned…"),
+// the forms the server's parser accepts.
+export function reportShapedNotes(notes) {
+  const text = String(notes || '');
+  return /^\s*WHAT WE DID(?: AND WHY)?(?::.*)?$/m.test(text)
+    && /^\s*WHAT WE FOUND(?::.*)?$/m.test(text);
+}
+
 // Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
 // "2 hr 15 min"). Minutes only — the steppers clamp to 0..1440.
 export function formatReentryStepperMinutes(min) {
@@ -16030,8 +16040,7 @@ export function CompletionPanel({
     // that predates the final findings (codex r54). Only genuinely
     // handwritten notes ground a regeneration; the previous handwritten
     // capture is kept otherwise.
-    const notesLookGenerated = /^\s*WHAT WE DID(?: AND WHY)?:?\s*$/m.test(notes)
-      && /^\s*WHAT WE FOUND:?\s*$/m.test(notes);
+    const notesLookGenerated = reportShapedNotes(notes);
     if (!notesLookGenerated
       && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
       preGenerationNotesRef.current = notes;

@@ -4,6 +4,7 @@ import {
   buildPhotoRecoveryOutcome,
   buildPhotoRetryFormBody,
   completionAutoCloseDelay,
+  reportShapedNotes,
 } from "./SchedulePage";
 
 const photo = (n, extra = {}) => ({ data: `data:image/jpeg;base64,${"QUJD".repeat(n)}`, name: `p${n}.jpg`, ...extra });
@@ -85,5 +86,19 @@ describe("buildPhotoRetryFormBody", () => {
     expect(form.get("sortOrder")).toBe("3");
     expect(form.get("caption")).toBeNull();
     expect(form.get("aiTags")).toBeNull();
+  });
+});
+
+describe("reportShapedNotes", () => {
+  it("recognizes the two-section and four-section reports, titles alone or inline", () => {
+    expect(reportShapedNotes("WHAT WE DID\nWe treated.\nWHAT WE FOUND\nLight activity.")).toBe(true);
+    expect(reportShapedNotes("WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\nBait.\nWHAT TO EXPECT\nA few days.\nWHAT'S NEXT\nCall us.")).toBe(true);
+    expect(reportShapedNotes("WHAT WE FOUND: Ants by the sink.\nWHAT WE DID AND WHY: We placed bait.\nWHAT TO EXPECT: A few days.\nWHAT'S NEXT: Call us.")).toBe(true);
+  });
+
+  it("leaves handwritten notes alone", () => {
+    expect(reportShapedNotes("Ants by the sink. Baited the cabinet base.")).toBe(false);
+    expect(reportShapedNotes("What we found: ants\nwhat we did: bait")).toBe(false);
+    expect(reportShapedNotes("WHAT WE DIDN'T GET TO\nWHAT WE FOUND\nAnts.")).toBe(false);
   });
 });
