@@ -340,6 +340,10 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
   // it is not the office's.
   if (await prepayWaivesDeferredSetupFee(trx, { seriesId: parentId, visit })) return null;
   const amount = Math.round(Number(rawAmount) * 100) / 100;
+  // Lock the series parent FIRST (pre-push audit P1), as the un-void path
+  // does: a completion claim or an office invoice racing this park then lands
+  // before the billed-by-hand scan below, never between it and the clear.
+  await trx('scheduled_services').where({ id: parentId }).forUpdate().first('id');
   // Already billed by hand: a live (not void / canceled / refunded) invoice on
   // the series carries a setup-fee line. That invoice owns the fee: record the
   // claim against it and retire the stamp (exact value), never ask the office

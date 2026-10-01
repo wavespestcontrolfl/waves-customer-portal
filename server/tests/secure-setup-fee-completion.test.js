@@ -39,7 +39,9 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // Adopt: no line → exactly one adopter via the updated_at lease CAS.
     // The marker is a LEASE: only a marker idle for the whole lease (a dead
     // worker) may be adopted — a fresh one is another visit's in-flight mint.
-    expect(dispatchSource).toMatch(/const SETUP_FEE_CLAIM_LEASE_MS = \d+ \* 60 \* 1000;/);
+    // The lease IS the completion attempt's own stale window (one number).
+    expect(dispatchSource).toMatch(/const SETUP_FEE_CLAIM_LEASE_MS = CompletionAttempts\.STALE_SIDE_EFFECTS_MS;/);
+    expect(require('../services/completion-attempts').STALE_SIDE_EFFECTS_MS).toBeGreaterThan(0);
     expect(dispatchSource).toMatch(/pending_setup_fee: parentRow\.pending_setup_fee, updated_at: parentRow\.updated_at \}\)\s*\n\s*\.where\('updated_at', '<', new Date\(Date\.now\(\) - SETUP_FEE_CLAIM_LEASE_MS\)\)\s*\n\s*\.update\(\{ updated_at: new Date\(\) \}\)/);
   });
 
