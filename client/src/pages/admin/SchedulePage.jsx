@@ -1116,6 +1116,8 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // something the report leaves out. Returns the confirm() text, or null for
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
+export const PROMISE_MARKS_CHANGED_PROMPT = "You changed a promise mark after the report was written, so the report may not match it.\n\nOK — send as is.\nCancel — go back and write the report again.";
+
 export function completionReportRulesPrompt(error) {
   if (error?.code !== "report_rules_review") return null;
   const lead = String(error?.message || "").trim();
@@ -13152,6 +13154,10 @@ export function CompletionPanel({
   // merely use the report's headings, and is the base completion compares
   // the submitted report against for the edit heads-up (Codex #5500).
   const installedReportDraftRef = useRef(null);
+  // The promise marks the installed report was written with (pending while
+  // a Generate request is out): a later change asks before sending.
+  const pendingGenerationPromiseSignatureRef = useRef(null);
+  const generationPromiseSignatureRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
   // Whether the CURRENTLY INSTALLED draft was actually generated with photo
   // grounding — the server's own photoGroundingUsed flag on its response
@@ -14726,8 +14732,15 @@ export function CompletionPanel({
     return () => { cancelled = true; };
   }, [service.id]);
   const visitPromises = promiseCheck?.promises || [];
-  // Marked promises only; none while Quick complete hides the report.
-  const promiseMarksForRequest = quickComplete ? [] : promiseMarksPayload(promiseMarks, visitPromises);
+  // No marks while Quick complete hides the report, on a backdated closeout
+  // (the marks would never apply) or on a visit that did no work: declined
+  // or incomplete (Codex #5516).
+  const promiseMarksSuppressed = quickComplete || backfillCloseout
+    || visitOutcome === "customer_declined" || visitOutcome === "incomplete";
+  // Marked, listed promises only, each with the wording version the tech saw.
+  const promiseMarksForRequest = promiseMarksSuppressed ? [] : promiseMarksPayload(promiseMarks, visitPromises);
+  // The marks as the staleness check and the report heads-up compare them.
+  const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : promiseMarks));
 
   useEffect(() => {
     let cancelled = false;
@@ -15249,6 +15262,7 @@ export function CompletionPanel({
         installedReportDraft: installedReportDraftRef.current,
         // The promise check's marks restore with the draft they shaped.
         promiseMarks,
+        generationPromiseSignature: generationPromiseSignatureRef.current,
         // Whether that installed report was actually generated WITH photo
         // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
         // a reload/billing-detour doesn't forget a grounded draft is
@@ -15667,6 +15681,9 @@ export function CompletionPanel({
     setPromiseMarks(savedDraft.promiseMarks && typeof savedDraft.promiseMarks === "object" && !Array.isArray(savedDraft.promiseMarks)
       ? savedDraft.promiseMarks
       : {});
+    generationPromiseSignatureRef.current = typeof savedDraft.generationPromiseSignature === "string"
+      ? savedDraft.generationPromiseSignature
+      : null;
     // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
     // field, which defaults to false (byte-identical to this fix not
     // existing yet: nothing tracked, nothing invalidates).
@@ -16147,6 +16164,7 @@ export function CompletionPanel({
     // the OLD flag/shape, self-invalidating a draft the tech never touched
     // the instant the flag changes.
     generationInputsRef.current = buildGenerationInputsSnapshot();
+    generationPromiseSignatureRef.current = pendingGenerationPromiseSignatureRef.current;
   }
   // Deselect handle after an AI draft: remove a structured selection from its
   // label array (and its recorded re-entry/treatment scope, for protocol
@@ -16499,6 +16517,7 @@ export function CompletionPanel({
       ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
       ...typedFindingsPayload,
     };
+    pendingGenerationPromiseSignatureRef.current = effectivePromiseSignature;
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
       productsApplied.length > 0 ||
@@ -16526,7 +16545,9 @@ export function CompletionPanel({
       // The omitted-field fallback state must REACH the server — after a
       // failed lookup the client can't know whether a visit-linked confirmed
       // row exists; the server's validated gate decides.
-      (isLawn && lawnAssessmentReady === "failed");
+      (isLawn && lawnAssessmentReady === "failed") ||
+      // A marked promise is visit detail the report can speak to (Codex #5516).
+      promiseMarksForRequest.length > 0;
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied, dryDown) {
@@ -17334,6 +17355,16 @@ export function CompletionPanel({
     // completion posted now would ship notes without it (pre-push P1).
     if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
+      return;
+    }
+    // A promise mark changed after the report was written and the tech kept
+    // their edited report (an untouched one clears itself): the report may
+    // not match the marks, so the tech decides (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !resumingPoll
+      && installedReportDraftRef.current
+      && generationPromiseSignatureRef.current != null
+      && generationPromiseSignatureRef.current !== effectivePromiseSignature
+      && !window.confirm(PROMISE_MARKS_CHANGED_PROMPT)) {
       return;
     }
     const specialtyProductConflict = exclusiveProtocolProductConflict(
@@ -18575,7 +18606,7 @@ export function CompletionPanel({
       aiReportIncludeComms,
       // a promise marked (or re-marked) after generation changes what the
       // report should say about it
-      promiseMarksSignature(promiseMarks),
+      effectivePromiseSignature,
     ]);
   }
   useEffect(() => {
@@ -18596,7 +18627,7 @@ export function CompletionPanel({
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
-    aiReportIncludeComms, selectedProducts, serviceTypeForArea, promiseMarks]);
+    aiReportIncludeComms, selectedProducts, serviceTypeForArea, effectivePromiseSignature]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose
@@ -19850,9 +19881,10 @@ export function CompletionPanel({
                 />{" "}
               </Field>
             )}
-            {!quickComplete && promiseCheck && (
+            {!promiseMarksSuppressed && promiseCheck && (
               <PromiseCheck
                 promises={visitPromises}
+                total={promiseCheck.total}
                 marks={promiseMarks}
                 onChange={setPromiseMarks}
                 disabled={generating}
@@ -22295,9 +22327,10 @@ export function CompletionPanel({
               </div>
             )}{" "}
           </div>
-          {!quickComplete && promiseCheck && (
+          {!promiseMarksSuppressed && promiseCheck && (
             <PromiseCheck
               promises={visitPromises}
+              total={promiseCheck.total}
               marks={promiseMarks}
               onChange={setPromiseMarks}
               disabled={generating}

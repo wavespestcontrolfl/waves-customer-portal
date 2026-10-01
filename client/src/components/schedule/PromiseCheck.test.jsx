@@ -2,11 +2,11 @@
 import { useState } from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import PromiseCheck, { promiseMarksPayload, promiseMarksSignature, promiseSourceLabel, STILL_LEFT_MAX } from './PromiseCheck';
+import PromiseCheck, { promiseCountLabel, promiseMarksPayload, promiseMarksSignature, promiseSourceLabel, STILL_LEFT_MAX } from './PromiseCheck';
 
 const PROMISES = [
-  { id: 'p-1', description: 'Check under the dishwasher and the kitchen sink', source: 'call', madeAt: '2026-09-29T15:00:00.000Z' },
-  { id: 'p-2', description: 'Look at the gap under the garage door', source: 'text', madeAt: '2026-09-27T16:00:00.000Z' },
+  { id: 'p-1', description: 'Check under the dishwasher and the kitchen sink', source: 'call', madeAt: '2026-09-29T15:00:00.000Z', version: '1111111111111111' },
+  { id: 'p-2', description: 'Look at the gap under the garage door', source: 'text', madeAt: '2026-09-27T16:00:00.000Z', version: '2222222222222222' },
 ];
 
 function Harness({ promises = PROMISES, onMarks = () => {} }) {
@@ -65,16 +65,24 @@ describe('PromiseCheck', () => {
 });
 
 describe('promise mark helpers', () => {
-  it('the request carries marked, listed promises only, a still-left note on Partly only', () => {
+  it('the request carries marked, listed promises only, with the wording version seen, a still-left note on Partly only', () => {
     expect(promiseMarksPayload({
       'p-1': { mark: 'done', stillLeft: 'stale text' },
       'p-2': { mark: 'partly', stillLeft: '  the left side ' },
       'p-9': { mark: 'done' }, // no longer listed
       'p-3': { mark: 'maybe' },
-    }, [...PROMISES, { id: 'p-3', description: 'x' }])).toEqual([
-      { id: 'p-1', mark: 'done' },
-      { id: 'p-2', mark: 'partly', stillLeft: 'the left side' },
+    }, [...PROMISES, { id: 'p-3', description: 'x', version: '3333333333333333' }])).toEqual([
+      { id: 'p-1', mark: 'done', version: '1111111111111111' },
+      { id: 'p-2', mark: 'partly', version: '2222222222222222', stillLeft: 'the left side' },
     ]);
+  });
+
+  it('says when only the newest promises are shown', () => {
+    expect(promiseCountLabel(2, 2)).toBe('2 open');
+    expect(promiseCountLabel(10, 14)).toBe('10 of 14 open');
+    expect(promiseCountLabel(3, null)).toBe('3 open');
+    render(<PromiseCheck promises={PROMISES} total={14} marks={{}} onChange={() => {}} />);
+    expect(screen.getByText('2 of 14 open')).toBeTruthy();
   });
 
   it('the staleness signature ignores whether the list has loaded and the order of entry', () => {

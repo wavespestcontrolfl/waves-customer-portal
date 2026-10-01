@@ -131,9 +131,11 @@ describe('GET /:serviceId/promises', () => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
     mockDbCurrent = serviceDb(SERVICE, []);
     resolveCompletionProfileForScheduledService.mockResolvedValue({ serviceKey: 'pest_re_service', findingsType: null });
-    loadVisitPromises.mockResolvedValue(PROMISES);
+    loadVisitPromises.mockResolvedValue({ promises: PROMISES, total: 3 });
     const res = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-1' });
-    expect(res.body).toEqual({ available: true, promises: PROMISES });
+    // The total counts every open visit promise, so the card can say when
+    // only the newest are shown.
+    expect(res.body).toEqual({ available: true, promises: PROMISES, total: 3 });
     expect(loadVisitPromises).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1' });
   });
 });

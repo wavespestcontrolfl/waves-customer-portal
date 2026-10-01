@@ -33,6 +33,7 @@ const logger = require('../services/logger');
 const VisitPromises = require('../services/service-report/visit-promises');
 
 const ID = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const V = (description) => VisitPromises.promiseVersion(description);
 
 const CALL_ROW = {
   id: ID(1), party: 'waves', kind: 'technician_follow_up', description: 'Check under the  dishwasher and the kitchen sink',
@@ -60,12 +61,13 @@ beforeEach(() => {
 
 describe('the promises listed', () => {
   test('Waves promises a technician keeps, from calls, texts and emails, newest first', async () => {
-    const promises = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    const { promises, total } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
     expect(promises).toEqual([
-      { id: ID(3), description: 'Recheck the attic vent', source: 'email', madeAt: '2026-09-30T12:00:00.000Z' },
-      { id: ID(1), description: 'Check under the dishwasher and the kitchen sink', source: 'call', madeAt: '2026-09-29T15:00:00.000Z' },
-      { id: ID(2), description: 'Look at the gap under the garage door', source: 'text', madeAt: '2026-09-27T12:00:00.000Z' },
+      { id: ID(3), description: 'Recheck the attic vent', source: 'email', madeAt: '2026-09-30T12:00:00.000Z', version: V('Recheck the attic vent') },
+      { id: ID(1), description: 'Check under the dishwasher and the kitchen sink', source: 'call', madeAt: '2026-09-29T15:00:00.000Z', version: V('Check under the dishwasher and the kitchen sink') },
+      { id: ID(2), description: 'Look at the gap under the garage door', source: 'text', madeAt: '2026-09-27T12:00:00.000Z', version: V('Look at the gap under the garage door') },
     ]);
+    expect(total).toBe(3);
     // Call rows are asked for the visit kinds and Waves' side only, as a pure read.
     expect(CallCommitments.listOpenCommitments).toHaveBeenCalledWith({}, expect.objectContaining({
       party: 'waves', kinds: ['technician_follow_up', 'other'], customerId: 'cust-1', prepare: false,
@@ -75,13 +77,13 @@ describe('the promises listed', () => {
   test('a source whose ledger is off is not listed', async () => {
     mockCallLedger = false;
     mockEmailLedger = false;
-    const promises = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    const { promises } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
     expect(promises.map((promise) => promise.source)).toEqual(['text']);
     expect(CallCommitments.listOpenCommitments).not.toHaveBeenCalled();
   });
 
   test('no customer, no read', async () => {
-    expect(await VisitPromises.loadVisitPromises({}, { customerId: null })).toEqual([]);
+    expect(await VisitPromises.loadVisitPromises({}, { customerId: null })).toEqual({ promises: [], total: 0 });
     expect(CallCommitments.listOpenCommitments).not.toHaveBeenCalled();
     expect(SmsActions.listSmsCommitments).not.toHaveBeenCalled();
   });
@@ -91,26 +93,29 @@ describe('the promises listed', () => {
       ...CALL_ROW, id: ID(100 + i), call_started_at: `2026-09-${String(10 + i).padStart(2, '0')}T12:00:00Z`,
     })));
     SmsActions.listSmsCommitments.mockResolvedValue([]);
-    const promises = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    const { promises, total } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
     expect(promises).toHaveLength(VisitPromises.MAX_LISTED_PROMISES);
+    expect(total).toBe(14);
     expect(promises[0].id).toBe(ID(113));
   });
 });
 
 describe('marks from the request', () => {
-  test('valid marks only, one per promise, a still-left note on Partly only', () => {
+  test('valid marks only, one per promise, each with the wording version, a still-left note on Partly only', () => {
+    const v = V('anything');
     expect(VisitPromises.promiseMarksFromBody([
-      { id: ID(1), mark: 'done', stillLeft: 'ignored' },
-      { id: ID(2), mark: 'partly', stillLeft: '  under the   kitchen sink ' },
-      { id: 'not-a-uuid', mark: 'done' },
-      { id: ID(3), mark: 'maybe' },
-      { id: ID(1), mark: 'not_yet' },
+      { id: ID(1), mark: 'done', version: v, stillLeft: 'ignored' },
+      { id: ID(2), mark: 'partly', version: v, stillLeft: '  under the   kitchen sink ' },
+      { id: 'not-a-uuid', mark: 'done', version: v },
+      { id: ID(3), mark: 'maybe', version: v },
+      { id: ID(4), mark: 'done' }, // no version: the wording seen is unknown
+      { id: ID(1), mark: 'not_yet', version: v },
     ])).toEqual([
-      { id: ID(1), mark: 'not_yet' },
-      { id: ID(2), mark: 'partly', stillLeft: 'under the kitchen sink' },
+      { id: ID(1), mark: 'not_yet', version: v },
+      { id: ID(2), mark: 'partly', version: v, stillLeft: 'under the kitchen sink' },
     ]);
-    expect(VisitPromises.promiseMarksFromBody({ id: ID(1), mark: 'done' })).toEqual([]);
-    expect(VisitPromises.promiseMarksFromBody([{ id: ID(2), mark: 'partly', stillLeft: 'x'.repeat(500) }])[0].stillLeft)
+    expect(VisitPromises.promiseMarksFromBody({ id: ID(1), mark: 'done', version: v })).toEqual([]);
+    expect(VisitPromises.promiseMarksFromBody([{ id: ID(2), mark: 'partly', version: v, stillLeft: 'x'.repeat(500) }])[0].stillLeft)
       .toHaveLength(VisitPromises.MAX_STILL_LEFT_CHARS);
   });
 
@@ -118,14 +123,15 @@ describe('marks from the request', () => {
     const resolved = await VisitPromises.resolveVisitPromiseMarks({}, {
       customerId: 'cust-1',
       marks: [
-        { id: ID(1), mark: 'done' },
-        { id: ID(4), mark: 'done' }, // the customer's own to-do
-        { id: ID(5), mark: 'done' }, // office work
-        { id: ID(9), mark: 'done' }, // closed since, or never this customer's
+        { id: ID(1), mark: 'done', version: V(CALL_ROW.description) },
+        { id: ID(2), mark: 'done', version: V('Look at the old gap wording') }, // reworded since
+        { id: ID(4), mark: 'done', version: V(CUSTOMER_TODO.description) }, // the customer's own to-do
+        { id: ID(5), mark: 'done', version: V(OFFICE_TEXT.description) }, // office work
+        { id: ID(9), mark: 'done', version: V('x') }, // closed since, or never this customer's
       ],
     });
     expect(resolved).toEqual([
-      { id: ID(1), mark: 'done', description: 'Check under the dishwasher and the kitchen sink', source: 'call' },
+      { id: ID(1), mark: 'done', version: V(CALL_ROW.description), description: 'Check under the dishwasher and the kitchen sink', source: 'call' },
     ]);
   });
 
@@ -192,8 +198,8 @@ function ledgerDb({ customers = ['cust-1'], commitments = {}, sources = {} } = {
 
 const LEDGER = () => ({
   commitments: {
-    [ID(1)]: { status: 'open', party: 'waves', kind: 'technician_follow_up', call_log_id: 'call-1' },
-    [ID(2)]: { status: 'open', party: 'waves', kind: 'other', sms_log_id: 'sms-1', human_note: 'Customer prefers mornings' },
+    [ID(1)]: { status: 'open', party: 'waves', kind: 'technician_follow_up', call_log_id: 'call-1', description: CALL_ROW.description },
+    [ID(2)]: { status: 'open', party: 'waves', kind: 'other', sms_log_id: 'sms-1', description: TEXT_ROW.description, human_note: 'Customer prefers mornings' },
   },
   sources: { 'call_log:call-1': { customer_id: 'cust-1' }, 'sms_log:sms-1': { customer_id: 'cust-1' } },
 });
@@ -203,21 +209,26 @@ describe('marks reach the office list after the save', () => {
     const { conn, locks } = ledgerDb(LEDGER());
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
       customerId: 'cust-1',
-      marks: [{ id: ID(1), mark: 'done' }, { id: ID(2), mark: 'done' }],
+      marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }, { id: ID(2), mark: 'done', version: V(TEXT_ROW.description) }],
       visitDate: '2026-10-01',
       reviewedBy: 'tech-1',
     });
     const note = 'Done at the October 1 visit (marked by the technician).';
     expect(CallCommitments.applyHumanUpdate).toHaveBeenCalledWith(expect.any(Function), ID(1), { action: 'fulfill', note, reviewedBy: 'tech-1' });
-    expect(SmsActions.applySmsCommitmentUpdate).toHaveBeenCalledWith(conn, ID(2), {
+    // A text promise is checked under the office path's own lock strength,
+    // then written by that path inside the same transaction.
+    expect(SmsActions.applySmsCommitmentUpdate).toHaveBeenCalledWith(expect.any(Function), ID(2), {
       customerId: 'cust-1', action: 'fulfill', note, reviewedBy: 'tech-1',
     });
     expect(results).toEqual([
       { id: ID(1), mark: 'done', applied: true },
       { id: ID(2), mark: 'done', applied: true },
     ]);
-    // The call promise is re-checked under locks first: customer, call, promise.
-    expect(locks).toEqual(['customers:share', 'call_log:share', 'call_commitments:update']);
+    // Each promise is re-checked under locks first: customer, source, promise.
+    expect(locks).toEqual([
+      'customers:share', 'call_log:share', 'call_commitments:update',
+      'customers:update', 'sms_log:update', 'call_commitments:update',
+    ]);
   });
 
   test('Done is not written when the call moved to another customer or the office settled the promise meanwhile', async () => {
@@ -225,7 +236,7 @@ describe('marks reach the office list after the save', () => {
     moved.sources['call_log:call-1'] = { customer_id: 'cust-2' };
     const movedDb = ledgerDb(moved);
     const movedResults = await VisitPromises.applyVisitPromiseMarks(movedDb.conn, {
-      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done' }], visitDate: '2026-10-01',
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }], visitDate: '2026-10-01',
     });
     expect(movedResults).toEqual([{ id: ID(1), mark: 'done', applied: false }]);
 
@@ -233,7 +244,7 @@ describe('marks reach the office list after the save', () => {
     settled.commitments[ID(1)].status = 'dismissed';
     const settledDb = ledgerDb(settled);
     const settledResults = await VisitPromises.applyVisitPromiseMarks(settledDb.conn, {
-      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done' }], visitDate: '2026-10-01',
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }], visitDate: '2026-10-01',
     });
     expect(settledResults).toEqual([{ id: ID(1), mark: 'done', applied: false }]);
     expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
@@ -241,7 +252,7 @@ describe('marks reach the office list after the save', () => {
 
   test('Partly keeps the promise open with the still-left note, added once', async () => {
     const { conn, updates } = ledgerDb(LEDGER());
-    const args = { customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', stillLeft: 'seal the left side' }], visitDate: '2026-10-01' };
+    const args = { customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'seal the left side' }], visitDate: '2026-10-01' };
     await VisitPromises.applyVisitPromiseMarks(conn, args);
     await VisitPromises.applyVisitPromiseMarks(conn, args); // a resumed completion
     expect(updates).toHaveLength(1);
@@ -251,12 +262,25 @@ describe('marks reach the office list after the save', () => {
     expect(SmsActions.applySmsCommitmentUpdate).not.toHaveBeenCalled();
   });
 
+  test('Done is not written when the office reworded the promise meanwhile', async () => {
+    const reworded = LEDGER();
+    reworded.commitments[ID(1)].description = 'Check under the dishwasher only';
+    // The listing still shows the old wording (the card's snapshot)…
+    const { conn } = ledgerDb(reworded);
+    const results = await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }], visitDate: '2026-10-01',
+    });
+    // …but the locked row reads differently, so nothing is written.
+    expect(results).toEqual([{ id: ID(1), mark: 'done', applied: false }]);
+    expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
+  });
+
   test('Partly adds no note once the text belongs to another customer', async () => {
     const moved = LEDGER();
     moved.sources['sms_log:sms-1'] = { customer_id: 'cust-2' };
     const { conn, updates } = ledgerDb(moved);
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
-      customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', stillLeft: 'x' }], visitDate: '2026-10-01',
+      customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'x' }], visitDate: '2026-10-01',
     });
     expect(results).toEqual([{ id: ID(2), mark: 'partly', applied: false }]);
     expect(updates).toEqual([]);
@@ -267,7 +291,7 @@ describe('marks reach the office list after the save', () => {
     const { conn, updates } = ledgerDb(LEDGER());
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
       customerId: 'cust-1',
-      marks: [{ id: ID(1), mark: 'done' }, { id: ID(2), mark: 'done' }, { id: ID(3), mark: 'not_yet' }],
+      marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }, { id: ID(2), mark: 'done', version: V(TEXT_ROW.description) }, { id: ID(3), mark: 'not_yet', version: V(EMAIL_ROW.description) }],
       visitDate: '2026-10-01',
     });
     expect(results).toEqual([
@@ -282,7 +306,7 @@ describe('marks reach the office list after the save', () => {
     CallCommitments.listOpenCommitments.mockResolvedValue([]);
     const { conn } = ledgerDb(LEDGER());
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
-      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done' }], visitDate: '2026-10-01',
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }], visitDate: '2026-10-01',
     });
     expect(results).toEqual([]);
     expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
@@ -302,6 +326,7 @@ describe('wiring source contracts', () => {
     expect(call).toBeGreaterThan(completionSource.indexOf('durableCompletionCommitted = true;'));
     expect(completionSource.indexOf('const responsePayload = {', call)).toBeGreaterThan(call);
     const block = completionSource.slice(completionSource.lastIndexOf('if (!isBackfillCompletion', call), call + 400);
+    expect(block).toMatch(/visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'/);
     expect(block).toMatch(/Array\.isArray\(promiseMarks\) && promiseMarks\.length/);
     expect(block).toMatch(/reportWriterRulesLive\(\)/);
     expect(block).toMatch(/effectiveCompletionProfile && VisitPromises\.promiseCheckInScope\(svc\.service_type, effectiveCompletionProfile\)/);
@@ -314,6 +339,8 @@ describe('wiring source contracts', () => {
 
   test('the generate route reads marks only with the writer rules on a grounded visit', () => {
     expect(routeSource).toMatch(/if \(writerRulesOn && groundingCustomerId && Array\.isArray\(promiseMarks\) && promiseMarks\.length\) \{/);
+    // A validated mark is visit detail on its own.
+    expect(routeSource).toMatch(/if \(!baseHasReportInput && !companionCustomerInput && !visitPromises\.length\) \{/);
     expect(routeSource).toMatch(/visitPromises,\n\s+\}\);/);
   });
 });

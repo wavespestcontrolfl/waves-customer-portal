@@ -14052,8 +14052,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never fails the completion, and nothing contacts the customer. Only
     // while the writer rules are live, on a visit the writer covers, judged
     // on the profile the completion transaction used (null skips).
-    // Backfills excluded, like the comms guard. Re-runnable on a resume.
-    if (!isBackfillCompletion && Array.isArray(promiseMarks) && promiseMarks.length
+    // Only a visit that did its work: never a declined (or incomplete) one
+    // (Codex #5516). Backfills excluded, like the comms guard. Re-runnable
+    // on a resume.
+    if (!isBackfillCompletion && visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'
+      && Array.isArray(promiseMarks) && promiseMarks.length
       && require('../config/feature-gates').reportWriterRulesLive()) {
       try {
         const VisitPromises = require('../services/service-report/visit-promises');

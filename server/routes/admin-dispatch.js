@@ -652,8 +652,8 @@ router.get('/:serviceId/promises', async (req, res, next) => {
     if (!VisitPromises.promiseCheckInScope(svc.service_type, completionProfile, { failed: profileFailed })) {
       return res.json({ available: false, promises: [] });
     }
-    const promises = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id });
-    res.json({ available: true, promises });
+    const { promises, total } = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id });
+    res.json({ available: true, promises, total });
   } catch (err) { next(err); }
 });
 

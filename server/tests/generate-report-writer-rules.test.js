@@ -483,6 +483,19 @@ describe('the promise check reaches the writer', () => {
     expect(mockResolveMarks).not.toHaveBeenCalled();
   });
 
+  test('gate on: a marked promise is visit detail on its own; without it a bare request is refused', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    const bare = { serviceNotes: '', productsApplied: '', products: [] };
+    const refused = mkRes();
+    await handler(mkReq(bare), refused);
+    expect(refused.statusCode).toBe(400);
+    mockResolveMarks.mockImplementation(async () => RESOLVED);
+    const generated = mkRes();
+    await handler(mkReq({ ...bare, promiseMarks: MARKS }), generated);
+    expect(generated.statusCode).toBe(200);
+    expect(mockBuildContext.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ visitPromises: RESOLVED }));
+  });
+
   test('gate on: a failed promise read writes the report without them', async () => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
     mockResolveMarks.mockImplementation(async () => { throw new Error('ledger down'); });

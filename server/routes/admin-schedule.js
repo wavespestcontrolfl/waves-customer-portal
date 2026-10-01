@@ -24563,6 +24563,10 @@ router.post('/generate-report', async (req, res) => {
       || ratingNum !== null
       || typedHasFindingInput
       || hasValidLawnAssessment
+      // Provisional, like companion input: submitted promise marks keep the
+      // request alive to grounding, and only marks that resolve against the
+      // customer's open promises open generation (re-checked below).
+      || (Array.isArray(promiseMarks) && promiseMarks.length > 0)
       || suppliedTreeShrubReview
       || cappedPhotoCaptions.length > 0;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
@@ -25127,7 +25131,21 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       || hasValidLawnAssessment
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
       || cappedPhotoCaptions.length > 0;
-    if (!baseHasReportInput && !companionCustomerInput) {
+    // The technician's promise marks, resolved against this customer's open
+    // promises (owner "ok yes add these" 2026-10-01): with the writer rules
+    // on a grounded visit only. Fail-soft: no record, no mention. Resolved
+    // before the input check: a validated mark is visit detail on its own
+    // (Codex #5516).
+    let visitPromises = [];
+    if (writerRulesOn && groundingCustomerId && Array.isArray(promiseMarks) && promiseMarks.length) {
+      try {
+        visitPromises = await require('../services/service-report/visit-promises')
+          .resolveVisitPromiseMarks(db, { customerId: groundingCustomerId, marks: promiseMarks });
+      } catch (promiseErr) {
+        logger.warn(`[generate-report] promise marks not loaded: ${promiseErr.message}`);
+      }
+    }
+    if (!baseHasReportInput && !companionCustomerInput && !visitPromises.length) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
 
@@ -25139,18 +25157,6 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let deterministicApplications = [];
     let writerAllowedPhrases = [];
     let writerAllowedDates = [];
-    // The technician's promise marks, resolved against this customer's open
-    // promises (owner "ok yes add these" 2026-10-01): with the writer rules
-    // on a grounded visit only. Fail-soft: no record, no mention.
-    let visitPromises = [];
-    if (writerRulesOn && groundingCustomerId && Array.isArray(promiseMarks) && promiseMarks.length) {
-      try {
-        visitPromises = await require('../services/service-report/visit-promises')
-          .resolveVisitPromiseMarks(db, { customerId: groundingCustomerId, marks: promiseMarks });
-      } catch (promiseErr) {
-        logger.warn(`[generate-report] promise marks not loaded: ${promiseErr.message}`);
-      }
-    }
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,

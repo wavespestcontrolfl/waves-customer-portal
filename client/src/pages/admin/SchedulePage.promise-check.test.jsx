@@ -22,8 +22,8 @@ const service = {
 };
 
 const PROMISES = [
-  { id: '00000000-0000-4000-8000-000000000001', description: 'Check under the dishwasher', source: 'call', madeAt: '2026-09-29T15:00:00.000Z' },
-  { id: '00000000-0000-4000-8000-000000000002', description: 'Look at the gap under the garage door', source: 'text', madeAt: '2026-09-27T16:00:00.000Z' },
+  { id: '00000000-0000-4000-8000-000000000001', description: 'Check under the dishwasher', source: 'call', madeAt: '2026-09-29T15:00:00.000Z', version: '1111111111111111' },
+  { id: '00000000-0000-4000-8000-000000000002', description: 'Look at the gap under the garage door', source: 'text', madeAt: '2026-09-27T16:00:00.000Z', version: '2222222222222222' },
 ];
 const REPORT = "WHAT WE FOUND\nGhost ants were trailing along the slider track.\nWHAT WE DID AND WHY\nWe placed bait along the track.\nWHAT TO EXPECT\nYou may see more ants at the bait for a few days.\nWHAT'S NEXT\nIf ants are still trailing, let us know.";
 
@@ -82,7 +82,7 @@ describe('the promise check on the completion form', () => {
     await waitFor(() => expect(submit.disabled).toBe(false));
     await act(async () => fireEvent.click(submit));
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: PROMISES[0].id, mark: 'done' }]);
+    expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: PROMISES[0].id, mark: 'done', version: PROMISES[0].version }]);
   });
 
   it("sends a Partly mark and its still-left note with the report request", async () => {
@@ -95,7 +95,7 @@ describe('the promise check on the completion form', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Generate AI Service Report' })));
     await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('generate-report'))).toBe(true));
     const request = JSON.parse(fetch.mock.calls.find(([url]) => String(url).includes('generate-report'))[1].body);
-    expect(request.promiseMarks).toEqual([{ id: PROMISES[1].id, mark: 'partly', stillLeft: 'the left side' }]);
+    expect(request.promiseMarks).toEqual([{ id: PROMISES[1].id, mark: 'partly', version: PROMISES[1].version, stillLeft: 'the left side' }]);
   });
 
   it('a mark changed after generating clears the untouched report', async () => {
@@ -118,6 +118,56 @@ describe('the promise check on the completion form', () => {
       const saved = JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`) || '{}');
       expect(saved.promiseMarks).toEqual({ [PROMISES[0].id]: { mark: 'done', stillLeft: '' } });
     }, { timeout: 3000 });
+  });
+
+  it('a declined visit hides the card and sends no marks', async () => {
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await renderPanel({ onSubmit });
+    await screen.findByText('Promises we made');
+    fireEvent.click(markButton('Check under the dishwasher', 'Done'));
+    fireEvent.change(screen.getByDisplayValue('Completed'), { target: { value: 'customer_declined' } });
+    await waitFor(() => expect(screen.queryByText('Promises we made')).toBeNull());
+
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][1]).not.toHaveProperty('promiseMarks');
+  });
+
+  it('a marked promise alone is enough to write the report', async () => {
+    await renderPanel();
+    await screen.findByText('Promises we made');
+    fireEvent.click(markButton('Check under the dishwasher', 'Done'));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Generate AI Service Report' })));
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('generate-report'))).toBe(true));
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it('a mark changed after the report was edited asks before sending', async () => {
+    const onSubmit = vi.fn().mockResolvedValue({});
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    await renderPanel({ onSubmit });
+    await screen.findByText('Promises we made');
+    fireEvent.change(notes(), { target: { value: 'Ghost ants on the slider track.' } });
+    fireEvent.click(markButton('Check under the dishwasher', 'Done'));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Generate AI Service Report' })));
+    await waitFor(() => expect(notes().value).toContain('WHAT WE FOUND'));
+    // The tech edits the report, then changes the mark.
+    fireEvent.change(notes(), { target: { value: `${notes().value} Edited.` } });
+    await act(async () => fireEvent.click(markButton('Check under the dishwasher', 'Not yet')));
+
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('You changed a promise mark after the report was written'));
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await act(async () => fireEvent.click(submit));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: PROMISES[0].id, mark: 'not_yet', version: PROMISES[0].version }]);
   });
 
   it('no card and no marks when the server says the check is unavailable', async () => {

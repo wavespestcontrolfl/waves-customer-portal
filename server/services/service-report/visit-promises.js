@@ -16,6 +16,7 @@
  * owns). Marking is never required, never blocks completion, and never
  * contacts the customer.
  */
+const crypto = require('crypto');
 const logger = require('../logger');
 const { isEnabled, gateEnvValue } = require('../../config/feature-gates');
 const { writerRulesInScope } = require('./lawn-report-copy-prompt');
@@ -34,10 +35,19 @@ const MAX_STILL_LEFT_CHARS = 200;
 const MAX_DESCRIPTION_CHARS = 300;
 const MAX_HUMAN_NOTE_CHARS = 2000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VERSION_RE = /^[0-9a-f]{16}$/;
 
 function cleanText(value, max = Infinity) {
   const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   return text.length > max ? text.slice(0, max).trim() : text;
+}
+
+// The version of a promise's wording the technician saw: a mark counts only
+// while the promise still reads that way (an office edit in between drops
+// it; Codex #5516). Wording, not updated_at: automatic refreshes touch rows
+// without changing what was promised.
+function promiseVersion(description) {
+  return crypto.createHash('sha256').update(cleanText(description)).digest('hex').slice(0, 16);
 }
 
 function isoOrNull(value) {
@@ -91,42 +101,55 @@ async function openVisitPromises(conn, { customerId }) {
     }
   }
   return rows
-    .map((row) => ({ ...row, description: cleanText(row.description, MAX_DESCRIPTION_CHARS), madeAt: isoOrNull(row.madeAt) }))
+    .map((row) => ({
+      ...row,
+      description: cleanText(row.description, MAX_DESCRIPTION_CHARS),
+      version: promiseVersion(row.description),
+      madeAt: isoOrNull(row.madeAt),
+    }))
     .filter((row) => row.id && row.description)
     .sort((a, b) => (Date.parse(b.madeAt || 0) || 0) - (Date.parse(a.madeAt || 0) || 0));
 }
 
-// The card's list: { id, description, source: call|text|email, madeAt }.
+// The card's list, newest first: { promises: [{ id, description, source:
+// call|text|email, madeAt, version }], total } (total counts every open
+// visit promise, so the card can say when older ones are not shown).
 async function loadVisitPromises(conn, { customerId }) {
-  return (await openVisitPromises(conn, { customerId })).slice(0, MAX_LISTED_PROMISES);
+  const open = await openVisitPromises(conn, { customerId });
+  return { promises: open.slice(0, MAX_LISTED_PROMISES), total: open.length };
 }
 
-// The request's marks, validated: [{ id, mark, stillLeft? }], one per id
-// (the last wins). Anything else is dropped, never an error: marking is
-// optional and must not fail a completion.
+// The request's marks, validated: [{ id, mark, version, stillLeft? }], one
+// per id (the last wins); the version is the wording the technician saw.
+// Anything else is dropped, never an error: marking is optional and must
+// not fail a completion.
 function promiseMarksFromBody(value) {
   if (!Array.isArray(value)) return [];
   const byId = new Map();
   for (const entry of value.slice(0, MAX_MARKS)) {
     const id = String(entry?.id || '');
     const mark = String(entry?.mark || '');
-    if (!UUID_RE.test(id) || !MARKS.includes(mark)) continue;
+    const version = String(entry?.version || '').toLowerCase();
+    if (!UUID_RE.test(id) || !MARKS.includes(mark) || !VERSION_RE.test(version)) continue;
     const stillLeft = mark === 'partly' ? cleanText(entry?.stillLeft, MAX_STILL_LEFT_CHARS) : '';
-    byId.set(id.toLowerCase(), { id, mark, ...(stillLeft ? { stillLeft } : {}) });
+    byId.set(id.toLowerCase(), { id, mark, version, ...(stillLeft ? { stillLeft } : {}) });
   }
   return [...byId.values()];
 }
 
-// Marks for promises still open for this customer, with each promise's own
-// description and source. A mark for anything else (closed since, another
-// customer's, an office kind) is dropped.
+// Marks for promises still open for this customer and still worded as the
+// technician saw them, with each promise's own description and source. A
+// mark for anything else (closed or reworded since, another customer's, an
+// office kind) is dropped.
 async function resolveVisitPromiseMarks(conn, { customerId, marks }) {
   const valid = promiseMarksFromBody(marks);
   if (!valid.length || !customerId) return [];
   const open = new Map((await openVisitPromises(conn, { customerId })).map((row) => [String(row.id).toLowerCase(), row]));
   return valid.flatMap((entry) => {
     const promise = open.get(entry.id.toLowerCase());
-    return promise ? [{ ...entry, id: promise.id, description: promise.description, source: promise.source }] : [];
+    return promise && promise.version === entry.version
+      ? [{ ...entry, id: promise.id, description: promise.description, source: promise.source }]
+      : [];
   });
 }
 
@@ -166,28 +189,32 @@ const SOURCE_TABLES = Object.freeze({
 });
 
 // The promise as it stands under locks, or null when it is no longer this
-// customer's open visit promise (dismissed or done by the office meanwhile,
-// or its call, text or email moved to another customer). The marks were
-// resolved from an unlocked read, so every write re-checks here first.
-// Lock order: the customer, then the promise's source row, then the
-// promise: the call relink and customer merge order, and
-// applySmsCommitmentUpdate's.
-async function lockOwnedOpenPromise(trx, id, { customerId, source }) {
+// customer's open visit promise worded as the technician saw it (dismissed,
+// done or reworded by the office meanwhile, or its call, text or email
+// moved to another customer). The marks were resolved from an unlocked
+// read, so every write re-checks here first. Lock order: the customer,
+// then the promise's source row, then the promise: the call relink and
+// customer merge order, and applySmsCommitmentUpdate's. `lock: 'update'`
+// takes the customer and source rows as that path does, before it runs
+// inside the same transaction.
+async function lockOwnedOpenPromise(trx, id, { customerId, source, version, lock = 'share' }) {
   const [table, column] = SOURCE_TABLES[source] || [];
-  if (!table || !customerId) return null;
-  const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id');
+  if (!table || !customerId || !version) return null;
+  const strength = (query) => (lock === 'update' ? query.forUpdate() : query.forShare());
+  const customer = await strength(trx('customers').where({ id: customerId }).whereNull('deleted_at')).first('id');
   if (!customer) return null;
   const initial = await trx('call_commitments').where({ id }).first(column, 'email_customer_id');
   if (!initial?.[column]) return null;
-  const sourceRow = await trx(table).where({ id: initial[column] }).forShare().first('customer_id');
+  const sourceRow = await strength(trx(table).where({ id: initial[column] })).first('customer_id');
   // An email ask follows a merge through emails.customer_id; a staff
   // promise's sent email carries none, so its own email_customer_id does
   // (the rule applySmsCommitmentUpdate applies).
   const owner = source === 'email' ? (sourceRow?.customer_id || initial.email_customer_id) : sourceRow?.customer_id;
   if (!sourceRow || String(owner || '') !== String(customerId)) return null;
   const row = await trx('call_commitments').where({ id }).forUpdate()
-    .first('status', 'party', 'kind', 'human_note', column);
+    .first('status', 'party', 'kind', 'description', 'human_note', column);
   if (!row || row.status !== 'open' || row.party !== 'waves' || !VISIT_PROMISE_KINDS.includes(row.kind)) return null;
+  if (promiseVersion(row.description) !== version) return null;
   // The promise still points at the source just checked.
   if (String(row[column] || '') !== String(initial[column])) return null;
   return row;
@@ -197,7 +224,7 @@ async function lockOwnedOpenPromise(trx, id, { customerId, source }) {
 // once (a resumed completion finds it already there).
 async function addStillLeftNote(conn, promise, customerId, line) {
   return conn.transaction(async (trx) => {
-    const row = await lockOwnedOpenPromise(trx, promise.id, { customerId, source: promise.source });
+    const row = await lockOwnedOpenPromise(trx, promise.id, { customerId, source: promise.source, version: promise.version });
     if (!row) return false;
     const current = String(row.human_note || '');
     if (current.includes(line)) return false;
@@ -223,22 +250,25 @@ async function applyVisitPromiseMarks(conn, { customerId, marks, visitDate = nul
     try {
       if (promise.mark === 'done') {
         const note = `Done at ${visit} (marked by the technician).`;
-        let applied = true;
-        if (promise.source === 'call') {
-          // applyHumanUpdate writes by id; the ownership and open checks
-          // run under locks in the same transaction first.
-          applied = await conn.transaction(async (trx) => {
-            if (!await lockOwnedOpenPromise(trx, promise.id, { customerId, source: 'call' })) return false;
+        // The ownership, open and wording checks run under locks in the
+        // same transaction as the office's own write: applyHumanUpdate for
+        // a call promise; applySmsCommitmentUpdate (its own checks again,
+        // on the rows this transaction already holds) for a text or email.
+        const applied = await conn.transaction(async (trx) => {
+          const locked = await lockOwnedOpenPromise(trx, promise.id, {
+            customerId, source: promise.source, version: promise.version,
+            lock: promise.source === 'call' ? 'share' : 'update',
+          });
+          if (!locked) return false;
+          if (promise.source === 'call') {
             await require('../call-commitments').applyHumanUpdate(trx, promise.id, { action: 'fulfill', note, reviewedBy });
-            return true;
-          });
-        } else {
-          // The office's own text/email path re-checks the customer, the
-          // source and the open status under its own locks.
-          await require('../sms-operational-actions').applySmsCommitmentUpdate(conn, promise.id, {
-            customerId, action: 'fulfill', note, reviewedBy,
-          });
-        }
+          } else {
+            await require('../sms-operational-actions').applySmsCommitmentUpdate(trx, promise.id, {
+              customerId, action: 'fulfill', note, reviewedBy,
+            });
+          }
+          return true;
+        });
         results.push({ id: promise.id, mark: 'done', applied });
       } else {
         const line = `Partly done at ${visit}. Still left: ${promise.stillLeft || 'not noted'}.`;
@@ -258,6 +288,7 @@ module.exports = {
   MAX_STILL_LEFT_CHARS,
   writerScopeContext,
   promiseCheckInScope,
+  promiseVersion,
   loadVisitPromises,
   promiseMarksFromBody,
   resolveVisitPromiseMarks,

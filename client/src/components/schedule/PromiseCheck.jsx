@@ -25,15 +25,22 @@ export function promiseSourceLabel(promise) {
   return day ? `${source} · ${day}` : source;
 }
 
-// The request's marks: marked promises only, a Partly with its note.
+// The request's marks: marked, listed promises only, each with the version
+// of the wording the tech saw (the server drops a mark once the promise was
+// reworded), a Partly with its note.
 export function promiseMarksPayload(marks, promises) {
-  const listed = new Set((Array.isArray(promises) ? promises : []).map((promise) => promise.id));
+  const listed = new Map((Array.isArray(promises) ? promises : []).map((promise) => [promise.id, promise]));
   return Object.entries(marks || {})
-    .filter(([id, entry]) => listed.has(id) && PROMISE_MARKS.some((option) => option.value === entry?.mark))
+    .filter(([id, entry]) => listed.get(id)?.version && PROMISE_MARKS.some((option) => option.value === entry?.mark))
     .map(([id, entry]) => {
       const stillLeft = entry.mark === "partly" ? String(entry.stillLeft || "").trim().slice(0, STILL_LEFT_MAX) : "";
-      return { id, mark: entry.mark, ...(stillLeft ? { stillLeft } : {}) };
+      return { id, mark: entry.mark, version: listed.get(id).version, ...(stillLeft ? { stillLeft } : {}) };
     });
+}
+
+// "2 open", or "10 of 14 open" when the list shows only the newest.
+export function promiseCountLabel(shown, total) {
+  return Number(total) > shown ? `${shown} of ${total} open` : `${shown} open`;
 }
 
 // The marks as the form's staleness check compares them: valid marks in id
@@ -55,7 +62,7 @@ const DEFAULT_TOKENS = {
   font: "inherit",
 };
 
-export default function PromiseCheck({ promises, marks, onChange, disabled = false, tokens = {}, compact = false }) {
+export default function PromiseCheck({ promises, total = null, marks, onChange, disabled = false, tokens = {}, compact = false }) {
   const t = { ...DEFAULT_TOKENS, ...tokens };
   const list = Array.isArray(promises) ? promises : [];
   if (!list.length) return null;
@@ -75,7 +82,7 @@ export default function PromiseCheck({ promises, marks, onChange, disabled = fal
     <section aria-label="Promises we made" style={{ margin: "4px 0 16px", fontFamily: t.font }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 8 }}>
         <span style={{ fontSize: compact ? 14 : 15, fontWeight: 500, color: t.ink }}>Promises we made</span>
-        <span style={{ fontSize: 14, color: t.muted }}>{list.length} open</span>
+        <span style={{ fontSize: 14, color: t.muted }}>{promiseCountLabel(list.length, total)}</span>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {list.map((promise) => {
