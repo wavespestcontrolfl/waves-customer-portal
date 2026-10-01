@@ -4547,8 +4547,16 @@ function initScheduledJobs() {
             let openLoopsReason = null;
             if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !reserviceStale) {
               const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
-              openLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, dbh: db });
-              openLoopsStale = openLoopsReason != null;
+              const rawOpenLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, dbh: db });
+              // An unreadable recheck says nothing about the message (same as the LIVE ETA
+              // leg below): never retire on it — the provider-boundary open-loop check re-reads
+              // and, if still unreadable, refuses retryably onto the bounded retry rail.
+              if (rawOpenLoopsReason === 'open_loops_recheck_failed') {
+                logger.warn(`[scheduled-sms] ${msg.id} open-loop recheck unreadable; deferring to the provider-boundary check`);
+              } else if (rawOpenLoopsReason != null) {
+                openLoopsReason = rawOpenLoopsReason;
+                openLoopsStale = true;
+              }
             }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
             const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale || openLoopsStale;

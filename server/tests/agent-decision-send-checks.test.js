@@ -314,6 +314,9 @@ describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provide
     expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
     // PR #5499: the open-loop recheck is composed at the same boundary
     expect(src).toContain('openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
+    // ...and its early queued-send recheck never retires a reply on an unreadable read
+    expect(src).toContain("if (rawOpenLoopsReason === 'open_loops_recheck_failed') {");
+    expect(src).toContain('} else if (rawOpenLoopsReason != null) {\n                openLoopsReason = rawOpenLoopsReason;\n                openLoopsStale = true;');
   });
 });
 
