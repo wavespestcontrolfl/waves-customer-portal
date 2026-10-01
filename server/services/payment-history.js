@@ -32,11 +32,13 @@ const IN_FLIGHT_INVOICE_SQL = `SELECT id FROM invoices
     AND (scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')
   LIMIT ${IN_FLIGHT_PAYMENTS_LIMIT}`;
 const rowsOf = (res) => (res && (res.rows || (Array.isArray(res) ? res : []))) || [];
-async function hasInFlightMoney(customerId, dbh = db) {
+// `linkage` (Codex round-55 P2): a caller that already holds the live payer linkage (the context aggregator) passes it, so one context
+// read makes ONE bounded ownership pass and every fact it builds sees the same ownership snapshot.
+async function hasInFlightMoney(customerId, dbh = db, { linkage: knownLinkage = null } = {}) {
   if (!customerId) return null;
   try {
     // LIVE ownership (Codex round-41 P1): same shared verdict as the history and the invoice facts.
-    const linkage = await loadLivePayerLinkage(customerId, dbh);
+    const linkage = knownLinkage || await loadLivePayerLinkage(customerId, dbh);
     if (linkage.failed) return null; // ownership unknown => unknown (callers read null as in flight)
     const candidates = rowsOf(await dbh.raw(IN_FLIGHT_PAYMENTS_SQL, [customerId]));
     if (candidates.some((p) => !linkage.isPayerLinked(p))) return true;

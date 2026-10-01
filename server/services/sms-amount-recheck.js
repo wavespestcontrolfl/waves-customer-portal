@@ -99,6 +99,8 @@ function zelleClauses(body) {
   ));
 }
 const isNegatedZelleClause = (clause) => ZELLE_NEGATION_RE.test(clause) || ZELLE_LIST_NEGATION_RE.test(clause);
+// "not for invoice #0002", "except invoice 0002", "no longer for that bill" - a negated clause with no subject of its own
+const ZELLE_ELLIPTICAL_NEGATION_RE = /^\s*(?:(?:but|and|though)\s+)?(?:not|no\s+longer|never|except|excluding)\b/i;
 
 // null (no affirmative Zelle mention in this clause), else 'offer'. A clause mentioning Zelle is a live instruction unless it
 // is negated; a payment-RECEIPT clause is no longer a separate kind - a received payment is stated only by a rendered
@@ -127,8 +129,10 @@ function isTransferInstructionClause(clause) {
 // Zelle") is excluded from hasAffirmativeZelleMention on purpose, but it is a live claim too: the recipient
 // is an env setting and the invoice's eligibility moves, so the denial can go stale before it sends.
 function hasNegativeZelleAvailabilityClaim(body) {
-  return zelleClauses(body)
-    .some((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && isNegatedZelleClause(clause));
+  if (zelleClauses(body)
+    .some((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && isNegatedZelleClause(clause))) return true;
+  // an elliptical denial ("We accept Zelle, but not for invoice #0002") is a negative claim too
+  return ZELLE_WORD_RE.test(String(body || '')) && zelleClauseTexts(body).denialText !== '';
 }
 // Codex round-32 P2: a reply can hold BOTH a Zelle offer and a Zelle denial ("Zelle isn't available for invoice A. You can
 // Zelle invoice B."). Every seam validates each independently, each against ITS OWN clause text (so each clause's invoice
@@ -142,6 +146,11 @@ function zelleClauseTexts(body) {
     return null;
   };
   const kinds = clauses.map(kindOf);
+  // Codex round-55 P2: an ELLIPTICAL negated clause inherits the preceding Zelle subject - "We accept Zelle, but not for invoice
+  // #0002" denies Zelle for #0002, so that clause is a denial (rechecked as one), not a reference attached to the offer
+  clauses.forEach((clause, i) => {
+    if (!kinds[i] && !ZELLE_WORD_RE.test(clause) && ZELLE_ELLIPTICAL_NEGATION_RE.test(clause) && kinds.slice(0, i).some(Boolean)) kinds[i] = 'denial';
+  });
   // Codex round-46 P1: the transfer instruction or invoice reference can sit in a clause that never says "Zelle" ("We take Zelle.
   // Send it to pay@x.com for invoice WPC-2026-0002."). A transfer INSTRUCTION always belongs to the offer. Codex round-51 P2: a
   // reference-only clause belongs to the NEAREST Zelle clause before it (else after it), offer or denial - "Zelle isn't available for

@@ -1034,10 +1034,9 @@ class ContextAggregator {
   // empty/null defaults; every other field is unaffected.
   async getContextForCustomer(customer, { includeLiveEta = false } = {}) {
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
-    // never throws — null on failure) starts NOW so it overlaps the fetches below instead of
-    // adding a serial round trip; it is awaited where hasProcessingPayment is derived.
+    // never throws — null on failure) starts right after the payer linkage below (it reuses it) and
+    // overlaps the remaining fetches; it is awaited where hasProcessingPayment is derived.
     const paymentHistoryService = require('./payment-history');
-    const inFlightMoneyPromise = paymentHistoryService.hasInFlightMoney(customer.id);
     // Any estimate deposit beyond a pending one (received, credited, refunded): money the payments table never records. null = unknown.
     const depositActivityPromise = db('estimate_deposits')
       .where(function ownDeposit() { this.where({ customer_id: customer.id }).orWhereIn('estimate_id', db('estimates').select('id').where({ customer_id: customer.id })); })
@@ -1054,6 +1053,8 @@ class ContextAggregator {
     // live-owned rows are also dropped IN SQL (before the over-fetch cap), and it gates BOTH the recent-payments window and the
     // failed-payment total below. A lookup / resolver failure => `failed` => billing unavailable (fail closed).
     const payerLinkage = await loadLivePayerLinkage(customer.id);
+    // the in-flight probe reuses THIS linkage (Codex round-55 P2): one bounded ownership pass per context read, one snapshot
+    const inFlightMoneyPromise = paymentHistoryService.hasInFlightMoney(customer.id, db, { linkage: payerLinkage });
     // One page of the Recent payments read (offset = rows already read). Codex round-50 P2: payer-linked rows are dropped in JS AFTER the
     // read, so a page can come back full of AP rows - the read continues page by page (below) until the homeowner window is filled.
     const paymentsPage = (offset) => excludeNeverAttemptedDeferrals(excludeLiveOwnedPayerPayments(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), payerLinkage), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').modify((qb) => { if (offset) qb.offset(offset); }).limit(PAYMENT_OVERFETCH);

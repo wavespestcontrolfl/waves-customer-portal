@@ -79,7 +79,8 @@ describe('hasProcessingPayment comes from the existence query, not the display w
   test('5 newer PAID rows in the window + an older processing row elsewhere => true', async () => {
     hasInFlightMoney.mockResolvedValue(true);
     const billing = await build();
-    expect(hasInFlightMoney).toHaveBeenCalledWith('c1');
+    // (Codex round-55 P2: it reuses the context's own live payer linkage - one ownership pass per read)
+    expect(hasInFlightMoney).toHaveBeenCalledWith('c1', expect.anything(), { linkage: expect.objectContaining({ failed: false }) });
     expect(billing.recentPayments.every((p) => p.status === 'paid')).toBe(true); // the processing row is NOT in the window
     expect(billing.hasProcessingPayment).toBe(true);
   });

@@ -156,3 +156,13 @@ describe('live payer ownership (round-41)', () => {
     return dbh;
   }
 });
+
+// Codex round-55 P2: a caller holding the live payer linkage passes it - no second ownership pass
+test('hasInFlightMoney reuses a passed linkage instead of loading its own', async () => {
+  const { hasInFlightMoney, IN_FLIGHT_PAYMENTS_SQL } = require('../services/payment-history');
+  const dbh = jest.fn(() => { throw new Error('no table read expected'); });
+  dbh.raw = jest.fn(async (sql) => ({ rows: sql === IN_FLIGHT_PAYMENTS_SQL ? [{ id: 'p1', metadata: null }] : [] }));
+  const linkage = { failed: false, isPayerLinked: () => false, liveOwnedIds: new Set() };
+  await expect(hasInFlightMoney('c1', dbh, { linkage })).resolves.toBe(true);
+  expect(dbh).not.toHaveBeenCalled();
+});

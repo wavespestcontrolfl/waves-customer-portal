@@ -11,27 +11,24 @@
 // full recheck on the new state. Content-based (md5 of the rows), so a write that does not bump updated_at still counts.
 const db = require('../models/db');
 
+// Codex round-55 P1 - WHOLE ROWS, not a column list: every round named one more column the recheck reads (dues eligibility, pause /
+// deactivation, ACH health, card expiry, ...). Each of the customer's billing rows is hashed in full (md5 of the row text), so any
+// change to a row the full recheck could have read refuses the send at the boundary - a new column can never be missed. The cost is a
+// retryable refusal when an unrelated column of one of these rows changes in the seconds between the recheck and the provider call.
 const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
-  (SELECT string_agg(concat_ws('|', id, status, amount, refund_status, refund_amount, payer_id, stripe_payment_intent_id, retry_count, next_retry_at,
-     superseded_by_payment_id, payment_date, md5(COALESCE(metadata::text, ''))), ',' ORDER BY id)
-   FROM payments WHERE customer_id = ?),
-  (SELECT string_agg(concat_ws('|', id, status, total, credit_applied, payer_id, payer_statement_id, scheduled_send_error, due_date,
-     stripe_payment_intent_id), ',' ORDER BY id)
-   FROM invoices WHERE customer_id = ?),
-  (SELECT string_agg(concat_ws('|', a.id, a.status, a.stripe_payment_intent_id, a.resolved_at), ',' ORDER BY a.id)
-   FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?),
-  (SELECT string_agg(concat_ws('|', id, status), ',' ORDER BY id) FROM payment_plans WHERE customer_id = ?),
-  (SELECT string_agg(concat_ws('|', id, payer_id, self_pay_override), ',' ORDER BY id) FROM scheduled_services
-   WHERE customer_id = ? AND (payer_id IS NOT NULL OR self_pay_override IS TRUE)),
-  (SELECT string_agg(concat_ws('|', p.id, p.active), ',' ORDER BY p.id) FROM payers p
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM payments t WHERE t.customer_id = ?),
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM invoices t WHERE t.customer_id = ?),
+  (SELECT string_agg(md5(a::text), ',' ORDER BY a.id) FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?),
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM payment_plans t WHERE t.customer_id = ?),
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM scheduled_services t
+   WHERE t.customer_id = ? AND (t.payer_id IS NOT NULL OR t.self_pay_override IS TRUE)),
+  (SELECT string_agg(md5(p::text), ',' ORDER BY p.id) FROM payers p
    WHERE p.id IN (SELECT payer_id FROM customers WHERE id = ? UNION SELECT payer_id FROM scheduled_services WHERE customer_id = ?)),
-  (SELECT string_agg(concat_ws('|', d.id, d.status, d.credited_amount, d.refunded_amount), ',' ORDER BY d.id) FROM estimate_deposits d
+  (SELECT string_agg(md5(d::text), ',' ORDER BY d.id) FROM estimate_deposits d
    WHERE d.customer_id = ? OR d.estimate_id IN (SELECT id FROM estimates WHERE customer_id = ?)),
-  (SELECT concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit, billing_mode, monthly_rate, waveguard_tier,
-     autopay_enabled, autopay_payment_method_id) FROM customers WHERE id = ?),
-  (SELECT string_agg(concat_ws('|', id, processor, is_default, autopay_enabled, method_type, card_funding, stripe_payment_method_id), ',' ORDER BY id)
-   FROM payment_methods WHERE customer_id = ?),
-  (SELECT string_agg(concat_ws('|', id, status, term_start, term_end, monthly_rate), ',' ORDER BY id) FROM annual_prepay_terms WHERE customer_id = ?)
+  (SELECT md5(c::text) FROM customers c WHERE c.id = ?),
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM payment_methods t WHERE t.customer_id = ?),
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM annual_prepay_terms t WHERE t.customer_id = ?)
 )) AS fingerprint`;
 
 const BILLING_FINGERPRINT_PARAMS = (BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length;

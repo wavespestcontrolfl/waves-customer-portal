@@ -11,16 +11,18 @@ jest.mock('../services/sms-amount-recheck', () => ({
 const { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL } = require('../services/billing-fingerprint');
 
 describe('billingFingerprint', () => {
-  test('one content hash over every row the recheck reads: payments, invoices, plans, payer assignments', () => {
+  // Codex round-55 P1: WHOLE ROWS, not column lists - every billing table the recheck can read is hashed row by row in full, so a
+  // column (dues eligibility, pause, ACH health, card expiry, retry state, credit, ...) can never be left out
+  test('one content hash over the WHOLE rows of every billing table the recheck reads', () => {
     expect(BILLING_FINGERPRINT_SQL).toMatch(/md5\(concat_ws/);
-    for (const t of ['FROM payments WHERE customer_id = ?', 'FROM invoices WHERE customer_id = ?', 'FROM payment_plans WHERE customer_id = ?',
-      'FROM payers p', 'FROM customers WHERE id = ?']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
-    // the columns a status / amount / ownership / Zelle answer depends on
-    // Codex round-50 P1: an invoice's attached PaymentIntent and its saved-card charge attempts are billing state too
-    expect(BILLING_FINGERPRINT_SQL).toContain('FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?');
-    for (const c of ['status', 'amount', 'refund_status', 'refund_amount', 'superseded_by_payment_id', 'metadata', 'credit_applied', 'payer_statement_id', 'scheduled_send_error', 'stripe_payment_intent_id', 'resolved_at']) {
-      expect(BILLING_FINGERPRINT_SQL).toContain(c);
-    }
+    for (const t of ['FROM payments t WHERE t.customer_id = ?', 'FROM invoices t WHERE t.customer_id = ?',
+      'FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?', 'FROM payment_plans t WHERE t.customer_id = ?',
+      'FROM scheduled_services t', 'self_pay_override IS TRUE', 'FROM payers p', 'FROM estimate_deposits d', 'FROM customers c WHERE c.id = ?',
+      'FROM payment_methods t WHERE t.customer_id = ?', 'FROM annual_prepay_terms t WHERE t.customer_id = ?']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
+    // every fragment hashes the row itself (md5(<alias>::text)), never a hand-picked column list
+    expect(BILLING_FINGERPRINT_SQL).not.toMatch(/concat_ws\('\|'/);
+    expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c)::text\)/g) || []).length).toBe(10);
+    expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(12);
   });
   test('reads through the given connection; null on no customer, a failed read, or no row', async () => {
     const dbh = { raw: jest.fn(async () => ({ rows: [{ fingerprint: 'abc' }] })) };
@@ -84,23 +86,9 @@ describe('Zelle at the provider boundary: the full recheck\'s own checks run aga
   });
 });
 
-// Codex round-51 P1: account credit that would cover the invoice is billing state too
-test('the fingerprint hashes the customer\'s account credit and auto-apply setting', () => {
-  expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit,");
-});
 
-// Local Codex review pass 1: payer activation, self-pay overrides and the estimate-deposit ledger are billing state too
-test('the fingerprint hashes payer activation, self-pay overrides and estimate deposits', () => {
-  expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', p.id, p.active)");
-  expect(BILLING_FINGERPRINT_SQL).toContain('self_pay_override IS TRUE');
-  expect(BILLING_FINGERPRINT_SQL).toContain('FROM estimate_deposits d');
-  expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(12);
-});
 
 // Codex round-53: retry fields drive the failed-payment balance; a denial approved with Zelle off is rechecked when it is set up
-test('the payments hash includes retry_count and next_retry_at', () => {
-  expect(BILLING_FINGERPRINT_SQL).toContain('stripe_payment_intent_id, retry_count, next_retry_at,');
-});
 describe('a denial that stood because Zelle was not set up', () => {
   const dbiWith = () => { const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] }); return dbi; };
   const denial = (zelleDenial) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleDenial, getBody: () => "We don't accept Zelle." });
@@ -119,9 +107,3 @@ describe('a denial that stood because Zelle was not set up', () => {
   });
 });
 
-// Codex round-54 P1: the dues authority (billing mode / rate / tier, the saved methods a surcharge is computed from, annual-prepay
-// terms) is billing state too
-test('the fingerprint hashes the monthly-dues authority', () => {
-  for (const t of ['billing_mode, monthly_rate, waveguard_tier', 'autopay_enabled, autopay_payment_method_id) FROM customers WHERE id = ?',
-    'FROM payment_methods WHERE customer_id = ?', 'card_funding', 'FROM annual_prepay_terms WHERE customer_id = ?']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
-});

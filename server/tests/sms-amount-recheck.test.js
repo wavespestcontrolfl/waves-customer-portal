@@ -936,3 +936,18 @@ describe('negation across a payment-method list', () => {
     expect(neg(b)).toBe(false);
   });
 });
+
+// Codex round-55 P2: an elliptical negated clause inherits the Zelle subject and is a denial
+describe('elliptical Zelle denials', () => {
+  const { hasNegativeZelleAvailabilityClaim: neg, zelleClauseTexts } = require('../services/sms-amount-recheck');
+  test.each(['We accept Zelle, but not for invoice #0002.', 'You can use Zelle, except for invoice WPC-2026-0002.', 'We take Zelle. Not for this invoice though.'])('a denial is checked: %s', (b) => {
+    const t = zelleClauseTexts(b);
+    expect(neg(b)).toBe(true);
+    expect(t.denialText).not.toBe('');
+    expect(t.offerText).not.toMatch(/\bnot\b|except/i);
+  });
+  test.each(['We accept Zelle for invoice #0002.', 'Thanks, not a problem at all.'])('no denial: %s', (b) => {
+    expect(neg(b)).toBe(false);
+    expect(zelleClauseTexts(b).denialText).toBe('');
+  });
+});
