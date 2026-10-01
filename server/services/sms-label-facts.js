@@ -270,12 +270,22 @@ async function isStillTheLastVisit({ customerId, conn, today, serviceDate }) {
   const newest = await performed().max('service_records.service_date as service_date').first();
   if (dateOnlyString(newest && newest.service_date) !== serviceDate) return false;
   if (await hasVisitToday(conn, customerId, today)) return false;
+  if (await hasMultipleProperties(conn, customerId)) return false;
   return !(await hasUnrecordedVisitSince(conn, customerId, serviceDate, today));
+}
+
+// A customer with more than one active property (a home and a rental, say) cannot be answered from "the latest visit": the
+// question may be about the other property, whose visit applied different products (Codex #5416 r32). None on file, so a
+// person answers; resolving the referenced property is a later change.
+async function hasMultipleProperties(conn, customerId) {
+  const rows = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('customer_properties.id');
+  return Array.isArray(rows) && rows.length > 1;
 }
 
 async function readLastVisitLabelFactsOnce({ customerId, conn, today }) {
 
   if (await hasVisitToday(conn, customerId, today)) return null;
+  if (await hasMultipleProperties(conn, customerId)) return null;
 
   const performed = () => conn('service_records')
     .where('service_records.customer_id', customerId)
