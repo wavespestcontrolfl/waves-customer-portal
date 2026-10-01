@@ -1,10 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { listNeedsMe } = require('../services/needs-me');
 const { AREAS, WHO } = require('../services/admin-alert-compose');
 
-router.use(adminAuthenticate);
+// Technicians read their tech-visible slice (role scoping below), so the guard is tech-or-admin.
+router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/needs-me?who=claude|person|either&area=<Area>&limit=<n>
 // Everything open, in the shape of docs/admin-notifications.md section 2. Scoped to the

@@ -11,7 +11,9 @@ const { refsFromRow } = require('./admin-alert-relevance');
 const { AREAS, SEVERITIES, WHO } = require('./admin-alert-compose');
 
 const DEFAULT_LIMIT = 200;
-const ROW_CAP = 500;
+const ROW_CAP = 500; // most items one response returns
+const PAGE_SIZE = 500;
+const SCAN_CAP = 20000;
 
 // Legacy rows (raw emitters that predate the rule) carry no area. First match wins;
 // anything unlisted is System. Inferred, so the row is flagged `derived`.
@@ -111,16 +113,28 @@ function mapStanding(alert) {
   };
 }
 
+// Every open row, walked in id-keyset pages: area, severity and who are judged in JS, so
+// a newest-N read would drop an older open finding from a filtered list and its totals.
+// SCAN_CAP is a runaway guard only; reaching it is reported as a warning, never silent.
 async function openAlertRows(role) {
   // Activity-only rows (feed 'activity': engineering findings, quiet standing digests) are
   // included on purpose: the bell never shows them, but they are open work, and the
   // engineering ones are the Claude work. Each carries activityOnly: true.
-  const query = NotificationService.scopeAdminFeedToRole(db('notifications').where({ recipient_type: 'admin' }), role);
-  // The cron's persisted dashboard_alert rows echo the standing conditions below.
-  return query.whereNull('done_at')
-    .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
-    .orderBy('created_at', 'desc').orderBy('id', 'desc').limit(ROW_CAP)
-    .select('id', 'category', 'title', 'body', 'link', 'metadata', 'created_at', 'read_at');
+  const rows = [];
+  let after = null;
+  for (;;) {
+    const query = NotificationService.scopeAdminFeedToRole(db('notifications').where({ recipient_type: 'admin' }), role);
+    if (after) query.where('id', '>', after);
+    // The cron's persisted dashboard_alert rows echo the standing conditions below.
+    const page = await query.whereNull('done_at')
+      .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
+      .orderBy('id', 'asc').limit(PAGE_SIZE)
+      .select('id', 'category', 'title', 'body', 'link', 'metadata', 'created_at', 'read_at');
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) return { rows, truncated: false };
+    if (rows.length >= SCAN_CAP) return { rows, truncated: true };
+    after = page[page.length - 1].id;
+  }
 }
 
 // `claude` returns what Claude may fix on its own: who is `claude` or `either`.
@@ -136,7 +150,14 @@ async function listNeedsMe({ who, area, limit, role } = {}) {
       warnings.push({ source, error: 'unavailable' });
     }
   };
-  await attempt('notifications', async () => (await openAlertRows(role)).map(mapAlertRow));
+  await attempt('notifications', async () => {
+    const { rows, truncated } = await openAlertRows(role);
+    if (truncated) {
+      logger.warn(`[needs-me] stopped at ${SCAN_CAP} open notification rows`);
+      warnings.push({ source: 'notifications', error: 'truncated' });
+    }
+    return rows.map(mapAlertRow);
+  });
   // Standing conditions carry finance totals and owner-only links: admin only, like the bell overlay.
   if (!role || role === 'admin') {
     await attempt('dashboard_alerts', async () => ((await computeDashboardAlerts()).alerts || []).map(mapStanding));

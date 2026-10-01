@@ -3,7 +3,7 @@
 // way docs/admin-notifications.md section 5 reads, and one failing source never loses
 // the other.
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
-jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn(), requireTechOrAdmin: jest.fn() }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   scopeAdminFeedToRole: jest.fn((q) => q),
@@ -11,12 +11,15 @@ jest.mock('../services/notification-service', () => ({
 
 let mockRows;
 let mockQueryError;
+let mockPages = null;
 const mockCalls = [];
 jest.mock('../models/db', () => () => {
   const q = new Proxy({}, {
     get(_, name) {
       if (name === 'then') {
-        return (resolve, reject) => (mockQueryError ? Promise.reject(mockQueryError) : Promise.resolve(mockRows)).then(resolve, reject);
+        // mockPages (when set) serves one page per query, for the keyset walk.
+        const result = mockPages ? (mockPages.shift() || []) : mockRows;
+        return (resolve, reject) => (mockQueryError ? Promise.reject(mockQueryError) : Promise.resolve(result)).then(resolve, reject);
       }
       return (...args) => { mockCalls.push([name, ...args]); return q; };
     },
@@ -38,6 +41,7 @@ const row = (over = {}) => ({
 beforeEach(() => {
   mockRows = [];
   mockQueryError = null;
+  mockPages = null;
   mockCalls.length = 0;
   computeDashboardAlerts.mockReset().mockResolvedValue({ alerts: [] });
   NotificationService.scopeAdminFeedToRole.mockClear();
@@ -159,6 +163,31 @@ test('a failing source is reported and the other source still answers', async ()
   const partial = await listNeedsMe();
   expect(partial.warnings).toEqual([{ source: 'dashboard_alerts', error: 'unavailable' }]);
   expect(partial.items.map((i) => i.id)).toEqual(['n1']);
+});
+
+test('an older open FIX behind more than a page of newer rows is still listed and counted', async () => {
+  const filler = (from) => Array.from({ length: 500 }, (_, i) => row({ id: `p${String(from + i).padStart(5, '0')}`, created_at: '2026-09-30T12:00:00Z' }));
+  const oldFix = row({ id: 'q-old-fix', category: 'ops_digest', created_at: '2026-08-01T12:00:00Z', metadata: { kind: 'FIX', audience: 'engineering' } });
+  mockPages = [filler(0), filler(500), [oldFix]];
+  const out = await listNeedsMe({ who: 'claude' });
+  expect(out.items.map((i) => i.id)).toEqual(['q-old-fix']);
+  expect(out.total).toBe(1);
+  expect(out.warnings).toEqual([]);
+  // Pages continue strictly after the last id read.
+  expect(mockCalls.filter((c) => c[0] === 'where' && c[1] === 'id').map((c) => c.slice(2))).toEqual([['>', 'p00499'], ['>', 'p00999']]);
+});
+
+test('a scan that reaches the runaway cap says so instead of answering short', async () => {
+  let n = 0;
+  mockPages = Array.from({ length: 41 }, () => Array.from({ length: 500 }, () => row({ id: `r${String(n++).padStart(6, '0')}` })));
+  const out = await listNeedsMe({});
+  expect(out.warnings).toEqual([{ source: 'notifications', error: 'truncated' }]);
+});
+
+test('the router guards by role as well as authentication', () => {
+  const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+  const handles = router.stack.filter((layer) => !layer.route).map((layer) => layer.handle);
+  expect(handles).toEqual(expect.arrayContaining([adminAuthenticate, requireTechOrAdmin]));
 });
 
 describe('GET /api/admin/needs-me', () => {
