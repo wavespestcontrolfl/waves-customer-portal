@@ -3128,7 +3128,7 @@ function identityConflicts(a, b) {
 }
 
 function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
-  const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const { mapSecondaryContactsToLegacy, canonicalV2Secondary } = require('../utils/extraction-compat');
   const primary = resolveCallSecondaryContact(extracted, v2Extraction);
   let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
   // When the single-contact resolver rejected V2's person on an identity
@@ -3137,7 +3137,10 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
   // rejected identity as an "additional" contact and fan notifications out
   // to it (codex P1). Drop the conflicting mirror; genuinely-different
   // extra parties (entries 2+) stay.
-  const v2Single = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  // The CANONICAL V2 person (the same identity resolveCallSecondaryContact
+  // compared): a name-only singleton filled from its mirror carries the
+  // mirror's phone, so a phone conflict with V1 drops that mirror here too.
+  const v2Single = canonicalV2Secondary(v2Extraction);
   if (primary && v2Single && identityConflicts(primary, v2Single)) {
     const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
     const norm = (v) => String(v || '').trim().toLowerCase();
@@ -3427,8 +3430,16 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
     } : {}),
-    // keepConsentStamp: the caller already holds the new phone behind a
-    // blocking recipient_optin row, so the stamp (other people's consent) stays.
+    // keepConsentStamp: the stamp (other people's consent) stays, and the new
+    // phone goes on the account's unconsented list — held out of every text
+    // resolver (customer-contact) whatever the opt-in gate does, until that
+    // person's own YES (recipient-optin) takes it off.
+    ...((contact.phone && keepConsentStamp && customer.service_contacts_consent_at) ? {
+      service_preferences: db.raw(
+        "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text))",
+        [last10(contact.phone)],
+      ),
+    } : {}),
     ...((contact.phone && !smsConsentExplicit && !keepConsentStamp && customer.service_contacts_consent_at) ? {
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,

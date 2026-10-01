@@ -650,7 +650,7 @@ const ALLOWLIST = [
   },
   {
     file: 'services/appointment-reminders.js',
-    snippet: "const recentDup = await db('sms_log')",
+    snippet: "const priorSend = await db('sms_log')",
     reason: 'sendConfirmationToServiceContact 24h dedupe existence check: deliberately counts an in-flight reservation — a confirmation already being sent to this phone for this visit must block a second one; it presents nothing as a delivered message.',
   },
 ];

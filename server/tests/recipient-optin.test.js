@@ -1,5 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The canonical customer-promised arrival the caller-demotion check reads;
+// each fakeDb() sets what it answers for its own visit.
+jest.mock('../services/appointment-reminders', () => ({
+  scheduledServiceApptTime: jest.fn(async () => globalThis.__fakeArrival || null),
+  sendConfirmationToServiceContact: jest.fn(async () => ({ sent: true })),
+}));
 
 const {
   recipientPhoneKey,
@@ -140,14 +146,19 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
   const OTHER = '9415550444';
   function fakeDb({ customer, optinRows, reminder = null, visit = { status: 'scheduled', scheduled_date: new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' } }) {
     const state = { customer: { id: 'c1', service_preferences: {}, ...customer }, optin: optinRows, prefs: [], cards: [], visit, reminder };
+    // The arrival the canonical helper answers: the reminder's, else the visit slot.
+    globalThis.__fakeArrival = reminder && reminder.appointment_time
+      ? new Date(reminder.appointment_time)
+      : (visit && visit.scheduled_date ? new Date(`${visit.scheduled_date}T${visit.window_start || '09:00:00'}`) : null);
     const markers = () => state.customer.service_preferences.demote_primary_on_optin || {};
     const dbh = jest.fn((table) => {
-      const ctx = { filter: {}, raw: null, whereIn: null, nullCols: [] };
+      const ctx = { filter: {}, raw: null, whereIn: null, nullCols: [], notIn: [] };
       const q = {
         where: jest.fn((f) => { if (f && typeof f === 'object') Object.assign(ctx.filter, f); return q; }),
         whereNot: jest.fn(() => q),
         whereNotNull: jest.fn(() => q),
         forUpdate: jest.fn(() => q),
+        whereNotIn: jest.fn((c, v) => { ctx.notIn.push(v); return q; }),
         whereNull: jest.fn((c) => { ctx.nullCols.push(c); return q; }),
         whereIn: jest.fn((c, v) => { ctx.whereIn = [c, v]; return q; }),
         whereRaw: jest.fn((sql, binds) => { ctx.raw = binds; return q; }),
@@ -156,8 +167,8 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
           && (!ctx.whereIn || ctx.whereIn[1].includes(r.phone_key)))),
         first: jest.fn(async () => {
           if (table === 'customers') return { ...state.customer };
-          if (table === 'scheduled_services') return state.visit;
-          if (table === 'appointment_reminders') return state.reminder || null;
+          if (table === 'scheduled_services') return state.visit && !ctx.notIn.some((l) => l.includes(state.visit.status)) ? state.visit : null;
+          if (table === 'appointment_reminders') return ctx.filter.cancelled === true ? (state.reminder?.cancelled ? state.reminder : null) : (state.reminder || null);
           if (table === 'recipient_optin') return state.optin.find((r) => r.phone_key === ctx.filter.phone_key && r.customer_id === ctx.filter.customer_id) || null;
           return null;
         }),
@@ -167,6 +178,19 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
             if (payload.service_contacts_consent_at) { Object.assign(state.customer, payload); return 1; }
             const raw = payload.service_preferences;
             const prefs = state.customer.service_preferences;
+            if (raw.sql.includes('unconsented_slot_phone_keys')) {
+              // YES removes the phone from the unconsented list: binds [phoneKey]
+              const list = Array.isArray(prefs.unconsented_slot_phone_keys) ? prefs.unconsented_slot_phone_keys : [];
+              prefs.unconsented_slot_phone_keys = list.filter((k) => k !== raw.binds[0]);
+              return 1;
+            }
+            if (raw.sql.includes('demote_primary_applied')) {
+              // applied record: binds [phone, phone, visit, iso]
+              const [phone, , visit, iso] = raw.binds;
+              prefs.demote_primary_applied = prefs.demote_primary_applied || {};
+              prefs.demote_primary_applied[phone] = { ...(prefs.demote_primary_applied[phone] || {}), [visit]: iso };
+              return 1;
+            }
             if (raw.sql.includes('jsonb_set')) {
               // demoted_at stamp: binds [path, iso]
               const [path, iso] = raw.binds;
@@ -264,7 +288,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
       const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed() });
       expect(await reconcileDemoteMarker('c1', KEY, { dbh })).toBe('applied');
       expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
-      expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
+      expect(state.customer.service_preferences.demote_primary_applied?.[KEY]?.s1).toBeDefined();
     });
 
     test.each(['declined'])('%s: drops the marker; the caller stays the recipient', async (status) => {
@@ -288,15 +312,15 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.customer).toMatchObject({ service_contacts_consent_source: 'recipient_optin_confirmed', service_contacts_consent_text_version: 'portal-2026-07-23' });
     expect(state.customer.service_contacts_consent_at).toBeInstanceOf(Date);
     expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
-    // The entry is kept (demoted_at stamped) until its replay is final.
-    expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
+    // The entry is kept until its replay is final; the demotion is recorded durably.
+    expect(state.customer.service_preferences.demote_primary_applied?.[KEY]?.s1).toBeDefined();
     expect(state.customer.service_preferences.other).toBe(1);
     expect(state.cards[0].payload).toEqual({ optin_result: 'confirmed' });
     expect(replays).toEqual([{ customerId: 'c1', scheduledServiceId: 's1', phoneKey: KEY, contact: { name: 'Sample Spouse', phone: '+19415550123', role: 'spouse_partner' } }]);
   });
 
   test('a second YES pass (retry / sweep) never re-demotes an entry already applied, but re-queues its replay', async () => {
-    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: 'x', demoted_at: 'z' } } } } }), optinRows: confirmed() });
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: 'x' } } }, demote_primary_applied: { [KEY]: { s1: 'earlier' } } } }), optinRows: confirmed() });
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.prefs).toEqual([]);
     expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1']);
@@ -323,6 +347,25 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.prefs).toEqual([]);
     expect(replays).toEqual([]);
+  });
+
+  test('a demotion already applied for this phone+visit (demote_primary_applied) is never re-applied, even after the replay entry was recreated', async () => {
+    const { dbh, state } = fakeDb({
+      customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { ...marker(), demote_primary_applied: { [KEY]: { s1: 'earlier' } } } }),
+      optinRows: confirmed(),
+    });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([]);
+    expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1']);
+  });
+
+  test('YES takes this phone off the account\'s unconsented list (others stay)', async () => {
+    const { dbh, state } = fakeDb({
+      customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { unconsented_slot_phone_keys: [KEY, OTHER] } }),
+      optinRows: confirmed(),
+    });
+    await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.customer.service_preferences.unconsented_slot_phone_keys).toEqual([OTHER]);
   });
 
   test('two bookings for the same recipient before the reply: BOTH visits replay', async () => {
@@ -420,6 +463,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
 
   test('confirmation replay: runs the shared confirmation helper per queued replay, after the transaction (non-tx: next tick)', async () => {
     const sendConfirmationToServiceContact = jest.fn(async () => ({ sent: true }));
+    jest.resetModules();
     jest.doMock('../services/appointment-reminders', () => ({ sendConfirmationToServiceContact }));
     const replay = { customerId: 'c1', scheduledServiceId: 's1', contact: { name: 'Sample Spouse', phone: '+19415550123', role: 'spouse_partner' } };
     runConfirmationReplays([replay], null);
@@ -447,7 +491,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
   });
 
   test('confirmation replay clears its visit entry only when final; a retryable miss keeps it for the sweep', async () => {
-    const dbMod = require('../models/db');
+    const dbMod = originalDb;
     const updates = [];
     const claims = [];
     dbMod.mockImplementation(() => {

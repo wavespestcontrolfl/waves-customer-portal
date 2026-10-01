@@ -530,7 +530,10 @@ describe('persistCallSecondaryContact', () => {
     });
     expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', on_site: true }, { onSiteAskEligible: true, keepConsentStamp: true })).toBe('written');
     expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_at');
-    expect(writes.updates[0]).not.toHaveProperty('service_preferences');
+    // ...and the new phone goes on the account's unconsented list (held out of
+    // every text resolver until its own YES, whatever the opt-in gate does).
+    expect(writes.updates[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
+    expect(writes.updates[0].service_preferences.binds).toEqual(['9542901693']);
   });
 
   test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
@@ -890,6 +893,18 @@ describe('on-site flags through the V1/V2 resolution', () => {
     role: 'spouse_partner', wants_notifications: true, ...flags,
   });
   const { normalizeSecondaryContact: normalizeV1 } = require('../utils/intake-normalize');
+
+  test('a rejected V2 identity is excluded by its CANONICAL form: name-only singleton + mirror carrying a different phone than V1 never becomes a second contact', () => {
+    // V1 caught only the phone (no name), so name-based dedupe cannot hide a resurrected mirror.
+    const v1 = { secondary_contact: { first_name: null, last_name: null, phone: '+15550100777', role: 'spouse_partner', wants_notifications: true } };
+    const v2 = {
+      secondary_contact: entry({ phone_e164: null }),
+      secondary_contacts: [entry({ phone_e164: '+15550100123', on_site: true })],
+    };
+    const list = resolveCallSecondaryContacts(v1, v2);
+    expect(list).toHaveLength(1);
+    expect(list[0].phone).toBe('+15550100777');
+  });
 
   test('mapper: strict booleans, false when absent', () => {
     expect(mapSecondaryContactToLegacy(entry())).toMatchObject({ wants_appointment_texts: false, on_site: false });

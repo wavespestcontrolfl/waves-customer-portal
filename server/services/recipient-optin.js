@@ -64,24 +64,21 @@ const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
 // Same set as appointment-reminders' CONFIRMATION_REPLAY_DEAD_STATUSES: a
 // visit that is over, called off or already under way.
 const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show', 'en_route', 'on_site', 'in_progress', 'rescheduled']);
-// The visit's slot start (ET), as composeScheduledApptTime builds it.
-function visitSlotAt(visit) {
-  const datePart = visit.scheduled_date instanceof Date
-    ? visit.scheduled_date.toISOString().slice(0, 10)
-    : String(visit.scheduled_date || '').slice(0, 10);
-  const timePart = visit.window_start ? String(visit.window_start).slice(0, 8) : null;
-  if (!datePart || !timePart) return null;
-  return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
-}
 // Replay outcomes that end the obligation (anything else is retried by the sweep).
 // template_unavailable is NOT terminal: the renderer returns null on a
 // transient template-read / render error too, so it is retried.
-const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'confirmation_off', 'sms_not_chosen', 'contact_not_in_slot', 'consent_missing', 'optin_not_confirmed']);
+const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'sms_not_chosen', 'not_a_recipient', 'delivery_uncertain']);
 // A replay claim older than this is a crashed attempt and may be retaken.
 const REPLAY_CLAIM_STALE_MS = 10 * 60 * 1000;
 // Unanswered or undeliverable entries stop being retried after this.
 const MARKER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const markerPath = (phoneKey, visitId) => (visitId ? ['demote_primary_on_optin', phoneKey, String(visitId)] : ['demote_primary_on_optin', phoneKey]);
+// The customer's service_preferences object (jsonb, or a JSON string from a
+// raw read), {} when absent.
+function prefsOf(customer) {
+  const raw = customer?.service_preferences;
+  return (typeof raw === 'string' ? JSON.parse(raw || '{}') : raw) || {};
+}
 async function withSavepoint(dbh, fn) {
   try {
     // A root handle opens its own transaction (so the row lock holds and the
@@ -124,8 +121,7 @@ async function stampConsentOnConfirm(h, customerId, phoneKey, customer) {
     const confirmedKeys = new Set((confirmed || []).map((r) => r.phone_key));
     // Phones the previous account stamp covered when an unconsented add
     // cleared it (call pipeline consent_covered_phone_keys) count as covered.
-    const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
-    const coveredKeys = new Set(Array.isArray(prefs?.consent_covered_phone_keys) ? prefs.consent_covered_phone_keys : []);
+    const coveredKeys = new Set(prefsOf(customer).consent_covered_phone_keys || []);
     if (!others.every((k) => confirmedKeys.has(k) || coveredKeys.has(k))) return { stamped: false, reason: 'other_slot_phone_unconfirmed' };
   }
   // Bound to the slot phones just checked: a concurrent contact add/replace
@@ -173,8 +169,7 @@ async function updateCaptureCard(h, phoneKey, patch, customerId = null) {
 // a stale entry is dropped, never applied. demote entries switch the caller's
 // appointment texts off once (demoted_at); every live entry queues the replay
 // and stays until that replay is final.
-async function applyMarkerEntry(h, customer, phoneKey, visits, replays) {
-  if (!visits || typeof visits !== 'object') return;
+async function applyMarkerEntry(h, customer, phoneKey, visits = {}, replays) {
   const customerId = customer.id;
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
   const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === phoneKey);
@@ -184,43 +179,44 @@ async function applyMarkerEntry(h, customer, phoneKey, visits, replays) {
     await dropPath(markerPath(phoneKey));
     return;
   }
+  // demote:false = another slot phone already gets the texts: replay only.
+  // Re-judged on the CURRENT row too: a call that filed two on-site contacts
+  // wrote demote:true for the first before the second landed — with another
+  // slot phone now on the account, the caller is not stepped back.
+  const otherSlotPhone = SERVICE_CONTACT_SLOTS.some((sl) => ![phoneKey, ''].includes(recipientPhoneKey(customer[sl.phone])));
+  // demote_primary_applied[phone][visit] is the durable record that this
+  // booking's demotion was applied: it outlives the replay entry, so a
+  // reprocess after the holder re-enabled texts never switches them off again.
+  const applied = prefsOf(customer).demote_primary_applied?.[phoneKey] || {};
+  const { scheduledServiceApptTime } = require('./appointment-reminders');
   for (const [visitId, entry] of Object.entries(visits)) {
-    const visit = await h('scheduled_services').where({ id: visitId, customer_id: customerId }).first('status', 'scheduled_date', 'window_start');
-    const setAt = entry && entry.set_at ? Date.parse(entry.set_at) : NaN;
-    const expired = Number.isFinite(setAt) && Date.now() - setAt > MARKER_MAX_AGE_MS;
-    // Same eligibility as the replay itself: a pre-visit status and a slot
-    // still in the future (a visit under way or past demotes nobody).
-    // The canonical customer-promised arrival (reminder row) first — a
-    // combined allocation's later member has its own later work slot.
-    const reminder = visit ? await h('appointment_reminders').where({ scheduled_service_id: visitId }).first('appointment_time', 'cancelled') : null;
-    const slotAt = reminder && reminder.cancelled ? null
-      : ((reminder && reminder.appointment_time ? new Date(reminder.appointment_time) : null) || (visit ? visitSlotAt(visit) : null));
-    const notFuture = !slotAt || Number.isNaN(slotAt.getTime()) || slotAt.getTime() <= Date.now();
-    if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()) || notFuture || expired) {
+    // Same eligibility as the replay itself: a pre-visit status, no pulled
+    // reminder, and the canonical customer-promised arrival still ahead (a
+    // combined allocation's later member resolves to the group's arrival).
+    const [visit, pulled, arrival] = await Promise.all([
+      h('scheduled_services').where({ id: visitId, customer_id: customerId })
+        .whereNotIn('status', [...DEMOTE_STALE_VISIT_STATUSES]).first('id'),
+      h('appointment_reminders').where({ scheduled_service_id: visitId, cancelled: true }).first('id'),
+      scheduledServiceApptTime(visitId),
+    ]);
+    // An entry older than the cap is dropped too (NaN set_at never expires).
+    if (!visit || pulled || !(arrival?.getTime() > Date.now()) || Date.now() - Date.parse(entry.set_at) > MARKER_MAX_AGE_MS) {
       await dropPath(markerPath(phoneKey, visitId));
       continue;
     }
-    // demote:false = another slot phone already gets the texts: replay only.
-    // Re-judged on the CURRENT row too: a call that filed two on-site contacts
-    // wrote demote:true for the first before the second landed — with another
-    // slot phone now on the account, the caller is not stepped back.
-    const otherSlotPhone = SERVICE_CONTACT_SLOTS.some((sl) => {
-      const k = recipientPhoneKey(customer[sl.phone]);
-      return !!k && k !== phoneKey;
-    });
-    if (entry && entry.demote !== false && !entry.demoted_at && !otherSlotPhone) {
+    if (entry.demote !== false && !applied[visitId] && !otherSlotPhone) {
       await h('notification_prefs')
         .insert({ customer_id: customerId, appointment_notify_primary: false })
         .onConflict('customer_id')
         .merge({ appointment_notify_primary: false });
       await h('customers').where({ id: customerId })
-        .update({ service_preferences: h.raw("jsonb_set(service_preferences, ?::text[], to_jsonb(?::text))", [[...markerPath(phoneKey, visitId), 'demoted_at'], new Date().toISOString()]) });
+        .update({ service_preferences: h.raw("jsonb_set(service_preferences, '{demote_primary_applied}', COALESCE(service_preferences -> 'demote_primary_applied', '{}'::jsonb) || jsonb_build_object(?::text, COALESCE(service_preferences #> ARRAY['demote_primary_applied', ?::text], '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(?::text))))", [phoneKey, phoneKey, String(visitId), new Date().toISOString()]) });
     }
     replays.push({
       customerId,
       scheduledServiceId: visitId,
       phoneKey,
-      contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
+      contact: { name: customer[slot.name], phone: customer[slot.phone], role: customer[slot.roleCol] },
     });
   }
 }
@@ -235,14 +231,17 @@ async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
       // whether the whole row is covered.
       const customer = await h('customers').where({ id: customerId }).forUpdate().first();
       if (!customer) continue;
+      // This phone's own YES: it leaves the account's unconsented list.
+      await h('customers').where({ id: customerId })
+        .whereRaw("COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) @> to_jsonb(ARRAY[?::text])", [phoneKey])
+        .update({ service_preferences: h.raw("jsonb_set(service_preferences, '{unconsented_slot_phone_keys}', COALESCE((SELECT jsonb_agg(k) FROM jsonb_array_elements(service_preferences -> 'unconsented_slot_phone_keys') k WHERE k <> to_jsonb(?::text)), '[]'::jsonb))", [phoneKey]) });
       const stamp = await stampConsentOnConfirm(h, customerId, phoneKey, customer);
       if (!stamp.stamped) {
         await updateCaptureCard(h, phoneKey, { optin_result: 'confirmed', consent_stamp: `held:${stamp.reason}` }, customerId);
         continue;
       }
       await updateCaptureCard(h, phoneKey, { optin_result: 'confirmed' }, customerId);
-      const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
-      const entries = (prefs && prefs[DEMOTE_MARKER_KEY]) || {};
+      const entries = prefsOf(customer)[DEMOTE_MARKER_KEY] || {};
       await applyMarkerEntry(h, customer, phoneKey, entries[phoneKey], replays);
       // This YES may be the one that completed the account's consent: entries
       // for OTHER confirmed phones held earlier (their YES came while this
@@ -353,8 +352,7 @@ async function sweepPendingConfirmationReplays({ limit = 25 } = {}) {
     .select('id', 'service_preferences');
   let touched = 0;
   for (const row of rows || []) {
-    const prefs = typeof row.service_preferences === 'string' ? JSON.parse(row.service_preferences) : row.service_preferences;
-    for (const [phoneKey, visits] of Object.entries((prefs && prefs[DEMOTE_MARKER_KEY]) || {})) {
+    for (const [phoneKey, visits] of Object.entries(prefsOf(row)[DEMOTE_MARKER_KEY] || {})) {
       const entries = Object.values(visits || {});
       const allExpired = entries.length > 0 && entries.every((e) => e && e.set_at && Date.now() - Date.parse(e.set_at) > MARKER_MAX_AGE_MS);
       if (!entries.length || allExpired) {
