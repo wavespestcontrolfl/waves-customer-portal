@@ -224,6 +224,37 @@ describe('deriveLawnLead', () => {
   });
 });
 
+describe('lead word budget', () => {
+  test('a long generated treatment narrative is dropped from the lead, never cut mid-sentence', () => {
+    const r = reportOf({ banner: HOLD_BANNER });
+    r.snapshot.progress = 'Your overall score is up 5 points since August.';
+    const longSummary = Array.from({ length: 30 }, (_, i) => `Today we treated area ${i + 1} along the lawn edge.`).join(' ');
+    r.snapshot.treatmentSummary = longSummary;
+    const lead = deriveLawnLead(r);
+    expect(leadWords({ ...r, lead })).toBeLessThanOrEqual(250);
+    expect(lead.progress).toBeNull();
+    expect(lead.why).toBeNull();
+    expect(lead.applied).toBeNull();
+    expect(lead.headline).not.toBeNull();
+  });
+
+  test('drops only as much as it needs, in order: progress, then why, then applied', () => {
+    const r = reportOf({ banner: HOLD_BANNER });
+    r.snapshot.progress = Array.from({ length: 200 }, () => 'word').join(' ');
+    r.snapshot.treatmentSummary = 'Today we applied a broadleaf herbicide.';
+    const lead = deriveLawnLead(r);
+    expect(lead.progress).toBeNull();
+    expect(lead.applied).toBe('Today we applied a broadleaf herbicide.');
+    expect(leadWords({ ...r, lead })).toBeLessThanOrEqual(250);
+  });
+
+  test('a lead inside the budget keeps every field', () => {
+    const r = reportOf();
+    r.snapshot.progress = 'Your overall score is up 5 points since August.';
+    expect(deriveLawnLead(r).progress).toBe('Your overall score is up 5 points since August.');
+  });
+});
+
 describe('leadWords', () => {
   test('counts banner lines, mow line, lead fields and 24 words of static labels', () => {
     const r = reportOf({ banner: { ...HOLD_BANNER, mowHold: { line: 'Hold off mowing for 2 days.' } } });

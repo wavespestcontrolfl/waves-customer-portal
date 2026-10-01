@@ -1691,7 +1691,9 @@ finding's own step (dropped when it restates the aftercare task), and
 moisture wording (water, irrigation, sprinkler, moisture, dry, drought, damp,
 rain, coverage); such a field falls to its next source or null. That wording
 test is the whole rule: a non-watering string from a water or coverage finding
-(e.g. "Stable — watching thin areas") may lead. The web report mounts the lead card right under the watering
+(e.g. "Stable — watching thin areas") may lead. The lead region (banner lines, lead fields and the joined next-visit
+date) is held to 250 visible words at derive time by nulling `progress`, then
+`why`, then `applied` until it fits. The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and the follow-up card and opens with the photo strip. The
 PDF is unchanged and ignores it.

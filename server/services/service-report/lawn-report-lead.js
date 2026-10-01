@@ -28,6 +28,13 @@ const { issueRestatesAftercare } = require('./lawn-report-insights');
 // visible-word budget as one constant, not per label.
 const STATIC_LABEL_WORDS = 24;
 const YOUR_PART_MAX = 2;
+// The lead region's visible-word ceiling (SCOPE content contract).
+const LEAD_WORD_BUDGET = 250;
+// Fields given up, in order, when a real payload runs over the budget. A
+// generated treatment narrative can run to 1,200 characters (codex P2 #5496
+// r4); what was applied is still listed in full under "What Waves did today"
+// and Products Applied further down, so it goes last of the three.
+const BUDGET_DROP_ORDER = ['progress', 'why', 'applied'];
 
 // The retired follow-up card's stock line. It is a placeholder, not a task.
 const STOCK_NO_ACTION = /^no action is needed\b/i;
@@ -114,7 +121,7 @@ function deriveLawnLead(reportV2) {
   if (!snapshot || typeof snapshot !== 'object') return null;
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
   const topIssue = topIssueOf(reportV2);
-  return {
+  const lead = {
     headline: pick([snapshot.statusHeadline], bannerPresent),
     why: pick([snapshot.rootCause, snapshot.scoreExplanation], bannerPresent),
     // Slot only: a later PR writes snapshot.progress.
@@ -125,6 +132,11 @@ function deriveLawnLead(reportV2) {
     yourPart: deriveYourPart(reportV2, topIssue, bannerPresent),
     next: deriveNext(reportV2, topIssue, bannerPresent),
   };
+  for (const field of BUDGET_DROP_ORDER) {
+    if (leadWords({ ...reportV2, lead }) <= LEAD_WORD_BUDGET) break;
+    lead[field] = null;
+  }
+  return lead;
 }
 
 function countWords(text) {
@@ -161,4 +173,4 @@ function leadWords(reportV2) {
   return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + STATIC_LABEL_WORDS;
 }
 
-module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS, WATERING_WORDS };
+module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS, WATERING_WORDS, LEAD_WORD_BUDGET };
