@@ -7857,6 +7857,49 @@ async function completeScheduledService(completionInput, packetContext = null) {
       effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
     }
 
+    // The promise check (owner "ok yes add these" 2026-10-01): the
+    // technician's marks reach the office's promise list. It runs here, right
+    // after the durable commit and the committed-truth re-derivation above,
+    // before any later step can return early (a resumable invoice, report or
+    // text error) or deliver the report, so a closeout that was saved never
+    // leaves its marks behind (Codex #5516). A street-level address hold whose
+    // release fails returns before this point; the retry that finalizes that
+    // closeout runs it. POST-COMMIT: a failed write never fails the
+    // completion and nothing contacts the customer; a mark that did not reach
+    // the list rings one office bell to settle it by hand. Only while the
+    // writer rules are live, on a visit the writer covers, judged on the
+    // profile the completion transaction used (null skips). Only a visit
+    // that did its work: never a declined (or incomplete) one. Backfills
+    // excluded, like the comms guard. Re-runnable on a resume.
+    if (!isBackfillCompletion && visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'
+      && Array.isArray(promiseMarks) && promiseMarks.length
+      && require('../config/feature-gates').reportWriterRulesLive()) {
+      try {
+        const VisitPromises = require('../services/service-report/visit-promises');
+        if (effectiveCompletionProfile && VisitPromises.promiseCheckInScope(svc.service_type, effectiveCompletionProfile)) {
+          let promiseResults = null;
+          try {
+            promiseResults = await VisitPromises.applyVisitPromiseMarks(db, {
+              customerId: svc.customer_id,
+              marks: promiseMarks,
+              visitDate: svc.scheduled_date,
+              reviewedBy: completionInput.actor?.technicianId || null,
+            });
+          } catch (applyErr) {
+            logger.warn(`[dispatch] promise marks not applied: ${applyErr.message}`);
+          }
+          const unsaved = await VisitPromises.unsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, marks: promiseMarks, results: promiseResults,
+          });
+          await VisitPromises.alertUnsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, serviceId: svc.id, visitDate: svc.scheduled_date, unsaved,
+          });
+        }
+      } catch (promiseErr) {
+        logger.warn(`[dispatch] promise marks failed (non-blocking): ${promiseErr.message}`);
+      }
+    }
+
     // Backfill tracker stamp (Codex P2, PR #2897 fix round 4): the SAME
     // end-instant rule the transaction applied to the kept lifecycle stamps,
     // for markComplete's completed_at below — a wall-clock completed_at
@@ -14179,46 +14222,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
       } catch (commsGuardErr) {
         logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
-      }
-    }
-
-    // The promise check (owner "ok yes add these" 2026-10-01): the
-    // technician's Done and Partly marks reach the office's promise list.
-    // POST-COMMIT: a failed write never fails the completion and nothing
-    // contacts the customer, but the report already said what was marked,
-    // so a mark that did not reach the list rings one office bell to settle
-    // it by hand (Codex #5516). Only while the writer rules are live, on a
-    // visit the writer covers, judged on the profile the completion
-    // transaction used (null skips).
-    // Only a visit that did its work: never a declined (or incomplete) one
-    // (Codex #5516). Backfills excluded, like the comms guard. Re-runnable
-    // on a resume.
-    if (!isBackfillCompletion && visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'
-      && Array.isArray(promiseMarks) && promiseMarks.length
-      && require('../config/feature-gates').reportWriterRulesLive()) {
-      try {
-        const VisitPromises = require('../services/service-report/visit-promises');
-        if (effectiveCompletionProfile && VisitPromises.promiseCheckInScope(svc.service_type, effectiveCompletionProfile)) {
-          let promiseResults = null;
-          try {
-            promiseResults = await VisitPromises.applyVisitPromiseMarks(db, {
-              customerId: svc.customer_id,
-              marks: promiseMarks,
-              visitDate: svc.scheduled_date,
-              reviewedBy: completionInput.actor?.technicianId || null,
-            });
-          } catch (applyErr) {
-            logger.warn(`[dispatch] promise marks not applied: ${applyErr.message}`);
-          }
-          const unsaved = await VisitPromises.unsavedVisitPromiseMarks(db, {
-            customerId: svc.customer_id, marks: promiseMarks, results: promiseResults,
-          });
-          await VisitPromises.alertUnsavedVisitPromiseMarks(db, {
-            customerId: svc.customer_id, serviceId: svc.id, visitDate: svc.scheduled_date, unsaved,
-          });
-        }
-      } catch (promiseErr) {
-        logger.warn(`[dispatch] promise marks failed (non-blocking): ${promiseErr.message}`);
       }
     }
 

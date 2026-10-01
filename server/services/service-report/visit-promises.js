@@ -9,7 +9,12 @@
  *   - Done closes the promise through the office's own Mark done path, with
  *     a note naming the visit;
  *   - Partly keeps it open and adds the technician's "still left" note;
- *   - Not yet, or a blank, changes nothing.
+ *   - Not yet keeps it open as the office wrote it;
+ *   - a blank changes nothing.
+ * Partly and Not yet are a person's verdict: the row takes the ledger's
+ * human-review state, so the automatic checks (the evidence close, the
+ * contact check, a call reprocess) never close what the technician said is
+ * still owed (Codex #5516).
  *
  * Only while GATE_REPORT_WRITER_RULES is live, and only on visits the
  * writer covers (never lawn or tree, shrub & palm, which another lane
@@ -294,18 +299,34 @@ async function addStillLeftNote(conn, promise, customerId, line) {
   });
 }
 
+// Not yet: the promise stays open as the office wrote it, and the row takes
+// the ledger's human-review state (an existing one kept), so the automatic
+// checks never close what the technician said is still owed (Codex #5516).
+async function keepPromiseOpen(conn, promise, customerId) {
+  return conn.transaction(async (trx) => {
+    const row = await lockOwnedOpenPromise(trx, promise.id, { customerId, source: promise.source, version: promise.version });
+    if (!row) return false;
+    if (!row.human_state) {
+      await trx('call_commitments').where({ id: promise.id }).update({ human_state: 'confirmed', updated_at: new Date() });
+    }
+    return true;
+  });
+}
+
 // Post-commit, best-effort: each mark is applied on its own, and a failure
 // is logged and leaves that promise as it was (open). Re-runnable: a Done
-// promise is no longer open, and a Partly note is added once.
+// promise is no longer open, a Partly note is added once, and a reviewed
+// row takes no second write.
 async function applyVisitPromiseMarks(conn, { customerId, marks, visitDate = null, reviewedBy = null }) {
   const resolved = await resolveVisitPromiseMarks(conn, { customerId, marks });
   const day = visitDayLabel(visitDate);
   const visit = day ? `the ${day} visit` : 'the visit';
   const results = [];
   for (const promise of resolved) {
-    if (promise.mark === 'not_yet') continue;
     try {
-      if (promise.mark === 'done') {
+      if (promise.mark === 'not_yet') {
+        results.push({ id: promise.id, mark: 'not_yet', applied: await keepPromiseOpen(conn, promise, customerId) });
+      } else if (promise.mark === 'done') {
         const doneLine = `Done at ${visit} (marked by the technician).`;
         // The ownership, open and wording checks run under locks in the
         // same transaction as the office's own write: applyHumanUpdate for

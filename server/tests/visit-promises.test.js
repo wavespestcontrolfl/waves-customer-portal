@@ -426,9 +426,12 @@ describe('marks reach the office list after the save', () => {
     expect(updates).toEqual([]);
   });
 
-  test('Not yet changes nothing, and one failure leaves the others applied', async () => {
+  test('Not yet keeps the promise open against the automatic checks, and one failure leaves the others applied', async () => {
     CallCommitments.applyHumanUpdate.mockRejectedValueOnce(new Error('Commitment not found'));
-    const { conn, updates } = ledgerDb(LEDGER());
+    const ledger = LEDGER();
+    ledger.commitments[ID(3)] = { status: 'open', party: 'waves', kind: 'technician_follow_up', email_id: 'email-1', description: EMAIL_ROW.description };
+    ledger.sources['emails:email-1'] = { customer_id: 'cust-1' };
+    const { conn, updates } = ledgerDb(ledger);
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
       customerId: 'cust-1',
       marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }, { id: ID(2), mark: 'done', version: V(TEXT_ROW.description) }, { id: ID(3), mark: 'not_yet', version: V(EMAIL_ROW.description) }],
@@ -437,9 +440,23 @@ describe('marks reach the office list after the save', () => {
     expect(results).toEqual([
       { id: ID(1), mark: 'done', applied: false },
       { id: ID(2), mark: 'done', applied: true },
+      { id: ID(3), mark: 'not_yet', applied: true },
     ]);
-    expect(updates).toEqual([]);
+    // Not yet writes only the review state: still open, no note, the
+    // office's verdict time untouched (Codex #5516).
+    expect(updates).toEqual([{ id: ID(3), patch: { human_state: 'confirmed', updated_at: expect.any(Date) } }]);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`mark not applied for promise ${ID(1)}`));
+  });
+
+  test('Not yet on a promise the office already reviewed writes nothing', async () => {
+    const ledger = LEDGER();
+    ledger.commitments[ID(1)].human_state = 'confirmed';
+    const { conn, updates } = ledgerDb(ledger);
+    const results = await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'not_yet', version: V(CALL_ROW.description) }], visitDate: '2026-10-01',
+    });
+    expect(results).toEqual([{ id: ID(1), mark: 'not_yet', applied: true }]);
+    expect(updates).toEqual([]);
   });
 
   test('a promise no longer open is left alone', async () => {
@@ -524,6 +541,12 @@ describe('wiring source contracts', () => {
   test('completion applies the marks POST-COMMIT, fail-soft, before the response payload', () => {
     const call = completionSource.indexOf('VisitPromises.applyVisitPromiseMarks(db, {');
     expect(call).toBeGreaterThan(completionSource.indexOf('durableCompletionCommitted = true;'));
+    // Right after the committed-truth re-derivation (a resumed backfill is
+    // judged as committed), before any later step can return early or
+    // deliver the report (Codex #5516).
+    expect(call).toBeGreaterThan(completionSource.indexOf('isBackfillCompletion = frozenResume.isBackfillCompletion;'));
+    expect(call).toBeLessThan(completionSource.indexOf('releaseCompletionAttemptForResume(completionAttempt, lookupErr)'));
+    expect(call).toBeLessThan(completionSource.indexOf('Backfill tracker stamp (Codex P2, PR #2897 fix round 4)'));
     expect(completionSource.indexOf('const responsePayload = {', call)).toBeGreaterThan(call);
     const block = completionSource.slice(completionSource.lastIndexOf('if (!isBackfillCompletion', call), call + 1800);
     expect(block).toMatch(/visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'/);
