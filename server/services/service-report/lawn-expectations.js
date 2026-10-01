@@ -149,10 +149,25 @@ function lineAllowed(text) {
 }
 
 // ── Row resolution ────────────────────────────────────────────────────────
+// Only the config's OWN keys count ("constructor" / "__proto__" are not
+// issues). Duplicate entries merge conservatively: any isNew / worsening
+// evidence on any copy survives, whatever the input order (terminal review).
 function normalizeIssues(issues) {
   const entries = (Array.isArray(issues) ? issues : []).map((raw) => (typeof raw === 'string' ? { key: raw } : raw));
-  const keyed = entries.map((e) => [String(e?.key || '').trim().toLowerCase(), e]);
-  return new Map(keyed.filter(([key]) => ISSUE_ROWS[key]));
+  const merged = new Map();
+  for (const e of entries) {
+    const key = String(e?.key || '').trim().toLowerCase();
+    if (!Object.prototype.hasOwnProperty.call(ISSUE_ROWS, key)) continue;
+    const prev = merged.get(key) || { key };
+    merged.set(key, {
+      ...prev,
+      ...e,
+      key,
+      isNew: Boolean(prev.isNew || e?.isNew),
+      worsening: Boolean(prev.worsening || e?.worsening),
+    });
+  }
+  return merged;
 }
 
 // What a tagged target establishes: { family, cause } from the controlled

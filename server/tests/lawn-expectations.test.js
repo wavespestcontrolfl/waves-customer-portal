@@ -859,3 +859,17 @@ describe('timestamp strings at exactly UTC midnight', () => {
     expect(out.rows.map((r) => r.id)).toContain('issue_seasonal_dip');
   });
 });
+
+describe('issue normalization (terminal review)', () => {
+  const { buildLawnExpectations } = require('../services/service-report/lawn-expectations');
+  const dipIds = (issues) => buildLawnExpectations({ applications: [], issues, visitDate: '2026-12-02', nextVisitDate: '2026-12-30' }, { includeUnapproved: true }).rows.map((r) => r.id);
+  test('a worsening flag on any duplicate withholds the seasonal dip, in either order', () => {
+    expect(dipIds([{ key: 'seasonal_dip', worsening: true }, 'seasonal_dip'])).not.toContain('issue_seasonal_dip');
+    expect(dipIds(['seasonal_dip', { key: 'seasonal_dip', worsening: true }])).not.toContain('issue_seasonal_dip');
+    expect(dipIds(['seasonal_dip'])).toContain('issue_seasonal_dip');
+  });
+  test.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])('inherited key %s is ignored, not thrown on', (key) => {
+    expect(() => buildLawnExpectations({ applications: [], issues: [key, 'seasonal_dip'], visitDate: '2026-12-02', nextVisitDate: '2026-12-30' }, { includeUnapproved: true })).not.toThrow();
+    expect(() => buildLawnExpectations({ applications: [], issues: [key] })).not.toThrow();
+  });
+});
