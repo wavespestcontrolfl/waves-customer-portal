@@ -548,9 +548,7 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // Contact removed/replaced since the claim: they are no longer an
       // appointment recipient for this property — release to ask_failed
       // (re-adding them re-claims and asks) instead of texting a stranger.
-      // An on-site visit ask whose dispatch died: its visit is not stored, so
-      // it is never re-sent blind (released the same way).
-      if (idx < 0 || row.requested_by === ON_SITE_VISIT_ASK) {
+      if (idx < 0) {
         await db('recipient_optin')
           .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
           .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
@@ -587,6 +585,16 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
             ...(priorSend.twilio_sid ? { provider_sid: String(priorSend.twilio_sid).slice(0, 64) } : {}),
             updated_at: new Date(),
           }).catch(() => {});
+        continue;
+      }
+      // An on-site visit ask whose dispatch died before it went out (the
+      // reconcile above found no accepted send): its visit is not stored, so
+      // it is never re-sent blind — released to ask_failed (the next booking
+      // re-asks with a fresh visit check).
+      if (row.requested_by === ON_SITE_VISIT_ASK) {
+        await db('recipient_optin')
+          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         continue;
       }
       const { renderSmsTemplate } = require('./sms-template-renderer');

@@ -256,7 +256,10 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     // recovery sweep releases it instead of re-sending it without its visit.
     expect(src).toContain("requested_by: visitId ? ON_SITE_VISIT_ASK : 'portal_contact_save',");
     expect(src).toContain('...(visitId ? { requested_by: ON_SITE_VISIT_ASK } : {}),');
-    expect(src).toContain('if (idx < 0 || row.requested_by === ON_SITE_VISIT_ASK) {');
+    // ...but only AFTER the accepted-send reconcile: a delivered ask is marked
+    // dispatched (the YES can confirm it), never released.
+    const sweepSrc = src.slice(src.indexOf('async function sweepUndispatchedOptins'));
+    expect(sweepSrc.indexOf("if (row.requested_by === ON_SITE_VISIT_ASK) {")).toBeGreaterThan(sweepSrc.indexOf('const priorSend = priorSendRow'));
   });
 });
 
