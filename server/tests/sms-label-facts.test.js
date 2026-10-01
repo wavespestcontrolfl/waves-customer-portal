@@ -3270,7 +3270,7 @@ describe('follow-up (#5416 prod sweep): the inbound language check counts only l
   });
 
   test('a short text is held on positive evidence: a function word of a language the guards cannot read', () => {
-    for (const text of ['Dlaczego nie', 'Poczekaj dwie godziny', 'khi nao', 'KIEDY PSY MOGA WYJSC', 'Kailan Puwedeng Lumabas Ang Aso', '2 godziny wystarczy?', '2 hours later czy mozna wyjsc?', '2godziny wystarczy?', 'Pot iesi?', 'Kutyak kimehetnek?']) { // #5520 r1: a number glued to a word keeps the word
+    for (const text of ['Dlaczego nie', 'Poczekaj dwie godziny', 'khi nao', 'KIEDY PSY MOGA WYJSC', 'Kailan Puwedeng Lumabas Ang Aso', '2 godziny wystarczy?', '2 hours later czy mozna wyjsc?', '2godziny wystarczy?', 'Pot iesi?', 'Kutyak kimehetnek?', 'Kutyak mehetnek outside?']) { // #5520 r1/r2: a number glued to a word keeps the word
       expect([text, english(text)]).toEqual([text, false]);
     }
   });
@@ -3298,7 +3298,7 @@ describe('follow-up (#5416 r34): whether watering hurts the treatment asks rainf
     for (const text of ['Will the sprinklers weaken it?', 'will the sprinklers hurt it', 'will the sprinklers be a problem for the treatment?', 'does the irrigation dilute it']) {
       expect([text, labelFactsLib.askedLabelKinds(text).includes('rain')]).toEqual([text, true]);
     }
-    for (const text of ['what days should I water my lawn?', 'how often should I water', 'Sprinkler issue in zone 2', 'my irrigation has a problem']) expect([text, labelFactsLib.askedLabelKinds(text)]).toEqual([text, []]); // #5520 r1 P2
+    for (const text of ['what days should I water my lawn?', 'how often should I water', 'Sprinkler issue in zone 2', 'my irrigation has a problem', 'Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill?']) expect([text, labelFactsLib.askedLabelKinds(text)]).toEqual([text, []]); // #5520 r1 P2
   });
   test('a bare contextual answer to it is held', () => {
     const asked = labelFactsLib.askedLabelKinds(['Will the sprinklers weaken it?']);

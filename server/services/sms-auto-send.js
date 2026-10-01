@@ -1014,10 +1014,11 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
     // Same release path as the early executor check: release the claim (never auto_send_failed),
     // settle the reservation, reopen parked siblings; the verified draft falls through to a
     // human-visible suggestion that the reviewer-send seam rechecks again.
-    logger.warn(`[sms-auto-send] live ETA recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    const what = result.code === 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'the label timing' : 'the live ETA';
+    logger.warn(`[sms-auto-send] ${what === 'the label timing' ? 'label facts' : 'live ETA'} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
     await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
     await releaseClaim(claim.decisionId);
-    await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+    await reopenParked(`Auto-send paused: ${what} could not be rechecked — suggestion reopened.`);
     return { sent: false, reason: result.code, retryable: true };
   }
 

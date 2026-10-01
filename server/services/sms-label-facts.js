@@ -1084,7 +1084,14 @@ function isUnverifiedLanguageInbound(inbound) {
   if (!tokens.length) return false;
   const foreign = foreignWordSet();
   // (also held: a short text with no known English word at all, "Pot iesi?" - a language on no list, which the reply guards cannot read)
-  if (tokens.length <= 3) return tokens.some((w) => foreign.has(w)) || !tokens.some(englishKnown);
+  if (tokens.length <= 3) {
+    if (tokens.some((w) => foreign.has(w))) return true;
+    const knownShort = tokens.filter(englishKnown).length;
+    // A short text that asks a label question must be ALL known words: one unknown word beside "outside" is exactly where a
+    // foreign question hides ("Kutyak mehetnek outside?", #5520 r2). Any other short text needs half ("No growth" stays English).
+    const asksLabel = askedKindsOf(text).kinds.length > 0 || askedKindsOf(text).elliptical;
+    return asksLabel ? knownShort < tokens.length : knownShort * 2 < tokens.length;
+  }
   const known = tokens.filter(englishKnown).length;
   return known / tokens.length < ENGLISH_SHARE;
 }
@@ -1239,8 +1246,10 @@ function cleaningKinds(text) {
 }
 // Whether watering will hurt the treatment ("Will the sprinklers weaken it?", "does irrigation affect the spray?") is the rain-fast question
 // in other words (Codex #5416 r34), not general watering advice. A generic noun (problem / issue / matter) counts only when it is tied
-// to the treatment ("will the sprinklers be a problem for the treatment?"); "Sprinkler issue in zone 2" is an equipment report.
-const WATERING_EFFECT_RE = /\b(?:weaken\w*|affect\w*|effect\w*|hurt\w*|harm\w*|ruin\w*|undo\w*|dilut\w*|impact\w*|reduc\w*|cancel\w*|mess(?:es|ed)?\s+(?:up|with)|interfer\w*)\b|\b(?:matter|bother|problem|issue)\b[^.?!]{0,30}\b(?:treatment|treated|spray\w*|application|applied|product|granules?|fertiliz\w*|it|that)\b/;
+// to the treatment, and so does every effect verb ("will the sprinklers be a problem for the treatment?", "will they weaken it?"); "Sprinkler issue in
+// zone 2" and "will the sprinklers hurt my new plants?" are not about the treatment (#5520 r2).
+const WATERING_EFFECT_OBJECT_SRC = '(?:treatment|treated|spray\\w*|application|applied|product|granules?|fertiliz\\w*|it|that)';
+const WATERING_EFFECT_RE = new RegExp(`\\b(?:weaken\\w*|affect\\w*|effect\\w*|hurt\\w*|harm\\w*|ruin\\w*|undo\\w*|dilut\\w*|impact\\w*|reduc\\w*|cancel\\w*|mess(?:es|ed)?\\s+(?:up|with)|interfer\\w*|matter|bother|problem|issue)\\b[^.?!]{0,30}\\b${WATERING_EFFECT_OBJECT_SRC}\\b`);
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return cleaningKinds(text);
   const context = WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text);
