@@ -52,7 +52,7 @@ function flatView(extraction) {
   const sentiment = extraction.sentiment_and_lead || {};
   const history = extraction.customer_history || {};
   const consent = extraction.consent || {};
-  const secondary = mapSecondaryContactToLegacy(extraction.secondary_contact, { evidence: extraction.evidence });
+  const secondary = mapSecondaryContactToLegacy(extraction.secondary_contact, { evidence: extraction.evidence, counterpart: extraction.secondary_contacts?.[0] || null });
 
   return {
     first_name: caller.first_name || null,
@@ -126,7 +126,7 @@ function flatView(extraction) {
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
     secondary_contact: secondary,
-    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence),
+    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null),
     // Flat mirrors of the first other party's on-site consent inputs (schema
     // 1.21.0) so replay variance watches them (FIELD_GROUPS high — they gate
     // an SMS consent stamp). False when absent, like agent_committed_booking.
@@ -135,7 +135,7 @@ function flatView(extraction) {
     // Order-stable per-contact signature over the whole secondary_contacts[]
     // (role:text-intent:on-site, '|'-joined, '' when none) so a flag flipping
     // on entries 2+ shows in replay variance too (FIELD_GROUPS high).
-    secondary_contacts_consent_signature: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence)
+    secondary_contacts_consent_signature: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null)
       .map((c) => `${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`)
       .join('|'),
 
@@ -198,9 +198,28 @@ function mapAdditionalPropertiesToLegacy(entries) {
 // contact persistence expects (same keys as the V1 extraction's
 // secondary_contact). An entry with no name, phone, or email is dropped —
 // there is nothing to persist or review without one.
-function secondaryEvidencePrefixes(index) {
-  if (index === null || index === undefined) return ['/secondary_contact', '/secondary_contacts/0'];
-  return index === 0 ? ['/secondary_contacts/0', '/secondary_contact'] : [`/secondary_contacts/${index}`];
+// The singleton secondary_contact and secondary_contacts[0] are usually the
+// same person written twice, so their evidence pointers are shared — but ONLY
+// when the two V2 shapes positively agree on identity (shared phone, email,
+// or full name). Otherwise one person's "he'll be there" would ground the
+// other's on-site consent (pre-push codex P1).
+function sameV2Person(a, b) {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const nameOf = (c) => norm(c.name_full) || norm([c.first_name, c.last_name].filter(Boolean).join(' '));
+  if (a.phone_e164 && b.phone_e164 && last10(a.phone_e164) === last10(b.phone_e164)) return true;
+  if (a.email && b.email && norm(a.email) === norm(b.email)) return true;
+  const an = nameOf(a); const bn = nameOf(b);
+  return !!an && an === bn && an.includes(' ');
+}
+
+function secondaryEvidencePrefixes(index, shareWithCounterpart = false) {
+  if (index === null || index === undefined) {
+    return shareWithCounterpart ? ['/secondary_contact', '/secondary_contacts/0'] : ['/secondary_contact'];
+  }
+  if (index === 0) return shareWithCounterpart ? ['/secondary_contacts/0', '/secondary_contact'] : ['/secondary_contacts/0'];
+  return [`/secondary_contacts/${index}`];
 }
 
 // Pinned quote for one on-site consent field from the V2 evidence[] list. The
@@ -225,8 +244,12 @@ function secondaryEvidenceQuote(evidence, prefixes, leaf) {
 // `evidence` (the extraction's evidence[]) and `index` (position in
 // secondary_contacts[], or null for the singleton secondary_contact, which
 // mirrors entry 0) locate this contact's pinned on-site quotes.
-function mapSecondaryContactToLegacy(contact, { evidence = null, index = null } = {}) {
+// `counterpart` is the OTHER shape's candidate for the same slot (the array's
+// entry 0 when mapping the singleton; the singleton when mapping entry 0):
+// evidence pointers are shared across the two paths only if sameV2Person.
+function mapSecondaryContactToLegacy(contact, { evidence = null, index = null, counterpart = null } = {}) {
   if (!contact || typeof contact !== 'object') return null;
+  const shareEvidence = (index === null || index === undefined || index === 0) && sameV2Person(contact, counterpart);
   // A V2 contact can arrive with only name_full populated ("Joseph Haught"
   // unsplit) — derive first/last from it so the name survives the flat
   // mapping instead of producing an unnamed (or dropped) contact.
@@ -252,8 +275,8 @@ function mapSecondaryContactToLegacy(contact, { evidence = null, index = null } 
     // Pinned evidence quotes for those two flags (null when none): without a
     // quote that appears in the transcript the processor ignores the flag
     // (verifyOnSiteGrounding) — a schema-valid response may omit evidence.
-    wants_appointment_texts_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index), 'wants_appointment_texts'),
-    on_site_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index), 'on_site'),
+    wants_appointment_texts_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index, shareEvidence), 'wants_appointment_texts'),
+    on_site_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index, shareEvidence), 'on_site'),
     is_billing_party: contact.is_billing_party === true,
     notes: contact.notes || null,
   };
@@ -263,11 +286,11 @@ function mapSecondaryContactToLegacy(contact, { evidence = null, index = null } 
 
 // 1.4.0 array — every entry through the same single-contact mapper; empty
 // shells drop; hard cap 3 (the slot budget).
-function mapSecondaryContactsToLegacy(list, evidence = null) {
+function mapSecondaryContactsToLegacy(list, evidence = null, singleton = null) {
   if (!Array.isArray(list)) return [];
   // The ORIGINAL index locates the evidence pointer, so map before dropping
-  // empty shells.
-  return list.map((c, i) => mapSecondaryContactToLegacy(c, { evidence, index: i })).filter(Boolean).slice(0, 3);
+  // empty shells. Entry 0 may share the singleton's pointers (same person only).
+  return list.map((c, i) => mapSecondaryContactToLegacy(c, { evidence, index: i, counterpart: i === 0 ? singleton : null })).filter(Boolean).slice(0, 3);
 }
 
 function mapServiceCategoryToLegacy(category) {
@@ -739,6 +762,8 @@ function callerIdDisclaimedNoteText(caller, { now = new Date(), ani = null } = {
 }
 
 module.exports = {
+  sameV2Person,
+  secondaryEvidencePrefixes,
   isV2Extraction,
   flatView,
   mapSecondaryContactsToLegacy,

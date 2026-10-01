@@ -1253,14 +1253,15 @@ describe('on-site grounding must be pinned to a CALLER quote that is in the tran
   ];
 
   test('V2 evidence[] pointers map to the matching contact; agent-spoken or blank quotes are not evidence', () => {
-    const single = mapSecondaryContactToLegacy(v2Contact, { evidence });
+    // The singleton mirrors entry 0 (same person), so it may read entry 0's pointers.
+    const single = mapSecondaryContactToLegacy(v2Contact, { evidence, counterpart: v2Contact });
     expect(single.wants_appointment_texts_quote).toBe('Yeah.');
     expect(single.on_site_quote).toBe('he will be at the house all day Tuesday');
     const list = mapSecondaryContactsToLegacy([v2Contact, second], evidence);
     expect(list[0].on_site_quote).toBe('he will be at the house all day Tuesday');
     expect(list[1].on_site_quote).toBe('she lives in the back unit');
     expect(list[1].wants_appointment_texts_quote).toBeNull();
-    const alt = mapSecondaryContactToLegacy(v2Contact, { evidence: [{ field_path: 'secondary_contacts[0].on_site', quote: 'he will be at the house', speaker: 'caller' }] });
+    const alt = mapSecondaryContactToLegacy(v2Contact, { evidence: [{ field_path: 'secondary_contacts[0].on_site', quote: 'he will be at the house', speaker: 'caller' }], counterpart: v2Contact });
     expect(alt.on_site_quote).toBe('he will be at the house');
     expect(mapSecondaryContactToLegacy(second, { evidence: [{ field_path: '/secondary_contact/on_site', quote: 'x'.repeat(20), speaker: 'caller' }], index: 1 }).on_site_quote).toBeNull();
     expect(mapSecondaryContactToLegacy(v2Contact).on_site_quote).toBeNull();
@@ -1415,5 +1416,35 @@ describe('V2 normalization keeps evidence indices aligned with secondary_contact
     expect(out.secondary_contacts).toHaveLength(3);
     expect(out.evidence).toEqual([ev[0]]);
     expect(remapSecondaryContactEvidence(undefined, new Map())).toBeUndefined();
+  });
+});
+
+// Pre-push codex P1: the singleton secondary_contact and secondary_contacts[0]
+// share evidence pointers ONLY when they are positively the same person.
+describe('singleton / entry-0 evidence sharing requires the same person', () => {
+  const { mapSecondaryContactToLegacy: mapOne, mapSecondaryContactsToLegacy: mapMany, sameV2Person } = require('../utils/extraction-compat');
+  const spouse = { name_full: 'Sample Spouse', first_name: 'Sample', last_name: 'Spouse', phone_e164: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true };
+  const lender = { name_full: 'Other Lender', first_name: 'Other', last_name: 'Lender', phone_e164: '+15550100777', role: 'lender', wants_notifications: true, wants_appointment_texts: true, on_site: true };
+  const evidence = [
+    { field_path: '/secondary_contacts/0/on_site', quote: 'he lives there', speaker: 'caller' },
+    { field_path: '/secondary_contacts/0/wants_appointment_texts', quote: 'yeah text him', speaker: 'caller' },
+  ];
+
+  test('different people: the singleton does NOT inherit entry 0\'s quotes (and vice versa)', () => {
+    expect(sameV2Person(spouse, lender)).toBe(false);
+    const single = mapOne(lender, { evidence, counterpart: spouse });
+    expect(single.on_site_quote).toBeNull();
+    expect(single.wants_appointment_texts_quote).toBeNull();
+    const singletonEv = [{ field_path: '/secondary_contact/on_site', quote: 'q', speaker: 'caller' }];
+    expect(mapMany([spouse], singletonEv, lender)[0].on_site_quote).toBeNull();
+  });
+
+  test('same person (phone / email / full name): quotes are shared both ways', () => {
+    expect(sameV2Person(spouse, { ...lender, phone_e164: spouse.phone_e164 })).toBe(true);
+    expect(sameV2Person({ ...spouse, phone_e164: null, email: 'a@example.com' }, { ...lender, email: 'A@example.com' })).toBe(true);
+    expect(sameV2Person({ ...spouse, phone_e164: null }, { ...lender, name_full: 'sample  spouse' })).toBe(true);
+    const single = mapOne({ ...spouse, phone_e164: null }, { evidence, counterpart: spouse });
+    expect(single.on_site_quote).toBe('he lives there');
+    expect(single.wants_appointment_texts_quote).toBe('yeah text him');
   });
 });

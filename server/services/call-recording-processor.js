@@ -2665,7 +2665,7 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
   const v1 = (extracted.secondary_contact && typeof extracted.secondary_contact === 'object')
     ? extracted.secondary_contact
     : null;
-  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact, { evidence: v2Extraction?.evidence });
+  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact, { evidence: v2Extraction?.evidence, counterpart: v2Extraction?.secondary_contacts?.[0] || null });
   // V1 has no evidence contract: its on-site consent flags can NEVER authorize
   // the stamp on their own (owner 2026-09-30 audit). Only a valid V2
   // extraction's evidence-pinned flags can — a V1-only (or V1-unmerged)
@@ -2760,7 +2760,7 @@ function identityConflicts(a, b) {
 function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
   const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
   const primary = resolveCallSecondaryContact(extracted, v2Extraction);
-  let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts, v2Extraction?.evidence);
+  let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts, v2Extraction?.evidence, v2Extraction?.secondary_contact || null);
   // When the single-contact resolver rejected V2's person on an identity
   // conflict (V1 wins unmerged), that same person is REQUIRED to lead the V2
   // array as the mirror entry — appending it here would resurrect the
