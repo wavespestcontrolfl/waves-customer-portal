@@ -19,7 +19,7 @@ const ALL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disag
 // jev_answer is the NORMALISED answer ({ p, yes, confident } or { choice, … }),
 // never text: a jev_right label confirms it, so without it two confirmed cases
 // with opposite answers would export identically (pre-push audit, 0d1f917627).
-const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'jev_answer', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
+const COLUMNS = ['capability', 'subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'jev_answer', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
 // The same contract the schema enforces (migrations 20261001130000 +
 // 20261001140000), repeated here so the export stays honest against rows older
 // than the CHECKs: a real sha256 hex hash, and for confirmed rows a label of the
@@ -41,15 +41,19 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 // a score is a finite number. Anything else (a name, an address, a sentence, an
 // option that is not in the package) is dropped, and a confirmed case that
 // cannot produce an in-domain expected answer is not exported at all.
-const { packageFor, packageHash } = require('../services/typed-decisions/packages');
+const { packageFor, packageHash, OUTCOME_SOURCES } = require('../services/typed-decisions/packages');
 
 // The row must name a registered package AND carry that package's CURRENT
 // content hash: a syntactically valid digest for different question wording
-// is false provenance and the row is not evidence.
-function questionFor(row) {
+// is false provenance and the row is not evidence. The package must also
+// belong to the row's capability and to the capability being exported, so a
+// courtesy-text case can never land in a call-judge fixture.
+function packageAndQuestion(row, capability) {
   const pkg = packageFor(row.package_id);
   if (!pkg || !pkg.questions || packageHash(pkg) !== row.package_hash) return null;
-  return pkg.questions[row.question_id] || null;
+  if (pkg.capability !== row.capability || (capability != null && pkg.capability !== capability)) return null;
+  const question = pkg.questions[row.question_id];
+  return question ? { pkg, question } : null;
 }
 // The question's answer domain: true when `v` is a valid answer for it.
 function inDomain(question, v) {
@@ -60,20 +64,32 @@ function inDomain(question, v) {
   return false;
 }
 const isProb = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
-// The normalised Jev answer, reduced to its typed fields for this question.
-function fixtureAnswer(question, a) {
-  if (!question || !a || typeof a !== 'object') return null;
+// The normalised Jev answer, rebuilt from its raw measurement with the same
+// rules as services/typed-decisions/jev.js#normaliseAnswer: yes and confident
+// are DERIVED from p (or confidence) and the package thresholds, never copied.
+// A stored yes/confident that disagrees with what the measurement implies is a
+// corrupt row and yields null (so a confirmed case built on it is not exported).
+function fixtureAnswer(pkg, question, a) {
+  if (!pkg || !question || !a || typeof a !== 'object') return null;
+  const t = pkg.thresholds || {};
+  const agrees = (field, derived) => a[field] === undefined || a[field] === derived;
   if (question.type === 'noul') {
-    return isProb(a.p) && typeof a.yes === 'boolean' ? { p: a.p, yes: a.yes, confident: a.confident === true } : null;
+    if (!isProb(a.p)) return null;
+    const yes = a.p >= 0.5;
+    const confident = a.p <= t.confident_low || a.p >= t.confident_high;
+    return agrees('yes', yes) && agrees('confident', confident) ? { p: a.p, yes, confident } : null;
   }
+  const confidence = isProb(a.confidence) ? a.confidence : null;
+  const confident = confidence !== null && confidence >= t.confident_high;
+  if (!agrees('confident', confident)) return null;
   if (question.type === 'choice') {
     if (!inDomain(question, a.choice)) return null;
     const probabilities = {};
     for (const k of Object.keys(question.criteria || {})) if (isProb((a.probabilities || {})[k])) probabilities[k] = a.probabilities[k];
-    return { choice: a.choice, confidence: isProb(a.confidence) ? a.confidence : null, confident: a.confident === true, probabilities };
+    return { choice: a.choice, confidence, confident, probabilities };
   }
   if (question.type === 'score') {
-    return Number.isFinite(a.score) ? { score: a.score, confidence: isProb(a.confidence) ? a.confidence : null, confident: a.confident === true } : null;
+    return Number.isFinite(a.score) ? { score: a.score, confidence, confident } : null;
   }
   return null;
 }
@@ -86,16 +102,16 @@ function fixtureBaselines(question, b) {
   for (const k of BASELINE_SOURCES) if (inDomain(question, b[k])) out[k] = b[k];
   return out;
 }
-// Outcome evidence is machine-written: a snake_case source name, a window
-// like 24h / 7d, a boolean-or-null value, an ISO timestamp. Nothing else.
-const SOURCE_RE = /^[a-z][a-z_]{0,39}$/;
-const WINDOW_RE = /^\d{1,3}[hd]$/;
+// Outcome evidence is machine-written: a source from the closed OUTCOME_SOURCES
+// registry with that source's own window, a boolean-or-null value, an ISO
+// timestamp. Evidence naming any other source is dropped whole: a pattern
+// check would still pass a name-shaped string (Codex #5476 r10).
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
 function fixtureEvidence(ev) {
   if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return null;
-  const out = {};
-  if (typeof ev.source === 'string' && SOURCE_RE.test(ev.source)) out.source = ev.source;
-  if (typeof ev.window === 'string' && WINDOW_RE.test(ev.window)) out.window = ev.window;
+  if (typeof ev.source !== 'string' || !Object.prototype.hasOwnProperty.call(OUTCOME_SOURCES, ev.source)) return null;
+  if (ev.window !== OUTCOME_SOURCES[ev.source]) return null;
+  const out = { source: ev.source, window: ev.window };
   if (typeof ev.value === 'boolean' || ev.value === null) out.value = ev.value;
   if (typeof ev.observed_at === 'string' && ISO_RE.test(ev.observed_at)) out.observed_at = ev.observed_at;
   return out;
@@ -107,10 +123,10 @@ function structuredLabel(label) {
 }
 // The human-confirmed answer, in the question's domain, or null when the label
 // cannot supply one (unclear; jev_wrong without a valid correct_value).
-function expectedFor(question, row) {
+function expectedFor(pkg, question, row) {
   const verdict = row.label && typeof row.label === 'object' ? row.label.verdict : null;
   if (verdict === 'jev_right') {
-    const a = fixtureAnswer(question, row.jev_answer);
+    const a = fixtureAnswer(pkg, question, row.jev_answer);
     if (!a) return null;
     if (question.type === 'noul') return a.yes;
     if (question.type === 'choice') return a.choice;
@@ -121,10 +137,13 @@ function expectedFor(question, row) {
 }
 const CONFIRMED = new Set(['confirmed_error', 'confirmed_correct']);
 
-function rowToCase(row) {
-  const question = questionFor(row);
-  if (!question) return null; // unknown package or question: nothing to validate against
-  const expected = expectedFor(question, row);
+// `capability` is the one being exported (exportCases passes it); a direct
+// call without it still requires the package to match the row's capability.
+function rowToCase(row, capability = null) {
+  const found = packageAndQuestion(row, capability);
+  if (!found) return null; // unknown/mismatched package or question: nothing to validate against
+  const { pkg, question } = found;
+  const expected = expectedFor(pkg, question, row);
   if (CONFIRMED.has(row.label_status) && expected === null) return null; // not scorable
   const verdict = row.label && typeof row.label === 'object' ? row.label.verdict : null;
   if (row.label_status === 'confirmed_correct' && verdict !== 'jev_right') return null; // status/verdict mismatch
@@ -138,7 +157,7 @@ function rowToCase(row) {
     package_hash: row.package_hash,
     question_id: row.question_id,
     question_type: question.type,
-    jev_answer: fixtureAnswer(question, row.jev_answer),
+    jev_answer: fixtureAnswer(pkg, question, row.jev_answer),
     expected,
     label,
     label_status: row.label_status,
@@ -170,7 +189,7 @@ async function exportCases({ db, capability, statuses = DEFAULT_STATUSES, now = 
     .whereRaw(EVIDENCE_PREDICATE)
     .select(COLUMNS)
     .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }]);
-  return { capability, exported_at: now().toISOString(), cases: rows.map(rowToCase).filter(Boolean) };
+  return { capability, exported_at: now().toISOString(), cases: rows.map((row) => rowToCase(row, capability)).filter(Boolean) };
 }
 
 async function main() {

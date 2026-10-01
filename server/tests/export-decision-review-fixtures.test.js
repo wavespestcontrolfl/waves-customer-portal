@@ -13,7 +13,7 @@ const ROW = {
   question_id: 'is_lead',
   jev_answer: { p: 0.9, yes: true, confident: true },
   baseline_answers: { rules: false, production: true },
-  outcome_evidence: { source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
+  outcome_evidence: { source: 'leads_customers', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
   sampled_for: 'disagreement',
   label: { verdict: 'jev_wrong', correct_value: false, note: 'Customer Jane Doe at 123 Main St said no' },
   label_status: 'confirmed_error',
@@ -38,7 +38,7 @@ describe('rowToCase', () => {
       label: { verdict: 'jev_wrong', correct_value: false },
       label_status: 'confirmed_error',
       baseline_answers: { rules: false, production: true },
-      outcome_evidence: { source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
+      outcome_evidence: { source: 'leads_customers', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
     });
     expect(JSON.stringify(c)).not.toMatch(/transcript|someone@example|labeled_by|Jane Doe|123 Main|note/);
   });
@@ -56,11 +56,11 @@ describe('rowToCase', () => {
     const ok = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, label_status: 'confirmed_correct',
       baseline_answers: { rules: 'Jane', production: true, excerpt: 'x' },
       outcome_evidence: { source: 'Jane_Doe', window: '7d', value: 'yes', observed_at: 'yesterday', transcript: 'leak' },
-      jev_answer: { p: 0.2, yes: false, confident: true, note: 'free text' } });
+      jev_answer: { p: 0.1, yes: false, confident: true, note: 'free text' } });
     expect(JSON.stringify(ok)).not.toMatch(/Jane|Main|transcript|free text|yesterday/);
     expect(ok.baseline_answers).toEqual({ production: true });
-    expect(ok.outcome_evidence).toEqual({ window: '7d' });
-    expect(ok.jev_answer).toEqual({ p: 0.2, yes: false, confident: true });
+    expect(ok.outcome_evidence).toBeNull();
+    expect(ok.jev_answer).toEqual({ p: 0.1, yes: false, confident: true });
     expect(ok.expected).toBe(false);
   });
   test('choice questions accept only the question\'s own criteria keys', () => {
@@ -109,6 +109,29 @@ describe('parseArgs', () => {
     expect(parseArgs(['--capability=sms_courtesy', '--status=confirmed_error', '--out', 'x.json'])).toEqual({ capability: 'sms_courtesy', statuses: ['confirmed_error'], out: 'x.json' });
     expect(() => parseArgs(['--capability', 'a', '--status', 'bogus'])).toThrow(/--status/);
     expect(() => parseArgs(['--capability', 'a', '--nope'])).toThrow(/unknown argument/);
+  });
+});
+
+describe('closed-world checks (Codex #5476 r10)', () => {
+  const RIGHT = { ...ROW, label: { verdict: 'jev_right' }, label_status: 'confirmed_correct' };
+  test('evidence source must be a registered machine source with its own window', () => {
+    expect(rowToCase({ ...RIGHT, outcome_evidence: { source: 'jane_doe', window: '7d', value: true } }).outcome_evidence).toBeNull();
+    expect(rowToCase({ ...RIGHT, outcome_evidence: { source: 'leads_customers', window: '24h', value: true } }).outcome_evidence).toBeNull();
+    expect(rowToCase({ ...RIGHT, outcome_evidence: { source: 'sms_log', window: '24h', value: null } }).outcome_evidence)
+      .toEqual({ source: 'sms_log', window: '24h', value: null });
+  });
+  test('the package must belong to the row and the exported capability', () => {
+    const sms = PACKAGES['sms_courtesy.v1'];
+    const smsRow = { ...RIGHT, package_id: sms.id, package_hash: packageHash(sms), question_id: Object.keys(sms.questions)[0] };
+    expect(rowToCase(smsRow)).toBeNull(); // row says call_judge, package is sms_courtesy
+    expect(rowToCase({ ...smsRow, capability: 'sms_courtesy' }, 'call_judge')).toBeNull();
+    expect(rowToCase({ ...smsRow, capability: 'sms_courtesy' }, 'sms_courtesy')).not.toBeNull();
+    expect(rowToCase(RIGHT, 'sms_courtesy')).toBeNull();
+  });
+  test('yes and confident are derived from p; a contradiction is not exported', () => {
+    expect(rowToCase({ ...RIGHT, jev_answer: { p: 0.9, yes: false, confident: true } })).toBeNull();
+    expect(rowToCase({ ...RIGHT, jev_answer: { p: 0.6, yes: true, confident: true } })).toBeNull();
+    expect(rowToCase({ ...RIGHT, jev_answer: { p: 0.6 } }).jev_answer).toEqual({ p: 0.6, yes: true, confident: false });
   });
 });
 

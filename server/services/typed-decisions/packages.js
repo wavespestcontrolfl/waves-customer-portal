@@ -113,4 +113,16 @@ function packageHash(pkg) {
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
-module.exports = { PACKAGES, packageFor, packageHash };
+// The closed set of machine outcome-evidence sources, each with its one window.
+// Outcome evidence is written only by code (services/typed-decisions/
+// outcome-evidence.js); the fixture exporter keeps a source only when it is a
+// key here and its window matches, so no stored string can reach a fixture.
+const OUTCOME_SOURCES = deepFreeze({
+  scheduled_services: '24h',
+  estimates: '48h',
+  leads_customers: '7d',
+  job_status_history: '7d',
+  sms_log: '24h',
+});
+
+module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES };
