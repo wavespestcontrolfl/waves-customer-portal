@@ -31,6 +31,13 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
+  // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend call — see
+  // sms-auto-send-reservation.test.js's identical mock comment.
+  findEtaMinutesClaims: jest.fn(() => []),
+  bodyMentionsArrival: jest.fn(() => false),
+  bodyHasTimedArrivalPhrase: jest.fn(() => false),
+  bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
@@ -128,4 +135,67 @@ test('a live-check error fails the send closed (nothing reaches the provider)', 
   drafter.reserviceBookedReferenceBlock.mockRejectedValue(new Error('db down'));
   await expect(attempt()).resolves.toMatchObject({ sent: false });
   expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+// Codex #5334 P2 (after the main merge): the booked-callback guard must be the LAST recheck. The live-ETA recheck is an async read, so booking
+// state that changes while it is in flight has to still be caught — in dispatchClaimedSend and at the provider boundary (incl. the repeat after
+// the durable attempt marker).
+describe('booked-callback guard runs AFTER every async ETA recheck', () => {
+  const eta = require('../services/sms-eta-freshness');
+  const CHANGED = 'reservice_booking_changed — the already-booked pest re-service appointment was cancelled, moved or never booked since this reply was drafted';
+  afterEach(() => jest.restoreAllMocks());
+
+  test('dispatchClaimedSend: a booking cancelled DURING the ETA await still blocks the send before provider entry', async () => {
+    drafter.reserviceBookedReferenceBlock.mockResolvedValue(null);
+    jest.spyOn(eta, 'etaClaimBlockReason').mockImplementation(async () => {
+      await new Promise((r) => setImmediate(r));
+      drafter.reserviceBookedReferenceBlock.mockResolvedValue(CHANGED); // customer cancels while the ETA read is in flight
+      return null;
+    });
+    await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'reservice_booking_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+  });
+
+  test('dispatchClaimedSend: an ETA infrastructure failure is still the retryable release (not a booked refusal)', async () => {
+    drafter.reserviceBookedReferenceBlock.mockResolvedValue(CHANGED);
+    jest.spyOn(eta, 'etaClaimBlockReason').mockResolvedValue('eta_recheck_failed');
+    await expect(attempt()).resolves.toMatchObject({ sent: false, retryable: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('provider boundary: ETA runs first, the booked check last, and a cancellation during the ETA read is refused', async () => {
+    drafter.reserviceBookedReferenceBlock.mockResolvedValue(null);
+    await attempt();
+    const input = sendCustomerMessage.mock.calls[0][0];
+    const order = [];
+    drafter.reserviceBookedReferenceBlock.mockImplementation(async () => { order.push('booked'); return null; });
+    jest.spyOn(eta, 'etaClaimBlockReason').mockImplementation(async () => {
+      order.push('eta');
+      await new Promise((r) => setImmediate(r));
+      return null;
+    });
+    await expect(input.providerPreSendCheck({ dbi: db })).resolves.toEqual({ ok: true });
+    expect(order).toEqual(['eta', 'booked']);
+
+    drafter.reserviceBookedReferenceBlock.mockImplementation(async () => CHANGED);
+    await expect(input.providerPreSendCheck({ dbi: db })).resolves.toMatchObject({ ok: false, code: 'reservice_booking_changed' });
+    // and an ETA failure still reports its own retryable boundary code, ahead of the booked verdict
+    eta.etaClaimBlockReason.mockResolvedValue('eta_recheck_failed');
+    await expect(input.providerPreSendCheck({ dbi: db })).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test('provider boundary: the repeat after the attempt marker re-runs ETA then booked, so a cancellation after the first pass is still caught', async () => {
+    drafter.reserviceBookedReferenceBlock.mockResolvedValue(null);
+    await attempt();
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(typeof input.providerPreSendCheck.afterMarker).toBe('function');
+    const order = [];
+    drafter.reserviceBookedReferenceBlock.mockImplementation(async () => { order.push('booked'); return null; });
+    jest.spyOn(eta, 'etaClaimBlockReason').mockImplementation(async () => { order.push('eta'); return null; });
+    await expect(input.providerPreSendCheck.afterMarker({ dbi: db })).resolves.toEqual({ ok: true });
+    expect(order).toEqual(['eta', 'booked']);
+    drafter.reserviceBookedReferenceBlock.mockImplementation(async () => CHANGED);
+    await expect(input.providerPreSendCheck.afterMarker({ dbi: db })).resolves.toMatchObject({ ok: false, code: 'reservice_booking_changed' });
+  });
 });

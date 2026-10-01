@@ -144,6 +144,34 @@ describe('lintComms mechanics', () => {
     }
   });
 
+  // LIVE ETA TRACKING LINK (Codex round-2 P2, PR #5334): the shadow
+  // drafter's facts block renders the tracking link through the SAME
+  // stripSmsUrlScheme helper this rule enforces, so a reply that just
+  // echoes the fact verbatim must still pass — never fail lint on the
+  // fact's own https:// scheme.
+  it('the LIVE ETA facts block TRACKING LINK line renders scheme-free and passes portal-link-scheme', () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+      const block = buildFactsBlock({
+        summary: 'Dana',
+        upcomingServices: [
+          {
+            type: 'Quarterly Pest', date: '2026-09-29', window: '1:00 PM–3:00 PM', tech: 'Sam', status: 'en_route', isToday: true,
+            liveEta: { minutes: 12, asOf: '2:45 PM ET', trackUrl: 'https://portal.wavespestcontrol.com/track/abc123' },
+          },
+        ],
+      });
+      const trackingLine = block.split('\n').find((l) => l.includes('TRACKING LINK:'));
+      expect(trackingLine).toBeTruthy();
+      const reply = `Your tech is about 12 minutes away. Track live: ${trackingLine.split('TRACKING LINK: ')[1]}`;
+      const r = lintComms(reply, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+    } finally {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+    }
+  });
+
   it('counts the final scheme-free text at the two-segment boundary', () => {
     const link = 'https://g.page/r/demo';
     const body = 'a'.repeat(307 - link.length) + link;

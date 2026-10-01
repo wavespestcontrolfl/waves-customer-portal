@@ -843,8 +843,8 @@ describe('sms gratitude qualification', () => {
       // audit P1, second finding): it comes from currentPromptVersion(),
       // not the static PROMPT_VERSION, which never moves once the gate goes
       // live and would otherwise stamp every pin "v11" forever.
-      expect(inHoursPins.promptVersion).toBe('house_voice_v12_real_answers2_cf');
-      expect(afterHoursPins.promptVersion).toBe('house_voice_v12_real_answers2_cf');
+      expect(inHoursPins.promptVersion).toBe('house_voice_v12_real_answers3_cf');
+      expect(afterHoursPins.promptVersion).toBe('house_voice_v12_real_answers3_cf');
     } finally {
       Date.now = realNow;
       if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;

@@ -106,6 +106,10 @@ postgres('billing Email provider preparation on its held connection', () => {
     await mockPg.schema.createTable('leads', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.text('email');
     });
+    // The bounce-recovery phase marker (dispatch_started_at) is written on the marker connection at the provider boundary.
+    await mockPg.schema.createTable('email_bounce_recoveries', (table) => {
+      table.uuid('recovery_message_id'); table.jsonb('metadata'); table.timestamp('updated_at');
+    });
     await mockPg.schema.createTable('email_messages', (table) => {
       table.uuid('id').primary();
       for (const key of ['template_key', 'recipient_type', 'recipient_id', 'recipient_email_snapshot',
