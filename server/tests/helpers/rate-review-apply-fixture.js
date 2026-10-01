@@ -291,6 +291,14 @@ function createFakeDb(tables = {}) {
         .map((s) => ({ ...s }));
       return { rows };
     }
+    if (/SELECT s\.id, s\.scheduled_date, s\.status, s\.estimated_price, s\.is_callback/.test(sql)) {
+      const [customerId] = bindings;
+      const rows = db.store.scheduled_services
+        .filter((s) => same(s.customer_id, customerId) && ['pending', 'confirmed', 'rescheduled'].includes(s.status))
+        .sort((a, b) => compare(a.scheduled_date, b.scheduled_date) || compare(a.id, b.id))
+        .map((s) => ({ id: s.id, scheduled_date: s.scheduled_date, status: s.status, estimated_price: s.estimated_price, is_callback: s.is_callback, is_recurring: s.is_recurring, recurring_parent_id: s.recurring_parent_id, line: s._line }));
+      return { rows };
+    }
     if (/pg_(try_)?advisory_xact_lock/.test(sql)) return { rows: [{ locked: true }] };
     throw new Error(`fake-knex: unexpected raw SQL ${String(sql).slice(0, 80)}`);
   });

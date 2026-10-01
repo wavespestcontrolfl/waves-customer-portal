@@ -1553,9 +1553,9 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
 // The annual rate review's renewal consumer (services/rate-review-apply.js
 // noticedRenewalAmountConflict): null when the gate is off, no noticed
 // successor amount applies, or the amount matches. Read at call time.
-async function noticedRenewalAmountConflictFor(customerId, amount) {
+async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart }) {
   if (!require('../config/feature-gates').rateReviewLive()) return null;
-  return require('../services/rate-review-apply').noticedRenewalAmountConflict(db, { customerId, amount, today: etDateString() });
+  return require('../services/rate-review-apply').noticedRenewalAmountConflict(db, { customerId, amount, coverageServiceType, termStart, today: etDateString() });
 }
 
 function parseAnnualPrepayAmount(value) {
@@ -5227,21 +5227,6 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const parsedAmount = parseAnnualPrepayAmount(req.body?.amount);
     if (parsedAmount.error) return res.status(400).json({ error: parsedAmount.error });
     const amount = parsedAmount.amount;
-    // Annual rate review (services/rate-review-apply.js, GATE_RATE_REVIEW): a
-    // renewal for a customer whose live or just-ended term carries the
-    // noticed successor amount charges exactly that amount — "notified
-    // amount is the charged amount" — unless the operator confirms a
-    // different one deliberately (acknowledgeNoticedAmount). Gate off = no
-    // read, byte-identical.
-    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, amount);
-    if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
-      return res.status(409).json({
-        error: `This customer was noticed a renewal amount of $${noticedConflict.noticedAmount.toFixed(2)} by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
-        code: 'RENEWAL_AMOUNT_NOTICED',
-        noticedAmount: noticedConflict.noticedAmount,
-        termId: noticedConflict.termId,
-      });
-    }
     // Optional one-time setup (rodent bait station setup) billed on the same
     // invoice as its own line. Relayed from the prepay-on-book preview's
     // mintPayload; excluded from the term's coverage basis below.
@@ -5334,6 +5319,21 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const termEnd = termEndInput.date || addMonthsDateOnly(termStart, 12);
     if (!termEnd || termEnd <= termStart) {
       return res.status(400).json({ error: 'termEnd must be after termStart' });
+    }
+    // Annual rate review (services/rate-review-apply.js, GATE_RATE_REVIEW): a
+    // renewal of a term that carries the noticed successor amount — the
+    // predecessor resolved by coverage family and the new term's start —
+    // charges exactly that amount ("notified amount is the charged amount")
+    // unless the operator confirms a different one deliberately
+    // (acknowledgeNoticedAmount). Gate off = no read, byte-identical.
+    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart });
+    if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
+      return res.status(409).json({
+        error: `This customer was noticed a renewal amount of $${noticedConflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
+        code: 'RENEWAL_AMOUNT_NOTICED',
+        noticedAmount: noticedConflict.noticedAmount,
+        termId: noticedConflict.termId,
+      });
     }
 
     const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
@@ -5797,21 +5797,6 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const parsedAmount = parseAnnualPrepayAmount(req.body?.amount);
     if (parsedAmount.error) return res.status(400).json({ error: parsedAmount.error });
     const amount = parsedAmount.amount;
-    // Annual rate review (services/rate-review-apply.js, GATE_RATE_REVIEW): a
-    // renewal for a customer whose live or just-ended term carries the
-    // noticed successor amount charges exactly that amount — "notified
-    // amount is the charged amount" — unless the operator confirms a
-    // different one deliberately (acknowledgeNoticedAmount). Gate off = no
-    // read, byte-identical.
-    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, amount);
-    if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
-      return res.status(409).json({
-        error: `This customer was noticed a renewal amount of $${noticedConflict.noticedAmount.toFixed(2)} by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
-        code: 'RENEWAL_AMOUNT_NOTICED',
-        noticedAmount: noticedConflict.noticedAmount,
-        termId: noticedConflict.termId,
-      });
-    }
 
     const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
     if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
@@ -5893,6 +5878,21 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const termEnd = termEndInput.date || addMonthsDateOnly(termStart, 12);
     if (!termEnd || termEnd <= termStart) {
       return res.status(400).json({ error: 'termEnd must be after termStart' });
+    }
+    // Annual rate review (services/rate-review-apply.js, GATE_RATE_REVIEW): a
+    // renewal of a term that carries the noticed successor amount — the
+    // predecessor resolved by coverage family and the new term's start —
+    // charges exactly that amount ("notified amount is the charged amount")
+    // unless the operator confirms a different one deliberately
+    // (acknowledgeNoticedAmount). Gate off = no read, byte-identical.
+    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart });
+    if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
+      return res.status(409).json({
+        error: `This customer was noticed a renewal amount of $${noticedConflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
+        code: 'RENEWAL_AMOUNT_NOTICED',
+        noticedAmount: noticedConflict.noticedAmount,
+        termId: noticedConflict.termId,
+      });
     }
 
     const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);

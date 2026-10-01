@@ -262,6 +262,23 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDat
   return rows.map((r) => ({ ...r, scheduled_date: ymd(r.scheduled_date) }));
 }
 
+// Every open (not terminal) visit of the customer with its plan line — the
+// consumers of customers.per_application_fee (billing-lane.js
+// completionInvoiceAmount bills an unpriced per-application visit at the
+// fee, whatever its family, cadence or date, one-off visits included).
+async function loadCustomerOpenVisits(dbh, { customerId }) {
+  const { LINE_SQL } = PLAN_LINE_SQL;
+  const { rows } = await dbh.raw(`
+    SELECT s.id, s.scheduled_date, s.status, s.estimated_price, s.is_callback, s.is_recurring, s.recurring_parent_id, ${LINE_SQL} AS line
+    FROM scheduled_services s
+    LEFT JOIN services sv ON sv.id = s.service_id
+    WHERE s.customer_id = ?
+      AND s.status IN ('pending', 'confirmed', 'rescheduled')
+    ORDER BY s.scheduled_date ASC, s.id ASC
+  `, [customerId]);
+  return rows.map((r) => ({ ...r, scheduled_date: ymd(r.scheduled_date) }));
+}
+
 // The live prepaid term that carries this line (the ranking's matchPrepayTerm
 // posture: the family named by the coverage text; one unlabeled live term
 // can only mean the line on a single-line account; two candidates = held).
@@ -693,16 +710,30 @@ async function repriceTargets(trx, { notice, parentId, lockedIds, effectiveDate,
 }
 
 // customers.per_application_fee — the completion fallback when a visit
-// carries no stamp (billing-lane.js completionInvoiceAmount step 4). Its
-// only writer today is acceptance; this is the one sanctioned non-accept
-// writer, and it moves ONLY when the fee is exactly the amount the customer
-// was told (a two-line account's fee may belong to the other line; a stale
-// fee is left as it was and flagged). A NULL fee stays NULL — unpriced is
-// never invented.
-async function moveFeeAndLedger(trx, { notice, customer, metadata, noticedCurrent, noticedNew }) {
-  const newDollars = dollars(noticedNew);
+// carries no stamp (billing-lane.js completionInvoiceAmount step 4) — is
+// ACCOUNT-WIDE: every unpriced open visit of the customer bills it, whatever
+// its family or date. Its only writer today is acceptance; this is the one
+// sanctioned non-accept writer, and it moves ONLY when every consumer of
+// the fallback is provably inside the noticed scope: the fee equals the
+// amount the customer was told, every open visit of the account belongs to
+// THIS plan line, and no open visit outside the repriced set (a visit
+// before the effective date, a one-off, a callback) is unpriced. Otherwise
+// the old fee is left as it was and the reason recorded. A NULL fee stays
+// NULL — unpriced is never invented.
+async function feeScopeRefusal(trx, { customer, familyKey, repricedIds, noticedCurrent }) {
   const feeCents = cents(customer.per_application_fee);
-  const feeUpdated = feeCents != null && feeCents === noticedCurrent;
+  if (feeCents == null) return 'no_fee_on_file';
+  if (feeCents !== noticedCurrent) return 'fee_differs_from_noticed_current';
+  const open = await loadCustomerOpenVisits(trx, { customerId: customer.id });
+  if (open.some((v) => v.line !== familyKey)) return 'fee_shared_with_other_lines';
+  if (open.some((v) => !repricedIds.has(String(v.id)) && cents(v.estimated_price) == null)) return 'fee_consumers_outside_scope';
+  return null;
+}
+
+async function moveFeeAndLedger(trx, { notice, customer, metadata, noticedCurrent, noticedNew, repricedIds }) {
+  const newDollars = dollars(noticedNew);
+  const feeUntouchedReason = await feeScopeRefusal(trx, { customer, familyKey: notice.family_key, repricedIds, noticedCurrent });
+  const feeUpdated = feeUntouchedReason == null;
   if (feeUpdated) await trx('customers').where({ id: customer.id }).update({ per_application_fee: newDollars, updated_at: new Date() });
   // Ledger: a per-application account's family slice is a monthly
   // equivalent (annual ÷ 12); move it by the same delta when one exists.
@@ -718,7 +749,7 @@ async function moveFeeAndLedger(trx, { notice, customer, metadata, noticedCurren
     before: { estimated_price: dollars(noticedCurrent), per_application_fee: feeBefore },
     after: { estimated_price: newDollars, per_application_fee: feeUpdated ? newDollars : feeBefore },
     feeUpdated,
-    feeUntouchedReason: feeUpdated ? null : (feeCents == null ? 'no_fee_on_file' : 'fee_differs_from_noticed_current'),
+    feeUntouchedReason,
     ledger,
   };
 }
@@ -741,7 +772,7 @@ async function applyPerApplication(trx, ctx) {
   const parentAddons = addonRows.filter((a) => String(a.scheduled_service_id) === String(parentId));
   await assertTemplateSpawnsAtNoticed(trx, { parentId, parentAddons, fields, noticedNew, schedule });
   await repriceTargets(trx, { notice, parentId, lockedIds, effectiveDate, fields, noticedNew, cols, schedule });
-  const money = await moveFeeAndLedger(trx, { notice, customer, metadata: ctx.metadata, noticedCurrent, noticedNew });
+  const money = await moveFeeAndLedger(trx, { notice, customer, metadata: ctx.metadata, noticedCurrent, noticedNew, repricedIds: lockedIds });
   const first = locked.slice().sort((a, b) => String(ymd(a.scheduled_date)).localeCompare(String(ymd(b.scheduled_date))))[0];
   return { lane: LANE_PER_APPLICATION, appliesFromVisitId: first.id, visitIds: [...lockedIds], parentId, ...money };
 }
@@ -943,21 +974,32 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 
 // The non-termite renewal consumer of next_term_prepay_amount: an admin
 // recording a renewal (routes/admin-customers.js, the collected-prepay and
-// draft-invoice routes) for a customer whose live or just-ended term
-// carries a noticed successor amount must charge exactly that amount, or
-// say so (acknowledgeNoticedAmount). Returns null when no noticed amount
-// applies or the amount matches; else { termId, noticedAmount, termEnd }.
-// `today` is an ET calendar day; the window is the term's renewal season
-// (ended within the last 60 days or still live).
-async function noticedRenewalAmountConflict(dbh, { customerId, amount, today }) {
+// draft-invoice routes) must charge the amount the customer was noticed for
+// THAT term's successor, or say so (acknowledgeNoticedAmount). The
+// predecessor is resolved, never guessed: the customer's terms carrying a
+// noticed amount, in the requested coverage's family (an unlabeled term only
+// when the request names no family either), neither cancelled nor already
+// renewed, whose term_end sits within 60 days either side of the new term's
+// start (a successor starts the day after its predecessor ends); with more
+// than one candidate the one ending nearest the new start is the
+// predecessor. Returns null when nothing applies or the amount matches,
+// else { termId, termEnd, noticedAmount }.
+async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType = null, termStart = null, today }) {
   if (!customerId || !(Number(amount) > 0)) return null;
-  const since = addDaysYmd(today, -60);
-  const term = await dbh('annual_prepay_terms')
+  const start = ymd(termStart) || today;
+  const family = familyOfCoverage(coverageServiceType);
+  const terms = await dbh('annual_prepay_terms')
     .where({ customer_id: customerId })
     .whereNotNull('next_term_prepay_amount')
-    .where('term_end', '>=', since)
-    .orderBy('term_end', 'desc')
-    .first('id', 'term_end', 'next_term_prepay_amount');
+    .where('term_end', '>=', addDaysYmd(start, -60))
+    .where('term_end', '<=', addDaysYmd(start, 60))
+    .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'renewed', 'switch_plan'])
+    .select('id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
+  const candidates = terms
+    .filter((t) => !['cancel', 'renew', 'switch_plan'].includes(String(t.renewal_decision || '')))
+    .filter((t) => (family ? familyOfCoverage(t.coverage_service_type) === family : !familyOfCoverage(t.coverage_service_type)))
+    .sort((a, b) => Math.abs(daysBetweenYmd(ymd(a.term_end), start)) - Math.abs(daysBetweenYmd(ymd(b.term_end), start)));
+  const term = candidates[0];
   if (!term) return null;
   const noticedCents = cents(term.next_term_prepay_amount);
   if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
@@ -1006,6 +1048,6 @@ module.exports = {
   noticedRenewalAmountConflict,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
-    loadLineOpenVisits, resolvePrepayTerm, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
+    loadLineOpenVisits, loadCustomerOpenVisits, feeScopeRefusal, resolvePrepayTerm, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };
