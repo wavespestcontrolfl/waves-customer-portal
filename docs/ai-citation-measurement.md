@@ -10,7 +10,7 @@ The current grid takes the latest observation for each question, engine, and rep
 
 ### Recommended and missing (additive, 2026-09-27)
 
-`recommended` sits next to `mentioned`/`cited` in both the sitewide summary and the fixed-benchmark block: a measured answer counts when Waves is mentioned, the light sentiment pass (`classifySentiment`) scored it `positive`, and `rank_position` — the 1-indexed order Waves' first mention appears among Waves + the hardcoded `COMPETITORS` list in `llm-mention-prober.js`'s `parse()` — is 1, 2, or 3. Same denominator as mentioned/cited (measured answers), so all three rates stay comparable; `recommendedRate` is the numerator/denominator pair the panel renders. This is a proxy for "would this answer actually steer a prospect to Waves", not a claim about a consumer-facing ranked list — no answer engine in this cohort returns an explicit rank.
+`recommended` sits next to `mentioned`/`cited` in both the sitewide summary and the fixed-benchmark block: a measured answer counts when Waves is mentioned, the light sentiment pass (`classifySentiment`) scored it `positive`, and `rank_position` is 1, 2, or 3. What `rank_position` means depends on the row's `rank_method` (see "Rank cohorts" below): the 1-indexed place of Waves' first mention among every company the answer names, or, on older rows, among Waves + the hard-coded `COMPETITORS` list. Same denominator as mentioned/cited (measured answers), so all three rates stay comparable; `recommendedRate` is the numerator/denominator pair the panel renders. This is a proxy for "would this answer actually steer a prospect to Waves", not a claim about a consumer-facing ranked list — no answer engine in this cohort returns an explicit rank.
 
 `missing` sits next to `noAnswer` in the fixed-benchmark block only: expected pairs (active benchmark questions × CONFIGURED engines — the prober's own provider set, passed in by `getDashboard`) that have no observation of any kind in the window. Measured, `noAnswer`, `legacy`, `unresolved` and `missing` therefore partition `expectedObservations`. The engine denominator is never derived from successful rows: `runDaily` skips null probes, so a newly enabled engine, or one failing for the whole window, has no rows and would otherwise shrink the denominator and read as full coverage; a removed engine's leftover rows never offset a configured engine's gap. A rotating daily attempt window (see below) means a healthy, fully-configured cohort still carries some `missing` most days — it is a coverage gauge, not a failure count on its own; watch its trend, not a single day's value.
 
@@ -21,8 +21,33 @@ Both fields are purely additive: every existing field name and denominator (`men
 - Claude: citations attached to answer text blocks. Thinking and refusal blocks are excluded. [Anthropic web search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool)
 - Perplexity: answer citation markers select entries from its citation array. Unused entries and `search_results` remain source evidence.
 - Google AI Overview: references or links attached to textual overview elements. Top-level references only identify pages that may have been used. [DataForSEO response schema](https://docs.dataforseo.com/v3/serp/google/organic/live/advanced/)
+- Google AI Mode: the same element-attached links as the Overview, from the AI Mode scraper (see Consumer-app and AI Mode rows).
+- ChatGPT app and Gemini app (DataForSEO scrapers, the default for those two platforms): the answer's attached sources.
 
-Provider adapters retain their own models and do not fall back across engines: a fallback would contaminate the engine being measured. Reported model identifiers are retained when a response provides them. This is an API observation series, not a claim about personalized consumer interfaces.
+Provider adapters retain their own models and do not fall back across engines: a fallback would contaminate the engine being measured. Reported model identifiers are retained when a response provides them. The ChatGPT, Gemini and AI Mode rows are scraped consumer-app observations (location-scoped, not personalised); the Claude, Perplexity and AI Overview rows, and the ChatGPT and Gemini rows while `LLM_MENTIONS_APP_SCRAPER` is off, are API observations. Neither is a claim about a personalised consumer interface.
+
+### Rank cohorts (`rank_method`, 2026-10-01)
+
+`rank_position` is Waves' 1-based place in the ordered `companies_named` list (jsonb, `[{name}]`, Waves included at its position), computed by `rankFor` in `server/services/seo/llm-mention-companies.js`. `rank_method` says how the list was built, and a rate that mixes methods is labeled (`rankMethods` on the dashboard summary, benchmark and every group; the panel adds a note when more than one is mixed):
+
+- `known_list_v1` (and NULL, rows from before the column): Waves' place among Waves + the `COMPETITORS` list only, so "rank 1" could be 3rd to 5th among every company named. Kept as written, never backfilled. `COMPETITORS` now also holds the local rivals the 2026-09-30 check found beating Waves (All U Need, Prodigy, Paragon, Farrow, Good News, ACME, Westfall's, Keller's), but old rows keep their old meaning.
+- `all_named_v2`: the provider supplied brand entities (the ChatGPT app scraper's `brand_entities`), so the list is the provider's own, ordered by position in the text, plus any known rival or Waves hit in the text.
+- `all_named_text_v2`: no entities, so company names were read from the answer text (list items, bold, link text, business cards, and capitalised business-name spans in plain sentences). Reading text can miss a company, which would make Waves look higher than it is, so this is its own cohort, and when the text yields no company besides Waves the row carries no `rank_position` (it stays out of the top-3 "recommended" count rather than counting as rank 1).
+
+`competitors_mentioned` keeps its stored meaning (known-list hits only). Everything that reads rivals (the dashboard's competitor counts, the opportunity miner's `aeo_gap` and `aeo_question_gap` evidence, the backlink strategy tool's `check_llm_mentions`) goes through `rivalsOf` / `rivalEntries` in the same module: `companies_named` when present, else `competitors_mentioned`, canonicalised, Waves excluded.
+
+### Consumer-app and AI Mode rows
+
+`LLM_MENTIONS_APP_SCRAPER` (default on whenever `DATAFORSEO_LOGIN` and `DATAFORSEO_PASSWORD` are set; `false`/`0`/`off`/`no` turns it off) measures the consumer products through DataForSEO instead of the older API models:
+
+- `chatgpt` rows come from the ChatGPT app scraper (`/ai_optimization/chat_gpt/llm_scraper/live/advanced`, US-level location only), `model_version` `dataforseo:chatgpt_app:<model>`. Cited links are the answer's `sources`; `search_results` stay source evidence. A scrape that returns only a short opening line with no sources or entities is stored as no answer, not a miss.
+- `gemini` rows come from the Gemini app scraper (`/ai_optimization/gemini/llm_scraper/live/advanced`, city location code), `model_version` `dataforseo:gemini_app:<model>`.
+- `google_ai_mode` is a new platform: Google AI Mode through `/serp/google/ai_mode/live/advanced` (city `location_name`; Parrish by coordinate, since DataForSEO has no named location for it), `model_version` `dataforseo:google_ai_mode`. It is a different Google feature from the AI Overview and is kept beside `google_ai_overview`; it reads links attached to answer elements as citations, like the Overview. It has no API equivalent, so it exists only while the switch is on.
+- The managed city is normalised before the location lookup (", FL" removed, case-folded, aliases such as "LWR"); an unknown non-empty city warns and falls back to the question text, then Sarasota.
+- With the switch off the ChatGPT and Gemini rows use the API probes again. The unique (query, platform, day) row means each platform runs one or the other, and `model_version` tells the rows apart, so API and app observations are separate cohorts. Do not compare them as before/after movement.
+- Each scrape costs about $0.004 and is logged. A request or task error writes no row and retries the next run. Six platforms times the 40 benchmark questions need a run ceiling (`LLM_MENTIONS_MAX_PROBES`) of at least 240; the default 200 rotates, so some pairs are observed every other day.
+
+`seo_llm_mentions.llm_platform` is a free string with no CHECK constraint or enum, so a new platform needs no migration.
 
 ## Existing mechanisms
 

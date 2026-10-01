@@ -148,6 +148,26 @@ describe('request shaping', () => {
     expect(scraper.geminiLocationCode('Unknownville', 'q')).toBe(1015192);
   });
 
+  test('managed city values are normalised: ", FL", case, aliases; an unknown non-empty city warns and falls back', () => {
+    const logger = require('../services/logger');
+    expect(scraper.normalizeCity('  Bradenton, FL ')).toBe('bradenton');
+    expect(scraper.normalizeCity('Lakewood Ranch, Florida')).toBe('lakewood ranch');
+    expect(scraper.normalizeCity('LWR')).toBe('lakewood ranch');
+    expect(scraper.geminiLocationCode('VENICE, fl', 'q')).toBe(1015223);
+    expect(scraper.geminiLocationCode('LWR', 'q')).toBe(9196651);
+    expect(scraper.aiModeRequestBody('q', 'Lakewood Ranch, FL')[0].location_name).toBe('Lakewood Ranch,Florida,United States');
+    expect(scraper.aiModeRequestBody('q', 'parrish, FL')[0].location_coordinate).toBe('27.5870,-82.4248,10');
+    expect(logger.warn).not.toHaveBeenCalled();
+    // Unknown city: the question text wins over Sarasota, and it warns.
+    expect(scraper.geminiLocationCode('North Port, FL', 'best pest control in Venice')).toBe(1015223);
+    expect(scraper.geminiLocationCode('North Port', 'best pest control')).toBe(1015192);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    // Empty city: no warning.
+    logger.warn.mockClear();
+    expect(scraper.geminiLocationCode('', 'q')).toBe(1015192);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
   test('the env switch is on by default with DataForSEO credentials and off for false/0/off/no', () => {
     expect(scraper.appScraperEnabled(undefined, true)).toBe(true);
     expect(scraper.appScraperEnabled('true', true)).toBe(true);
@@ -288,7 +308,7 @@ describe('rank computation', () => {
     const parsed = prober.parse({ text });
     // The old known-list rank would have been 1 (Orkin is the only listed name, and it comes later).
     expect(names(parsed.companiesNamed)).toEqual(['Example Bug Control', 'Sample Pest Solutions', 'Waves Pest Control', 'Orkin']);
-    expect(parsed).toMatchObject({ rankPosition: 3, rankMethod: 'all_named_v2', wavesMentioned: true });
+    expect(parsed).toMatchObject({ rankPosition: 3, rankMethod: 'all_named_text_v2', wavesMentioned: true });
     expect(parsed.competitors.map(c => c.name)).toEqual(['orkin']);
   });
 
@@ -296,6 +316,36 @@ describe('rank computation', () => {
     const parsed = new LLMMentionProber().parse({ text: '**Example Bug Control** is good. https://www.wavespestcontrol.com/x', citedUrls: ['https://www.wavespestcontrol.com/x'] });
     expect(parsed).toMatchObject({ wavesMentioned: false, rankPosition: null });
     expect(parsed.wavesCitedUrls).toHaveLength(1);
+  });
+
+  test('plain-prose names count: "Example Bug Control is first. Waves Pest Control is second." ranks Waves 2nd', () => {
+    const parsed = new LLMMentionProber().parse({ text: 'Example Bug Control is first. Waves Pest Control is second.' });
+    expect(names(parsed.companiesNamed)).toEqual(['Example Bug Control', 'Waves Pest Control']);
+    expect(parsed).toMatchObject({ rankPosition: 2, rankMethod: 'all_named_text_v2' });
+  });
+
+  test('prose names: sentence starters, service phrases, labels and table headers are not companies; a known rival keeps its leading word', () => {
+    const text = [
+      'Pest control in Exampleville is seasonal. Also Sample Lawn Care Inc. handles turf, and All U Need Pest Control covers ants.',
+      'However Termite Treatment Costs In Florida vary. Call Waves Pest Control for a quote.',
+      '| Company | Current local signal |',
+    ].join('\n');
+    expect(names(companies.buildCompaniesNamed(text))).toEqual(['Sample Lawn Care Inc.', 'All U Need', 'Waves Pest Control']);
+    // Names never run across a line break: a bold label on the next line is not part of the name.
+    expect(names(companies.buildCompaniesNamed('**Example Bug Control**\n**Why** it ranks'))).toEqual(['Example Bug Control']);
+    // The same company named twice, once in full and once short.
+    expect(names(companies.buildCompaniesNamed('Mosquito Joe of Exampleville is open. Mosquito Joe helps.'))).toEqual(['Mosquito Joe of Exampleville']);
+  });
+
+  test('rank honesty: provider entities give all_named_v2; text-only gives all_named_text_v2 and no rank when no other company was found', () => {
+    const entities = [{ title: 'Example Bug Control', category: 'local_business' }, { title: 'Waves Pest Control', category: 'local_business' }];
+    expect(companies.rankFor('Example Bug Control then Waves Pest Control.', { entities })).toMatchObject({ rankMethod: 'all_named_v2', rankPosition: 2 });
+    expect(companies.rankFor('Example Bug Control then Waves Pest Control.')).toMatchObject({ rankMethod: 'all_named_text_v2', rankPosition: 2 });
+    // Waves alone from text: completeness cannot be shown, so no rank (stays out of the top-3 "recommended" count).
+    expect(companies.rankFor('Go with Waves Pest Control, they are good.')).toMatchObject({ rankMethod: 'all_named_text_v2', rankPosition: null });
+    expect(new LLMMentionProber().parse({ text: 'Go with Waves Pest Control, they are good.' })).toMatchObject({ wavesMentioned: true, rankPosition: null });
+    // An unusable entity list falls back to the text path.
+    expect(companies.rankFor('Waves Pest Control', { entities: [{ title: 'Yelp', category: 'website' }] })).toMatchObject({ rankMethod: 'all_named_text_v2' });
   });
 
   test('rankAmong accepts plain names and returns null when Waves is absent', () => {
@@ -379,7 +429,7 @@ describe('Google AI Mode probe', () => {
     });
     const parsed = new LLMMentionProber().parse(probe);
     expect(names(parsed.companiesNamed)).toEqual(['Prodigy Pest Solutions', 'Example Bug Control', 'Waves Pest Control']);
-    expect(parsed).toMatchObject({ rankPosition: 3, rankMethod: 'all_named_v2', wavesMentioned: true, answerAvailable: true });
+    expect(parsed).toMatchObject({ rankPosition: 3, rankMethod: 'all_named_text_v2', wavesMentioned: true, answerAvailable: true });
   });
 
   test('no answer item is an empty observation; a request or task error is null (no row)', async () => {
@@ -427,7 +477,7 @@ describe('Google AI Mode probe', () => {
       insert: row => { inserted.push(row); return { onConflict: () => ({ ignore: async () => ({ rowCount: 1 }) }) }; },
     });
     await prober.runDaily();
-    expect(inserted[0]).toMatchObject({ llm_platform: 'google_ai_mode', model_version: 'dataforseo:google_ai_mode', rank_method: 'all_named_v2', rank_position: 3, answer_available: true });
+    expect(inserted[0]).toMatchObject({ llm_platform: 'google_ai_mode', model_version: 'dataforseo:google_ai_mode', rank_method: 'all_named_text_v2', rank_position: 3, answer_available: true });
 
     const dashboard = buildDashboard([{ ...inserted[0], measurement_version: 2, check_date: '2026-10-01', waves_cited_urls: '[]' }], queries,
       { configuredPlatforms: ['chatgpt', 'google_ai_overview', 'google_ai_mode'] });

@@ -27,8 +27,7 @@ const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const appScraper = require('./llm-app-scraper');
 const {
-  RANK_METHOD_ALL_NAMED, RANK_METHOD_KNOWN_LIST, WAVES_RE, URL_RE, COMPETITORS,
-  knownCompetitorHits, buildCompaniesNamed, rankAmong, rivalsOf,
+  RANK_METHOD_KNOWN_LIST, WAVES_RE, URL_RE, COMPETITORS, knownCompetitorHits, rankFor, rivalsOf,
 } = require('./llm-mention-companies');
 const MODELS = require('../../config/models');
 const { stripThinkingBlocks } = require('../llm/deep');
@@ -521,17 +520,17 @@ class LLMMentionProber {
     // its position: rank_position is Waves' place in THAT list, not among the
     // hard-coded rivals only. Provider brand entities lead when the scraper
     // supplies them; known rivals are always added by text position.
-    const companiesNamed = buildCompaniesNamed(text, { entities: probe.entities });
+    const { companies: companiesNamed, rankMethod, rankPosition: allNamedRank } = rankFor(text, { entities: probe.entities });
     const competitors = knownCompetitorHits(lower)
       .map(({ key, idx }) => ({ name: key, context: text.substring(idx, idx + 120) }));
-    const rankPosition = brandInText ? rankAmong(companiesNamed) : null;
+    const rankPosition = brandInText ? allNamedRank : null;
 
     return {
       wavesMentioned,
       mentionContext: brandInText ? text.substring(Math.max(0, wavesIdx - 60), wavesIdx + 240) : null,
       competitors,
       companiesNamed,
-      rankMethod: RANK_METHOD_ALL_NAMED,
+      rankMethod,
       rankPosition,
       citedUrls,
       wavesCitedUrls,

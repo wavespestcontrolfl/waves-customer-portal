@@ -18,6 +18,8 @@
  * prober owns the network call (dataforseo.request) and the env switch.
  */
 
+const logger = require('../logger');
+
 const CHATGPT_PATH = '/ai_optimization/chat_gpt/llm_scraper/live/advanced';
 const GEMINI_PATH = '/ai_optimization/gemini/llm_scraper/live/advanced';
 const AI_MODE_PATH = '/serp/google/ai_mode/live/advanced';
@@ -34,11 +36,25 @@ const GEMINI_CITY_LOCATIONS = {
 };
 const DEFAULT_GEMINI_LOCATION = GEMINI_CITY_LOCATIONS.sarasota;
 
+// Managed city values arrive as typed ("Bradenton, FL", "LWR"): fold them to a
+// lookup key before matching.
+const CITY_ALIASES = { lwr: 'lakewood ranch', 'lakewood rch': 'lakewood ranch' };
+
+function normalizeCity(value) {
+  const key = String(value || '').toLowerCase()
+    .replace(/[.]/g, ' ')
+    .replace(/,?\s*(?:fl|florida)\s*$/, '')
+    .replace(/\s+/g, ' ').trim();
+  return CITY_ALIASES[key] || key;
+}
+
 // The city on the managed query row, else a city named in the question, else
-// Sarasota. One rule for every engine that takes a city.
+// Sarasota. One rule for every engine that takes a city. An unknown non-empty
+// city falls back (to the question, then Sarasota) with a warning.
 function resolveCity(city, query) {
-  const wanted = String(city || '').trim().toLowerCase();
+  const wanted = normalizeCity(city);
   if (GEMINI_CITY_LOCATIONS[wanted]) return wanted;
+  if (wanted) logger.warn(`[llm-mentions] unknown city "${city}" for app-scraper location; falling back to the question text or Sarasota`);
   const text = String(query || '').toLowerCase();
   return Object.keys(GEMINI_CITY_LOCATIONS).find(name => text.includes(name)) || 'sarasota';
 }
@@ -157,6 +173,6 @@ function geminiRequestBody(query, city) {
 
 module.exports = {
   CHATGPT_PATH, GEMINI_PATH, AI_MODE_PATH, US_LOCATION_CODE, GEMINI_CITY_LOCATIONS, DEFAULT_GEMINI_LOCATION,
-  geminiLocationCode, aiModeLocation, appScraperEnabled, parseChatGPTScraper, parseGeminiScraper,
+  geminiLocationCode, aiModeLocation, normalizeCity, appScraperEnabled, parseChatGPTScraper, parseGeminiScraper,
   chatGPTRequestBody, geminiRequestBody, aiModeRequestBody,
 };
