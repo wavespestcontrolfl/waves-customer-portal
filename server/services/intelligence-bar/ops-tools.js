@@ -726,17 +726,26 @@ async function commitRailwayGate(input) {
     || live.prior_value_digest !== (input._verified_railway_gate_prior_digest ?? null)) {
     return { error: GATE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
   }
+  let upserted;
   try {
-    await railwayGraphQL(
+    upserted = (await railwayGraphQL(
       `mutation variableUpsert($input: VariableUpsertInput!) { variableUpsert(input: $input) }`,
       { input: { projectId: target.projectId, environmentId, serviceId, name, value } },
       { forWrite: true },
-    );
+    ))?.variableUpsert;
   } catch (err) {
     // Only a permission refusal proves nothing changed. Any other error once
     // the request went out (timeout, drop, 5xx, even a GraphQL error raised
     // after the variable saved) may have applied it — never report "failed".
     if (err.writeAccessRequired) throw err;
+    return {
+      outcome_unknown: true,
+      warning: `Railway did not confirm the change to ${name}. Check the variable in the Railway dashboard before trying again.`,
+    };
+  }
+  // The mutation answers a Boolean; anything but true is not a confirmed
+  // change (Codex r5 on #5514).
+  if (upserted !== true) {
     return {
       outcome_unknown: true,
       warning: `Railway did not confirm the change to ${name}. Check the variable in the Railway dashboard before trying again.`,

@@ -898,6 +898,18 @@ describe('intelligence bar set_railway_gate', () => {
     expect(executionOutcome(result)).toBe('outcome_unknown');
   });
 
+  // Codex r5 on #5514: only variableUpsert === true confirms the change.
+  test('the upsert answers variableUpsert:false: outcome_unknown, not success', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false' }))
+      .mockResolvedValueOnce(gqlResponse({ variableUpsert: false }));
+    const result = await commit();
+    expect(result.success).toBeUndefined();
+    expect(result.outcome_unknown).toBe(true);
+  });
+
   // Pass-2: a GraphQL error can be raised after the variable saved (e.g. while
   // triggering the deploy), so it is not proof nothing changed.
   test('a GraphQL error on the upsert is outcome_unknown too', async () => {

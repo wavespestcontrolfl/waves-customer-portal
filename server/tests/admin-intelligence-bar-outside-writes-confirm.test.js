@@ -210,6 +210,7 @@ const CASES = [
       return jsonRes(body.includes('variables(') ? railwayVars(drift) : railwayEnv(false));
     },
     isWrite: (u, i) => String(i.body || '').includes('mutation'),
+    writeBody: { data: { variableUpsert: true } },
     check: (u, i) => {
       const b = JSON.parse(i.body);
       expect(b.query).toContain('variableUpsert');
@@ -239,7 +240,7 @@ function installFetch(testCase) {
     if (u.hostname === '127.0.0.1') return realFetch(url, init);
     if (testCase.isWrite(u, init)) {
       writes.push([u, init]);
-      return Promise.resolve(denyWrites ? jsonRes(testCase.deniedBody || { message: 'Forbidden' }, 403) : jsonRes({ success: true, result: { id: 'new-1' } }));
+      return Promise.resolve(denyWrites ? jsonRes(testCase.deniedBody || { message: 'Forbidden' }, 403) : jsonRes(testCase.writeBody || { success: true, result: { id: 'new-1' } }));
     }
     const read = testCase.read(u, drift, init);
     if (!read) return Promise.resolve(jsonRes({ message: `unexpected read ${u.pathname}` }, 500));
@@ -393,6 +394,24 @@ describe('inbound forged pins never reach an outside-write executor', () => {
     expect(writes[0][0].pathname).toMatch(/\/issues\/111\/$/);
     expect(writes[0][0].pathname).not.toContain('forged');
   });
+});
+
+// Codex r5 on #5514: a card minted while the switch was still preview-only
+// (stored contract.preview_only) never executes after the commit path deploys.
+test('a stored preview-only switch card is refused at confirm: 409, nothing sent', async () => {
+  const testCase = CASES.find((c) => c.tool === 'set_railway_gate');
+  setEnv(testCase.env);
+  installFetch(testCase);
+  await claimFor(testCase.tool, testCase.input, testCase.run);
+  const { action } = await mockClaimForConfirm();
+  mockClaimForConfirm.mockResolvedValue({ action: { ...action, contract: { tier: 'yellow', preview_only: true } } });
+  global.fetch.mockClear();
+  const { status, body } = await confirm();
+  expect(status).toBe(409);
+  expect(body.code).toBe('preview_only');
+  expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ code: 'preview_only' }));
+  expect(global.fetch.mock.calls.filter(([u]) => !String(u).startsWith('http://127.0.0.1'))).toHaveLength(0);
+  expect(writes).toHaveLength(0);
 });
 
 // Feature switches: a forged pin in the stored params never reaches the

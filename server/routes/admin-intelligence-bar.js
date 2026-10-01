@@ -3454,6 +3454,16 @@ router.post('/confirm-action', async (req, res, next) => {
       return res.status(409).json(result);
     }
 
+    // A card minted while its tool was still preview-only (#5489, before this
+    // commit path deployed) carries contract.preview_only — it was approved
+    // as "cannot be applied", so it never executes (Codex r5 on #5514). Such
+    // rows expire within PendingActions.TTL_MINUTES of the deploy.
+    if (action.contract?.preview_only === true) {
+      const result = { error: 'This card was created as a preview only and cannot be applied — ask again for a fresh confirmation card.', code: 'preview_only' };
+      await PendingActions.recordResult(action.id, result);
+      return res.status(409).json(result);
+    }
+
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
       await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
       return res.status(404).json({ error: 'Agent Estimate is not enabled' });

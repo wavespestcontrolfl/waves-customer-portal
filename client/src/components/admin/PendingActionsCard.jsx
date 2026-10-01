@@ -305,6 +305,9 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
         const expired = status === 'expired' || (!settled && !busy && remaining !== null && remaining <= 0);
+        // A card minted as preview-only before the switches' commit path
+        // deployed is never confirmable (the server refuses it too).
+        const previewOnly = action.contract?.preview_only === true;
 
         return (
           <div
@@ -400,7 +403,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   </div>
                 )}
               <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
-                <button
+                {!previewOnly && <button
                   type="button"
                   disabled={busy}
                   onClick={() => decide(action, "confirm")}
@@ -412,7 +415,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
                 >
                   {status === "confirming" ? statusLabel.confirming : "Confirm"}
-                </button>
+                </button>}
                 <button
                   type="button"
                   disabled={busy}
