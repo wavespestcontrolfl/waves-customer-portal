@@ -1250,6 +1250,9 @@ describe('retired topics', () => {
     const codesFor = (opts) => gate.evaluateDraftTargeting(draft, { index: gate.indexCorpus(CORPUS), ...opts }).findings.map((f) => f.code);
     expect(codesFor({ targetSites: ['sarasotaflpestcontrol.com'] })).not.toContain(gate.CODES.RETIRED_TOPIC);
     expect(codesFor({})).toContain(gate.CODES.RETIRED_TOPIC);
+    // A caller-resolved HUB scope wins over writer-emitted spoke domains (codex r10).
+    const spokeDomainsDraft = { frontmatter: { ...draft.frontmatter, domains: [{ domain: 'sarasotaflpestcontrol.com' }] } };
+    expect(gate.evaluateDraftTargeting(spokeDomainsDraft, { index: gate.indexCorpus(CORPUS), targetSites: ['wavespestcontrol.com'] }).findings.map((f) => f.code)).toContain(gate.CODES.RETIRED_TOPIC);
   });
 
   test('canonical topics catch phrasings a decorative slug misses (codex r5)', () => {

@@ -4676,10 +4676,12 @@ const { resolvePublishOrigin, resolveSpokeTarget } = require('../content-astro/s
 // Where this post will actually publish, for the topic gate's retired-topic
 // scope: the publisher's own routing decision (persisted
 // voice_constraints.related_posts_target_sites first, then the brief, then
-// the seed; the spoke kill switch sends it to the hub). Hub → null (checked).
+// the seed; the spoke kill switch sends it to the hub). Always explicit —
+// the hub too — so a draft's writer-emitted `domains` (which the publisher
+// ignores) can never stand in for the routed scope.
 function retiredTopicScope(brief = {}, opp = {}) {
   const spoke = resolveSpokeTarget({ ...brief, target_sites: brief?.target_sites ?? opp?.signal_metadata?.target_sites });
-  return spoke ? [spoke] : null;
+  return spoke ? [spoke] : [...FLEET_HUB_SITE_KEYS];
 }
 
 /**
