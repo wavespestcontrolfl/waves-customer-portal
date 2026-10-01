@@ -3164,7 +3164,10 @@ without evidence: the `/pdf` download serves the pdfkit document without the
 line (the browser renderer reads the row itself and cannot be told), the
 legacy page re-renders without the item, and a `/data?mode=pdf` document pass
 (the headless capture, or a customer's bare `?mode=pdf` view) runs the same
-pre-render step and projects `rateReviewTermsEligible: false`. Plan eligibility alone never stamps: an accept from a tab that rendered
+pre-render step and projects `rateReviewTermsEligible: false`. That pass
+records evidence only while GATE_ESTIMATE_DOC_PDF is on — the condition under
+which the document is actually rendered; with the gate off, `?mode=pdf` falls
+through to the normal page, shows no document, and records nothing. Plan eligibility alone never stamps: an accept from a tab that rendered
 no rate copy (a bundle that predates the line with the gate off, the
 terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
 document without the line rather than claiming a disclosure that was never

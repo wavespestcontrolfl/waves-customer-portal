@@ -204,6 +204,40 @@ describe('GET /:token/data — proposal line projection', () => {
     });
   });
 
+  test('document mode with GATE_ESTIMATE_DOC_PDF off renders no document and records no served evidence (codex local max-effort review on #5434)', async () => {
+    const gates = require('../config/feature-gates');
+    gates.isEnabled.mockImplementation((gate) => gate === 'estimateCommercialGlass');
+    dbRows.estimates = {
+      ...estimateRow(),
+      id: 'est-rate-review-gate-off',
+      monthly_total: 85,
+      annual_total: 1020,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Ornamental Care Program', monthlyPrice: 85 }],
+        result: { recurring: { services: [{ service: 'tree_shrub', name: 'Ornamental Care Program', mo: 85 }] } },
+        proposal: {
+          enabled: false,
+          buildings: [{ name: 'Service location', lineItems: [{ description: 'Ornamental Care Program', unitPrice: 85, frequency: 'monthly', taxable: false }] }],
+        },
+      },
+    };
+    let writes = 0;
+    dbRows.__update = () => { writes += 1; return 1; };
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.documentRender).toBeUndefined();
+        expect(writes).toBe(0);
+      });
+    } finally {
+      dbRows.__update = null;
+      gates.isEnabled.mockImplementation((gate) => gate === 'estimateCommercialGlass' || gate === 'estimateDocPdf');
+    }
+  });
+
   test('document mode: a row that freezes between the read and the evidence write restarts the payload from the frozen row (pre-push Codex on #5434)', async () => {
     dbRows.estimates = {
       ...estimateRow(),

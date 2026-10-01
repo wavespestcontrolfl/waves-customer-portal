@@ -27608,8 +27608,12 @@ async function composeEstimateDataPayload(estimate, {
     // finds the marker already current (the /pdf route wrote it). A row that
     // froze between the read and the write restarts this composition from
     // the row as it is now — acceptance record, pricing, status, everything
-    // — never a payload stitched from the stale open row.
-    if (isPdfRenderPass && !documentEvidence) {
+    // — never a payload stitched from the stale open row. Gated exactly like
+    // the render itself (codex local max-effort review on #5434): with
+    // GATE_ESTIMATE_DOC_PDF off a bare ?mode=pdf falls through to the normal
+    // page and shows no document, so nothing is served and nothing is
+    // recorded (the /pdf route's pdfkit path writes its own evidence).
+    if (isPdfRenderPass && !documentEvidence && featureGates.isEnabled('estimateDocPdf')) {
       const evidence = await require('../services/estimate-proposal-billing').ensureRateReviewTermsEvidenceBeforeRender(estimate);
       if (evidence.estimate !== estimate) {
         return composeEstimateDataPayload(evidence.estimate, {
