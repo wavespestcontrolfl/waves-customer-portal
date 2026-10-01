@@ -936,7 +936,8 @@ describe('engine replay guards', () => {
     expect(JSON.parse(row.flags)).toContain('no_list_rate');
   });
   test('commercial accounts are no pricing reference: out of the cadence mode and the $/hr quartiles', async () => {
-    const commercial = [24, 25, 26].map((n) => fixture.customer(n, { member_since: '2024-11-1' + (n - 24), property_type: 'commercial', last_name: 'Commercial ' + n }));
+    // December anniversaries (imported lines: member_since 2024-12-10/11/12) so every fixture sits in the December window
+    const commercial = [24, 25, 26].map((n) => fixture.customer(n, { member_since: '2024-12-1' + (n - 24), property_type: 'commercial', last_name: 'Commercial ' + n }));
     const clean = fixture.customer(27, { member_since: '2024-12-09', last_name: 'Residential No Estimate' });
     const scenario = {
       planLines: [...commercial.map((c) => fixture.planLine(c.id, 'pest_control', 'bimonthly', 250)), fixture.planLine(clean.id, 'pest_control', 'bimonthly', 90)],
@@ -953,7 +954,12 @@ describe('engine replay guards', () => {
     expect(row.list_rate_source).toBe('none'); // three commercial $250 contracts never became the residential list rate
     expect(row.status).toBe('skipped');
     expect(out.lineRph.pest_control).toBeUndefined();
-    for (const c of commercial) expect(JSON.parse(scripted.writes.snapshotInserts.find((r) => r.customer_id === c.id).flags)).toContain('commercial');
+    for (const c of commercial) {
+      const commercialRow = scripted.writes.snapshotInserts.find((r) => r.customer_id === c.id);
+      expect(commercialRow).toBeDefined();
+      expect(commercialRow.status).toBe('exception');
+      expect(JSON.parse(commercialRow.flags)).toContain('commercial');
+    }
   });
   test('a config read that FAILS fails the batch; a missing row still defaults', async () => {
     const failing = fixture.scriptedDb({ planLines: [], customers: [], configError: new Error('relation unavailable') });
