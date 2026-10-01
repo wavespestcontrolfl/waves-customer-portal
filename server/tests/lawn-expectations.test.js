@@ -14,6 +14,7 @@ const {
   visitGapDays,
   wordCount,
 } = require('../services/service-report/lawn-expectations');
+const { LAWN_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 
@@ -33,7 +34,7 @@ const REPRESENTATIVE = {
   [FAMILY.FUNGICIDE]: 'Artavia 2 SC',
   [FAMILY.INSECTICIDE]: 'Arena 50 WDG',
 };
-const TARGET = { [FAMILY.FUNGICIDE]: 'large patch', [FAMILY.INSECTICIDE]: 'chinch bugs' };
+const TARGET = { [FAMILY.FUNGICIDE]: 'large patch', [FAMILY.INSECTICIDE]: 'Southern chinch bugs' };
 
 // Lawn-specific deny list: nothing about watering, rain, sprinklers, mowing,
 // county ordinances or blackouts, laws, clock times, or plan tiers.
@@ -260,7 +261,7 @@ describe('buildLawnExpectations', () => {
     const names = PRODUCT_CLASS_ENTRIES.filter(([, family]) => family).map(([name]) => name);
     for (const name of names) {
       for (const gap of [null, 0, 2, 5, 10, 14, 21, 28, 42, 70, 120]) {
-        for (const targets of [[], ['large patch'], ['chinch bugs']]) {
+        for (const targets of [[], ['large patch'], ['Southern chinch bugs']]) {
           const out = buildLawnExpectations({
             visitDate: '2026-10-01',
             nextVisitGapDays: gap == null ? undefined : gap,
@@ -628,10 +629,10 @@ describe('buildLawnExpectations', () => {
     it('a talak-class insecticide is curative only with a chinch target or issue; Acelepryn is always preventive', () => {
       const none = buildLawnExpectations({ ...base, applications: [{ name: 'Atticus Talak' }] }, PREVIEW);
       expect(none.rows.map((r) => r.id)).toEqual(['insecticide_preventive']);
-      const curative = buildLawnExpectations({ ...base, applications: [{ name: 'Atticus Talak', targets: ['Chinch bugs'] }] }, PREVIEW);
+      const curative = buildLawnExpectations({ ...base, applications: [{ name: 'Atticus Talak', targets: ['Southern chinch bugs'] }] }, PREVIEW);
       expect(curative.rows.map((r) => r.id)).toEqual(['insecticide_curative']);
       const acelepryn = buildLawnExpectations({
-        ...base, applications: [{ name: 'Acelepryn Xtra', targets: ['Chinch bugs'] }], issues: ['chinch'],
+        ...base, applications: [{ name: 'Acelepryn Xtra', targets: ['Southern chinch bugs'] }], issues: ['chinch'],
       }, PREVIEW);
       expect(acelepryn.rows.map((r) => r.id)).toEqual(['insecticide_preventive', 'issue_chinch']);
     });
@@ -657,6 +658,126 @@ describe('buildLawnExpectations', () => {
       expect(row.lines.join(' ')).toContain('weeks to months');
       expect(row.lines.join(' ')).not.toContain('2 to 4 weeks');
       expect(row.byNextVisit.state).toBe('partial');
+    });
+
+    describe('emit first, then dedupe', () => {
+      const withApproval = (productApproved, issueApproved, fn) => {
+        const originals = [PRODUCT_ROWS.fungicide_curative, ISSUE_ROWS.large_patch];
+        PRODUCT_ROWS.fungicide_curative = { ...originals[0], approved: productApproved };
+        ISSUE_ROWS.large_patch = { ...originals[1], approved: issueApproved };
+        try {
+          return fn();
+        } finally {
+          [PRODUCT_ROWS.fungicide_curative, ISSUE_ROWS.large_patch] = originals;
+        }
+      };
+      const run = (opts) => buildLawnExpectations({
+        ...base, applications: [{ name: 'Artavia 2 SC' }], issues: ['large_patch'],
+      }, opts);
+
+      it.each([
+        // productApproved, issueApproved, includeUnapproved -> emitted ids
+        [true, true, false, ['fungicide_curative']],
+        [true, false, false, ['fungicide_curative']],
+        [false, true, false, ['issue_large_patch']],
+        [false, false, false, []],
+        [true, true, true, ['fungicide_curative']],
+        [true, false, true, ['fungicide_curative']],
+        [false, true, true, ['fungicide_curative']],
+        [false, false, true, ['fungicide_curative']],
+      ])('product approved=%s issue approved=%s preview=%s emits %j', (product, issue, preview, expected) => {
+        const out = withApproval(product, issue, () => run({ includeUnapproved: preview }));
+        expect(out.rows.map((r) => r.id)).toEqual(expected);
+      });
+
+      it('an approved issue row is never silenced by an unapproved product row, for chinch either', () => {
+        const original = [PRODUCT_ROWS.insecticide_curative, ISSUE_ROWS.chinch];
+        PRODUCT_ROWS.insecticide_curative = { ...original[0], approved: false };
+        ISSUE_ROWS.chinch = { ...original[1], approved: true };
+        try {
+          const out = buildLawnExpectations({ ...base, applications: [{ name: 'Arena 50 WDG' }], issues: ['chinch'] });
+          expect(out.rows.map((r) => r.id)).toEqual(['issue_chinch']);
+          expect(out.withheld).toEqual([{ rowId: 'insecticide_curative', reason: 'not_approved' }]);
+        } finally {
+          [PRODUCT_ROWS.insecticide_curative, ISSUE_ROWS.chinch] = original;
+        }
+      });
+    });
+
+    describe('treatment target vocabulary', () => {
+      it('every lawn vocabulary tag is classified, and nothing else is', () => {
+        expect(Object.keys(config.TARGET_CLASS_BY_NAME).sort()).toEqual([...LAWN_TARGET_SUGGESTIONS].sort());
+      });
+
+      const FAMILY_PRODUCT = { [FAMILY.FUNGICIDE]: 'Artavia 2 SC', [FAMILY.INSECTICIDE]: 'Arena 50 WDG' };
+      const curativeTags = LAWN_TARGET_SUGGESTIONS
+        .map((name) => [name, config.TARGET_CLASS_BY_NAME[name]])
+        .filter(([, cls]) => cls);
+
+      it('every lawn insect and disease tag is recognized (config-derived, includes fire ants, fairy ring, pythium)', () => {
+        const names = curativeTags.map(([name]) => name);
+        expect(names).toEqual(expect.arrayContaining(['Fire ants', 'Fairy ring', 'Pythium root rot', 'Southern chinch bugs', 'Large patch']));
+      });
+
+      it.each(curativeTags)('%s on its matching product family makes the row curative', (name, cls) => {
+        const out = buildLawnExpectations({ ...base, applications: [{ name: FAMILY_PRODUCT[cls.family], targets: [name] }] }, PREVIEW);
+        expect(out.rows.map((r) => r.mode)).toEqual(['curative']);
+        expect(out.rows[0].lines.length).toBeGreaterThan(0);
+      });
+
+      it.each(curativeTags)('%s on a product of the OTHER family does not make a curative row', (name, cls) => {
+        const other = cls.family === FAMILY.FUNGICIDE ? 'Arena 50 WDG' : 'Artavia 2 SC';
+        const out = buildLawnExpectations({ ...base, applications: [{ name: other, targets: [name] }] }, PREVIEW);
+        expect(out.rows.map((r) => r.mode)).toEqual(['preventive']);
+      });
+
+      it('weed and nematode tags never make a fungicide or insecticide curative', () => {
+        const noFamily = LAWN_TARGET_SUGGESTIONS.filter((name) => !config.TARGET_CLASS_BY_NAME[name]);
+        expect(noFamily).toEqual(expect.arrayContaining(['Crabgrass', 'Nematodes', 'Broadleaf weeds']));
+        for (const name of noFamily) {
+          for (const product of Object.values(FAMILY_PRODUCT)) {
+            const out = buildLawnExpectations({ ...base, applications: [{ name: product, targets: [name] }] }, PREVIEW);
+            expect(out.rows.map((r) => r.mode)).toEqual(['preventive']);
+          }
+        }
+      });
+
+      it('tags match the vocabulary case-insensitively, never a substring or a free-text guess', () => {
+        const run = (tag) => buildLawnExpectations({ ...base, applications: [{ name: 'Artavia 2 SC', targets: [tag] }] }, PREVIEW).rows[0].mode;
+        expect(run('FAIRY RING')).toBe('curative');
+        expect(run('a patch of something')).toBe('preventive');
+        expect(run('fungus')).toBe('preventive');
+      });
+    });
+
+    describe('one recognized-cause set for overrides', () => {
+      const run = (extra) => buildLawnExpectations({
+        visitDate: '2026-10-01', nextVisitDate: '2026-10-22', applications: [{ name: 'Torque SC', ...extra.app }], issues: extra.issues,
+      }, PREVIEW);
+
+      it('a tagged Large patch and issues:[large_patch] give identical output', () => {
+        const tagged = run({ app: { targets: ['Large patch'] } });
+        const named = run({ issues: ['large_patch'] });
+        const both = run({ app: { targets: ['Large patch'] }, issues: ['large_patch'] });
+        expect(tagged).toEqual(named);
+        expect(both).toEqual(named);
+        expect(tagged.rows[0].lines.join(' ')).toContain('weeks to months');
+        expect(tagged.rows[0].lines.join(' ')).not.toContain('2 to 4 weeks');
+      });
+
+      it('a tagged Southern chinch bugs and issues:[chinch] give identical output', () => {
+        const input = (extra) => ({
+          ...base, applications: [{ name: 'Arena 50 WDG', ...extra.app }], issues: extra.issues,
+        });
+        const tagged = buildLawnExpectations(input({ app: { targets: ['Southern chinch bugs'] } }), PREVIEW);
+        const named = buildLawnExpectations(input({ issues: ['chinch'] }), PREVIEW);
+        expect(tagged).toEqual(named);
+      });
+
+      it('a tag with no named cause (fairy ring) keeps the default window', () => {
+        const out = run({ app: { targets: ['Fairy ring'] } });
+        expect(out.rows[0].lines.join(' ')).toContain('2 to 4 weeks');
+      });
     });
 
     it('weeds seen with no herbicide today says treatment is planned; any herbicide row silences it', () => {

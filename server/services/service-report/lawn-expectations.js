@@ -33,7 +33,7 @@ const {
   PRODUCT_ROWS,
   ISSUE_ROWS,
   ROW_PRIORITY,
-  CURATIVE_TARGET_PATTERNS,
+  LAWN_TARGET_CLASS,
   CURATIVE_ISSUE_KEYS,
   normalizeProductName,
 } = require('../../config/lawn-expectations');
@@ -150,141 +150,119 @@ function lineAllowed(text) {
 
 // ── Row resolution ────────────────────────────────────────────────────────
 function normalizeIssues(issues) {
-  const out = new Map();
-  for (const raw of Array.isArray(issues) ? issues : []) {
-    const entry = typeof raw === 'string' ? { key: raw } : raw;
-    const key = String(entry?.key || '').trim().toLowerCase();
-    if (key && ISSUE_ROWS[key]) out.set(key, entry);
-  }
-  return out;
+  const entries = (Array.isArray(issues) ? issues : []).map((raw) => (typeof raw === 'string' ? { key: raw } : raw));
+  const keyed = entries.map((e) => [String(e?.key || '').trim().toLowerCase(), e]);
+  return new Map(keyed.filter(([key]) => ISSUE_ROWS[key]));
 }
 
-function targetsOf(app) {
-  return (Array.isArray(app?.targets) ? app.targets : [])
-    .map((t) => String(t == null ? '' : t).trim())
-    .filter(Boolean);
+// What a tagged target establishes: { family, cause } from the controlled
+// lawn vocabulary, or null for an unknown tag or one with no curative row.
+function targetClass(target) {
+  return LAWN_TARGET_CLASS.get(normalizeProductName(target)) || null;
 }
 
-function isCurative(family, app, issueKeys, modeLock) {
+function appName(app) {
+  return typeof app === 'string' ? app : app?.name;
+}
+
+function appTargets(app) {
+  return (Array.isArray(app?.targets) ? app.targets : []).map(targetClass).filter(Boolean);
+}
+
+// ONE recognized-cause set from both inputs: named issues AND the causes the
+// applications' target tags establish. Curative mode and the cause-specific
+// wording overrides both read it, so a tagged "Large patch" and an
+// issues: ['large_patch'] entry give the same output.
+function recognizedCauses(applications, issueMap) {
+  const fromTargets = applications.flatMap(appTargets).map((t) => t.cause).filter(Boolean);
+  return new Set([...issueMap.keys(), ...fromTargets]);
+}
+
+function isCurative(family, app, causes, modeLock) {
   if (modeLock) return modeLock === 'curative';
-  const pattern = CURATIVE_TARGET_PATTERNS[family];
-  if (pattern && targetsOf(app).some((t) => pattern.test(t))) return true;
-  return (CURATIVE_ISSUE_KEYS[family] || []).some((key) => issueKeys.has(key));
+  const tagged = appTargets(app).some((t) => t.family === family);
+  return tagged || (CURATIVE_ISSUE_KEYS[family] || []).some((cause) => causes.has(cause));
 }
 
-function applyIssueOverrides(row, issueKeys) {
-  const overrides = row.issueOverrides || {};
-  const hit = Object.keys(overrides).find((key) => issueKeys.has(key));
+function applyIssueOverrides(row, causes) {
+  const hit = Object.keys(row.issueOverrides).find((cause) => causes.has(cause));
   if (!hit) return row;
-  const o = overrides[hit];
+  const o = row.issueOverrides[hit];
   return {
     ...row,
-    limits: o.limits || row.limits,
-    windows: { ...row.windows, ...(o.windows || {}) },
-    byNextVisit: { ...row.byNextVisit, ...(o.byNextVisit || {}) },
+    ...o,
+    windows: { ...row.windows, ...o.windows },
+    byNextVisit: { ...row.byNextVisit, ...o.byNextVisit },
     overriddenBy: hit,
   };
 }
 
-function materializeRow(base, { issueKeys, gapDays, celsiusYtdCount }) {
-  const row = applyIssueOverrides(base, issueKeys);
-  const capped = !!(row.secondApp
-    && row.secondApp.cappedBy === 'celsius'
-    && Number.isFinite(celsiusYtdCount)
-    && celsiusYtdCount >= (row.secondApp.cap || CELSIUS_YTD_CAP));
-  const secondAppLine = row.secondApp
-    ? (capped ? row.secondApp.cappedLine : row.secondApp.line)
-    : null;
+// Which sentence a row says about the next visit, as {state, line} or null.
+function nextVisitView(row, gapDays) {
   const state = nextVisitState(row, gapDays);
-  const nextLine = pickNextVisitLine(row.byNextVisit, state);
+  const line = pickNextVisitLine(row.byNextVisit, state);
+  return lineAllowed(line) ? { state, line } : null;
+}
 
+// The keys of a materialized row (everything the writer or preview reads).
+const ROW_OUTPUT_KEYS = [
+  'id', 'kind', 'family', 'mode', 'appliesTo', 'metric', 'transient', 'judgedByAbsence', 'behindEligible',
+  'approved', 'windows', 'metricWindows', 'visibleChange', 'limits',
+];
+
+function materializeRow(base, { causes, gapDays, celsiusYtdCount }) {
+  const row = applyIssueOverrides(base, causes);
+  // At the Celsius year-to-date cap the second-application line swaps.
+  const capped = Boolean(row.secondApp) && celsiusYtdCount >= row.secondApp.cap;
+  const byNextVisit = nextVisitView(row, gapDays);
+  const contactTrigger = lineAllowed(row.contactTrigger) ? row.contactTrigger : null;
   const candidates = [
     row.visibleChange,
-    ...(row.limits || []),
-    secondAppLine,
-    nextLine,
-    row.contactTrigger,
-  ];
-  const lines = [];
-  const dropped = [];
-  for (const line of candidates) {
-    if (!line) continue;
-    if (lineAllowed(line)) lines.push(line);
-    else dropped.push(line);
-  }
-
-  const sources = new Set(
-    [row.windows?.first, row.windows?.full].filter(Boolean).map((w) => w.source),
-  );
+    ...row.limits,
+    row.secondApp && (capped ? row.secondApp.cappedLine : row.secondApp.line),
+    byNextVisit?.line,
+    contactTrigger,
+  ].filter(Boolean);
   return {
-    id: row.id,
-    kind: row.kind || 'product',
-    family: row.family || null,
-    mode: row.mode || null,
-    appliesTo: row.appliesTo,
-    metric: row.metric,
-    transient: !!row.transient,
-    judgedByAbsence: !!row.judgedByAbsence,
-    behindEligible: judgeEligibility(row),
-    approved: !!row.approved,
-    windows: row.windows,
-    metricWindows: row.metricWindows || {},
-    windowSources: [...sources],
-    visibleChange: row.visibleChange,
-    limits: row.limits || [],
-    secondApp: row.secondApp ? { possible: !!row.secondApp.possible, capped } : null,
-    byNextVisit: state && nextLine && lineAllowed(nextLine) ? { state, line: nextLine } : null,
-    contactTrigger: row.contactTrigger && lineAllowed(row.contactTrigger) ? row.contactTrigger : null,
-    lines,
-    droppedLines: dropped,
+    ...Object.fromEntries(ROW_OUTPUT_KEYS.map((key) => [key, row[key]])),
+    windowSources: [...new Set([row.windows.first, row.windows.full].filter(Boolean).map((w) => w.source))],
+    secondApp: row.secondApp && { possible: row.secondApp.possible, capped },
+    byNextVisit,
+    contactTrigger,
+    lines: candidates.filter(lineAllowed),
+    droppedLines: candidates.filter((line) => !lineAllowed(line)),
   };
 }
 
-// True only when the row has at least one metric window that can close.
-function judgeEligibility(row) {
-  if (row.transient || row.judgedByAbsence || row.behindEligible === false) return false;
-  return Object.values(row.metricWindows || {}).some((w) => Number.isFinite(w?.closeDays));
-}
-
-function resolveProductRows(applications, issueKeys) {
-  const unmapped = [];
+function resolveProductRows(applications, causes) {
+  const mapped = applications.filter((app) => classifyLawnProductStatus(appName(app)) === 'mapped');
+  const unmapped = applications
+    .filter((app) => classifyLawnProductStatus(appName(app)) === 'unmapped')
+    .map((app) => String(appName(app) ?? '').trim())
+    .filter(Boolean);
   const familyCurative = new Map(); // family -> curative?
-  for (const app of Array.isArray(applications) ? applications : []) {
-    const name = typeof app === 'string' ? app : app?.name;
-    const status = classifyLawnProductStatus(name);
-    if (status === 'unmapped') {
-      if (normalizeProductName(name)) unmapped.push(String(name).trim());
-      continue;
-    }
-    if (status === 'explicit_null') continue;
-    const { family, modeLock } = classifyLawnProduct(name);
-    const curative = isCurative(family, typeof app === 'string' ? {} : app, issueKeys, modeLock);
+  for (const app of mapped) {
+    const { family, modeLock } = classifyLawnProduct(appName(app));
     // One curative application is enough to make the family's row curative.
-    familyCurative.set(family, Boolean(familyCurative.get(family)) || curative);
+    familyCurative.set(family, familyCurative.get(family) || isCurative(family, app, causes, modeLock));
   }
-  const rows = [];
-  for (const [family, curative] of familyCurative) {
-    const mode = curative ? 'curative' : 'preventive';
-    const row = Object.values(PRODUCT_ROWS).find((r) => r.family === family && (!r.mode || r.mode === mode));
-    if (row) rows.push(row);
-  }
-  return { rows, unmapped, families: new Set(familyCurative.keys()) };
+  const rows = [...familyCurative].map(([family, curative]) => Object.values(PRODUCT_ROWS)
+    .find((r) => r.family === family && (!r.mode || r.mode === (curative ? 'curative' : 'preventive'))));
+  return { rows: rows.filter(Boolean), unmapped, families: new Set(familyCurative.keys()) };
 }
 
-// Why an issue row is skipped (null = keep it).
-function issueSkipReason(key, entry, { productRowIds, families, month }) {
-  const row = ISSUE_ROWS[key];
-  // The product row already carries these; never say it twice.
-  if (key === 'chinch' && productRowIds.has('insecticide_curative')) return { silent: true };
-  if (key === 'large_patch' && productRowIds.has('fungicide_curative')) return { silent: true };
-  if (row.onlyWithoutRows && row.onlyWithoutRows.some((fam) => families.has(fam))) return { silent: true };
-  if (row.months && (month == null || !row.months.includes(month))) return { reason: 'out_of_season' };
-  // A seasonal dip is never the explanation for a new or worsening problem.
-  if (key === 'seasonal_dip' && (entry?.isNew === true || entry?.worsening === true)) return { reason: 'new_or_worsening' };
-  return null;
-}
+// Issue rows are withheld for a reason that depends only on the visit.
+const ISSUE_WITHHOLD_RULES = [
+  { reason: 'out_of_season', applies: (row, entry, month) => row.months && !row.months.includes(month) },
+  { reason: 'new_or_worsening', applies: (row, entry) => row.steadyOnly && (entry.isNew || entry.worsening) },
+];
 
 /**
+ * Emission is decided FIRST (approved, or the caller asked for a preview);
+ * only then are issue rows deduped against the product rows that will really
+ * be emitted. So an approved issue row is never silenced by a product row
+ * that is itself withheld.
+ *
  * @param {object} input
  * @param {Array<{name:string, targets?:string[]}>} [input.applications] today's applied products
  * @param {Array<string|{key:string, isNew?:boolean, worsening?:boolean}>} [input.issues] named issue keys
@@ -296,38 +274,38 @@ function issueSkipReason(key, entry, { productRowIds, families, month }) {
  * @param {boolean} [opts.includeUnapproved=false] tests and owner preview only
  */
 function buildLawnExpectations(input = {}, { includeUnapproved = false } = {}) {
-  const { applications = [], issues = [], visitDate = null, nextVisitDate = null, celsiusYtdCount = null } = input || {};
+  const applications = Array.isArray(input?.applications) ? input.applications : [];
+  const { visitDate = null, nextVisitDate = null, celsiusYtdCount = null } = input || {};
   const gapDays = visitGapDays({ visitDate, nextVisitDate, nextVisitGapDays: input?.nextVisitGapDays });
-  const issueMap = normalizeIssues(issues);
-  const issueKeys = new Set(issueMap.keys());
-  const ctx = { issueKeys, gapDays, celsiusYtdCount: Number.isFinite(celsiusYtdCount) ? celsiusYtdCount : null };
+  const issueMap = normalizeIssues(input?.issues);
+  const causes = recognizedCauses(applications, issueMap);
+  const ctx = { causes, gapDays, celsiusYtdCount };
 
-  // 1. Product rows. Unmapped and explicit-null names yield nothing.
-  const { rows: candidateRows, unmapped, families } = resolveProductRows(applications, issueKeys);
-
-  // 2. Issue rows.
-  const productRowIds = new Set(candidateRows.map((r) => r.id));
+  const { rows: productRows, unmapped, families } = resolveProductRows(applications, causes);
   const month = visitMonth(visitDate);
+  const issueRows = [];
   const withheld = [];
   for (const [key, entry] of issueMap) {
-    const skip = issueSkipReason(key, entry, { productRowIds, families, month });
-    if (skip?.reason) withheld.push({ rowId: ISSUE_ROWS[key].id, reason: skip.reason });
-    if (!skip) candidateRows.push(ISSUE_ROWS[key]);
+    const row = ISSUE_ROWS[key];
+    const rule = ISSUE_WITHHOLD_RULES.find((r) => r.applies(row, entry, month));
+    if (rule) withheld.push({ rowId: row.id, reason: rule.reason });
+    // A herbicide applied today carries the weeds; the planned-treatment line would be wrong.
+    const appliedHerbicide = row.onlyWithoutRows.some((family) => families.has(family));
+    if (!rule && !appliedHerbicide) issueRows.push(row);
   }
 
-  // 3. Approval, ordering, materialization.
-  const ordered = candidateRows
-    .slice()
-    .sort((a, b) => ROW_PRIORITY.indexOf(a.id) - ROW_PRIORITY.indexOf(b.id));
-  const rows = [];
-  for (const base of ordered) {
-    if (!base.approved && !includeUnapproved) {
-      withheld.push({ rowId: base.id, reason: 'not_approved' });
-      continue;
-    }
-    const row = materializeRow(base, ctx);
-    if (row.lines.length) rows.push(row);
-  }
+  // 1. Decide emission. 2. Dedupe among what will be emitted.
+  const candidates = [...productRows, ...issueRows];
+  const emitted = (row) => row.approved || includeUnapproved;
+  const emittedIds = new Set(candidates.filter(emitted).map((row) => row.id));
+  const kept = candidates.filter((row) => !emittedIds.has(row.supersededBy));
+  withheld.push(...kept.filter((row) => !emitted(row)).map((row) => ({ rowId: row.id, reason: 'not_approved' })));
+
+  const rows = kept
+    .filter(emitted)
+    .sort((a, b) => ROW_PRIORITY.indexOf(a.id) - ROW_PRIORITY.indexOf(b.id))
+    .map((row) => materializeRow(row, ctx))
+    .filter((row) => row.lines.length);
 
   return {
     engineVersion: ENGINE_VERSION,
@@ -352,29 +330,36 @@ function buildLawnExpectations(input = {}, { includeUnapproved = false } = {}) {
 // "behind" until that metric's window has closed. Transient rows, rows judged
 // by absence and site limits carry no windows, so they can never be behind.
 //
-//   too_early     before the metric's window opens
-//   in_window     window open, not closed, no clear gain yet
-//   ahead         a full band of gain before the full window opens
-//   on_track      gained a band, or (hold mode) has stopped falling
-//   behind        window closed with no gain (gain mode) or still falling
-//                 (hold mode)
+//   too_early       before the metric's window opens
+//   in_window       window open, not closed, no clear gain yet
+//   ahead           a full band of gain before the full window opens
+//   on_track        gained a band, or (hold mode) has stopped falling
+//   behind          window closed with no gain (gain mode) or still falling
+//                   (hold mode)
 //   holding_steady  nothing to judge against for this metric
-//   unclear       missing inputs
+//   unclear         missing inputs
+const PROGRESS_VERDICT = {
+  gain: {
+    gained_full: 'on_track', gained_early: 'ahead', closed_down: 'behind', closed_flat: 'behind', open: 'in_window',
+  },
+  hold: {
+    gained_full: 'on_track', gained_early: 'on_track', closed_down: 'behind', closed_flat: 'on_track', open: 'in_window',
+  },
+};
+
+// Where the score sits against one metric window.
+function progressSituation(win, days, delta, band) {
+  if (delta >= band) return days >= win.fullMinDays ? 'gained_full' : 'gained_early';
+  if (days <= win.closeDays) return 'open';
+  return delta <= -band ? 'closed_down' : 'closed_flat';
+}
+
 function judgeProgress(row, { metric, daysSinceApplication, scoreDelta, band = 8 } = {}) {
-  if (!row) return 'unclear';
-  if (!Number.isFinite(daysSinceApplication) || !Number.isFinite(scoreDelta)) return 'unclear';
-  const win = row.metricWindows?.[metric || row.metric] || null;
-  if (!win || !Number.isFinite(win.closeDays)) return 'holding_steady';
-  if (daysSinceApplication < (win.startDays || 0)) return 'too_early';
-  const gained = scoreDelta >= band;
-  const closed = daysSinceApplication > win.closeDays;
-  if (win.mode === 'hold') {
-    if (gained) return 'on_track';
-    if (!closed) return 'in_window';
-    return scoreDelta <= -band ? 'behind' : 'on_track';
-  }
-  if (gained) return daysSinceApplication >= (win.fullMinDays ?? win.startDays ?? 0) ? 'on_track' : 'ahead';
-  return closed ? 'behind' : 'in_window';
+  const win = row?.metricWindows?.[metric || row.metric];
+  if (![daysSinceApplication, scoreDelta].every(Number.isFinite)) return 'unclear';
+  if (!win) return 'holding_steady';
+  if (daysSinceApplication < win.startDays) return 'too_early';
+  return PROGRESS_VERDICT[win.mode][progressSituation(win, daysSinceApplication, scoreDelta, band)];
 }
 
 module.exports = {

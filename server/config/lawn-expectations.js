@@ -29,6 +29,8 @@
  *  - Each customer line is at most 33 words.
  */
 
+const { LAWN_TARGET_SUGGESTIONS } = require('./treatment-target-vocabulary');
+
 const ENGINE_VERSION = 'lawn_expectations_v1';
 
 // Celsius WG label/protocol cap: 3 applications per property per year
@@ -493,6 +495,7 @@ const ISSUE_ROWS = {
     id: 'issue_chinch',
     issueKey: 'chinch',
     kind: 'issue',
+    supersededBy: 'insecticide_curative',
     appliesTo: 'chinch bug damage',
     metric: 'stress_damage',
     metricWindows: {
@@ -519,6 +522,7 @@ const ISSUE_ROWS = {
     id: 'issue_large_patch',
     issueKey: 'large_patch',
     kind: 'issue',
+    supersededBy: 'fungicide_curative',
     appliesTo: 'large patch',
     metric: 'stress_damage',
     metricWindows: {
@@ -580,6 +584,7 @@ const ISSUE_ROWS = {
     approved: false,
     // Only Nov to Feb, and never for a new or worsening problem.
     months: [11, 12, 1, 2],
+    steadyOnly: true,
     windows: { first: null, full: null },
     visibleChange: 'Color is muted for this cooler stretch and often returns as nights warm.',
     limits: [],
@@ -668,13 +673,49 @@ const ROW_PRIORITY = [
   'issue_weeds_untreated',
 ];
 
-// Tech-tagged application targets that make a fungicide or insecticide
-// application curative rather than preventive. Matched on the controlled
-// target tag text, never on free text.
-const CURATIVE_TARGET_PATTERNS = {
-  [FAMILY.FUNGICIDE]: /\b(?:large patch|brown patch|take[- ]all|dollar spot|gray leaf spot|fung(?:us|al)|disease|patch(?:es)?|blight)\b/i,
-  [FAMILY.INSECTICIDE]: /\b(?:chinch|insects?|bugs?|armyworms?|sod webworms?|mole crickets?|grubs?)\b/i,
+// Tech-tagged application targets. The controlled lawn vocabulary
+// (config/treatment-target-vocabulary.js LAWN_TARGET_SUGGESTIONS) is the only
+// source of target tags, so curative recognition is a lookup on it, never a
+// regex over free text. Every vocabulary entry is classified here (a test
+// fails when one is added without a decision):
+//   family  the product family a tag on that family's application makes curative
+//           (null = no curative row exists for it: weeds, nematodes)
+//   cause   the named cause the tag establishes, which also selects the
+//           cause-specific wording overrides (null = none)
+const TARGET_CLASS_BY_NAME = {
+  'Broadleaf weeds': null,
+  Crabgrass: null,
+  'Nutsedge / sedge': null,
+  'Green kyllinga': null,
+  Dollarweed: null,
+  Doveweed: null,
+  Chamberbitter: null,
+  Spurge: null,
+  Clover: null,
+  Goosegrass: null,
+  Torpedograss: null,
+  'Annual bluegrass (Poa annua)': null,
+  'Southern chinch bugs': { family: FAMILY.INSECTICIDE, cause: 'chinch' },
+  'Fall armyworms': { family: FAMILY.INSECTICIDE, cause: null },
+  'Tropical sod webworms': { family: FAMILY.INSECTICIDE, cause: null },
+  'White grubs': { family: FAMILY.INSECTICIDE, cause: null },
+  'Tawny mole crickets': { family: FAMILY.INSECTICIDE, cause: null },
+  'Fire ants': { family: FAMILY.INSECTICIDE, cause: null },
+  // Nematodes are not insects: the insecticide row's "insect activity" copy
+  // would be wrong, so a nematode tag stays preventive-only.
+  Nematodes: null,
+  'Large patch': { family: FAMILY.FUNGICIDE, cause: 'large_patch' },
+  'Dollar spot': { family: FAMILY.FUNGICIDE, cause: null },
+  'Gray leaf spot': { family: FAMILY.FUNGICIDE, cause: null },
+  'Take-all root rot': { family: FAMILY.FUNGICIDE, cause: null },
+  'Fairy ring': { family: FAMILY.FUNGICIDE, cause: null },
+  'Pythium root rot': { family: FAMILY.FUNGICIDE, cause: null },
 };
+
+// normalized vocabulary tag -> { family, cause } | null
+const LAWN_TARGET_CLASS = new Map(
+  LAWN_TARGET_SUGGESTIONS.map((name) => [normalizeProductName(name), TARGET_CLASS_BY_NAME[name] || null]),
+);
 
 // Named issues that establish a curative cause for a family even with no
 // tagged target on the application.
@@ -682,6 +723,39 @@ const CURATIVE_ISSUE_KEYS = {
   [FAMILY.FUNGICIDE]: ['large_patch'],
   [FAMILY.INSECTICIDE]: ['chinch'],
 };
+
+// ── Row defaults ──────────────────────────────────────────────────────────
+// Applied once here so the engine never branches on a missing field.
+const ROW_DEFAULTS = {
+  kind: 'product',
+  family: null,
+  mode: null,
+  transient: false,
+  judgedByAbsence: false,
+  contactTrigger: null,
+  secondApp: null,
+  months: null,
+  steadyOnly: false,
+  onlyWithoutRows: [],
+  supersededBy: null,
+  limits: [],
+  metricWindows: {},
+  byNextVisit: {},
+  issueOverrides: {},
+  windows: { first: null, full: null },
+};
+
+// A row can be "behind" only through a metric window that can close.
+function normalizeRow(row) {
+  const full = { ...ROW_DEFAULTS, ...row };
+  const hasWindow = Object.values(full.metricWindows).some((w) => Number.isFinite(w.closeDays));
+  const absent = full.transient || full.judgedByAbsence;
+  return { ...full, behindEligible: full.behindEligible !== false && hasWindow && !absent };
+}
+
+for (const rows of [PRODUCT_ROWS, ISSUE_ROWS]) {
+  for (const [key, row] of Object.entries(rows)) rows[key] = normalizeRow(row);
+}
 
 module.exports = {
   ENGINE_VERSION,
@@ -693,7 +767,8 @@ module.exports = {
   PRODUCT_ROWS,
   ISSUE_ROWS,
   ROW_PRIORITY,
-  CURATIVE_TARGET_PATTERNS,
+  TARGET_CLASS_BY_NAME,
+  LAWN_TARGET_CLASS,
   CURATIVE_ISSUE_KEYS,
   normalizeProductName,
 };
