@@ -274,14 +274,13 @@ function daysBetween(fromDate, toDate) {
  * Pure. `placements` are seo_link_prospects rows with first_live_at
  * (id, target_domain, live_url, first_live_at); `rows` are mention rows (any
  * order; only measured ones are read) covering RECHECK_BEFORE_DAYS before the oldest placement.
- * The page is the live_url when engines cited it before the link went live,
- * else every page on the host they cited; the questions are those whose
- * answers cited it before that day. before = those questions' answers in the
+ * The page is the placement's own live_url; the questions are those whose
+ * answers cited that exact page before the link went live. before = those questions' answers in the
  * RECHECK_BEFORE_DAYS before; after = their answers from that day on.
  * verdict: too_early (under RECHECK_SETTLE_DAYS live, or no answer since) |
  * named_when_cited (an answer since cites the page and names Waves) |
- * page_not_cited_now | not_named_yet. A placement on a page no engine cited
- * is not returned.
+ * page_not_cited_now | not_named_yet. A placement with no live_url, or on a
+ * page no engine cited before that day, is not returned.
  */
 function recheckPlacements(placements, rows, { now = new Date() } = {}) {
   const today = etDateString(now);
@@ -291,14 +290,14 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
     const host = canonicalProspectDomain(pl.target_domain);
     if (!host || !pl.first_live_at) continue;
     const liveOn = etDateString(new Date(pl.first_live_at));
-    const onHost = (k) => k === host || k.startsWith(`${host}/`) || k.startsWith(`${host}?`);
-    const before = dated.filter((r) => r.date < liveOn);
-    const hostPages = new Set(before.flatMap((r) => [...r.keys].filter(onHost)));
-    if (!hostPages.size) continue;
+    // The link's own page, on the placement's own host: another page on the
+    // same site (a Yelp listing beside a cited Yelp search) is not this one.
     const liveKey = pl.live_url ? pageKey(pl.live_url) : null;
-    const pages = liveKey && hostPages.has(liveKey) ? new Set([liveKey]) : hostPages;
-    const cites = (r) => [...r.keys].some((k) => pages.has(k));
+    if (!liveKey || !(liveKey === host || liveKey.startsWith(`${host}/`) || liveKey.startsWith(`${host}?`))) continue;
+    const before = dated.filter((r) => r.date < liveOn);
+    const cites = (r) => r.keys.has(liveKey);
     const questions = new Set(before.filter(cites).map((r) => r.query));
+    if (!questions.size) continue; // engines never cited this page before the link went live
     const windowStart = etDateString(addETDays(new Date(`${liveOn}T12:00:00Z`), -RECHECK_BEFORE_DAYS));
     const tally = { before: emptyTally(), after: emptyTally() };
     for (const r of dated) {
@@ -315,7 +314,7 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
     else if (daysLive < RECHECK_SETTLE_DAYS || tally.after.answers === 0) verdict = 'too_early';
     else if (tally.after.citingPage === 0) verdict = 'page_not_cited_now';
     out.push({
-      prospectId: pl.id, host, liveOn, daysLive, pages: [...pages].sort(), questions: [...questions].sort(),
+      prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(),
       before: tally.before, after: tally.after, verdict,
     });
   }

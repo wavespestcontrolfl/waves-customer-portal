@@ -157,7 +157,7 @@ describe('recheckPlacements', () => {
     const [r] = recheckPlacements([placement()], rows, { now: NOW });
     expect(r).toMatchObject({
       prospectId: 'p1', host: 'floridist.com', liveOn: '2026-10-01', daysLive: 19,
-      pages: ['floridist.com/best-pest-control-sarasota'], questions: [Q1],
+      page: 'floridist.com/best-pest-control-sarasota', questions: [Q1],
       before: { answers: 2, named: 0, citingPage: 2, namedWhenCiting: 0 },
       after: { answers: 2, named: 1, citingPage: 1, namedWhenCiting: 1 },
       verdict: 'named_when_cited',
@@ -172,10 +172,11 @@ describe('recheckPlacements', () => {
     expect(recheckPlacements([placement()], [before, row({ query: Q1, date: '2026-10-18', urls: [PAGE] })], { now: NOW })[0].verdict).toBe('not_named_yet');
   });
 
-  test('a live_url engines never cited falls back to every cited page on the host; an uncited host is not returned', () => {
+  test('only the placement\'s own page counts — another page on the same site, a missing live_url or another host is not rechecked', () => {
     const rows = [row({ query: Q1, date: '2026-09-25', urls: [PAGE, 'https://floridist.com/lwr'] })];
-    expect(recheckPlacements([placement({ live_url: 'https://floridist.com/partners' })], rows, { now: NOW })[0].pages)
-      .toEqual(['floridist.com/best-pest-control-sarasota', 'floridist.com/lwr']);
+    expect(recheckPlacements([placement({ live_url: 'https://floridist.com/LWR/' })], rows, { now: NOW })[0].page).toBe('floridist.com/lwr');
+    expect(recheckPlacements([placement({ live_url: 'https://floridist.com/partners' })], rows, { now: NOW })).toEqual([]);
+    expect(recheckPlacements([placement({ live_url: null })], rows, { now: NOW })).toEqual([]);
     expect(recheckPlacements([placement({ target_domain: 'other.com' })], rows, { now: NOW })).toEqual([]);
   });
 
