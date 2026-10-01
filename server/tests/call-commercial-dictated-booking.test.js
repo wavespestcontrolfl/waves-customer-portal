@@ -57,9 +57,16 @@ function extraction({
       agreed_slot_words: WORDS,
       ...scheduling,
     },
-    service_request: { quoted_price_usd: 150, ...PRICE_JUDGEMENTS, ...service },
+    service_request: withAcceptedEntry({ quoted_price_usd: 150, ...PRICE_JUDGEMENTS, ...service }, service),
     evidence: [...evidence, ...priceEvidence],
   };
+}
+// The accepted price entry for the quoted total (unit 'unknown': a bare "$150"), unless the
+// test supplies its own price / prices.
+function withAcceptedEntry(sr, service) {
+  if ('price' in service || 'prices' in service || typeof sr.quoted_price_usd !== 'number') return sr;
+  const entry = { amount_usd: sr.quoted_price_usd, accepted: true, caller_response: 'accepted', unit: 'unknown' };
+  return { ...sr, price: entry, prices: [entry] };
 }
 // The processor's options for a gate-ON inbound call.
 const opts = (extra = {}) => ({
@@ -303,10 +310,45 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
       expect(grounded(r)).toEqual({ ok: false, reason: 'price_unit_not_bookable' });
       expect(route(r).allowed).toBe(false);
     }
-    for (const unit of ['one_time', 'per_application', 'unknown', undefined]) {
-      const entry = { amount_usd: 150, accepted: true, caller_response: 'accepted', ...(unit ? { unit } : {}) };
+    for (const unit of ['one_time', 'per_application', 'unknown']) {
+      const entry = { amount_usd: 150, accepted: true, caller_response: 'accepted', unit };
       expect(grounded(extraction({ service: { price: entry, prices: [entry] } })).ok).toBe(true);
     }
+    // No unit recorded (null = "no price stated" in the schema): the spoken unit is unknown, so the office books it.
+    for (const unit of [null, undefined]) {
+      const entry = { amount_usd: 150, accepted: true, caller_response: 'accepted', ...(unit === null ? { unit } : {}) };
+      expect(grounded(extraction({ service: { price: entry, prices: [entry] } }))).toEqual({ ok: false, reason: 'price_unit_not_bookable' });
+    }
+  });
+
+  test('the unit must come from an accepted price entry for the quoted total, never a synthesized unitless term (codex #5377 r15 P1)', () => {
+    // "$150 per month" pinned and accepted, quoted_price_usd 150, but the price entry omitted ...
+    const omitted = extraction({ service: { price: null, prices: [] } });
+    expect(grounded(omitted)).toEqual({ ok: false, reason: 'no_accepted_price_entry' });
+    expect(route(omitted).allowed).toBe(false);
+    // ... or present but not marked accepted (caller_response 'no_response')
+    const unaccepted = { amount_usd: 150, accepted: false, caller_response: 'no_response', unit: 'per_month' };
+    const r = extraction({ service: { price: unaccepted, prices: [unaccepted] } });
+    expect(grounded(r)).toEqual({ ok: false, reason: 'no_accepted_price_entry' });
+    expect(route(r).allowed).toBe(false);
+    // ... or accepted at a different amount than the quoted total
+    const other = { amount_usd: 140, accepted: true, caller_response: 'accepted', unit: 'one_time' };
+    expect(grounded(extraction({ service: { price: other, prices: [other] } })).ok).toBe(false);
+  });
+
+  test('a dollars-and-cents offer spoken in words grounds the quoted amount (codex #5377 r15 P2)', () => {
+    const at = (spoken, amount) => {
+      const offer = `The quarterly service for the office is ${spoken}`;
+      const t = TRANSCRIPT.split(PRICE_QUOTE).join(offer);
+      const ex = extraction({ service: { quoted_price_usd: amount }, priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', offer), PRICE_EVIDENCE[1]] });
+      return grounded(ex, t);
+    };
+    expect(at('one hundred fifty dollars and fifty cents', 150.5).ok).toBe(true);
+    expect(at('150 dollars and 50 cents', 150.5).ok).toBe(true);
+    expect(at('one hundred forty nine dollars and ninety-nine cents', 149.99).ok).toBe(true);
+    // the compound states 150.50, not 150 or 50
+    expect(at('one hundred fifty dollars and fifty cents', 150).reason).toBe('price_not_stated_by_staff');
+    expect(at('one hundred fifty dollars and fifty cents', 50).reason).toBe('price_not_stated_by_staff');
   });
 
   test('a multi-term accepted price ("$150 to start plus $50/month") goes to the office (codex #5377 r3 P1)', () => {

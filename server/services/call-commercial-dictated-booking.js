@@ -61,10 +61,29 @@ const { parseTurns, turnsHolding, spokenFiguresIn } = groundingTools;
 // grounds the booked amount in the staff's own offer quote. It does NOT scan for
 // other figures: whether a later correction or an added charge happened is the
 // extraction's judgement (price_is_final), per the owner ruling of 2026-10-01.
-function statesAmount(text, amount) {
-  const digits = [...String(text || '').matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)]
+function amountsIn(text) {
+  const str = String(text || '');
+  const digits = [...str.matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)]
     .map((m) => Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
-  return digits.includes(amount) || spokenFiguresIn(text).includes(amount);
+  return [...digits, ...spokenFiguresIn(str)];
+}
+function statesAmount(text, amount) {
+  const str = String(text || '');
+  const amounts = amountsIn(str);
+  // A dollars-and-cents compound ("one hundred fifty dollars and fifty cents", "150 dollars
+  // and 50 cents") reads as two figures: the last figure before "dollars and" and the cents
+  // figure after it become ONE amount (150.5), and neither part counts on its own.
+  for (const m of str.matchAll(/\bdollars?\s+and\s+([a-z0-9 -]+?)\s+cents?\b/gi)) {
+    const dollars = amountsIn(str.slice(0, m.index)).at(-1);
+    const cents = amountsIn(m[1]);
+    if (dollars == null || cents.length !== 1 || !(cents[0] < 100)) continue;
+    for (const part of [dollars, cents[0]]) {
+      const i = amounts.indexOf(part);
+      if (i >= 0) amounts.splice(i, 1);
+    }
+    amounts.push(Math.round(dollars * 100 + cents[0]) / 100);
+  }
+  return amounts.includes(amount);
 }
 
 // The agreed price is real. The extraction JUDGES the price language (schema 1.21.0:
@@ -115,7 +134,15 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quot
   // ("$150 a month") stamped as that price would lose the recurring term, so
   // only a one-time / per-application / unitless amount books here. The
   // schema records a bare "$150" with unit 'unknown' — that is unitless.
-  if (agreed.unit && !['one_time', 'per_application', 'unknown'].includes(agreed.unit)) return fail('price_unit_not_bookable');
+  // The unit is read from an ACCEPTED price entry for this exact total:
+  // resolveCallAgreedPrice synthesizes a unitless term from quoted_price_usd
+  // when no entry matches, so a missing, unaccepted or unit-less entry would
+  // otherwise let "$150 a month" book as a bare $150 visit (codex #5377 r15 P1).
+  const svc = v2.service_request || {};
+  const entries = Array.isArray(svc.prices) && svc.prices.length ? svc.prices : [svc.price];
+  const entry = entries.find((e) => e && e.accepted === true && e.amount_usd === quoted && !(e.amount_max_usd > e.amount_usd));
+  if (!entry) return fail('no_accepted_price_entry');
+  if (!['one_time', 'per_application', 'unknown'].includes(entry.unit)) return fail('price_unit_not_bookable');
   // The booking path discards a total outside its accepted range (or with
   // sub-cent precision) and books at the catalog price or none, so the
   // caller's accepted amount would never reach the appointment: the office
