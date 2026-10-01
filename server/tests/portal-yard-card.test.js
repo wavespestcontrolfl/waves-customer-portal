@@ -352,7 +352,10 @@ describe('GET /api/feed/yard', () => {
     jest.doMock('../services/local-news-store', () => ({}));
     jest.doMock('../services/pest-forecast/forecast', () => ({ getForecast: jest.fn() }));
     jest.doMock('../config/feature-gates', () => ({ portalYardCalendarLive: () => gateLive }));
-    jest.doMock('../services/account-properties', () => ({ resolveSessionScope: jest.fn(async () => { if (scopeRejects) throw new Error('db'); return scopeResult; }) }));
+    jest.doMock('../services/account-properties', () => ({
+      resolveSessionScope: jest.fn(async () => { if (scopeRejects) throw new Error('db'); return scopeResult; }),
+      resolvedScopePayload: (sc) => ({ echoed: sc }),
+    }));
     jest.doMock('../services/portal-yard-card', () => ({ buildYardCard }));
     const router = require('../routes/feed');
     handler = router.stack.find((l) => l.route && l.route.path === '/yard').route.stack[0].handle;
@@ -376,7 +379,8 @@ describe('GET /api/feed/yard', () => {
     gateLive = true;
     scopeResult = { enabled: true, scoped: true };
     const body = await get({ customer: { city: 'Sarasota', zip: '34236' }, property: { city: 'Venice', zip: '34285' } });
-    expect(body).toEqual({ available: true, month: 10 });
+    // The resolved scope is echoed for the client's scopeEchoMismatch check.
+    expect(body).toEqual({ available: true, month: 10, propertyScope: { echoed: { enabled: true, scoped: true } } });
     const args = buildYardCard.mock.calls[0][0];
     expect(args.customerId).toBe('cust-1');
     expect(args.place.slug).toBe('venice-fl');

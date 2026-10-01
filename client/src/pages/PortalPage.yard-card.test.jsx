@@ -101,6 +101,24 @@ describe('Local Conditions slot', () => {
     expect(screen.queryByRole('link', { name: /See what to look for/ })).not.toBeInTheDocument();
   });
 
+  it('a card resolved to another house than the tab shows is withheld and the property list re-read', async () => {
+    const onSavedScopeUnavailable = vi.fn();
+    api.getYardMonth.mockResolvedValue({ ...YARD, propertyScope: { enabled: true, propertyId: 'prop-a', closed: false } });
+    const scope = { currentEntry: { key: 'k-b', propertyId: 'prop-b' }, savedScope: true, selectedPropertyId: 'prop-b', onSavedScopeUnavailable };
+    render(<LocalConditionsSlot customer={customer} nextService={null} onOpenPhotoId={null} scope={scope} />);
+    await settle();
+    expect(screen.queryByRole('tab', { name: 'Lawn' })).not.toBeInTheDocument();
+    expect(onSavedScopeUnavailable).toHaveBeenCalled();
+  });
+
+  it('a card resolved to the house the tab shows renders', async () => {
+    api.getYardMonth.mockResolvedValue({ ...YARD, propertyScope: { enabled: true, propertyId: 'prop-b', closed: false } });
+    const scope = { currentEntry: { key: 'k-b', propertyId: 'prop-b' }, savedScope: true, selectedPropertyId: 'prop-b', onSavedScopeUnavailable: vi.fn() };
+    render(<LocalConditionsSlot customer={customer} nextService={null} onOpenPhotoId={null} scope={scope} />);
+    await settle();
+    expect(screen.getByRole('tab', { name: 'Lawn' })).toBeInTheDocument();
+  });
+
   it('shows the widget loading panel while the gate answer is pending', () => {
     render(<LocalConditionsSlot customer={customer} nextService={null} onOpenPhotoId={null} />);
     expect(screen.getByText('Loading local conditions')).toBeInTheDocument();

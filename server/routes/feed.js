@@ -9,7 +9,7 @@ const localNewsStore = require('../services/local-news-store');
 const { getForecast } = require('../services/pest-forecast/forecast');
 const { LOCATIONS, BY_SLUG, resolveZip } = require('../services/pest-forecast/locations');
 const { portalYardCalendarLive } = require('../config/feature-gates');
-const { resolveSessionScope } = require('../services/account-properties');
+const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 const { buildYardCard } = require('../services/portal-yard-card');
 
 router.use(authenticate);
@@ -598,7 +598,10 @@ router.get('/yard', async (req, res, next) => {
     // property's visit or grass under this property's heading.
     const scope = await resolveSessionScope(req);
     const card = await buildYardCard({ customerId: req.customerId, place, scope });
-    res.json({ available: true, ...card });
+    // Echo the house this read resolved to (fallbacks included), like every
+    // other property-scoped portal read, so the client can withhold the card
+    // when it differs from the house the tab shows (scopeEchoMismatch).
+    res.json({ available: true, ...card, propertyScope: resolvedScopePayload(scope) });
   } catch (err) { next(err); }
 });
 

@@ -9086,8 +9086,16 @@ const ARTICLES = [
 // WeatherPestWidget renders exactly as before; on, the yard-month card takes
 // its place. The loading panel is the widget's own first state, so neither
 // path shows a different placeholder.
-function LocalConditionsSlot({ customer, nextService, onOpenPhotoId }) {
+function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = null }) {
   const yard = useYardMonth();
+  // A card the server resolved to another house than this tab shows (the
+  // selected house retired, a stale claim) is withheld: re-read the property
+  // list and show the customer-level widget until the label follows.
+  const scopeStale = !!(scope && yard.status === 'on' && yard.data?.propertyScope
+    && scopeEchoMismatch(yard.data.propertyScope, scope.currentEntry || null, !!scope.savedScope, scope.selectedPropertyId || null));
+  useEffect(() => {
+    if (scopeStale && scope?.onSavedScopeUnavailable) scope.onSavedScopeUnavailable();
+  }, [scopeStale, scope?.onSavedScopeUnavailable]);
   // Capacitor shell: target=_blank strands the SPA (F-017), so the app opens
   // the report in the same in-app overlay the Services tab uses.
   const { preview, openPagePreview, closePreview } = useReportPreview(
@@ -9104,7 +9112,7 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId }) {
       message="Checking weather and seasonal pest pressure for your area."
     />
   );
-  if (yard.status === 'on') return <>
+  if (yard.status === 'on' && !scopeStale) return <>
     <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} externalLinks={!isNativeApp()} />
     {preview && <DocumentPreviewOverlay key="report-preview"
       preview={preview} onClose={closePreview}
@@ -9523,7 +9531,7 @@ function ContentCard({ post, large, compact }) {
   );
 }
 
-function LearnTab({ customer, onOpenPhotoId = null }) {
+function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
@@ -9751,7 +9759,7 @@ function LearnTab({ customer, onOpenPhotoId = null }) {
         </div>
       </section>
 
-      <LocalConditionsSlot customer={customer} nextService={nextService} onOpenPhotoId={onOpenPhotoId} />
+      <LocalConditionsSlot customer={customer} nextService={nextService} onOpenPhotoId={onOpenPhotoId} scope={scope} />
 
       {alerts.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -17382,7 +17390,7 @@ export default function PortalPage() {
             wateringPlanCustomerId={wateringPlanCustomerId}
             onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
           />)}
-        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} />}
+        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} scope={{ currentEntry: activeProperty, savedScope: portalProperties.some((p) => p.key), selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable: refreshProperties }} />}
         </PortalRefreshArea>
       </main>
 
