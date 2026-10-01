@@ -5981,6 +5981,7 @@ async function createSelfBooking(payload = {}) {
                 customerId: custId,
                 enforceOriginating: true,
                 excludeCallbackRequests: true,
+                bookingId: txResult.existing.id,
               });
               if (replayConversion?.converted) replayConvertedLeadIds = replayConversion.leadIds || [];
             } catch (leadErr) {
@@ -6443,6 +6444,7 @@ async function createSelfBooking(payload = {}) {
           source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
           customerId: custId,
           enforceOriginating: true,
+          bookingId: booking?.id || null,
           // The customer's own /book booking closes a preferred-time request as
           // 'handled' (closeBookedPreferredLeads below) — never wins it here.
           excludeCallbackRequests: true,

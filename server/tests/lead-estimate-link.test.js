@@ -1049,6 +1049,16 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(result).toMatchObject({ converted: true, leadIds: ['Lreq'] });
     });
 
+    test('bookingId rides to markConverted only when supplied (lineage persisted at the conversion; other callers unchanged)', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, contactLeads: [{ id: 'Lgen', status: 'new', lead_type: 'web_form', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' }] });
+      await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, bookingId: 'sba-9', database, leadAttributionService: { markConverted } });
+      expect(markConverted.mock.calls[0][1]).toEqual({ customerId: 'c1', triggerSource: 'recurring_service_booked', bookingId: 'sba-9' });
+      markConverted.mockClear();
+      await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+      expect(markConverted.mock.calls[0][1]).not.toHaveProperty('bookingId');
+    });
+
     test('both /book conversion calls (primary and replay) pass the flag', () => {
       const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
       const calls = src.match(/convertLeadFromEvent\(\{[^}]*\}\)/g) || [];

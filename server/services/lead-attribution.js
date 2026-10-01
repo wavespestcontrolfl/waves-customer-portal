@@ -177,7 +177,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // write must lose rather than overwrite its customer, codex #3834 r18 P1):
 // 0 rows ⇒ a concurrent transition wins and nothing below runs.
 // Returns whether the lead converted.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId } = {}) {
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -197,7 +197,14 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // carries no estimate settles under the SAME scope: without it, an admin
   // replay after a deposit on estimate B let the root linked to estimate A
   // take the funnel row and dropped the repeat's (codex #3834 r37 P1).
-  if (estimateId) updates.extracted_data = db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ won_estimate_id: String(estimateId) })]);
+  // The /book booking this conversion rode in on (optional), persisted in the SAME
+  // statement as the win so the lineage can never be lost to a crash after it
+  // (extracted_data.won_booking_id: booking-preferred-time.js reads it to tell
+  // which lead's funnel row replaces a closed preferred-time request's).
+  const wonFacts = {};
+  if (estimateId) wonFacts.won_estimate_id = String(estimateId);
+  if (bookingId) wonFacts.won_booking_id = String(bookingId);
+  if (Object.keys(wonFacts).length) updates.extracted_data = db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(wonFacts)]);
 
   // Soft-deleted leads are out of every live mutation path: 0 rows updated
   // means the lead is missing or deleted, and nothing below should run.

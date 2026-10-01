@@ -127,6 +127,42 @@ function runStageUpdate(db, target, scopeRows) {
   return run(db);
 }
 
+// Statuses that put a lead back among the prospects a funnel row counts: the open
+// statuses and won. Reaching one of them is what restores a missing row below.
+const RESTAMP_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'won'];
+
+/**
+ * A /book preferred-time request that closed itself as 'handled' gives up its
+ * funnel row once its booking has its own (booking-preferred-time.js). If staff
+ * then reopen it (or win it), the lead is a prospect again with no row, and a
+ * bridge UPDATE cannot create one. This is the ONE place every status writer
+ * already calls (admin Leads route, Intelligence Bar single and bulk, the won
+ * settlement), so it re-stamps the row from the lead's stored first-touch fields
+ * when a preferred-time request that has none reaches an open or won status.
+ * Only that lead type: every other lead without a row has none on purpose.
+ * Best-effort; a savepoint when the caller is inside a transaction.
+ */
+async function restampMissingPreferredRows(db, leadIds, leadStatus) {
+  const ids = (leadIds || []).filter(Boolean);
+  if (!ids.length || !RESTAMP_STATUSES.includes(leadStatus)) return 0;
+  const run = async (handle) => {
+    const rows = await handle('leads').whereIn('id', ids)
+      .where({ lead_type: 'book_preferred_time' }).whereNull('deleted_at')
+      .whereNotExists(function hasRow() { this.select(1).from('ad_service_attribution').whereRaw('ad_service_attribution.lead_id = leads.id'); });
+    let stamped = 0;
+    for (const row of rows) {
+      if (await stampLeadFunnelRow(handle, row, { rethrow: true })) stamped += 1;
+    }
+    return stamped;
+  };
+  try {
+    return db && db.isTransaction && typeof db.transaction === 'function' ? await db.transaction((sp) => run(sp)) : await run(db);
+  } catch (err) {
+    logger.warn(`[lead-funnel-bridge] preferred-request funnel row restamp failed (${leadStatus}): ${err.message}`);
+    return 0;
+  }
+}
+
 /**
  * bridgeLeadFunnelStage(leadId, leadStatus, database?, { onlyIfLead }?)
  * Advance the funnel row linked to `leadId` to the stage `leadStatus` maps to.
@@ -141,6 +177,7 @@ function runStageUpdate(db, target, scopeRows) {
 async function bridgeLeadFunnelStage(leadId, leadStatus, database = null, { onlyIfLead = null } = {}) {
   const db = database || require('../models/db');
   try {
+    await restampMissingPreferredRows(db, [leadId], leadStatus);
     const target = LEAD_STATUS_TO_FUNNEL_STAGE[leadStatus];
     if (!leadId || !target) return { updated: 0, reason: 'no_mapping' };
 
@@ -171,6 +208,7 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
   try {
     const target = LEAD_STATUS_TO_FUNNEL_STAGE[leadStatus];
     const ids = (leadIds || []).filter(Boolean);
+    await restampMissingPreferredRows(db, ids, leadStatus);
     if (!ids.length || !target) return { updated: 0, reason: 'no_mapping' };
 
     const updated = await runStageUpdate(db, target, (q) => q.whereIn('lead_id', ids));
@@ -301,6 +339,7 @@ async function stampLeadFunnelRow(database, lead, { customerId = null, serviceIn
 module.exports = {
   bridgeLeadFunnelStage,
   bridgeLeadsFunnelStage,
+  restampMissingPreferredRows,
   stampLeadFunnelRow,
   // exported for unit tests
   FUNNEL_STAGE_RANK,

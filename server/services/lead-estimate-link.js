@@ -1549,6 +1549,9 @@ async function convertLeadFromEvent({
   requireAcceptedEstimate = false,
   enforceOriginating = false,
   excludeCallbackRequests = false,
+  // The /book booking (self_booked_appointments id) the event is, persisted on the
+  // won lead by markConverted as extracted_data.won_booking_id.
+  bookingId = null,
   // The scheduled_services row the event is about (booked or completed).
   // A Waves Assessment is NOT a win (owner ruling 2026-09-08,
   // services/assessment-booking.js): the owner goes out to look and quote,
@@ -1715,6 +1718,7 @@ async function convertLeadFromEvent({
       if (estimateId) conversion.estimateId = estimateId;
       if (resolvedCustomerId) conversion.customerId = resolvedCustomerId;
       else if (lead.customer_id) conversion.customerId = lead.customer_id;
+      if (bookingId) conversion.bookingId = bookingId;
       // Pass revenue fields only when an estimate supplied them — otherwise
       // markConverted preserves whatever the lead already has.
       if (haveEstimateHints) {

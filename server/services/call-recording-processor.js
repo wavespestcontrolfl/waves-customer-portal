@@ -4910,7 +4910,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         // quote hides in a closed lead the pipeline view never shows.
         const currentLead = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .first('id', 'status');
         if (!currentLead) return false;
@@ -4921,7 +4921,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         }
         const claimed = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .update(claimUpdates);
         if (claimed) {
@@ -4963,13 +4963,13 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         q.whereNull('customer_id').orWhere('customer_id', customerId);
       const convertible = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .first('id');
       if (!convertible) return false;
       const updated = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .update({
           status: 'won',

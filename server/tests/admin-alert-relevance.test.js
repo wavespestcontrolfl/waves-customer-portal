@@ -359,13 +359,12 @@ describe('class rules', () => {
     expect(classify(note({ category: 'new_lead', link: '/admin/leads', metadata: { triggerKey: 'new_lead' } }))).toBeNull();
   });
 
-  test('new lead (codex #5477 r2 P1): a request closed as handled after the bell retires it, even though the lead is unlinked from any customer', async () => {
-    mockTables.leads = [lead({ status: 'handled', customer_id: null, updated_at: AFTER_BELL })];
-    expect((await reasonFor(leadNote())).reason).toBe('Request was handled');
-    // handled BEFORE the bell (a lead already handled when a later submission rang) stays relevant
-    mockTables.leads = [lead({ status: 'handled', customer_id: null, updated_at: BEFORE_BELL })];
-    expect((await reasonFor(leadNote())).reason).toBeNull();
-    // reopened by staff after being handled: relevant again (the sweep puts the bell back)
+  test('new lead (codex #5477 r2/r3 P1): a lead whose CURRENT status is handled is moved on whatever the timestamps say, even when the close landed before the bell', async () => {
+    for (const updated_at of [AFTER_BELL, BEFORE_BELL, undefined]) {
+      mockTables.leads = [lead({ status: 'handled', customer_id: null, updated_at })];
+      expect((await reasonFor(leadNote())).reason).toBe('Request was handled');
+    }
+    // reopened by staff after being handled: not handled any more, so relevant again (the sweep puts the bell back)
     mockTables.leads = [lead({ status: 'new', customer_id: null, updated_at: AFTER_BELL })];
     expect((await reasonFor(leadNote())).reason).toBeNull();
   });

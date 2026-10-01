@@ -438,6 +438,28 @@ jest.setTimeout(60000);
         expect(await requestRow(req.leadId)).toHaveLength(1);
       });
 
+      test('lineage persisted AT the conversion (won_booking_id): a replay with no in-memory ids and no audit ids still finds the genuine lead (crash between conversion and close)', async () => {
+        const { cust, req, booking, genuineId } = await setupConverted();
+        await database('leads').where({ id: genuineId }).update({ extracted_data: JSON.stringify({ won_booking_id: booking.id }) });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking }); // the replay's close: no ids
+        expect((await closeRows())[0].metadata.converted_lead_ids).toBeUndefined();
+        await attributeConverted(cust, booking);
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(1);
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+        expect(await requestRow(genuineId)).toHaveLength(1);
+      });
+
+      test('won_booking_id of ANOTHER booking, or a lead that is no longer won, is not lineage for this one', async () => {
+        const { cust, req, booking, genuineId } = await setupConverted();
+        await database('leads').where({ id: genuineId }).update({ extracted_data: JSON.stringify({ won_booking_id: randomUUID() }) });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        await attributeConverted(cust, booking);
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(0);
+        await database('leads').where({ id: genuineId }).update({ extracted_data: JSON.stringify({ won_booking_id: booking.id }), status: 'lost' });
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(0);
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+      });
+
       test('converted ids whose funnel row is still at an open stage are not a replacement', async () => {
         const { cust, req, booking, genuineId } = await setupConverted({ stage: 'contacted' });
         await closeBookedPreferredLeads(database, { customerId: cust, booking, convertedLeadIds: [genuineId] });

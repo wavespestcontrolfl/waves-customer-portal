@@ -403,7 +403,21 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   // rings.
   const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt, leadId });
 
+  // A booking can close the request between the reconcile above and the bell
+  // being written (the reconcile's lookup ran just before that booking
+  // committed): re-read THIS lead's status right before ringing, and stay silent
+  // for one that is already handled.
+  let closedMeanwhile = false;
   if (created && notify && !alreadyBooked) {
+    try {
+      const row = await db('leads').where({ id: leadId }).first('status');
+      closedMeanwhile = !!row && row.status === CLOSED_STATUS;
+    } catch (err) {
+      logger.warn(`[booking:preferred-time] pre-bell status recheck failed: ${err.message}`);
+    }
+  }
+
+  if (created && notify && !alreadyBooked && !closedMeanwhile) {
     try {
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('new_lead', {
@@ -593,8 +607,9 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
  * the submit's reconcileBookingSince, or a replay): each calls this after its
  * own step and whichever runs SECOND, once the booking's row exists, deletes.
  * Idempotent. The replacement (a row keyed to this booking's id, or the booked /
- * completed row of a genuine lead THIS booking converted: ids passed by the
- * booking path or persisted on its close audit row) belonging to another lead is
+ * completed row of a genuine lead THIS booking converted: won_booking_id stamped
+ * on the lead by the conversion itself, or ids passed by the booking path or
+ * persisted on its close audit row) belonging to another lead is
  * verified in the same statement as the delete, and a row already at booked /
  * completed (revenue attached) is never removed.
  * Best-effort: never throws into the booking. Returns the rows removed.
@@ -639,6 +654,14 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
             if (converted.length) {
               q.orWhere((c) => c.whereIn('booked.lead_id', converted).whereIn('booked.funnel_stage', ['booked', 'completed']));
             }
+            // Lineage persisted AT the conversion: a lead this booking won carries
+            // extracted_data.won_booking_id (written by the conversion in the same statement as the win),
+            // so a crash between the conversion and the close loses nothing.
+            q.orWhere((c) => c.whereIn('booked.funnel_stage', ['booked', 'completed'])
+              .whereIn('booked.lead_id', function convertedByThisBooking() {
+                this.select('w.id').from('leads as w').whereNull('w.deleted_at').where('w.status', 'won')
+                  .whereRaw("w.extracted_data->>'won_booking_id' = ?", [String(booking.id)]);
+              }));
           });
       })
       .del()) || 0;

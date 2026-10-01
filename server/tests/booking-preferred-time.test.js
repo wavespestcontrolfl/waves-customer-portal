@@ -24,6 +24,7 @@ const mockRaws = [];            // whereRaw calls (query-shape asserts)
 let mockOpenLeadsNewerOnly = false; // every open preferred lead was requested AFTER the booking (the <= cutoff excludes them)
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
+let mockStatusRead = null;      // overrides the submitted request's own status read (null = derived from this run's writes)
 let mockLockedLead = null;     // what the note transaction's leads ... FOR UPDATE re-read returns
 
 function builder(table) {
@@ -54,7 +55,7 @@ function builder(table) {
     first: (...cols) => Promise.resolve(
       table === 'leads' && cols.length === 1 && cols[0] === 'status'
         // the reconcile's read of the SUBMITTED request's own status: handled once this run closed it
-        ? { status: mockOps.some((o) => o.table === 'leads' && o.op === 'update' && o.arg && o.arg.status === 'handled') ? 'handled' : 'new' }
+        ? { status: mockStatusRead || (mockOps.some((o) => o.table === 'leads' && o.op === 'update' && o.arg && o.arg.status === 'handled') ? 'handled' : 'new') }
         : table === 'leads' ? (b._forUpdate ? mockLockedLead : mockExistingLead)
         : table === 'customers' ? mockCustomer
           : table === 'self_booked_appointments as sba' ? mockBookedSince
@@ -194,6 +195,7 @@ beforeEach(() => {
   mockOpenLeads = [];
   mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample', email: null, requested_in_time: true };
   mockLeadUpdateRows = 1;
+  mockStatusRead = null;
   mockRetireError = null;
   mockBookedSince = null;
   mockOpenLeadsNewerOnly = false;
@@ -505,6 +507,18 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(mockMarkConverted).not.toHaveBeenCalled();
     expect(mockTriggerNotification).not.toHaveBeenCalled();
     expect(mockSendSMS).not.toHaveBeenCalled();
+  });
+
+  test('pre-bell recheck (codex #5477 r3 P1): the reconcile saw no booking, but a booking handled the request before the bell is written -> no new_lead bell', async () => {
+    mockStatusRead = 'handled'; // the status read right before the bell
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    // still open at that read: the bell rings as before
+    mockTriggerNotification.mockClear();
+    mockStatusRead = 'new';
+    await post(baseUrl, { ...validBody({ phone: '(941) 555-0111' }), capture_token: loopbackToken() });
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
 
   test('a race booking never wins the lead or touches its funnel row (even with several open requests: each closes as handled, none converted)', async () => {
@@ -995,6 +1009,9 @@ describe('a completed booking closes the customer\'s open preferred-time request
     const replaySrc = src.slice(replayStart, replayEnd);
     expect(replaySrc).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing, convertedLeadIds: replayConvertedLeadIds \}\);/);
     const normal = src.slice(replayEnd);
+    // both conversions carry the booking id: the lineage is persisted on the won lead AT the conversion
+    expect(normal).toMatch(/bookingId: booking\?\.id \|\| null,/);
+    expect(replaySrc).toMatch(/bookingId: txResult\.existing\.id,/);
     expect(normal).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking, convertedLeadIds \}\);/);
     // The request's funnel row is dropped by whichever closer runs SECOND: the normal path after attributeSelfBooking
     // (only when it attributed), the replay path after its close, and the submit's reconcile after its close.
