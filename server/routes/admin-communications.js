@@ -925,7 +925,7 @@ router.post('/sms', async (req, res, next) => {
           async () => {
             const consent = await ReviewService.reviewSmsAllowedNow(rr.customer_id);
             if (!consent.allowed) return { consent };
-            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
+            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id, { staffComposer: true });
             if (!gate.allowed) return { gate };
             // The send-time click guard every review sender uses: a customer who
             // tapped a tracked review link since this draft's anchor is not asked again.

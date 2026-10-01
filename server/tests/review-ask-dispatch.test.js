@@ -2,6 +2,7 @@ jest.mock('../services/review-ask-history', () => ({
   ASK_SPACING_MS: 72 * 3600000,
   lastDeliveredAskAt: jest.fn(async () => null),
   lastManualAskAt: jest.fn(async () => null),
+  lastUnresolvedAskAt: jest.fn(async () => null),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/review-click-guard', () => ({
@@ -23,6 +24,7 @@ describe('review ask dispatch boundary', () => {
     jest.useFakeTimers().setSystemTime(now);
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
+    history.lastUnresolvedAskAt.mockReset().mockResolvedValue(null);
     lock.runExclusive.mockReset().mockImplementation(async (_key, callback) => callback());
     guard.askIdSuppressedByClick.mockReset().mockResolvedValue(false);
   });
@@ -77,6 +79,42 @@ describe('review ask dispatch boundary', () => {
       expect(provider).toHaveBeenCalledTimes(1);
       expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
       expect(history.lastManualAskAt).not.toHaveBeenCalled();
+    });
+
+    test('an unresolved prior send still blocks, excluding this attempt\'s own reservation', async () => {
+      history.lastUnresolvedAskAt.mockResolvedValue(recent());
+      const provider = jest.fn();
+      expect(await dispatchReviewAsk('customer', provider, { skipSpacing: true, excludeReservationId: 'own' }))
+        .toMatchObject({ sent: false, blocked: true, code: 'REVIEW_SEND_UNRESOLVED', httpStatus: 409,
+          reason: 'A review text to this customer is still being confirmed. Check the thread before sending again.' });
+      expect(provider).not.toHaveBeenCalled();
+      expect(history.lastUnresolvedAskAt).toHaveBeenCalledWith('customer', {
+        since: new Date(now.getTime() - history.ASK_SPACING_MS), excludeReservationId: 'own',
+      });
+    });
+
+    test('an unreadable unresolved-send lookup fails closed with a 503', async () => {
+      history.lastUnresolvedAskAt.mockRejectedValue(new Error('db down'));
+      const provider = jest.fn();
+      expect(await dispatchReviewAsk('customer', provider, { skipSpacing: true }))
+        .toMatchObject({ sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503 });
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    test('the unresolved lookup runs in the same lock hold as the send', async () => {
+      let held = false;
+      lock.runExclusive.mockImplementation(async (_key, callback) => {
+        held = true;
+        try { return await callback(); } finally { held = false; }
+      });
+      history.lastUnresolvedAskAt.mockImplementation(async () => { expect(held).toBe(true); return null; });
+      expect(await dispatchReviewAsk('customer', async () => ({ sent: true }), { skipSpacing: true })).toEqual({ sent: true });
+      expect(history.lastUnresolvedAskAt).toHaveBeenCalledTimes(1);
+    });
+
+    test('other callers never consult the unresolved lookup', async () => {
+      await dispatchReviewAsk('customer', async () => ({ sent: true }));
+      expect(history.lastUnresolvedAskAt).not.toHaveBeenCalled();
     });
 
     test('still runs under the per-customer lock, so it serializes with the automatic sender', async () => {

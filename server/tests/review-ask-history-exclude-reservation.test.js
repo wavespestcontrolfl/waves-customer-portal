@@ -14,7 +14,7 @@
 
 jest.mock('../models/db', () => jest.fn());
 const db = require('../models/db');
-const { lastManualAskAt } = require('../services/review-ask-history');
+const { lastManualAskAt, lastUnresolvedAskAt } = require('../services/review-ask-history');
 
 function makeSmsLogQuery(rows) {
   let filtered = rows.slice();
@@ -117,5 +117,46 @@ describe('a composer-sent staff review ask stays spacing evidence for the automa
       }])
       : { where: () => ({ whereNotNull: () => ({ select: async () => [] }) }) }));
     expect(await lastManualAskAt('cust-A', { since: new Date(now.getTime() - 72 * 3600000) })).toEqual(sentAt);
+  });
+});
+
+describe('lastUnresolvedAskAt — only in-flight or uncertain sends, never confirmed asks', () => {
+  const now = new Date('2040-01-10T16:00:00Z');
+  const since = new Date(now.getTime() - 72 * 3600000);
+  const wire = rows => db.mockImplementation((table) => (table === 'sms_log'
+    ? makeSmsLogQuery(rows)
+    : { where: () => ({ whereNotNull: () => ({ select: async () => [] }) }) }));
+  beforeEach(() => { jest.useFakeTimers().setSystemTime(now); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('an unresolved (sending) or recovered-failed reservation counts', async () => {
+    const at = new Date(now.getTime() - 60000);
+    wire([{ id: 'r1', customer_id: 'cust-A', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: at }]);
+    expect(await lastUnresolvedAskAt('cust-A', { since })).toEqual(at);
+    wire([{ id: 'r2', customer_id: 'cust-A', direction: 'outbound', status: 'failed', metadata: { review_ask_reservation: true }, created_at: at }]);
+    expect(await lastUnresolvedAskAt('cust-A', { since })).toEqual(at);
+  });
+
+  test('a confirmed reservation or a confirmed manual ask does not count', async () => {
+    const at = new Date(now.getTime() - 60000);
+    wire([
+      { id: 'r1', customer_id: 'cust-A', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: at },
+      { id: 'm1', customer_id: 'cust-A', direction: 'outbound', status: 'delivered', message_body: 'Review us: https://g.page/r/example/review', metadata: {}, created_at: at },
+    ]);
+    expect(await lastUnresolvedAskAt('cust-A', { since })).toBeNull();
+  });
+
+  test('the caller\'s own reservation and another customer\'s reservation do not count', async () => {
+    const at = new Date(now.getTime() - 60000);
+    wire([
+      { id: 'own', customer_id: 'cust-A', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: at },
+      { id: 'other', customer_id: 'cust-B', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: at },
+    ]);
+    expect(await lastUnresolvedAskAt('cust-A', { since, excludeReservationId: 'own' })).toBeNull();
+  });
+
+  test('an unresolved reservation older than the window does not count', async () => {
+    wire([{ id: 'old', customer_id: 'cust-A', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date(now.getTime() - 80 * 3600000) }]);
+    expect(await lastUnresolvedAskAt('cust-A', { since })).toBeNull();
   });
 });

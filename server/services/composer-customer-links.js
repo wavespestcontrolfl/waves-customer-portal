@@ -78,7 +78,7 @@ async function buildReviewRequestLink(customerId) {
   const minted = await runExclusive(
     `review-send:${customerId}`,
     async () => {
-      const gate = await ReviewService.checkUnscheduledAskGates(customerId);
+      const gate = await ReviewService.checkUnscheduledAskGates(customerId, { staffComposer: true });
       if (!gate.allowed) return { gate };
       return { inline: await ReviewService.createInline({ customerId, armSafetyNet: false }) };
     },

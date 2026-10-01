@@ -25,7 +25,9 @@ async function clickGate(reviewRequestId) {
 // check, the per-customer lock (it still serializes with the automatic sender),
 // the busy-lock refusal and the click gate are unchanged. The send itself still
 // lands in sms_log, where lastManualAskAt sees it, so automatic asks keep their
-// spacing around it.
+// spacing around it. Confirmed prior asks never block it, but an UNRESOLVED
+// review-ask reservation (a send whose outcome is in flight or uncertain, other
+// than this attempt's own) still does, so a retry cannot double-text.
 async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null, skipSpacing = false } = {}) {
   if (!customerId) return { sent: false, blocked: true, code: 'REVIEW_CUSTOMER_REQUIRED',
     reason: 'Select the customer receiving this review request before sending.', httpStatus: 409 };
@@ -37,7 +39,20 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
       reason: require('./review-click-guard').REVIEW_LINK_CLICKED_REASON, httpStatus: 409 };
     if (click === 'unknown') return { sent: false, blocked: true, code: 'REVIEW_CLICK_STATE_UNAVAILABLE',
       reason: 'Could not confirm whether this customer already tapped their review link. Try again shortly.', httpStatus: 503 };
-    if (skipSpacing) return dispatch();
+    if (skipSpacing) {
+      let unresolvedAt;
+      try {
+        unresolvedAt = await history.lastUnresolvedAskAt(customerId, {
+          since: new Date(Date.now() - history.ASK_SPACING_MS), excludeReservationId,
+        });
+      } catch {
+        return { sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE',
+          reason: 'Could not verify recent review requests. Try again after review history is available.', httpStatus: 503 };
+      }
+      if (unresolvedAt) return { sent: false, blocked: true, code: 'REVIEW_SEND_UNRESOLVED',
+        reason: 'A review text to this customer is still being confirmed. Check the thread before sending again.', httpStatus: 409 };
+      return dispatch();
+    }
     let pipelineAt;
     let manualAt;
     try {

@@ -429,6 +429,8 @@ describe('buildReviewRequestLink', () => {
       token: 'tok',
     });
     const r = await buildReviewRequestLink('c1');
+    // The staff composer skips the cadence block and 30-day cooldown only.
+    expect(ReviewService.checkUnscheduledAskGates).toHaveBeenCalledWith('c1', { staffComposer: true });
     expect(r.url).toContain('/l/rv123');
     expect(r.requestId).toBe('rr-1');
     expect(r.line).toContain(r.url);
@@ -436,10 +438,10 @@ describe('buildReviewRequestLink', () => {
 
   test('a gate-blocked customer gets the reason, not a mint', async () => {
     mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
-    ReviewService.checkUnscheduledAskGates.mockResolvedValueOnce({ allowed: false, outcome: 'cooldown' });
+    ReviewService.checkUnscheduledAskGates.mockResolvedValueOnce({ allowed: false, outcome: 'at_cap' });
     const r = await buildReviewRequestLink('c1');
     expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/last 30 days/);
+    expect(r.reason).toMatch(/3 review requests/);
     expect(ReviewService.createInline).not.toHaveBeenCalled();
   });
 

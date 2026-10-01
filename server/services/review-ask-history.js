@@ -109,7 +109,7 @@ async function lastDeliveredAskAt(customerId, options) {
 
 // Lookups throw: dispatch callers must hold when evidence is unavailable.
 // The enrollment standdown retains its explicit fail-open wrapper.
-async function lastManualAskAt(customerId, { since, includeReservations = true, excludeReservationId = null } = {}) {
+async function lastManualAskAt(customerId, { since, includeReservations = true, excludeReservationId = null, unresolvedOnly = false } = {}) {
   const sinceAt = since ? new Date(since) : new Date(Date.now() - 30 * 86400000);
   const fetchFloor = new Date(sinceAt.getTime() - 90000);
   const rows = await db('sms_log')
@@ -163,6 +163,9 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
     const at = new Date(row.created_at);
     return at >= sinceAt && (!latest || at > latest) ? at : latest;
   }, null);
+  // unresolvedOnly: just the in-flight / unconfirmed reservation evidence
+  // above, with no manual-ask candidates and no review_requests lookup.
+  if (unresolvedOnly) return reservedAt;
   const candidates = outbound.filter(row => {
     const meta = metadata(row);
     if ((isReviewReservation(row) && !isConfirmed(row)) || (row.status === 'sending' && !meta.finalize_only)) return false;
@@ -217,4 +220,11 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
   return reservedAt && (!manualAt || reservedAt > manualAt) ? reservedAt : manualAt;
 }
 
-module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt };
+// When the newest UNRESOLVED review-ask reservation (a send whose outcome is
+// in flight or uncertain, not confirmed delivered) was opened, inside `since`.
+// Confirmed asks never count. Throws on a read failure: callers fail closed.
+async function lastUnresolvedAskAt(customerId, { since, excludeReservationId = null } = {}) {
+  return lastManualAskAt(customerId, { since, excludeReservationId, unresolvedOnly: true });
+}
+
+module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };

@@ -5682,17 +5682,22 @@ const ReviewService = {
    *
    * isAsk=false (private no-link check-ins) bypasses everything by design.
    *
+   * staffComposer=true (the staff Messages composer's review link only): a
+   * person deliberately sending a review link skips the active-cadence block
+   * and the 30-day cooldown. The 3-in-180-day cap and the queued/in-flight
+   * checks still apply. Default false: every other caller is unchanged.
+   *
    * @returns {{allowed: boolean, outcome?: string, nextAllowedAt?: *}}
    */
-  async checkUnscheduledAskGates(customerId, { isAsk = true } = {}) {
+  async checkUnscheduledAskGates(customerId, { isAsk = true, staffComposer = false } = {}) {
     if (!isAsk) return { allowed: true };
-    if (await this._activeCadenceFor(customerId)) return { allowed: false, outcome: "in_cadence" };
+    if (!staffComposer && await this._activeCadenceFor(customerId)) return { allowed: false, outcome: "in_cadence" };
 
     const thirtyDaysAgo = Date.now() - 30 * 86400000;
     // No .catch → a DB error throws instead of silently reading as zero asks.
     const stats = await this.getDeliveredAskStats(customerId);
     if (stats.count >= 3) return { allowed: false, outcome: "at_cap" };
-    if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+    if (!staffComposer && stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
       return { allowed: false, outcome: "cooldown" };
     }
 

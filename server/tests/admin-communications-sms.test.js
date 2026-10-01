@@ -141,6 +141,7 @@ jest.mock('../services/review-ask-history', () => ({
   ...jest.requireActual('../services/review-ask-history'),
   lastDeliveredAskAt: jest.fn(async () => null),
   lastManualAskAt: jest.fn(async () => null),
+  lastUnresolvedAskAt: jest.fn(async () => null),
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_key, fn) => fn()),
@@ -2546,6 +2547,7 @@ describe('Communications review ask serialization', () => {
     mockGates.smsGratitudeReplies = false;
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
+    history.lastUnresolvedAskAt.mockReset().mockResolvedValue(null);
     locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
       if (held.has(key)) return { skipped: true, reason: 'lease_held' };
       held.add(key);
@@ -2827,9 +2829,11 @@ describe('Communications review ask serialization', () => {
     // excludeReservationId: the claimed-link seam reserves before
     // dispatchReviewAsk's own spacing check now, so this attempt's own row
     // must not self-block it (kind !== 'bare' routes through that seam).
-    history.lastManualAskAt.mockImplementation(async (customerId, opts = {}) => reservations().some(row =>
+    const ledgerEvidence = async (customerId, opts = {}) => reservations().some(row =>
       row.customer_id === customerId && row.metadata.review_ask_reservation
-      && row.id !== opts.excludeReservationId) ? new Date() : null);
+      && row.id !== opts.excludeReservationId) ? new Date() : null;
+    history.lastManualAskAt.mockImplementation(ledgerEvidence);
+    history.lastUnresolvedAskAt.mockImplementation(ledgerEvidence);
     // Exercise the actual adapter's classification, including its thrown-error
     // path. The wrapper's post-provider audit failure preserves this outcome.
     require('../services/twilio').sendSMS = jest.fn(async () => {
@@ -2851,10 +2855,14 @@ describe('Communications review ask serialization', () => {
         if (retained) expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
         else expect(reviews.releaseInlineClaim).toHaveBeenCalled();
       }
-      // The automatic sequence's spacing read still sees an uncertain ask
-      // (staff composer sends themselves skip spacing, so no retry is blocked).
+      // The automatic sequence's spacing read still sees an uncertain ask,
+      // and a composer retry is held while that outcome is unresolved (it
+      // skips spacing, not the unresolved-send protection).
       expect(!!(await history.lastManualAskAt('cust-A', {}))).toBe(retained);
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const retry = await send(baseUrl);
+      expect(retry.status).toBe(retained ? 409 : 200);
+      if (retained) expect((await retry.json()).code).toBe('REVIEW_SEND_UNRESOLVED');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(retained ? 1 : 2);
     });
   });
 
@@ -2934,6 +2942,33 @@ describe('Communications review ask serialization', () => {
     });
     expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
     expect(history.lastManualAskAt).not.toHaveBeenCalled();
+  });
+  test('a composer review send is held while an earlier send to the customer is unresolved, and its claim is released', async () => {
+    history.lastUnresolvedAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.code).toBe('REVIEW_SEND_UNRESOLVED');
+      expect(body.error).toMatch(/still being confirmed/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', true);
+    });
+  });
+  test('the unresolved lookup failing holds the composer send with a 503', async () => {
+    history.lastUnresolvedAskAt.mockRejectedValue(new Error('history unavailable'));
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(503);
+      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('the send seam runs the unscheduled-ask gate as the staff composer (cadence and cooldown skipped)', async () => {
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(200);
+    });
+    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledWith('cust-A', { staffComposer: true });
   });
   test('an unavailable review history does not hold a composer review send', async () => {
     history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
