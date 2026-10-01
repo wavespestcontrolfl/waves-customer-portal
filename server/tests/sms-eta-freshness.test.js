@@ -1970,15 +1970,22 @@ describe('plural route claims bind every snapshot entry, link or not', () => {
   test('a singular claim with no link and several entries stays ambiguous (unchanged)', async () => {
     expect(await run('Your tech is on the way.', both)).toBe('eta_claim_ambiguous');
   });
-  test('an arrived claim in the plural binds every on-site entry; en-route entries are not required to be on site', async () => {
-    const mixed = { entries: [entry('svc-1', 'tok-1', { state: 'on_property' }), entry('svc-2', 'tok-2')] };
-    const onSite = [row('svc-1', 'tok-1', { status: 'on_site', track_state: 'on_property' }), row('svc-2', 'tok-2')];
-    expect(await run('Our team has arrived.', onSite, mixed)).toBeNull();
-    expect(await run('Our team has arrived.', [row('svc-1', 'tok-1'), row('svc-2', 'tok-2')], mixed)).toBe('eta_claim_no_longer_en_route');
+  // Codex #5334 P2: a plural subject speaks for EVERY live stop, so one stop in another state makes it false.
+  const mixed = { entries: [entry('svc-1', 'tok-1', { state: 'on_property' }), entry('svc-2', 'tok-2')] };
+  const mixedRows = [row('svc-1', 'tok-1', { status: 'on_site', track_state: 'on_property' }), row('svc-2', 'tok-2')];
+  test('a plural arrived claim is REJECTED while another stop is still en route (not bound to the on-site subset)', async () => {
+    expect(await run('Our team has arrived.', mixedRows, mixed)).not.toBeNull();
   });
-  test('a plural en-route claim ignores an on-site entry (only en-route stops can be on the way)', async () => {
-    const mixed = { entries: [entry('svc-1', 'tok-1', { state: 'on_property' }), entry('svc-2', 'tok-2')] };
-    expect(await run('Your techs are on the way.', [row('svc-1', 'tok-1', { status: 'on_site', track_state: 'on_property' }), row('svc-2', 'tok-2')], mixed)).toBe(null);
+  test('a plural en-route claim is REJECTED while another stop is already on site (not bound to the en-route subset)', async () => {
+    expect(await run('Your techs are on the way.', mixedRows, mixed)).not.toBeNull();
+  });
+  test('a plural arrived claim passes only when EVERY stop is on site', async () => {
+    const bothOnSite = { entries: [entry('svc-1', 'tok-1', { state: 'on_property' }), entry('svc-2', 'tok-2', { state: 'on_property' })] };
+    const rows = [row('svc-1', 'tok-1', { status: 'on_site', track_state: 'on_property' }), row('svc-2', 'tok-2', { status: 'on_site', track_state: 'on_property' })];
+    expect(await run('Our team has arrived.', rows, bothOnSite)).toBeNull();
+  });
+  test('a SINGULAR claim still narrows by claimed state (one en-route beside one on-site leaves one candidate)', async () => {
+    expect(await run('Your tech is on the way.', mixedRows, mixed)).toBeNull();
   });
 });
 
@@ -2162,9 +2169,15 @@ describe('status claims naming a technician assigned after the snapshot', () => 
   test('"Dana\'s order is on the way." stays a non-claim: a capitalized word is a subject only when it is an assigned technician', async () => {
     expect(await run("Dana's order is on the way.", dbFor({ visits: [visit({ technician_id: 'tech-2' })], techNames: { 'tech-2': 'Alex' } }))).toBeNull();
   });
-  test('an unreadable name lookup falls back to the draft\'s names (earlier behavior), never throws', async () => {
+  test('an unreadable name lookup FAILS CLOSED on the retryable infrastructure reason (never passes the body unchecked)', async () => {
     const broken = (table) => (table === 'technicians' ? { whereIn: () => { throw new Error('db down'); } } : { whereIn: () => ({ select: async () => dated([visit({ technician_id: 'tech-2' })]) }) });
-    expect(await run('Alex is on the way.', broken)).toBeNull();
+    const out = await run('Alex is on the way.', broken);
+    expect(out).toBe('eta_claim_recheck_failed');
+    expect(require('../services/sms-eta-freshness').isEtaInfrastructureFailure(out)).toBe(true);
+  });
+  test('a body with no status vocabulary never touches the name lookup, so an outage cannot block it', async () => {
+    const broken = () => { throw new Error('db down'); };
+    expect(await run('Thanks, 5 stars!', broken)).toBeNull();
   });
   test('names the draft already recorded keep their path (no extra reads)', async () => {
     const lookups = jest.fn();
@@ -2204,9 +2217,23 @@ describe('status wording with no snapshot (GATE_SMS_REAL_ANSWERS on)', () => {
   ])('%p is not current status wording: untouched', async (body) => {
     expect(await noSnap(body)).toBeNull();
   });
-  test('the approved SLA wording keeps its exemption', async () => {
-    expect(await noSnap('Your technician is nearby and should arrive within the hour.')).toBeNull();
-    expect(await noSnap('Sorry about that — someone will follow up within the hour.')).toBeNull();
+  // Codex #5334 P2: the SLA exemption covers genuine OFFICE CALLBACK copy only, never technician status/arrival that reuses the phrase.
+  test('the approved SLA wording keeps its exemption for genuine office callbacks', async () => {
+    for (const body of [
+      'Sorry about that — someone will follow up within the hour.',
+      "I'll call you within the hour to confirm.",
+      'Thanks for waiting. Our office will text you within the hour. We appreciate it!',
+      "We'll get back to you by 9 AM tomorrow morning.",
+    ]) expect(await noSnap(body)).toBeNull();
+  });
+  test.each([
+    'Your technician is nearby and should arrive within the hour.',
+    'The tech should be there within the hour.',
+    'Sorry for the wait. Your technician is nearby and should arrive within the hour.',
+    'Someone will follow up within the hour. Your tech is on the way.',
+    'We will call you within the hour; the tech is outside.',
+  ])('%p is technician status wording even with the SLA phrase: held without a LIVE STATUS fact', async (body) => {
+    expect(await noSnap(body)).toBe('eta_claim_no_snapshot');
   });
   test('a snapshot-backed status claim is still bound by the snapshot (unchanged)', async () => {
     const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
@@ -2248,7 +2275,7 @@ describe('persisted tech_names classify name-subjected status wording with no sn
   test('questions, negations and the SLA wording keep their exemptions', async () => {
     expect(await run('Is Sam on the way?', ['Sam'])).toBeNull();
     expect(await run("Sam isn't on the way yet.", ['Sam'])).toBeNull();
-    expect(await run('Sam should arrive within the hour.', ['Sam'])).toBeNull();
+    expect(await run('Sam should arrive within the hour.', ['Sam'])).toBe('eta_claim_no_snapshot'); // Codex #5334 P2: not an office callback
   });
   test('names persisted beside a snapshot union with the entries\' own names', async () => {
     const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', technicianNames: ['Alex'] }] };
@@ -2297,7 +2324,9 @@ describe('no-snapshot strictness follows the persisted prompt version', () => {
     expect(await run('  ', true)).toBe('eta_claim_no_snapshot');
   });
   test('the SLA wording keeps its exemption for v12 decisions', async () => {
-    expect(await run('house_voice_v12_real_answers', false, 'Your technician is nearby and should arrive within the hour.')).toBeNull();
+    expect(await run('house_voice_v12_real_answers', false, 'Sorry about that — someone will follow up within the hour.')).toBeNull();
+    // Codex #5334 P2: technician arrival reusing the phrase is not an office callback
+    expect(await run('house_voice_v12_real_answers', false, 'Your technician is nearby and should arrive within the hour.')).toBe('eta_claim_no_snapshot');
   });
   test('non-status copy is untouched for v12', async () => {
     expect(await run('house_voice_v12_real_answers', false, 'Thanks, 5 stars!')).toBeNull();

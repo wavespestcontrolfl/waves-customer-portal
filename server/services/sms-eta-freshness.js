@@ -299,10 +299,27 @@ function classifyStatusClaims(drafter, outgoingBody, { liveContext, snapshotHasE
 // exemption.
 function classifyUngroundedStatus(drafter, outgoingBody, { liveContext, techNames, promptVersion }) {
   return !liveContext && requiresLiveStatusEvidence(promptVersion)
-    && !require('./sms-followup-sla').replyPromisesFollowup(outgoingBody)
-    && Boolean(drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true, techNames })
-      || drafter.bodyMentionsArrival(outgoingBody, { techNames })
-      || drafter.bodyMentionsVisitStatus(outgoingBody, { techNames }));
+    && statusWordingIn(drafter, withoutOfficeFollowupSentences(outgoingBody), techNames);
+}
+function statusWordingIn(drafter, body, techNames) {
+  return Boolean(drafter.bodyHasTimedArrivalPhrase(body, { completedArrivalOnly: true, techNames })
+    || drafter.bodyMentionsArrival(body, { techNames })
+    || drafter.bodyMentionsVisitStatus(body, { techNames }));
+}
+// The approved follow-up SLA exemption covers genuine OFFICE CALLBACK sentences only (Codex #5334 P2): a sentence that carries an SLA
+// phrase ("within the hour"), a follow-up verb (follow up / call / text / get back / confirm ...) and NOTHING about a technician or
+// arrival ("someone will follow up within the hour"). "Your technician is nearby and should arrive within the hour" carries the same
+// phrase but asserts technician location/arrival, so it is NOT exempt and is held to LIVE STATUS like any other status wording.
+const OFFICE_FOLLOWUP_VERB_RE = /\b(?:follow(?:ing)?[\s-]?up|call(?:ing)?|text(?:ing)?|e-?mail(?:ing)?|reach(?:ing)?\s+out|get(?:ting)?\s+back|be\s+in\s+touch|contact(?:ing)?|let\s+you\s+know|respond|reply|confirm(?:ing)?)\b/i;
+const TECH_OR_ARRIVAL_WORDING_RE = /\b(?:tech(?:nician)?s?|drivers?|crews?|arriv\w*|en[\s-]?route|on\s+(?:the|his|her|their|our|my)\s+way|nearby|outside|there|here|pull(?:ed|ing)?\s+up|head(?:ing|ed)|coming|running)\b/i;
+function withoutOfficeFollowupSentences(body) {
+  const { SLA_PHRASES } = require('./sms-followup-sla');
+  return String(body || '').split(/(?<=[.!?])\s+|\n+/).filter((sentence) => {
+    const lower = sentence.toLowerCase();
+    const officeCallback = SLA_PHRASES.some((p) => lower.includes(p.toLowerCase()))
+      && OFFICE_FOLLOWUP_VERB_RE.test(sentence) && !TECH_OR_ARRIVAL_WORDING_RE.test(sentence);
+    return !officeCallback;
+  }).join(' ');
 }
 function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [], promptVersion = null }) {
   const drafter = require('./sms-shadow-drafter');
@@ -361,6 +378,10 @@ function draftFreshnessReason(factsGeneratedAt, now, entry = null) {
 // with several, the /track/ token in the body selects the entry it names
 // (Codex round-10 P2) — only an unselectable status claim is ambiguous.
 function bindStatusClaim(claim, entries) {
+  // Codex #5334 P2: a PLURAL subject ("Your techs are on the way", "Our team has arrived") speaks for EVERY live stop. It keeps every
+  // entry — no narrowing by the claimed state — and the liveness check that follows refuses the claim unless ALL of them are in the
+  // asserted state (one en-route tech beside one on-site tech makes either plural claim false).
+  if (claim.pluralSubject) return { entries: [...entries] };
   // Narrow by the CLAIMED state before deciding anything is ambiguous (Codex round-43 P2): an
   // en-route claim can only be about en-route stops, an arrived claim only about on-property
   // ones, so one en-route group beside one on-property group leaves exactly one candidate.
@@ -416,21 +437,18 @@ function mergeTechNames(persistedTechNames, liveEtaSnapshot) {
     ...(liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])),
   ]);
 }
-// First names of the technicians CURRENTLY assigned to the snapshot's visits (two small reads: visits -> technicians). A lookup
-// failure is not fatal here — it only widens classification, so on error the persisted names alone apply (the earlier behavior);
-// every recheck that follows a classified claim fails closed on its own reads.
+// Cheap gate for the name lookup: only a body with some status-ish vocabulary can be a status claim about a newly assigned technician,
+// so a plain "Thanks, 5 stars!" never pays for (or depends on) the extra reads. Deliberately broad; the real classification follows.
+const POSSIBLE_STATUS_WORDING_RE = /\b(?:en[\s-]?route|on\s+(?:the|his|her|their|our|my)\s+way|arriv\w*|head(?:ing|ed)|coming|driving|rolling|running|outside|nearby|pull(?:ed|ing)?\s+up|show(?:ed|ing)?\s+up|got\s+(?:there|here)|made\s+it|reached|almost\s+there|here|there|close|on[\s-]?site|left\s+(?:for|to)|late|behind|ahead)\b/i;
+// First names of the technicians CURRENTLY assigned to the snapshot's visits (two small reads: visits -> technicians). THROWS on a
+// read failure — the caller holds the send on the retryable infrastructure reason.
 async function currentAssignedTechNames(entries, dbh) {
-  try {
-    const visitIds = [...new Set(entries.flatMap((e) => e.scheduledServiceIds || []))];
-    const visits = await dbh('scheduled_services').whereIn('id', visitIds).select('technician_id');
-    const techIds = [...new Set((visits || []).map((v) => v?.technician_id).filter((id) => id != null))];
-    if (!techIds.length) return [];
-    const techs = await dbh('technicians').whereIn('id', techIds).select('name');
-    return (techs || []).map((t) => String(t?.name || '').trim().split(/\s+/)[0]).filter(Boolean);
-  } catch (err) {
-    logger.warn(`[sms-eta-freshness] current technician names unreadable: ${err.message}; classifying with the draft's names only`);
-    return [];
-  }
+  const visitIds = [...new Set(entries.flatMap((e) => e.scheduledServiceIds || []))];
+  const visits = await dbh('scheduled_services').whereIn('id', visitIds).select('technician_id');
+  const techIds = [...new Set((visits || []).map((v) => v?.technician_id).filter((id) => id != null))];
+  if (!techIds.length) return [];
+  const techs = await dbh('technicians').whereIn('id', techIds).select('name');
+  return (techs || []).map((t) => String(t?.name || '').trim().split(/\s+/)[0]).filter(Boolean);
 }
 // No claim and no link. Round-20 structural rule: wording classification decides WHICH claim to verify,
 // never WHETHER to recheck. A draft that carries a live-ETA/on-site snapshot and whose body touches
@@ -489,8 +507,18 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // matches no status predicate, so nothing would be rechecked. When the body classified as nothing against a live snapshot, widen the
   // subjects with the CURRENTLY assigned technicians of the snapshot's visits and classify once more; a hit then goes through the
   // normal visit/technician/state recheck (which refuses a reassigned visit). Capitalized words are still never subjects on their own.
-  if (entries.length && !claim.hasClaim && !claim.hasTrackLink && !claim.visitStatusMention && !claim.ungroundedStatus) {
-    const merged = sanitizeTechNames([...techNames, ...await currentAssignedTechNames(entries, dbh)]);
+  if (entries.length && !claim.hasClaim && !claim.hasTrackLink && !claim.visitStatusMention && !claim.ungroundedStatus
+    && POSSIBLE_STATUS_WORDING_RE.test(normalizeGsmPunctuation(String(outgoingBody || '')))) {
+    let assigned;
+    try {
+      assigned = await currentAssignedTechNames(entries, dbh);
+    } catch (err) {
+      // Codex #5334 P2: FAIL CLOSED. Without the current names this body cannot be ruled out as a status claim about the new technician, so it
+      // is held on the retryable infrastructure reason (never passed unchecked during an outage).
+      logger.warn(`[sms-eta-freshness] current technician names unreadable: ${err.message}; holding the send (retryable)`);
+      return 'eta_claim_recheck_failed';
+    }
+    const merged = sanitizeTechNames([...techNames, ...assigned]);
     if (merged.length > techNames.length) claim = classifyEtaBody({ outgoingBody, snapshotHasEntries, techNames: merged, promptVersion });
   }
   if (!claim.hasClaim && !claim.hasTrackLink) return recheckWithoutClaim(claim, entries, dbh);
