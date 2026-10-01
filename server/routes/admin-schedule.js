@@ -18496,6 +18496,11 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // shift and the series' occupied dates; null falls back to the cadence
   // generator (the series-end append). Only honoured with extendByOne.
   placementPicker = null,
+  // With a picked date: the plan position of the occurrence it replaces.
+  // Recurring add-ons follow that occurrence, not the off-cadence day the
+  // replacement lands on (a patterned add-on is due only on exact cadence
+  // dates, so the new day would silently drop it).
+  placementAddonDate = null,
 }) {
   const live = await liveUpcomingSeriesVisits(trx, parentId);
   const target = extendByOne
@@ -18690,7 +18695,8 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
+    const addonDate = (pickedDate && placementAddonDate) ? placementAddonDate : nd;
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -20294,7 +20300,7 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // included follow-ups would clamp live + 1 back to 24 and add nothing. The
 // cap is enforced here, on the plan-row population, instead.
 async function addOneReseedVisit(trx, {
-  parent, parentId, cols, upcomingPlanCount, anchorFloor, placementPicker = null,
+  parent, parentId, cols, upcomingPlanCount, anchorFloor, placementPicker = null, placementAddonDate = null,
 }) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
@@ -20317,6 +20323,7 @@ async function addOneReseedVisit(trx, {
       claimToken: null,
       ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
       placementPicker,
+      placementAddonDate,
     });
     return { added: result.added, reconcileParent, placement: result.placement || 'series_end' };
   } catch (e) {
@@ -20373,7 +20380,13 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
     })
     : null;
   const add = await addOneReseedVisit(trx, {
-    parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor, placementPicker,
+    parent,
+    parentId,
+    cols,
+    upcomingPlanCount: term.upcomingPlanCount,
+    anchorFloor: term.anchorFloor,
+    placementPicker,
+    placementAddonDate: placementPicker ? require('../services/recurring-series-cancel-reseed').planPositionDate(cancelled) : null,
   });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });

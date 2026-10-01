@@ -146,8 +146,33 @@ describe('wiring (source guards)', () => {
     expect(schedule).toMatch(/const extendDates = pickedDate \? \[pickedDate\] : planSeriesExtendDates\(/);
   });
 
+  test('an in-term replacement carries the add-ons of the occurrence it replaces', () => {
+    expect(schedule).toMatch(/const addonDate = \(pickedDate && placementAddonDate\) \? placementAddonDate : nd;\n\s+const dueAddons = filterAddonLinesForDate\(parentAddons, parent\.scheduled_date, addonDate,/);
+    expect(schedule).toMatch(/placementAddonDate: placementPicker \? require\('\.\.\/services\/recurring-series-cancel-reseed'\)\.planPositionDate\(cancelled\) : null,/);
+  });
+
   test('the stamp records where the visit went', () => {
     expect(schedule).toMatch(/overlap_dates: overlapDates, placement,/);
+  });
+});
+
+describe('recurring add-ons on an off-cadence day', () => {
+  // Why the replaced occurrence's date is used: a patterned add-on is due
+  // only on exact cadence dates, so the in-term day alone would drop it.
+  jest.resetModules();
+  const { filterAddonLinesForDate } = require('../routes/admin-schedule')._test;
+  const quarterlyAddon = [{ service_name: 'Quarterly add-on', recurring_pattern: 'quarterly' }];
+
+  test('the off-cadence day drops it; the replaced occurrence keeps it', () => {
+    const day = (n) => new Date(Date.parse('2026-06-08T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+    const dueDays = [];
+    for (let n = 1; n <= 120; n += 1) {
+      if (filterAddonLinesForDate(quarterlyAddon, '2026-06-08', day(n)).length) dueDays.push(day(n));
+    }
+    // The add-on's next cadence occurrence keeps it; the in-term day does not.
+    expect(dueDays).toHaveLength(1);
+    expect(dueDays).not.toContain('2026-10-07');
+    expect(filterAddonLinesForDate(quarterlyAddon, '2026-06-08', '2026-10-07')).toHaveLength(0);
   });
 });
 
