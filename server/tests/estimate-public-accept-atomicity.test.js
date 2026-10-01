@@ -2737,6 +2737,22 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(storedEstimate().status).not.toBe('accepted');
   });
 
+  test('gate ON, the transaction resolves a PAYER-billed customer: the fee is never deferred onto a card (409 with the real answer, nothing stamped)', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-payer-billed');
+    const Payer = require('../services/payer');
+    Payer.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    const response = await putAcceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(response.data.setupFeePromise).toBe(false);
+    // The ONLY payer lookup is the in-transaction one (the policy saw self-pay).
+    expect(Payer.resolveForInvoice).toHaveBeenCalledTimes(1);
+    expect(Payer.resolveForInvoice.mock.calls[0][0]).toMatchObject({ throwOnError: true });
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
   test('gate ON, the accept WOULD defer but the tab did not attest the promise (stale tab / older client): refused 409 for a refresh, nothing stamped or minted', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-unattested');

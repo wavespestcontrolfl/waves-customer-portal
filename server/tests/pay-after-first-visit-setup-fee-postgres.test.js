@@ -436,6 +436,44 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('a voided fee on a DEAD series is handed to the office (tagged with the invoice); un-void closes an open handoff and refuses one the office acted on', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId)).toMatchObject({ status: 200 });
+      const [inv] = await mockPg('invoices').where({ customer_id: f.customerId });
+      // The series ends: no visit can bill a restored stamp.
+      await mockPg('scheduled_services').whereIn('id', f.childIds).update({ status: 'cancelled' });
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'void' });
+      const Invoices = require('../services/invoice');
+      await Invoices.restoreRodentSetupObligationForReversedInvoice(mockPg, await mockPg('invoices').where({ id: inv.id }).first());
+      const [handoff] = await officeFeeAlerts(f);
+      expect(handoff).toBeTruthy();
+      expect(handoff.payload).toMatchObject({ sourceInvoiceId: String(inv.id), amount: SETUP_FEE });
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+
+      // Un-void while the office has not acted: the handoff is closed.
+      await Invoices.retireRodentSetupObligationForReinstatedInvoice(mockPg, inv.id, { strict: true });
+      expect((await mockPg('dispatch_alerts').where({ id: handoff.id }).first('resolved_at')).resolved_at).not.toBeNull();
+
+      // Had the office already acted on it, a strict un-void refuses (no double bill).
+      await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ resolved_at: new Date(Date.now() - 1000) });
+      await expect(Invoices.retireRodentSetupObligationForReinstatedInvoice(mockPg, inv.id, { strict: true }))
+        .rejects.toThrow(/handed to the office after it was voided/);
+    } finally { await cleanup(f); }
+  });
+
+  test('a free CALLBACK completing on a dues-covered series never hands the stranded setup fee to the office', async () => {
+    const f = await seed();
+    try {
+      await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 45 });
+      await makeDue(f.childIds[0]);
+      await mockPg('scheduled_services').where({ id: f.childIds[0] }).update({ is_callback: true, estimated_price: 0 });
+      expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
+      expect(await officeFeeAlerts(f)).toHaveLength(0);
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+    } finally { await cleanup(f); }
+  });
+
   // Terminal Codex pass 1 (P2): a NON-recurring booster/add-on under the plan
   // parent is not a plan application, so its completion never takes (or parks)
   // the plan's queued first-visit fee.

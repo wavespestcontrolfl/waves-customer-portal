@@ -175,6 +175,11 @@ describe('handleRefundFailed', () => {
       if (table === 'payments') return trxPaymentsQuery;
       if (table === 'invoices') return trxInvoicesQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      // The reinstatement's office-handoff reconcile (no PAF setup handoffs here).
+      if (table === 'dispatch_alerts') {
+        const q = { where: () => q, whereRaw: () => q, select: async () => [] };
+        return q;
+      }
       throw new Error(`Unexpected trx table: ${table}`);
     });
 

@@ -12626,7 +12626,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // is a monthly member the preview could not resolve, a gate or rail
           // flipped, a stale tab) refuses retryably — the whole accept rolls
           // back — so the customer is never billed differently than shown.
-          const deferPromisedNow = deferShapeEligible && deferLaneIsPerApplication;
+          // A customer the TRANSACTION resolved (e.g. a phone match) whose bills
+          // go to a third-party payer is never the "saved card billed after the
+          // first visit" promise: the payer is invoiced, so the fee is not
+          // deferred onto a card (fail closed: an unreadable payer throws and
+          // the accept rolls back).
+          const deferPayerBilled = deferShapeEligible && deferLaneIsPerApplication
+            && !!(await require('../services/payer').resolveForInvoice({
+              database: trx,
+              customerId,
+              scheduledServiceId: standardConversionResult?.firstScheduledServiceId || null,
+              throwOnError: true,
+            }))?.payerId;
+          const deferPromisedNow = deferShapeEligible && deferLaneIsPerApplication && !deferPayerBilled;
           setupFeePromiseEvaluated = true;
           if (setupFeeAfterVisitAttested !== deferPromisedNow) {
             logger.warn(`[estimate-accept] setup-fee terms differ for estimate ${estimate.id} (tab rendered the first-visit promise: ${setupFeeAfterVisitAttested}, accept would apply it: ${deferPromisedNow}) — refusing for a refresh`);

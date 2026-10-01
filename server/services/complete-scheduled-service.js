@@ -8883,7 +8883,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // declined / inspection-only visit, a backfill or a recap-only record
         // performed no application, so the stamp stays for the visit that does.
         if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length
-          && visitPerformed && require('../services/setup-fee-obligation').isPlanApplicationRow(svc) && !isIncompleteVisit && !isBackfillCompletion && !recapReviewOnly) {
+          && visitPerformed && require('../services/setup-fee-obligation').isPlanApplicationRow(svc) && !isIncompleteVisit && !isBackfillCompletion && !recapReviewOnly
+          && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
           const { parkSetupFeeStampForOffice } = require('../services/setup-fee-obligation');
           const parked = [];
           for (const stamp of obligation.unconsumableStamps) {

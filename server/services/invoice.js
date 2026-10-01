@@ -10616,6 +10616,19 @@ const InvoiceService = {
         const restamped = await conn("scheduled_services").where({ id: anchorId }).whereNull("pending_setup_fee")
           .update({ pending_setup_fee: amount, updated_at: new Date() });
         if (restamped !== 1) return null;
+        // A DEAD series (cancelled / completed, no live child) can never bill
+        // the restored stamp: hand it to the office now, tagged with this
+        // invoice so un-voiding it reconciles the handoff
+        // (retireRodentSetupObligationForReinstatedInvoice).
+        const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status");
+        if (!(await require("./secure-appointment-plans").seriesCanStillConsume(conn, anchorRow))) {
+          await require("./setup-fee-obligation").parkSetupFeeStampForOffice(conn, {
+            parentId: anchorId, rawAmount: amount, customerId: invoiceRow.customer_id,
+            estimateId: claimRecord.estimate_id || null,
+            origin: `voided invoice ${invoiceRow.id}; no visit left to bill it`,
+            alertContext: { sourceInvoiceId: String(invoiceRow.id) },
+          });
+        }
         logger.info(`[invoice] voided invoice ${invoiceRow.id}: pay-after-first-visit setup fee ($${amount.toFixed(2)}) owed again on series ${anchorId}`);
         return { scheduledServiceId: anchorId, amount };
       }
@@ -11032,6 +11045,24 @@ const InvoiceService = {
 
   async retireRodentSetupObligationForReinstatedInvoice(conn, invoiceId, { strict = false } = {}) {
     if (!invoiceId) return null;
+    // A pay-after-first-visit setup fee this invoice's VOID handed to the
+    // office (dead series): the reinstated invoice owns the fee again. An
+    // alert the office has not acted on is closed here; one it already acted
+    // on (billed or dismissed) means the fee may now be billed twice — a strict
+    // caller (unvoid) refuses, the others raise it for a person.
+    const handoffs = await conn("dispatch_alerts")
+      .where({ type: "setup_fee_office_billing" })
+      .whereRaw("payload->>'sourceInvoiceId' = ?", [String(invoiceId)])
+      .select("id", "resolved_at");
+    for (const handoff of handoffs || []) {
+      if (!handoff.resolved_at) {
+        await conn("dispatch_alerts").where({ id: handoff.id }).whereNull("resolved_at").update({ resolved_at: new Date() });
+        continue;
+      }
+      const message = `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and the office already acted on it — check that fee before restoring this invoice`;
+      if (strict) throw new Error(message);
+      logger.error(`[invoice] FIX: ${message}`);
+    }
     const invoiceRow = await conn("invoices")
       .where({ id: invoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");
