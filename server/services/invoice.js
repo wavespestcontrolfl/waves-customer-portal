@@ -10585,32 +10585,26 @@ const InvoiceService = {
     // already restores.
     const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
     if (termBacked) return null; // prepay lane — restored via the claims ledger / marker re-mint
-    // A pay-after-first-visit WaveGuard setup fee (GATE_PAF_SETUP_FEE) rides
-    // the same stamp + claim mechanism, but it is NOT a rodent obligation: a
-    // refunded claim-backed fee stays resolved (setup-fee-obligation.js
-    // deferredSetupFeeCovers; the public contract bills it once). Its anchor
-    // series comes from the accept that deferred it, which persisted
-    // setupFeeDeferredToFirstVisit on the estimate — never re-armed here.
+    // A pay-after-first-visit setup fee (GATE_PAF_SETUP_FEE) rides the same
+    // stamp + claim mechanism but is NOT a rodent obligation: a refunded
+    // claim-backed fee stays resolved. Provenance is resolved across the whole
+    // series (the claim's estimate, the anchor, the billed visit's series and
+    // every child, so an adopted appointment's estimate is found even when a
+    // sibling billed the fee).
     if (claimRecord) {
-      // Provenance from every place it can live: the claim itself, the anchor
-      // series, and the visit the invoice billed (an accept that adopted an
-      // existing appointment stamps the fee on a parent from ANOTHER series,
-      // while the billed child carries the deferring estimate).
-      const candidateEstimateIds = new Set();
-      if (claimRecord.estimate_id) candidateEstimateIds.add(String(claimRecord.estimate_id));
-      for (const visitId of [claimRecord.scheduled_service_id, invoiceRow.scheduled_service_id]) {
-        if (!visitId) continue;
-        const visit = await conn("scheduled_services").where({ id: visitId }).first("source_estimate_id");
-        if (visit?.source_estimate_id) candidateEstimateIds.add(String(visit.source_estimate_id));
+      let billedSeries = null;
+      if (invoiceRow.scheduled_service_id) {
+        const billed = await conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id }).first("id", "recurring_parent_id");
+        billedSeries = billed?.recurring_parent_id || billed?.id || null;
       }
-      for (const estimateId of candidateEstimateIds) {
-        const deferringEstimate = await conn("estimates").where({ id: estimateId }).first("estimate_data");
-        let deferringData = deferringEstimate?.estimate_data;
-        if (typeof deferringData === "string") { try { deferringData = JSON.parse(deferringData); } catch { deferringData = null; } }
-        if (deferringData?.setupFeeDeferredToFirstVisit === true) {
-          logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee (estimate ${estimateId}) stays resolved (not a rodent obligation; never re-armed)`);
-          return null;
-        }
+      const deferredByPaf = await require("./setup-fee-obligation").seriesSetupFeeDeferredByPaf(
+        conn,
+        [claimRecord.scheduled_service_id, billedSeries, invoiceRow.scheduled_service_id].filter(Boolean),
+        [claimRecord.estimate_id],
+      );
+      if (deferredByPaf) {
+        logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee stays resolved (not a rodent obligation; never re-armed)`);
+        return null;
       }
     }
     if (claimRecord) {

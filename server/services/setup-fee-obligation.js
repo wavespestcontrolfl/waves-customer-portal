@@ -219,20 +219,34 @@ async function estimateSetupSeries(conn, estimate) {
 // waits, and a performed visit bills it once no prepay covers it. No switch,
 // refund or revival bookkeeping, so the prepay lifecycle cannot drift from it.
 // Rodent (bait-station) setup is NOT waived by prepay and never matches here.
-async function prepayWaivesDeferredSetupFee(conn, { seriesId, visit } = {}) {
-  if (!seriesId || !visit) return false;
-  const series = await conn('scheduled_services').where({ id: seriesId }).first('source_estimate_id');
-  const estimateIds = new Set([series?.source_estimate_id].filter(Boolean).map(String));
-  for (const child of rows(await conn('scheduled_services').where({ recurring_parent_id: seriesId })
-    .whereNotNull('source_estimate_id').select('source_estimate_id'))) {
-    estimateIds.add(String(child.source_estimate_id));
+// TRUE when a pay-after-first-visit accept deferred this series' setup fee:
+// the estimate flag setupFeeDeferredToFirstVisit on any estimate tied to the
+// series — the root, any child (an accept that adopted an existing appointment
+// leaves its estimate on that CHILD while the fee sits on the parent), plus
+// any extra estimate ids a caller already holds. One provenance check for
+// every reader (the at-visit prepay waiver, the refund restoration).
+async function seriesSetupFeeDeferredByPaf(conn, seriesIds, extraEstimateIds = []) {
+  const ids = rows(seriesIds).filter((id) => id != null);
+  const estimateIds = new Set(rows(extraEstimateIds).filter(Boolean).map(String));
+  if (ids.length) {
+    for (const row of rows(await conn('scheduled_services').whereIn('id', ids).select('source_estimate_id'))) {
+      if (row.source_estimate_id) estimateIds.add(String(row.source_estimate_id));
+    }
+    for (const row of rows(await conn('scheduled_services').whereIn('recurring_parent_id', ids)
+      .whereNotNull('source_estimate_id').select('source_estimate_id'))) {
+      estimateIds.add(String(row.source_estimate_id));
+    }
   }
-  let deferred = false;
   for (const id of estimateIds) {
     const estimate = await conn('estimates').where({ id }).first('estimate_data');
-    if (parseEstimateData(estimate?.estimate_data).setupFeeDeferredToFirstVisit === true) { deferred = true; break; }
+    if (parseEstimateData(estimate?.estimate_data).setupFeeDeferredToFirstVisit === true) return true;
   }
-  if (!deferred) return false;
+  return false;
+}
+
+async function prepayWaivesDeferredSetupFee(conn, { seriesId, visit } = {}) {
+  if (!seriesId || !visit) return false;
+  if (!(await seriesSetupFeeDeferredByPaf(conn, [seriesId]))) return false;
   // The ONE coverage authority for a visit (term status, plan scope, termite
   // grace): judged on the PERFORMED visit itself, strict — an unverifiable
   // coverage throws, so every caller fails closed (nothing billed, nothing
@@ -623,6 +637,7 @@ async function findUnmintedSetupFeeObligation({
 }
 
 module.exports = {
+  seriesSetupFeeDeferredByPaf,
   prepayWaivesDeferredSetupFee,
   estimateSetupSeries,
   officeParkedSetupFeeSeries,

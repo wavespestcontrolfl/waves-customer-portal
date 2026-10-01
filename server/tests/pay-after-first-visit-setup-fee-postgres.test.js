@@ -357,6 +357,46 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     }
   });
 
+  test('a PRICED non-recurring booster completing after a declined first visit bills its own work without the plan fee', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId, { visitOutcome: 'customer_declined' })).toMatchObject({ status: 200 });
+      const child = await mockPg('scheduled_services').where({ id: f.childIds[0] }).first();
+      const { randomUUID: uuid } = require('crypto');
+      const { etDateString } = require('../utils/datetime-et');
+      const boosterId = uuid();
+      f.childIds.push(boosterId);
+      await mockPg('scheduled_services').insert({
+        id: boosterId, customer_id: child.customer_id, technician_id: child.technician_id, service_id: child.service_id,
+        service_type: child.service_type, scheduled_date: etDateString(), window_start: '11:00', window_end: '12:00',
+        status: 'confirmed', estimated_price: 45, estimated_duration_minutes: 30, source_estimate_id: child.source_estimate_id,
+        recurring_parent_id: f.parentId, is_recurring: false,
+      });
+      expect(await complete(f, boosterId)).toMatchObject({ status: 200 });
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(0);
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+    } finally { await cleanup(f); }
+  });
+
+  test('adopted child declined -> a sibling bills the fee -> refund: the PAF fee is never restored (series-wide provenance)', async () => {
+    const f = await seed({ childCount: 2 });
+    try {
+      // Older/unlinked parent; only child 0 (the adopted appointment) carries the estimate.
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ source_estimate_id: null, status: 'completed' });
+      await mockPg('scheduled_services').where({ id: f.childIds[1] }).update({ source_estimate_id: null });
+      await makeDue(f.childIds[0]);
+      expect(await complete(f, f.childIds[0], { visitOutcome: 'customer_declined' })).toMatchObject({ status: 200 });
+      await makeDue(f.childIds[1]);
+      expect(await complete(f, f.childIds[1])).toMatchObject({ status: 200 });
+      const inv = (await mockPg('invoices').where({ customer_id: f.customerId })).find((row) => setupLines(row).length);
+      expect(inv).toBeTruthy();
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'refunded' });
+      const refunded = await mockPg('invoices').where({ id: inv.id }).first();
+      expect(await require('../services/invoice').restoreRodentSetupObligationForReversedInvoice(mockPg, refunded)).toBeNull();
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
   // Terminal Codex pass 1 (P2): a NON-recurring booster/add-on under the plan
   // parent is not a plan application, so its completion never takes (or parks)
   // the plan's queued first-visit fee.

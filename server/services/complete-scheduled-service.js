@@ -10349,7 +10349,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // stamp waits for a visit no prepay covers.
         const prepayWaived = rawFee > 0 && await require('../services/setup-fee-obligation')
           .prepayWaivesDeferredSetupFee(db, { seriesId: setupParentId, visit: svc });
-        if (rawFee && !prepayWaived) {
+        // A non-recurring booster / add-on under the plan's parent is not a plan
+        // application: it never takes the plan's queued first-visit fee.
+        const boosterUnderPlan = !!svc.recurring_parent_id && !svc.is_recurring;
+        if (rawFee && !prepayWaived && !boosterUnderPlan) {
           const amount = Math.round(Math.abs(rawFee) * 100) / 100;
           if (rawFee < 0) {
             // Orphaned claim from a dead worker. The durable truth is the
