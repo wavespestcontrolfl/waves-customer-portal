@@ -80,13 +80,13 @@ async function shadowJevJudge(call, prod, verdict, tally) {
 async function askAndRecord(call, prod, verdict) {
   try {
     const { askPackage } = require('./typed-decisions/jev');
-    const { packageFor } = require('./typed-decisions/packages');
+    const { packageFor, CALL_TRANSCRIPT_CHARS } = require('./typed-decisions/packages');
     const { recordDecisions } = require('./typed-decisions/shadow-recorder');
     const { callEvidence } = require('./typed-decisions/outcome-evidence');
     const result = await askPackage('call_judge.v2', {
       call_direction: compactDirection(call.direction),
       duration_seconds: call.duration_seconds ?? null,
-      transcript: call.transcription.slice(0, 5000),
+      transcript: call.transcription.slice(0, CALL_TRANSCRIPT_CHARS),
     });
     if (!result.ok) return 'failed';
     const bool = (v) => (typeof v === 'boolean' ? v : undefined);

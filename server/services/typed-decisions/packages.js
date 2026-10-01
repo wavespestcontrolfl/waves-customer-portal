@@ -136,4 +136,8 @@ function answerInDomain(question, v) {
   return false;
 }
 
-module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain };
+// How much of a call transcript call_judge is given (call-self-audit.js). The
+// admin review route shows the reviewer the same span.
+const CALL_TRANSCRIPT_CHARS = 5000;
+
+module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS };

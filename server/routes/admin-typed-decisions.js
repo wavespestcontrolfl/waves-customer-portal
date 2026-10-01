@@ -17,7 +17,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
-const { packageFor, answerInDomain } = require('../services/typed-decisions/packages');
+const { packageFor, answerInDomain, CALL_TRANSCRIPT_CHARS } = require('../services/typed-decisions/packages');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -30,7 +30,6 @@ const SAMPLED_FOR = ['disagreement', 'random_audit', 'heldout'];
 const VERDICT_STATUS = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
 const CONFIRMED = ['confirmed_correct', 'confirmed_error'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const TRANSCRIPT_CHARS = 1200;
 const MAX_NOTE_CHARS = 2000;
 
 const parse = (value) => {
@@ -99,7 +98,7 @@ async function loadSubjects(rows) {
     }
     if (callIds.length) {
       const calls = await db('call_log').whereIn('id', callIds)
-        .select('id', 'direction', 'created_at', db.raw('LEFT(COALESCE(transcription, \'\'), ?) AS transcript_excerpt', [TRANSCRIPT_CHARS]));
+        .select('id', 'direction', 'created_at', db.raw('LEFT(COALESCE(transcription, \'\'), ?) AS transcript_excerpt', [CALL_TRANSCRIPT_CHARS]));
       for (const c of calls) {
         subjects.set(`call_log:${c.id}`, { type: 'call_log', direction: c.direction || null, text: c.transcript_excerpt || null, at: c.created_at });
       }
@@ -120,7 +119,14 @@ router.get('/reviews', async (req, res, next) => {
     if (sampled.some((s) => !SAMPLED_FOR.includes(s))) {
       return res.status(400).json({ error: `sampled_for must be a comma list of ${SAMPLED_FOR.join(', ')}` });
     }
+    // `before`: rows strictly older than this ISO time (the client's "Load older").
+    let before = null;
+    if (req.query.before !== undefined) {
+      before = new Date(String(req.query.before));
+      if (Number.isNaN(before.getTime())) return res.status(400).json({ error: 'before must be an ISO timestamp' });
+    }
     const query = db(TABLE).orderBy('created_at', 'desc').limit(clampLimit(req.query.limit));
+    if (before) query.where('created_at', '<', before);
     if (status !== 'all') query.where('label_status', status);
     if (sampled.length) query.whereIn('sampled_for', sampled);
     if (req.query.capability) query.where('capability', String(req.query.capability));

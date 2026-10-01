@@ -88,6 +88,26 @@ function SubjectText({ subject }) {
   );
 }
 
+function AnswersBlock({ review }) {
+  const baselines = Object.entries(review.baselineAnswers || {});
+  const evidence = review.outcomeEvidence;
+  const hasEvidence = evidence && evidence.value !== null && evidence.value !== undefined;
+  return (
+    <div className="space-y-1 text-ui-body">
+      <div className="font-medium text-zinc-900">Jev: {formatAnswer(review.jevAnswer)}</div>
+      {baselines.map(([name, value]) => (
+        <div key={name} className="text-zinc-700">{name.replace(/_/g, " ")}: {formatAnswer(value)}</div>
+      ))}
+      {hasEvidence && (
+        <div className="text-14 text-ink-secondary">
+          Outcome ({String(evidence.source || "unknown").replace(/_/g, " ")}{evidence.window ? `, ${evidence.window}` : ""}): {String(evidence.value)}
+          {evidence.observed_at ? ` · ${timeLabel(evidence.observed_at)}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReviewRow({ review, onLabeled }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
@@ -95,9 +115,6 @@ function ReviewRow({ review, onLabeled }) {
   const [conflict, setConflict] = useState(null);
 
   const yesNo = isYesNo(review.jevAnswer);
-  const baselines = Object.entries(review.baselineAnswers || {});
-  const evidence = review.outcomeEvidence;
-  const hasEvidence = evidence && evidence.value !== null && evidence.value !== undefined;
 
   const submit = async (verdict, force = false) => {
     setBusy(verdict);
@@ -136,18 +153,7 @@ function ReviewRow({ review, onLabeled }) {
 
       <SubjectText subject={review.subject} />
 
-      <div className="space-y-1 text-ui-body">
-        <div className="font-medium text-zinc-900">Jev: {formatAnswer(review.jevAnswer)}</div>
-        {baselines.map(([name, value]) => (
-          <div key={name} className="text-zinc-700">{name.replace(/_/g, " ")}: {formatAnswer(value)}</div>
-        ))}
-        {hasEvidence && (
-          <div className="text-14 text-ink-secondary">
-            Outcome ({String(evidence.source || "unknown").replace(/_/g, " ")}{evidence.window ? `, ${evidence.window}` : ""}): {String(evidence.value)}
-            {evidence.observed_at ? ` · ${timeLabel(evidence.observed_at)}` : ""}
-          </div>
-        )}
-      </div>
+      <AnswersBlock review={review} />
 
       {review.label?.verdict && (
         <div className="text-14 text-ink-secondary">
@@ -183,30 +189,74 @@ function ReviewRow({ review, onLabeled }) {
   );
 }
 
+const PAGE_SIZE = 50;
+
 export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
   const [status, setStatus] = useState("unreviewed");
+  const [sampledOnly, setSampledOnly] = useState(true);
   const [reviews, setReviews] = useState([]);
+  const [cursor, setCursor] = useState(null);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const requestRef = useRef(0);
+
+  const buildUrl = useCallback((before) => {
+    const params = new URLSearchParams({ status, limit: String(PAGE_SIZE) });
+    if (sampledOnly) params.set("sampled_for", "disagreement,random_audit");
+    if (before) params.set("before", before);
+    return `/admin/typed-decisions/reviews?${params.toString()}`;
+  }, [status, sampledOnly]);
 
   const load = useCallback(async () => {
     const request = ++requestRef.current;
     setLoading(true);
+    setLoadingMore(false);
     setError("");
+    setReviews([]);
+    setCursor(null);
+    setHasMore(false);
     try {
-      const data = await adminFetch(`/admin/typed-decisions/reviews?status=${encodeURIComponent(status)}&limit=50`);
+      const data = await adminFetch(buildUrl());
       if (request !== requestRef.current) return;
-      setReviews(Array.isArray(data?.reviews) ? data.reviews : []);
+      const rows = Array.isArray(data?.reviews) ? data.reviews : [];
+      setReviews(rows);
+      setCursor(rows.length ? rows[rows.length - 1].createdAt : null);
+      setHasMore(rows.length >= PAGE_SIZE);
     } catch (err) {
       if (request !== requestRef.current) return;
       setError(err?.message || "Could not load typed decisions.");
     } finally {
       if (request === requestRef.current) setLoading(false);
     }
-  }, [status]);
+  }, [buildUrl]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Older rows: strictly older than the last row fetched, appended below.
+  const loadOlder = useCallback(async () => {
+    if (!cursor) return;
+    const request = ++requestRef.current;
+    setLoadingMore(true);
+    setError("");
+    try {
+      const data = await adminFetch(buildUrl(cursor));
+      if (request !== requestRef.current) return;
+      const rows = Array.isArray(data?.reviews) ? data.reviews : [];
+      setReviews((current) => {
+        const seen = new Set(current.map((r) => r.id));
+        return [...current, ...rows.filter((r) => !seen.has(r.id))];
+      });
+      if (rows.length) setCursor(rows[rows.length - 1].createdAt);
+      setHasMore(rows.length >= PAGE_SIZE);
+    } catch (err) {
+      if (request !== requestRef.current) return;
+      setError(err?.message || "Could not load older rows.");
+    } finally {
+      if (request === requestRef.current) setLoadingMore(false);
+    }
+  }, [buildUrl, cursor]);
 
   // After a label: drop the row when it no longer belongs to the current
   // filter, otherwise update it in place (keeping the loaded subject text).
@@ -222,18 +272,24 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
   return (
     <UiSurface density="comfortable" className="min-h-full space-y-4 text-zinc-800">
       {!embedded && <AdminCommandHeader title="Typed decisions" subtitle="Label Jev's typed answers against the baselines." />}
-      <div className="flex flex-wrap items-center gap-2">
-        <label htmlFor="typed-status" className="text-14 font-medium text-ink-secondary">Status</label>
-        <select
-          id="typed-status"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="h-11 rounded-sm border border-zinc-300 bg-white px-3 text-ui-body text-zinc-900 sm:h-9"
-        >
-          {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex items-center gap-2">
+          <label htmlFor="typed-status" className="text-14 font-medium text-ink-secondary">Status</label>
+          <select
+            id="typed-status"
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            className="h-11 rounded-sm border border-zinc-300 bg-white px-3 text-ui-body text-zinc-900 sm:h-9"
+          >
+            {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <label htmlFor="typed-sampled" className="flex min-h-11 items-center gap-2 text-14 font-medium text-ink-secondary sm:min-h-0">
+          <input id="typed-sampled" type="checkbox" checked={sampledOnly} onChange={(e) => setSampledOnly(e.target.checked)} />
+          Sampled only
+        </label>
       </div>
-      {error && <ActionFeedback error onRetry={load}>{error}</ActionFeedback>}
+      {error && <ActionFeedback error onRetry={reviews.length ? undefined : load}>{error}</ActionFeedback>}
       {loading && !reviews.length && !error ? (
         <div className="text-ui-body text-ink-secondary">Loading…</div>
       ) : !error && !reviews.length ? (
@@ -242,6 +298,9 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
         <div className="space-y-3 min-w-0">
           {reviews.map((review) => <ReviewRow key={review.id} review={review} onLabeled={handleLabeled} />)}
         </div>
+      )}
+      {hasMore && reviews.length > 0 && (
+        <Button variant="secondary" loading={loadingMore ? true : undefined} onClick={loadOlder}>Load older</Button>
       )}
     </UiSurface>
   );

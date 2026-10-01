@@ -98,9 +98,16 @@ describe('GET /reviews', () => {
     expect(called(log, 'decision_reviews', 'where')).toContainEqual(['label_status', 'unreviewed']);
     expect(called(log, 'decision_reviews', 'whereIn')).toContainEqual(['sampled_for', ['disagreement', 'random_audit']]);
     expect(called(log, 'decision_reviews', 'limit')).toContainEqual([50]);
-    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('LEFT('), [1200]);
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('LEFT('), [5000]); // the span call_judge was given
     // Reads only: nothing is written anywhere.
     expect(Object.keys(log).flatMap((t) => log[t]).filter(([m]) => ['insert', 'update', 'delete'].includes(m))).toEqual([]);
+  });
+
+  test('before pages to strictly older rows; a bad before is 400', async () => {
+    const log = installDb({ decision_reviews: { list: [] } });
+    expect((await get('/reviews?before=2026-09-30T00:00:00.000Z')).status).toBe(200);
+    expect(called(log, 'decision_reviews', 'where')).toContainEqual(['created_at', '<', new Date('2026-09-30T00:00:00.000Z')]);
+    expect((await get('/reviews?before=yesterday')).status).toBe(400);
   });
 
   test('rejects an unknown status or sampled_for, clamps the limit', async () => {
