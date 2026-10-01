@@ -95,9 +95,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const agreedRef = useRef(false);
   const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
   // The checkbox assents to the RENDERED authorization — if the variant
-  // changes (per-application Auto Pay ↔ immediate annual prepay charge),
-  // the prior check must not carry over (Codex r5 P1).
-  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay]);
+  // changes (per-application Auto Pay ↔ immediate annual prepay charge, or
+  // base ↔ setup fee billed with the first visit), the prior check must not
+  // carry over (Codex r5 P1).
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, afterVisitSetup]);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
   // Stripe.js failed to load/mount: reported upward so the parent can drop

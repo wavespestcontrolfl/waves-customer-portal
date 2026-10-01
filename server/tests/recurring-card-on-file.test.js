@@ -118,6 +118,7 @@ const {
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   payAfterFirstVisitCardRail,
+  payAfterFirstVisitSetupFeeRail,
   payAfterFirstVisitInvoiceRail,
   _private: { recurringCardIntentMatchesEstimate, classifyDeliveryOutcome },
 } = require('../services/recurring-card-on-file');
@@ -193,6 +194,13 @@ describe('GATE_PAY_AFTER_FIRST_VISIT (payAfterFirstVisitCardRail)', () => {
     expect(payAfterFirstVisitCardRail({ enforced: true, required: true, exemptReason: null })).toBe(true);
     expect(payAfterFirstVisitCardRail({ enforced: true, required: false, exemptReason: 'saved_method_consented' })).toBe(true);
     expect(payAfterFirstVisitCardRail({ enforced: true, required: false, exemptReason: 'autopay_already_active' })).toBe(true);
+  });
+
+  it('gate on: the setup-fee promise rides only a fresh capture (the one surface showing the after-visit authorization)', () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    expect(payAfterFirstVisitSetupFeeRail({ enforced: true, required: true, exemptReason: null })).toBe(true);
+    expect(payAfterFirstVisitSetupFeeRail({ enforced: true, required: false, exemptReason: 'saved_method_consented' })).toBe(false);
+    expect(payAfterFirstVisitSetupFeeRail({ enforced: true, required: false, exemptReason: 'autopay_already_active' })).toBe(false);
   });
 
   it('gate on: every exemption keeps today\'s wording', () => {

@@ -312,6 +312,9 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
 
       // Coverage ends (the prepay was refunded): the next performed visit bills it.
       await mockPg('annual_prepay_terms').where({ id: termId }).update({ status: 'cancelled', renewal_decision: null });
+      // ...even while the customer still reads the annual-prepay lane (a stale
+      // billing_mode): coverage is judged on the visit, not the lane label.
+      await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'annual_prepay' });
       await makeDue(f.childIds[0]);
       const child = await mockPg('scheduled_services').where({ id: f.childIds[0] }).first();
       expect(await Obligation.prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, visit: child })).toBe(false);

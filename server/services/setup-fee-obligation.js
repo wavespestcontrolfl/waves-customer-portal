@@ -263,13 +263,20 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
   const { resolveBillingLane } = require('./billing-lane');
   const customerRow = await conn('customers').where({ id: estimate.customer_id })
     .first('billing_mode', 'waveguard_tier', 'monthly_rate');
-  const lanePaysAtCompletion = !DUES_COVERED_LANES.has(resolveBillingLane(customerRow || {}).mode);
+  const laneMode = resolveBillingLane(customerRow || {}).mode;
   // The completing visit is itself a live consumer of its own series: a
   // parent already completed (a declined first visit) with the claim still
   // queued is consumed by THIS child, whatever status the row reads mid-
   // completion.
   const completingIds = new Set([completingVisitId, completingParentId].filter(Boolean).map(String));
   const completingVisit = completingVisitId ? await conn('scheduled_services').where({ id: completingVisitId }).first() : null;
+  // An annual-prepay customer's visit is dues-covered only while a live term
+  // covers it (the same canonical, strict coverage read): a performed visit no
+  // term covers (expired/refunded term, a stale billing_mode) bills on its own
+  // completion, so it consumes the stamp like any per-visit lane.
+  const lanePaysAtCompletion = !DUES_COVERED_LANES.has(laneMode)
+    || (laneMode === 'annual_prepay' && !!completingVisit
+      && !(await require('./annual-prepay-renewals').annualPrepayCoversVisit(completingVisit, conn, { throwOnError: true })));
   const unconsumableStamps = [];
   for (const root of rootRows) {
     // No stamp, an unreadable one or a zero carries no fee (Number(null) is 0).

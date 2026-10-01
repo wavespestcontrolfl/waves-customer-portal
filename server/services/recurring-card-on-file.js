@@ -116,6 +116,15 @@ function payAfterFirstVisitCardRail(policy) {
   return payAfterFirstVisitInvoiceRail(policy);
 }
 
+// GATE_PAF_SETUP_FEE: the setup-fee "billed with your first visit" promise
+// rides only a FRESH capture (policy.required) — the one surface that renders
+// the after_visit_card authorization. A customer satisfied by a saved or
+// enrolled method (saved_method_consented / autopay_already_active) sees no
+// capture and so never that text: the fee keeps today's payable invoice.
+function payAfterFirstVisitSetupFeeRail(policy) {
+  return payAfterFirstVisitCardRail(policy) && policy.required === true;
+}
+
 // The ONE predicate for "this accept's invoice rides the card lane": the
 // policy either captures a card at accept (required) or the customer already
 // has an enrolled/consented method (saved_method_consented /
@@ -1715,6 +1724,7 @@ module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   payAfterFirstVisitCardRail,
+  payAfterFirstVisitSetupFeeRail,
   payAfterFirstVisitInvoiceRail,
   resolveRecurringCardPolicyForEstimate,
   resolveGroupedEstimateOwnerId,

@@ -5535,9 +5535,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // (no payable invoice, no pay link) and billed with the first performed
   // visit — so the page may say so. Pure WaveGuard setup only: a rodent
   // bait-station setup rides today's invoice, and a first-application line
-  // means the shape is not setup-only. Same rail predicate as
-  // payAfterFirstVisitCopy (card capture required / enrolled), so the page
-  // and the accept (estimate-public accept, setup-fee deferral) agree.
+  // means the shape is not setup-only. The caller zeroes
+  // setupFeePromiseLaneOk off payAfterFirstVisitSetupFeeRail (a fresh card
+  // capture), the same predicate the accept's setup-fee deferral uses.
   const payAfterSetupFeeCopy = payAfterFirstVisitCopy
     && opts.setupFeePromiseLaneOk !== false
     && require('../config/feature-gates').pafSetupFeeLive()
@@ -9092,7 +9092,11 @@ async function handleEstimateView(req, res, next) {
           payAfterFirstVisitCopy = RecurringCards.payAfterFirstVisitCardRail(payAfterPolicy);
           // The setup-fee promise's lane half (see estimateSetupFeePromiseLaneOk):
           // only looked up when the page could otherwise promise it.
-          if (payAfterFirstVisitCopy && require('../config/feature-gates').pafSetupFeeLive()) {
+          // A saved/enrolled-method customer sees no capture (so never the
+          // after-visit authorization): no setup-fee promise.
+          if (payAfterFirstVisitCopy && !RecurringCards.payAfterFirstVisitSetupFeeRail(payAfterPolicy)) {
+            setupFeePromiseLaneOk = false;
+          } else if (payAfterFirstVisitCopy && require('../config/feature-gates').pafSetupFeeLive()) {
             // A SETUP_FEE_TERMS_REFRESH reload carries the answer the accept
             // would apply (?setup_fee_terms=0|1): the page renders it instead of
             // the pre-conversion lookup, so it cannot refuse on every confirm.
@@ -12605,7 +12609,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const deferShapeEligible = !!(shouldCreateStandardDraftInvoice && setupFeeApplies && !includesFirstApplicationLine
             && !(acceptedRodentSetupAmount > 0)
             && require('../config/feature-gates').pafSetupFeeLive()
-            && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicy)
+            && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicy)
             // The SAME eligibility predicate the preview (/data flag, legacy
             // page) applies: a tier whose visit count is unknown shows the
             // BASE text and keeps today's payable invoice, so the accept
@@ -27864,7 +27868,7 @@ async function composeEstimateDataPayload(estimate, {
     // estimateSetupFeePromiseLaneOk). The accept recomputes it inside its
     // transaction and refuses (409 SETUP_FEE_TERMS_REFRESH) on any difference.
     const setupFeePromiseForData = require('../config/feature-gates').pafSetupFeeLive()
-      && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData)
+      && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicyForData)
       && monthlyTierVisitCountsResolvable(pricingBundle?.frequencies)
       && await estimateSetupFeePromiseLaneOk(estimate);
     if (recurringCardLaneActiveForData && depositPolicy.required) {

@@ -293,6 +293,20 @@ describe('InlineAutoPayCapture afterVisitSetup (setup fee billed with the first 
     expect(queryByText(CARD_CONSENT_TEXT)).toBeNull();
   });
 
+  it('a checked box is cleared when the rendered authorization switches to the setup-fee variant', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByRole, rerender } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    await act(async () => { getByRole('checkbox').click(); });
+    expect(getByRole('checkbox')).toBeChecked();
+    rerender(<InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} afterVisitSetup />);
+    await flush();
+    expect(getByRole('checkbox')).not.toBeChecked();
+  });
+
   it('default (flag absent): today\'s copy and base consent text', async () => {
     const { StripeCtor } = makeStripeStub();
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));

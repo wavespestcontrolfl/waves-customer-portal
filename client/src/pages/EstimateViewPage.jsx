@@ -3086,6 +3086,9 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
   const methodTypeRef = useRef(methodType);
   const agreedRef = useRef(false);
   const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
+  // The checkbox assents to the RENDERED authorization: a variant change while
+  // the modal is open clears it.
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, afterVisitSetup]);
 
   useEffect(() => {
     let cancelled = false;
