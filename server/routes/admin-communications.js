@@ -925,11 +925,11 @@ router.post('/sms', async (req, res, next) => {
           async () => {
             const consent = await ReviewService.reviewSmsAllowedNow(rr.customer_id);
             if (!consent.allowed) return { consent };
-            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
+            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id, { staffComposer: true });
             if (!gate.allowed) return { gate };
-            // The send-time click guard every review sender uses: a customer who
-            // tapped a tracked review link since this draft's anchor is not asked again.
-            if (await ClickGuard.askSuppressedByClick(rr)) return { clicked: true };
+            // No click guard here by owner ruling: the Quick Links link is the
+            // staff "send anytime" link, so a prior tap does not suppress it. A
+            // tap on THIS link is still recorded and stops the cadence (/go).
             // Both stamps the owed email leg on the claim itself, so the
             // Quick Links retry path has persisted evidence this ask asked
             // for an email (GH Codex #3856 r8 P1).
@@ -998,9 +998,6 @@ router.post('/sms', async (req, res, next) => {
         }
         if (seam.consent) {
           return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
-        }
-        if (seam.clicked) {
-          return abortUnsent(409, `${ClickGuard.REVIEW_LINK_CLICKED_REASON} Remove the review link before sending.`);
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
@@ -1290,8 +1287,13 @@ router.post('/sms', async (req, res, next) => {
         return result;
       };
       return reviewLooking
+        // skipSpacing only for a Quick Links tracked link (a claimed request):
+        // that path ran the full seam (consent/review prefs, the staff-composer
+        // unscheduled gate incl. the cap, the click guard) and records the ask
+        // on review_requests. A pasted or typed link has none of that, so it
+        // keeps the 72-hour spacing exactly as on main.
         ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
-          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId })
+          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, skipSpacing: Boolean(claimedReviewRequestId) })
         : sendAndSettle();
     };
     const result = prepLinkSends
@@ -2891,7 +2893,7 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
     logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${requestId}): ${firstErr.message}`);
     await ReviewService.markInlineDelivered(requestId, claimToken);
   }
-  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId) : null;
+  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true }) : null;
 }
 
 // The inline review ask once the composer's send has THROWN: a throw after
@@ -2919,7 +2921,7 @@ async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailR
   }
   await ReviewService.markInlineDelivered(requestId, claimToken);
   if (!emailRequested) return;
-  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId);
+  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true });
   err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
     ? 'the review email was sent too.'
     : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
@@ -2945,7 +2947,7 @@ async function emailReviewAskNow(primaryId) {
     // on the delivered text cannot land between the click check inside
     // sendInlineEmailCopy and the email provider call.
     const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
-    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id),
+    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id, { skipClickGuard: true }),
       { recordHealth: false, waitForSlot: false });
     if (wasLockSkipped(copy)) {
       return { status: 409, body: { error: 'A review request to this customer is already being sent. Try again in a moment.', outcome: 'blocked', code: 'REVIEW_SEND_BUSY' } };

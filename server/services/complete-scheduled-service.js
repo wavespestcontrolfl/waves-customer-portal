@@ -3,6 +3,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { savepointRead, failSoftRead, savepointScope } = require('../utils/savepoint-read');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
+const { sendLawnWateringSms } = require('../services/service-report/lawn-watering-sms');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -12460,6 +12461,32 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch { /* best-effort — render-time reconciliation still applies */ }
     }
 
+    // Separate lawn watering text (GATE_LAWN_WATERING_SMS, owner 2026-09-30):
+    // the visit's frozen watering instruction goes out as its OWN text, right
+    // after the completion text. It shares the completion text's eligibility
+    // but does not depend on that text going out, so it is also called from
+    // the early exits below (dispute-hold hand-over failure, token-withheld,
+    // completion-text resume) that never reach the end of this chain. At most once per visit via the
+    // lawnWateringSmsStatus marker; best-effort, never blocks completion;
+    // gate off = returns before any read or write.
+    const sendLawnWateringSmsOnce = () => sendLawnWateringSms({
+      record,
+      svc,
+      notes: recordStructuredNotes,
+      isBackfill: isBackfillCompletion,
+      deliveryMode: typedDeliveryMode,
+      internalOnly: isInternalOnlyCompletion,
+      // The completion text was REQUESTED (operator toggle, not suppressed,
+      // not a grouped stop's packet effects); its own failure or withholding
+      // still sends the watering text.
+      completionTextRequested: effectiveSendCompletionSms === true,
+    }, {
+      db,
+      sendCustomerMessage,
+      getTemplate: (...a) => smsTemplatesRouter.getTemplate(...a),
+      mergeNotes: mergeRecordNotesKeys,
+      throwIfDeliveryUnverified,
+    });
     // Dispute-hold HAND-OVER (owner ruling 2026-09-30). While a customer has an
     // active collections dispute hold no completion-time text carries a pay
     // link; the invoice the link would have delivered is QUEUED onto the
@@ -12509,6 +12536,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } catch (alertErr) {
             logger.error(`[dispatch] office alert for the failed dispute-hold hand-over (invoice ${invoice.id}) also failed: ${alertErr.message}`);
           }
+          await sendLawnWateringSmsOnce();
           await queueServiceReportEmailIfEligible();
           await sendPayerInvoiceToApIfEligible();
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, handOverErr);
@@ -12571,6 +12599,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // tech's retry re-enters here — ensureReportToken runs again and, once
       // it succeeds, the 'failed' marker above is not completionSmsAlreadyHandled
       // so the report text sends normally.
+      // The watering text does not depend on the report token either.
+      await sendLawnWateringSmsOnce();
       // The payer AP channel does not depend on the report token or the
       // homeowner text — deliver it before releasing, exactly as the SMS
       // resume exit does, or a payer invoice sits as a draft until the tech
@@ -12620,6 +12650,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // try and by the catch when a rejection's audit insert threw.
       const exitForCompletionSmsResume = async (sendErr) => {
         await queueServiceReportEmailIfEligible();
+        // The completion text failed, but the watering text stands on its own.
+        await sendLawnWateringSmsOnce();
         await sendPayerInvoiceToApIfEligible();
         const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, sendErr);
         if (!released) {
@@ -13461,6 +13493,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
+
+    // After the completion text (sent, held, skipped or already handled).
+    await sendLawnWateringSmsOnce();
 
     await queueServiceReportEmailIfEligible();
 

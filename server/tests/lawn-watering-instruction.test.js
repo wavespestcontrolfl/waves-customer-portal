@@ -145,6 +145,10 @@ describe('mixed-visit matrix', () => {
     expect(build([NONE('label'), null]).state).toBeNull();
   });
 
+  test('records the completion instant the lines are anchored to (the watering text checks freshness against it)', () => {
+    expect(build([HOLD(24)]).completedAt).toBe(new Date(COMPLETED).toISOString());
+  });
+
   test('completedAt missing or invalid -> no claim at all', () => {
     for (const completedAt of [null, undefined, '', 'not a date']) {
       const r = buildWateringInstruction({ rules: [HOLD(24)], completedAt });

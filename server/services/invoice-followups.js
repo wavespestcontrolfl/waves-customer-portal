@@ -964,8 +964,24 @@ async function runPending() {
       skipped++;
     }
   }
+  await runCustomerScheduleShadow(now);
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
   return { sent, skipped };
+}
+
+// Customer-level overdue reminders, SHADOW only (dunning consolidation PR 2,
+// GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW): logs what the customer schedule
+// would do and writes NOTHING — no rows, mints, reservations, sends or credit.
+// The live path is wired in a later PR. A failure here never costs the run
+// its per-invoice result.
+async function runCustomerScheduleShadow(now) {
+  const shadowLive = require('../config/feature-gates').dunningCustomerScheduleShadowLive;
+  if (typeof shadowLive !== 'function' || !shadowLive()) return;
+  try {
+    await require('./customer-dunning/runner').shadowRun(now);
+  } catch (err) {
+    logger.error(`[invoice-followups] customer-dunning shadow run failed: ${err.message}`);
+  }
 }
 
 /**

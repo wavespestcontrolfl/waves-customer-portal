@@ -179,10 +179,11 @@
     {
       "router": "server/routes/well-known.js",
       "mount": "/.well-known",
-      "reason": "Apple app-site-association + Android assetlinks — the platforms fetch these anonymously by contract",
+      "reason": "Apple app-site-association + Android assetlinks — the platforms fetch these anonymously by contract; security.txt (RFC 9116) is static public disclosure-contact text",
       "routes": [
         "GET /.well-known/apple-app-site-association",
-        "GET /.well-known/assetlinks.json"
+        "GET /.well-known/assetlinks.json",
+        "GET /.well-known/security.txt"
       ]
     },
     {

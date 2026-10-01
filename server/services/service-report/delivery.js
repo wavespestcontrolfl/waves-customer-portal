@@ -44,6 +44,12 @@ function serviceReportV1SmsType({ hasInvoiceLink = false } = {}) {
 //     belongs on estimates and the marketing-adjacent lanes only.
 //   - No lawn synthesis lead-in and no score/tip fold-in. Lawn reads exactly
 //     like pest; the score band and watering advice belong on the report.
+//     REVERSAL (owner 2026-09-30, GATE_LAWN_WATERING_SMS): the watering
+//     instruction now ALSO goes to the customer, but as its own separate text
+//     sent right after this one (services/service-report/lawn-watering-sms.js,
+//     template lawn_watering_instruction). It is never a line inside this
+//     completion template, so the completion text above stays short and
+//     watering-free.
 //
 // There is no code-built body any more. Completion texts render from the
 // EDITABLE DB TEMPLATE for every service line, so these vars are the whole
