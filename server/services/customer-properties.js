@@ -130,12 +130,45 @@ function normalizeOccupancy(v) {
   return OCCUPANCY_TYPES.includes(v) ? v : 'unknown';
 }
 
+// USPS suffixes addressKey does not expand. Kept OUT of STREET_SUFFIX_CANON:
+// that map feeds the stored, uniquely indexed address_key and the saved
+// service-area key, so widening it would orphan existing keys. Used only by
+// the duplicate check below (ops 2026-10-01: a call re-recorded "16430
+// Woodside Gln" as "16430 Woodside Glen", a second property for one house).
+const PREMISES_SUFFIX_CANON = {
+  gln: 'glen', glen: 'glen', cv: 'cove', cove: 'cove', trce: 'trace', trace: 'trace',
+  xing: 'crossing', crossing: 'crossing', lndg: 'landing', landing: 'landing',
+  rdg: 'ridge', ridge: 'ridge', crk: 'creek', creek: 'creek', holw: 'hollow', hollow: 'hollow',
+  sq: 'square', square: 'square', bnd: 'bend', bend: 'bend', aly: 'alley', alley: 'alley',
+  vw: 'view', view: 'view', vis: 'vista', vista: 'vista', cswy: 'causeway', causeway: 'causeway',
+  plz: 'plaza', plaza: 'plaza', pt: 'point', point: 'point', mdw: 'meadow', meadow: 'meadow',
+  mdws: 'meadows', meadows: 'meadows', hts: 'heights', heights: 'heights', psge: 'passage', passage: 'passage',
+};
+
+/**
+ * Same-house key for the duplicate check: street + unit + 5-digit ZIP,
+ * suffix-canonical with the extra USPS forms above. City is left out on
+ * purpose: one ZIP carries several mailing names (Parrish / Duette 34219,
+ * Bradenton / Lakewood Ranch 34211), so the same house arrives under either.
+ */
+function premisesKey({ address_line1, address_line2, zip } = {}) {
+  const streetUnit = stripUnitDesignators([address_line1, address_line2].filter(Boolean).join(' '));
+  return canonicalizeAddress([streetUnit, normalizeZip(zip)].filter(Boolean).join(' '))
+    .split(' ').map((w) => PREMISES_SUFFIX_CANON[w] || w).join('')
+    .replace(/[^a-z0-9]/g, '');
+}
+
 /** True when `candidate` has a street and its full address isn't already in `existingProps` (pure). */
 function isNewAddress(existingProps, candidate = {}) {
   if (!String(candidate.address_line1 || '').trim()) return false;
   const key = addressKey(candidate);
   if (!key) return false;
-  return !(existingProps || []).some((p) => addressKey(p) === key);
+  // Without a ZIP on both sides the city is the only locality evidence, so
+  // the full address key decides alone.
+  const zip = normalizeZip(candidate.zip);
+  const premises = zip ? premisesKey(candidate) : null;
+  return !(existingProps || []).some((p) => addressKey(p) === key
+    || (premises && normalizeZip(p.zip) === zip && premisesKey(p) === premises));
 }
 
 /** Active properties for a customer, primary first. */

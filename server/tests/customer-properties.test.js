@@ -108,6 +108,19 @@ describe('customer-properties pure helpers', () => {
     expect(isNewAddress([], { address_line1: '12398 Amber Creek Cir' })).toBe(true);
     expect(isNewAddress(null, { address_line1: '1 Main St' })).toBe(true);
   });
+
+  test('isNewAddress — one house spelled two ways in the same ZIP is not a new property', () => {
+    // The 2026-10-01 duplicates: a call re-recorded the signup address with a
+    // different suffix spelling or mailing city, minting a second property.
+    expect(isNewAddress([{ address_line1: '16430 Woodside Gln', city: 'Parrish', zip: '34219' }], { address_line1: '16430 Woodside Glen', city: 'Parrish', zip: '34219' })).toBe(false);
+    expect(isNewAddress([{ address_line1: '8717 Windlass Cv', city: 'Parrish', zip: '34219' }], { address_line1: '8717 Windlass Cove', city: 'Parrish', zip: '34219' })).toBe(false);
+    expect(isNewAddress([{ address_line1: '10515 Crooked Creek Ct', city: 'Duette', zip: '34219' }], { address_line1: '10515 Crooked Creek Court', city: 'Parrish', zip: '34219-1234' })).toBe(false);
+    // a different unit, house number, suffix or ZIP is still a new property
+    expect(isNewAddress([{ address_line1: '100 Main Gln', address_line2: 'Unit A', zip: '34219' }], { address_line1: '100 Main Glen', address_line2: 'Unit B', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '16430 Woodside Gln', zip: '34219' }], { address_line1: '16432 Woodside Glen', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '100 Main Cv', zip: '34219' }], { address_line1: '100 Main Ct', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '100 Main St', city: 'Parrish', zip: '34219' }], { address_line1: '100 Main St', city: 'Bradenton', zip: '34211' })).toBe(true);
+  });
 });
 
 describe('syncPrimaryAddress explicit line 2 intent', () => {

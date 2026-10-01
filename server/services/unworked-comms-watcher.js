@@ -112,7 +112,7 @@ function taskLaneCarriesCallbackSql(alias) {
       )`;
 }
 
-// Lane 1: callback-requested calls from today with nothing behind them.
+// Lane 1: callback-requested calls (rolling 30 days) with nothing behind them.
 async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false } = {}) {
   const cardsEnabled = require('./callback-cards').enabled();
   const { staleAiRowSql } = require('./call-commitments');
@@ -578,11 +578,11 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     sectionHtml.push(`<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=owed">${cardsTotal} open callback card${cardsTotal === 1 ? '' : 's'}</a></p>`);
   }
   if (a.length) {
-    sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
+    sectionText.push('Callbacks requested on calls, still not returned (last 30 days; nothing else tracks these):');
     sectionText.push(...a.map((r) => `- ${etDateTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
     sectionText.push(...moreLine(a.length, legacyCallbackTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>${legacyCallbackTotal > a.length ? `<p>…and ${legacyCallbackTotal - a.length} more not shown</p>` : ''}`);
+    sectionHtml.push(`<p><strong>Callbacks requested on calls, still not returned</strong> (last 30 days; nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>${legacyCallbackTotal > a.length ? `<p>…and ${legacyCallbackTotal - a.length} more not shown</p>` : ''}`);
   }
   if (b.length) {
     sectionText.push('Follow-up tasks overdue or silently expired today:');
