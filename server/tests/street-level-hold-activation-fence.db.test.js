@@ -72,6 +72,9 @@ postgres('an office-approved street-level hold is activated behind its address w
     return { customerId, callId, visitId, svc: { id: visitId, customer_id: customerId, source_action: 'voice_agent', source_call_log_id: callId, scheduled_date: '2099-01-05', window_start: '09:00:00', service_type: 'pest_control' } };
   }
   const { runOfficeConfirmActivation, resumePendingHoldActivations, _test } = require('../services/outbound-review-confirm');
+  // The sweep only recovers a marker that has been quiet past its lease: backdate it (the crash was a while ago).
+  const age = (callId) => knex('triage_items').where({ call_log_id: callId })
+    .update({ payload: knex.raw("payload || jsonb_build_object('activation_pending_at', to_char(NOW() AT TIME ZONE 'UTC' - interval '1 hour', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))") });
   const marker = async (callId) => (await knex('triage_items').where({ call_log_id: callId }).first('payload')).payload.activation_pending;
   const state = async (visitId, callId) => ({
     confirmed: (await knex('scheduled_services').where({ id: visitId }).first('customer_confirmed')).customer_confirmed,
@@ -95,6 +98,7 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'open' });
     expect(reminders.registerAppointment).not.toHaveBeenCalled();
 
+    await age(callId);
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
     expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
     expect(reminders.registerAppointment).toHaveBeenCalledTimes(1);
@@ -118,6 +122,7 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect(await marker(callId)).toBe('office');
     // The sweep finishes the legs; the visit is never stuck behind a restored hold.
     reminders.registerAppointment.mockImplementationOnce((...args) => actual(...args));
+    await age(callId);
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
     expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
     expect(await marker(callId)).toBeUndefined();
@@ -149,6 +154,7 @@ postgres('an office-approved street-level hold is activated behind its address w
     // The lazy one finished and cleared only ITS mode: the office upgrade is still owed.
     expect(await marker(callId)).toBe('office');
     reminders.registerAppointment.mockImplementationOnce((...args) => actual(...args));
+    await age(callId);
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
     expect(await marker(callId)).toBeUndefined();
     expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).not.toBeNull();
@@ -162,9 +168,11 @@ postgres('an office-approved street-level hold is activated behind its address w
       await knex('triage_items').where({ call_log_id: callId }).update({ payload: knex.raw("payload || '{\"activation_pending\": \"office\"}'::jsonb") });
       return actual(...args);
     });
+    await age(callId);
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
     expect(await marker(callId)).toBe('office');
     reminders.registerAppointment.mockImplementationOnce((...args) => actual(...args));
+    await age(callId);
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
     expect(await marker(callId)).toBeUndefined();
   });
@@ -172,10 +180,20 @@ postgres('an office-approved street-level hold is activated behind its address w
   test('a LAZY-mode marker resumes without the office clearance: no clearance stamp, the card ask runs delivery-less', async () => {
     const { visitId, callId, svc } = await seedApprovedHold();
     await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'lazy' });
+    await age(callId);
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
     expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).toBeNull();
     expect(cardRequest.requestCardForAppointment).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: visitId, delivery: 'none' }));
     expect(await marker(callId)).toBeUndefined();
+  });
+
+  test('a FRESH marker is leased: the sweep leaves a running activation (and its failure rollback) alone', async () => {
+    const { callId, svc } = await seedApprovedHold();
+    await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'office' });
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 0, resumed: 0 });
+    expect(reminders.registerAppointment).not.toHaveBeenCalled();
+    await age(callId);
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
   });
 
   test('a refused stamp writes no marker; a visit a rejection took just drops it', async () => {
@@ -187,6 +205,7 @@ postgres('an office-approved street-level hold is activated behind its address w
     const cancelled = await seedApprovedHold();
     await _test.stampCustomerConfirmed(knex, cancelled.svc, { bindAddress: true, markActivationPending: 'office' });
     await knex('scheduled_services').where({ id: cancelled.visitId }).update({ status: 'cancelled' });
+    await age(cancelled.callId);
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 0 });
     expect(await marker(cancelled.callId)).toBeUndefined();
     expect(reminders.registerAppointment).not.toHaveBeenCalled();

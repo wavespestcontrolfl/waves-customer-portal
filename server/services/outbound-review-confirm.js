@@ -1041,8 +1041,8 @@ async function setHoldActivationPending(conn, callLogId, visitId, pending, onlyI
     if (!pending && onlyIfMode) q.whereRaw("payload->>'activation_pending' = ?", [onlyIfMode]);
   }).update({
     payload: pending
-      ? conn.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('activation_pending', ?::text)", [String(pending)])
-      : conn.raw("COALESCE(payload, '{}'::jsonb) - 'activation_pending'"),
+      ? conn.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('activation_pending', ?::text, 'activation_pending_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))", [String(pending)])
+      : conn.raw("COALESCE(payload, '{}'::jsonb) - 'activation_pending' - 'activation_pending_at'"),
   });
   return true;
 }
@@ -1150,13 +1150,18 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
  * success, the marker cleared. A visit a rejection took (cancelled / skipped / rescheduled) just drops the
  * marker. The legs run in the mode the interrupted activation recorded on the marker (office-confirm: the
  * clearance stamp and card ask included; lazy: the ask only on an existing clearance). Run by the hourly
- * stranded-activation sweep; bounded per run.
+ * stranded-activation sweep; bounded per run; leases a fresh marker (see HOLD_ACTIVATION_RESUME_AFTER_MINUTES).
  */
+const HOLD_ACTIVATION_RESUME_AFTER_MINUTES = 10;
 async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
   const rows = await dbh('triage_items as ti')
     .join('scheduled_services as ss', dbh.raw("ss.id::text = ti.payload->>'scheduled_service_id'"))
     .where('ti.reason_code', 'outbound_booking_review')
     .whereIn(dbh.raw("ti.payload->>'activation_pending'"), ['office', 'lazy'])
+    // A lease, like every stale-claim rail here: a marker younger than HOLD_ACTIVATION_RESUME_AFTER_MINUTES
+    // belongs to an activation that is still running in a live process (its own failure rollback included),
+    // so the sweep leaves it alone and only recovers one that has been quiet that long.
+    .whereRaw("COALESCE((ti.payload->>'activation_pending_at')::timestamptz, 'epoch'::timestamptz) < NOW() - make_interval(mins => ?)", [HOLD_ACTIVATION_RESUME_AFTER_MINUTES])
     .where('ss.customer_confirmed', true)
     .limit(limit)
     .select(dbh.raw("ti.payload->>'activation_pending' as pending_mode"), 'ss.id', 'ss.status', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.source_call_log_id', 'ss.source_action',
