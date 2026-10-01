@@ -726,31 +726,57 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
         .select('l.id')) || [];
       const closedIds = locked.map((r) => r.id);
       if (!closedIds.length) return 0;
-      // First touch keeps the credit (owner ruling 2026-10-01, codex #5477 r8/r9): a
+      // The rows that replace a closed request's row: the booking's own row (keyed to
+      // this booking), OR the booked / completed funnel row of a genuine lead this
+      // booking converted instead (recurring / estimate-linked bookings convert that
+      // lead, so attributeSelfBooking writes no row of its own). The converted lead is
+      // known from the ids the booking path passes or persisted on its close audit
+      // rows, or from the lineage persisted AT the conversion (extracted_data.
+      // won_booking_id, written in the same statement as the win), so a crash between
+      // the conversion and the close loses nothing. One scope for the transfer target
+      // and the delete's existence check.
+      const replacementScope = (q) => {
+        q.whereRaw('booked.self_booked_appointment_id = ?', [booking.id]);
+        if (converted.length) {
+          q.orWhere((c) => c.whereIn('booked.lead_id', converted).whereIn('booked.funnel_stage', ['booked', 'completed']));
+        }
+        q.orWhere((c) => c.whereIn('booked.funnel_stage', ['booked', 'completed'])
+          .whereIn('booked.lead_id', function convertedByThisBooking() {
+            this.select('w.id').from('leads as w').whereNull('w.deleted_at').where('w.status', 'won')
+              .whereRaw("w.extracted_data->>'won_booking_id' = ?", [String(booking.id)]);
+          }));
+      };
+      // First touch keeps the credit (owner ruling 2026-10-01, codex #5477 r8-r11): a
       // request that came in paid (is_paid: a paid click, or paid UTMs whose click id
-      // was stripped) and a booking with no paid click of its own is one paid lead, so
-      // the booking's own row takes the request's touch before the request's row goes,
-      // the same credit an ordinary lead's own row gets when its booking advances it.
-      // The earliest paid request wins; a booking with a paid click of its own keeps it.
+      // was stripped) is the journey's first touch unless the replacement's own touch
+      // is older, so the replacement takes the request's touch before the request's
+      // row goes, the same credit an ordinary lead's own row gets when its booking
+      // advances it. The earliest paid request wins; a replacement with a paid click of
+      // its own keeps it (whatever its is_paid: attributeSelfBooking's new-customer
+      // mint leaves it NULL), and so does a converted lead whose own first contact
+      // came before the request. The booking's own row is preferred as the target.
       // The touch columns are the ones lead-funnel-bridge stampLeadFunnelRow writes
       // (fbp is a browser id, not a click).
       const { CLICK_ID_COLUMNS, PAID_CLICK_ID_COLUMNS } = require('./lead-funnel-bridge');
       const touchColumns = ['lead_source', 'lead_source_detail', 'lead_date', ...CLICK_ID_COLUMNS, 'utm_campaign', 'utm_term', 'is_paid'];
-      const bookingRow = await trx('ad_service_attribution')
-        .where({ self_booked_appointment_id: booking.id }).forUpdate().first();
-      const hasPaidClick = (row) => !!row && PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
-      const paidRow = (row) => !!row && row.is_paid === true;
-      // The booking's own row keeps any paid click it has, whatever its is_paid
-      // flag (attributeSelfBooking's new-customer mint leaves it NULL); a row with
-      // no paid click (direct, or paid UTMs only) takes the request's click.
-      if (bookingRow && !hasPaidClick(bookingRow)) {
+      const target = await trx('ad_service_attribution as booked')
+        .where((q) => q.whereNull('booked.lead_id').orWhereNotIn('booked.lead_id', closedIds))
+        .where(replacementScope)
+        .orderByRaw('(booked.self_booked_appointment_id = ?) DESC NULLS LAST, booked.id ASC', [booking.id])
+        .forUpdate()
+        .first('booked.*');
+      const hasPaidClick = (row) => PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
+      const dayMs = (d) => (d ? new Date(d).getTime() : null);
+      if (target && !hasPaidClick(target)) {
         const requestRows = (await trx('ad_service_attribution')
           .whereIn('lead_id', closedIds)
           .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
           .orderBy([{ column: 'lead_date', order: 'asc', nulls: 'last' }, { column: 'id', order: 'asc' }])) || [];
-        const firstPaid = requestRows.find(paidRow);
-        if (firstPaid) {
-          await trx('ad_service_attribution').where({ id: bookingRow.id })
+        const firstPaid = requestRows.find((row) => row.is_paid === true);
+        const targetFirst = dayMs(target.lead_date) != null && dayMs(firstPaid?.lead_date) != null
+          && dayMs(target.lead_date) < dayMs(firstPaid.lead_date);
+        if (firstPaid && !targetFirst) {
+          await trx('ad_service_attribution').where({ id: target.id })
             .update({ ...Object.fromEntries(touchColumns.map((col) => [col, firstPaid[col] ?? null])), updated_at: trx.fn.now() });
         }
       }
@@ -758,26 +784,9 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
         .whereIn('lead_id', closedIds)
         .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
         .whereExists(function replacementRow() {
-          // The booking's own row (keyed to this booking), OR the booked / completed
-          // funnel row of a genuine lead this booking converted instead (recurring /
-          // estimate-linked bookings convert that lead, so attributeSelfBooking writes
-          // no row of its own).
           this.select(1).from('ad_service_attribution as booked')
             .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id')
-            .where((q) => {
-              q.whereRaw('booked.self_booked_appointment_id = ?', [booking.id]);
-              if (converted.length) {
-                q.orWhere((c) => c.whereIn('booked.lead_id', converted).whereIn('booked.funnel_stage', ['booked', 'completed']));
-              }
-              // Lineage persisted AT the conversion: a lead this booking won carries
-              // extracted_data.won_booking_id (written by the conversion in the same statement as the win),
-              // so a crash between the conversion and the close loses nothing.
-              q.orWhere((c) => c.whereIn('booked.funnel_stage', ['booked', 'completed'])
-                .whereIn('booked.lead_id', function convertedByThisBooking() {
-                  this.select('w.id').from('leads as w').whereNull('w.deleted_at').where('w.status', 'won')
-                    .whereRaw("w.extracted_data->>'won_booking_id' = ?", [String(booking.id)]);
-                }));
-            });
+            .where(replacementScope);
         })
         .del()) || 0;
     });

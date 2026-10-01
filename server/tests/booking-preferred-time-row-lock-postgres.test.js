@@ -339,6 +339,33 @@ jest.setTimeout(60000);
         expect((await bookingRows(sbaId))[0]).toMatchObject({ lead_source: 'google_ads', gclid: 'g-own', utm_campaign: null });
       });
 
+      describe('a booking that converted a genuine lead instead of writing its own row (codex #5477 r11)', () => {
+        const setupConverted = async ({ genuineDate }) => {
+          const cust = randomUUID();
+          await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
+          const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+          await database('ad_service_attribution').insert({
+            lead_id: req.leadId, funnel_stage: 'lead', lead_source: 'google_ads', lead_date: '2026-09-20', gclid: 'g-first', utm_campaign: 'fall-pest', is_paid: true,
+          });
+          const genuine = randomUUID();
+          await database('ad_service_attribution').insert({ lead_id: genuine, funnel_stage: 'booked', lead_source: 'website', lead_date: genuineDate, is_paid: false });
+          const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+          await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+          await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0], convertedLeadIds: [genuine] });
+          expect(await dropSupersededPreferredFunnelRows(database, { booking: sba[0], convertedLeadIds: [genuine] })).toBe(1);
+          expect(await requestRow(req.leadId)).toHaveLength(0);
+          return database('ad_service_attribution').where({ lead_id: genuine }).first();
+        };
+
+        test('the paid request came first: the converted lead\'s row takes its touch', async () => {
+          expect(await setupConverted({ genuineDate: '2026-09-25' })).toMatchObject({ funnel_stage: 'booked', lead_source: 'google_ads', gclid: 'g-first', utm_campaign: 'fall-pest', is_paid: true });
+        });
+
+        test('the genuine lead\'s own first contact came before the request: it keeps its own touch', async () => {
+          expect(await setupConverted({ genuineDate: '2026-09-01' })).toMatchObject({ lead_source: 'website', gclid: null, is_paid: false });
+        });
+      });
+
       test('a booking with a paid click of its own keeps it', async () => {
         const { sbaId } = await setupPaid({ bookingTouch: { lead_source: 'facebook_ads', fbclid: 'f-own', is_paid: true } });
         expect((await bookingRows(sbaId))[0]).toMatchObject({ lead_source: 'facebook_ads', fbclid: 'f-own', gclid: null });

@@ -972,7 +972,10 @@ touch keeps the credit (owner ruling 2026-10-01): when the request's row came
 in paid (`is_paid`: a paid click, or paid UTMs whose click id was stripped)
 and the booking's own row has no paid click id, the booking's
 row first takes the request's touch (source, detail, lead date, click ids,
-UTM campaign/term, `is_paid`; the earliest paid request wins; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
+UTM campaign/term, `is_paid`; the earliest paid request wins; when the
+booking converted a genuine lead instead of writing its own row, that lead's
+booked row is the target, and it keeps its own touch when its first contact
+came before the request; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
 is credited, and reported, to that ad. Every other lead surface
 treats `handled` as closed: it is out of the open set, out of every prospect
 denominator (conversion, win and lost rates), and never re-attached by a later

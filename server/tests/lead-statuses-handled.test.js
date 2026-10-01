@@ -98,6 +98,10 @@ describe("lead status 'handled'", () => {
     for (const t of tools) expect(t.input_schema.properties.new_status.enum).not.toContain('handled');
     const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
     expect(route).toMatch(/if \(updates\.status === 'handled' && existingLead\.status !== 'handled'\) \{\s*return res\.status\(400\)/);
+    // the board's handled column shows handled requests but takes no drops (codex #5477 r11)
+    const board = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
+    expect(board).toMatch(/const acceptsDrops = stage !== "handled";/);
+    expect(board).toMatch(/onDrop=\{acceptsDrops \? \(e\) => handleBoardDrop\(e, stage\) : undefined\}/);
   });
 
   test('the Intelligence Bar lead overview keeps handled out of the conversion denominator (a cohort containing a handled request)', async () => {

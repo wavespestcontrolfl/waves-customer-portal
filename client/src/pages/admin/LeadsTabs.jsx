@@ -3107,13 +3107,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           >
             {BOARD_STAGES.map((stage) => {
               const stageLeads = leads.filter((lead) => lead.status === stage);
+              // 'handled' is system-set only (the server refuses it): its column
+              // shows handled requests (dragged out to reopen) but takes no drops.
+              const acceptsDrops = stage !== "handled";
               const isDropTarget =
-                draggingLead && draggingLead.status !== stage;
+                acceptsDrops && draggingLead && draggingLead.status !== stage;
               return (
                 <div
                   key={stage}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => handleBoardDrop(e, stage)}
+                  onDragOver={acceptsDrops ? (e) => e.preventDefault() : undefined}
+                  onDrop={acceptsDrops ? (e) => handleBoardDrop(e, stage) : undefined}
                   className={
                     isDropTarget
                       ? "flex-[0_0_260px] min-w-[240px] bg-zinc-50 border-hairline border-zinc-200 rounded-md p-[10px] ring-2 ring-zinc-900"
