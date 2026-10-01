@@ -1398,6 +1398,34 @@ describe('extraction compat adapter', () => {
     expect(flatView(make('+15550100123')).secondary_on_site_evidence).toBe(false);
   });
 
+  test('flatView with a transcript verifies the on-site flags against it (replay compares grounding, not quote presence)', () => {
+    const transcript = ['Agent: We could put his cell phone on the account so he will get the reminders.', 'Caller: Yeah.', 'Agent: Will he be there Tuesday?', 'Caller: Yes he will be at the house all day.'].join('\n');
+    const make = (textsQuote, onSiteQuote) => {
+      const v2 = validPersisted();
+      v2.secondary_contact = {
+        name_full: 'Sample', first_name: 'Sample', last_name: null, phone_e164: '+15550100123', email: null,
+        role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true,
+      };
+      v2.evidence = [
+        { field_path: '/secondary_contact/wants_appointment_texts', quote: textsQuote, speaker: 'caller' },
+        { field_path: '/secondary_contact/on_site', quote: onSiteQuote, speaker: 'caller' },
+      ];
+      return v2;
+    };
+    const good = flatView(make('Yeah.', 'Yes he will be at the house all day'), { transcript });
+    expect(good).toMatchObject({ secondary_wants_appointment_texts_grounded: true, secondary_on_site_grounded: true });
+    expect(good.secondary_contacts_consent_signature).toBe('5550100123:spouse_partner:1:1:1:1:1:1');
+    // A candidate whose quotes are text ABSENT from the transcript still has evidence presence, but is not grounded.
+    const fabricated = flatView(make('Yeah.', 'she lives in the back unit and is always home'), { transcript });
+    expect(fabricated).toMatchObject({ secondary_on_site_evidence: true, secondary_on_site_grounded: false, secondary_wants_appointment_texts_grounded: true });
+    expect(fabricated.secondary_contacts_consent_signature).not.toBe(good.secondary_contacts_consent_signature);
+    // No transcript: fields are null and the signature keeps its transcript-free shape.
+    const noTranscript = flatView(make('Yeah.', 'Yes he will be at the house all day'));
+    expect(noTranscript.secondary_on_site_grounded).toBeNull();
+    expect(noTranscript.secondary_wants_appointment_texts_grounded).toBeNull();
+    expect(noTranscript.secondary_contacts_consent_signature).toBe('5550100123:spouse_partner:1:1:1:1');
+  });
+
   test('flatView preserves _v2 reference', () => {
     const v2 = validPersisted();
     const flat = flatView(v2);

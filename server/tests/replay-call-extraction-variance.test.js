@@ -921,6 +921,19 @@ describe('call extraction replay variance reporting', () => {
         expect(compareFlatFields({ [field]: true }, { [field]: false }, true).find((v) => v.field === field).severity).toBe('high');
       }
     });
+    test('grounded mirrors are high-severity replay fields (null with no transcript collapses to false)', () => {
+      for (const field of ['secondary_wants_appointment_texts_grounded', 'secondary_on_site_grounded']) {
+        expect(FIELD_GROUPS.high).toContain(field);
+        expect(normalizeField(field, null)).toBe(false);
+        expect(normalizeField(field, true)).toBe(true);
+        expect(compareFlatFields({ [field]: true }, { [field]: false }, true).find((v) => v.field === field).severity).toBe('high');
+      }
+    });
+    test('the replay passes the stored transcript to both flatView calls', () => {
+      const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+      expect(src).toContain('helpers.flatView(priorV2, { transcript: call.transcription })');
+      expect(src).toContain('helpers.flatView(currentExtraction, { transcript: transcriptForExtraction })');
+    });
     test('the per-contact consent signature covers every entry and collapses absent to empty', () => {
       const field = 'secondary_contacts_consent_signature';
       expect(FIELD_GROUPS.high).toContain(field);

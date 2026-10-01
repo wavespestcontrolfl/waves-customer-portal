@@ -38,7 +38,13 @@ function pricesSignature(prices) {
   return prices.map(priceEntrySignature).join(';');
 }
 
-function flatView(extraction) {
+// `transcript` (optional, the call's speaker-labeled transcript): when given,
+// the on-site consent flags are also VERIFIED against it (the processor's own
+// check, utils/on-site-grounding.js) and exposed as *_grounded fields and in
+// the per-contact signature, so replay compares what would actually authorize
+// consent, not just whether a quote was produced. Absent -> those fields are
+// null and the signature is unchanged.
+function flatView(extraction, { transcript = null } = {}) {
   if (!extraction) return {};
   if (!isV2Extraction(extraction)) return extraction;
 
@@ -53,6 +59,11 @@ function flatView(extraction) {
   const history = extraction.customer_history || {};
   const consent = extraction.consent || {};
   const secondary = mapSecondaryContactToLegacy(extraction.secondary_contact, { evidence: extraction.evidence, counterpart: extraction.secondary_contacts?.[0] || null });
+  const hasTranscript = typeof transcript === 'string' && transcript.length > 0;
+  const groundedFor = (contact) => {
+    if (!hasTranscript || !contact) return null;
+    return require('./on-site-grounding').verifyOnSiteGrounding(contact, transcript);
+  };
 
   return {
     first_name: caller.first_name || null,
@@ -137,6 +148,8 @@ function flatView(extraction) {
     // so a model that stops (or starts) pinning them must show in replay.
     secondary_wants_appointment_texts_evidence: !!secondary?.wants_appointment_texts_quote,
     secondary_on_site_evidence: !!secondary?.on_site_quote,
+    secondary_wants_appointment_texts_grounded: groundedFor(secondary)?.wants_appointment_texts ?? (hasTranscript ? false : null),
+    secondary_on_site_grounded: groundedFor(secondary)?.on_site ?? (hasTranscript ? false : null),
     // Order-stable per-contact signature over the whole secondary_contacts[]
     // (identity:role:text-intent:on-site:text-evidence:on-site-evidence, '|'-joined, '' when none) so a flag flipping
     // on entries 2+ shows in replay variance too (FIELD_GROUPS high).
@@ -146,7 +159,12 @@ function flatView(extraction) {
     secondary_contacts_consent_signature: (() => {
       const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null);
       return (list.length ? list : [secondary].filter(Boolean))
-        .map((c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}:${c.wants_appointment_texts_quote ? 1 : 0}:${c.on_site_quote ? 1 : 0}`)
+        .map((c) => {
+          const base = `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}:${c.wants_appointment_texts_quote ? 1 : 0}:${c.on_site_quote ? 1 : 0}`;
+          if (!hasTranscript) return base;
+          const g = groundedFor(c);
+          return `${base}:${g.wants_appointment_texts ? 1 : 0}:${g.on_site ? 1 : 0}`;
+        })
         .join('|');
     })(),
 

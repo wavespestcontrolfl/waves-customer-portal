@@ -1264,6 +1264,30 @@ describe('on-site grounding must be pinned to a CALLER quote that is in the tran
     expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'YEAH', on_site_quote: 'Yes, HE will be at the house' }, transcript).on_site).toBe(true);
   });
 
+  test('negated or refusing quotes never ground (substantive or short), but "no problem" idioms do', () => {
+    const say = (agent, caller) => [`Agent: ${agent}`, `Caller: ${caller}`].join('\n');
+    // Codex counterexamples.
+    const refusedTexts = say('Should we text him the reminders?', "Don't send him appointment texts.");
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: "Don't send him appointment texts" }, refusedTexts).wants_appointment_texts).toBe(false);
+    const notThere = say('Will he be there?', 'He will not be at the house on Tuesday.');
+    expect(verifyOnSiteGrounding({ ...grounded, on_site_quote: 'He will not be at the house on Tuesday' }, notThere).on_site).toBe(false);
+    // Other refusal shapes.
+    for (const quote of ["I'd rather not have him get texts", 'Never text him please', 'Nobody will be home that day', 'Please stop texting him', 'He cannot be there']) {
+      expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: quote, on_site_quote: quote }, say('Text him the reminders? Will he be there?', quote))).toMatchObject({ wants_appointment_texts: false, on_site: false });
+    }
+    // Affirmative idioms with "no/not" still ground.
+    const idiom = say('Do you want us to text him the reminders?', 'No problem, text him the reminders.');
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'No problem, text him the reminders' }, idiom).wants_appointment_texts).toBe(true);
+    const notAProblem = say('Can we text him the tracking link?', 'That is not a problem, text him the tracking link.');
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'That is not a problem, text him the tracking link' }, notAProblem).wants_appointment_texts).toBe(true);
+    // A short answer must itself be affirmative: "No." / "Nope." / "Thanks." never ground.
+    for (const quote of ['No.', 'Nope.', 'Thanks.']) {
+      const t = say('Should we text him the reminders?', quote);
+      expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: quote }, t).wants_appointment_texts).toBe(false);
+    }
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Sounds good.' }, say('Should we text him the reminders?', 'Sounds good.')).wants_appointment_texts).toBe(true);
+  });
+
   test('a short affirmation counts only after an agent turn that asked about THAT field', () => {
     // Motivating call: agent offers reminders/tracking link, caller "Yeah." -> texts grounded.
     const motivating = ['Agent: Would you like us to text him the reminders and the tracking link?', 'Caller: Yeah.'].join('\n');

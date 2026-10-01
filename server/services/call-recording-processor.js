@@ -34,6 +34,7 @@ const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locati
 const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
+const { verifyOnSiteGrounding } = require('../utils/on-site-grounding');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 
@@ -3432,69 +3433,8 @@ function onSiteNotifyConsent(contact) {
   if (!String(contact.phone || '').trim()) return false;
   return ON_SITE_NOTIFY_ROLES.has(String(contact.role || '').trim().toLowerCase());
 }
-// Evidence check for the on-site consent inputs. The flags are model-judged
-// and a schema-valid V2 response may omit evidence[] entirely, so a
-// hallucinated true/true pair must not stamp consent or fire an opt-in text.
-// Returns a COPY with wants_appointment_texts / on_site forced false unless the
-// flag's pinned quote (V2 evidence[], speaker 'caller' — see
-// extraction-compat) sits word for word inside a CALLER turn of the
-// speaker-labeled transcript (turn parsing and the short-quote rule are the
-// reschedule applier's: a quote under three words must be the whole turn, so
-// a bare "Yeah." grounds only when it is that turn). An unlabeled transcript
-// fails closed. Pure; applied once where the call's contacts are resolved.
-// A bare affirmation ("Yeah.", "Yes", "Okay", "Sure") proves nothing on its
-// own: it only counts when the IMMEDIATELY preceding agent turn asked about
-// THAT field, so a stray "Yeah." after "What's the zip code?" cannot ground
-// consent. Substantive quotes (3+ words that are not all filler) keep the
-// plain caller-turn rule.
-const ON_SITE_FILLER_WORDS = new Set([
-  'yeah', 'yes', 'yep', 'yup', 'ok', 'okay', 'sure', 'right', 'alright', 'absolutely', 'definitely',
-  'please', 'that', 'works', 'fine', 'sounds', 'good', 'great', 'thanks', 'thank', 'you', 'uh', 'huh', 'mm', 'hmm', 'mhm', 'it', 'is', 'would', 'be', 'so',
-]);
-// Phrase-level, not token-level: "Are there termites?" must not ask about
-// presence and "Did you get my message?" must not ask about appointment texts
-// (pre-push codex P1). Texts additionally need a recipient reference in the
-// SAME agent turn (him/her/them/his/your/their/you/cell/phone/number/name).
-// "is/are there" is deliberately NOT a presence phrase ("Are there termites?").
-const ON_SITE_PROMPT_PATTERNS = {
-  wants_appointment_texts: /\b(text(s|ing)? (him|her|them|you|his|your|their)|(get|send|receive)s? (a |the )?(text|texts|reminder|reminders|tracking link)|(appointment |visit )?(reminder|reminders)|on (the|his|her|their|our) way|tracking link|notifications?)\b/i,
-  on_site: /\b((?:be|will be|is going to be|he's|she's|they're|he'll be|she'll be|they'll be) (?:there|home)|(?:be|is|are|he's|she's|they're|will be|is going to be) (?:at the (?:house|property|home|address)|on[- ]site|home)|meet (?:the|our|your) (?:tech|technician|inspector)|lives? (?:there|at the (?:house|property))|living there|present (?:at|for)|on[- ]site)\b/i,
-};
-const ON_SITE_RECIPIENT_REFERENCE = /\b(him|her|them|his|your|their|you|cell|phone|number|name)\b/i;
-const onSitePromptAsks = (field, agentText) => ON_SITE_PROMPT_PATTERNS[field].test(agentText)
-  && (field !== 'wants_appointment_texts' || ON_SITE_RECIPIENT_REFERENCE.test(agentText));
-function verifyOnSiteGrounding(contact, transcript) {
-  if (!contact || typeof contact !== 'object') return contact;
-  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement');
-  const turns = parseTurns(transcript);
-  const isGenericAffirmation = (quote) => {
-    const words = String(quote).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
-    return words.length < 3 || words.every((w) => ON_SITE_FILLER_WORDS.has(w));
-  };
-  // The agent turn right before this caller turn (empty turns skipped).
-  const promptingAgentTurn = (turn) => {
-    for (let i = turns.indexOf(turn) - 1; i >= 0; i -= 1) {
-      if (!turns[i].ns) continue;
-      return turns[i].agent ? turns[i] : null;
-    }
-    return null;
-  };
-  const verified = (field, flag, quote) => {
-    if (flag !== true || !turns || typeof quote !== 'string' || !quote.trim()) return false;
-    const holding = turnsHolding(turns, quote, 'caller');
-    if (!holding.length) return false;
-    if (!isGenericAffirmation(quote)) return true;
-    return holding.some((turn) => {
-      const prompt = promptingAgentTurn(turn);
-      return !!prompt && onSitePromptAsks(field, prompt.raw);
-    });
-  };
-  return {
-    ...contact,
-    wants_appointment_texts: verified('wants_appointment_texts', contact.wants_appointment_texts, contact.wants_appointment_texts_quote),
-    on_site: verified('on_site', contact.on_site, contact.on_site_quote),
-  };
-}
+// verifyOnSiteGrounding (transcript check of the on-site consent evidence)
+// lives in utils/on-site-grounding.js so the replay harness shares it.
 // Per-contact consent decision for the persistence loop: explicit V2 consent
 // wins (and keeps the original stamp source); otherwise the on-site rule may
 // authorize the stamp under its own source so audits can tell them apart.

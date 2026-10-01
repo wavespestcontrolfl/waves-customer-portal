@@ -53,6 +53,10 @@ const FIELD_GROUPS = {
     // Evidence presence for those flags (a caller-quote is what lets them authorize consent).
     'secondary_wants_appointment_texts_evidence',
     'secondary_on_site_evidence',
+    // VERIFIED against the transcript (what would actually authorize consent);
+    // null when no transcript was given, which collapses to false.
+    'secondary_wants_appointment_texts_grounded',
+    'secondary_on_site_grounded',
     // Same inputs for EVERY entry of secondary_contacts[] (order-stable signature).
     'secondary_contacts_consent_signature',
     'is_spam',
@@ -473,7 +477,8 @@ function normalizeField(field, value) {
   // (codex P2). A genuine true↔false disagreement still surfaces.
   if (field === 'agent_committed_booking' || field === 'caller_accepted_slot'
     || field === 'secondary_wants_appointment_texts' || field === 'secondary_on_site'
-    || field === 'secondary_wants_appointment_texts_evidence' || field === 'secondary_on_site_evidence') return normalizeBool(value) === true;
+    || field === 'secondary_wants_appointment_texts_evidence' || field === 'secondary_on_site_evidence'
+    || field === 'secondary_wants_appointment_texts_grounded' || field === 'secondary_on_site_grounded') return normalizeBool(value) === true;
   // Absent and '' both mean "no other parties" — collapse so pre-1.21 rows don't read as drift.
   if (field === 'secondary_contacts_consent_signature') return normalizeString(value) || '';
   if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
@@ -1294,7 +1299,7 @@ async function replayCall(call, context) {
   const legacyFlat = parseJson(call.ai_extraction, {}) || {};
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
-  const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
+  const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2, { transcript: call.transcription }) : null;
   const storedAvUnwaived = parseJson(call.ai_address_validation, null);
   // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) was decided
   // for the PRIOR extraction's service and property. It rebuilds for the prior
@@ -1407,7 +1412,10 @@ async function replayCall(call, context) {
   const durationMs = Date.now() - startedAt;
 
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
-  const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
+  // The candidate is verified against the transcript it was extracted from (the
+  // stored one unless --retranscribe replaced it): the on-site consent flags only
+  // count when their quotes are really in that transcript.
+  const currentFlat = currentExtraction ? helpers.flatView(currentExtraction, { transcript: transcriptForExtraction }) : null;
   const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
   const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && priorV2Valid && currentExtraction
     && waiverInputs(priorV2) !== waiverInputs(currentExtraction))
