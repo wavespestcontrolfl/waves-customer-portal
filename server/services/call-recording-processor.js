@@ -1884,6 +1884,9 @@ async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, le
   const callId = row.source_call_log_id || callLogId;
   // Serialize with the status routes (which lock this row, then recheck the hold): take the visit lock
   // and RE-READ eligibility under it — a confirm that committed first makes the row ineligible.
+  // Lock order everywhere in this feature: the per-call triage lock FIRST, then the visit row (close and
+  // reopen, the follow-up refresh and the confirm hook take them the same way).
+  await lockTriageCall(trx, callId);
   const live = await trx('scheduled_services').where({ id: row.id }).forUpdate().first('status', 'customer_confirmed');
   if (!live || live.customer_confirmed || live.status !== 'pending') return false;
   if (await findStreetLevelHoldCard(trx, { callLogId: callId, visitId: row.id })) return false;
@@ -1894,7 +1897,6 @@ async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, le
     visit_link: streetLevelVisitLink(row.id, dateOnlyISO(row.scheduled_date)),
     ...(followUpPlan ? { follow_up_plan: { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null } } : {}),
   };
-  await lockTriageCall(trx, callId);
   const card = await trx('triage_items')
     .where({ call_log_id: callId, reason_code: 'outbound_booking_review' })
     .whereIn('status', ['open', 'in_progress'])

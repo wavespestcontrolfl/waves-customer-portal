@@ -342,3 +342,23 @@ describe('r22: the follow-up refresh is serialized with the office confirm and r
     spy.mockRestore();
   });
 });
+
+describe('r22: one lock order for the hold lifecycle (per-call triage lock, then the visit row)', () => {
+  const read = (f) => fs.readFileSync(require.resolve(f), 'utf8');
+  test('promotion, close, reopen and the follow-up refresh all take the triage lock before the visit lock', () => {
+    const proc = read('../services/call-recording-processor.js');
+    const promote = proc.slice(proc.indexOf('async function promoteReusedRowToStreetLevelHold'), proc.indexOf('// Rings the one "confirm the address" admin bell'));
+    expect(promote.indexOf('await lockTriageCall(trx, callId);')).toBeGreaterThan(-1);
+    expect(promote.indexOf('await lockTriageCall(trx, callId);')).toBeLessThan(promote.indexOf(".forUpdate().first('status', 'customer_confirmed')"));
+    const hold = read('../services/street-level-hold.js');
+    for (const fn of ['async function closeHoldCardForEndedVisit', 'async function reopenHoldCardForRestoredVisit']) {
+      const body = hold.slice(hold.indexOf(fn));
+      const end = body.indexOf('\n}\n');
+      const f = body.slice(0, end);
+      expect(f.indexOf('await lockTriageCall(')).toBeGreaterThan(-1);
+      expect(f.indexOf('await lockTriageCall(')).toBeLessThan(f.indexOf('.forUpdate()'));
+    }
+    const refresh = hold.slice(hold.indexOf('async function refreshHoldFollowUpPlan'));
+    expect(refresh.indexOf('lockTriageCall')).toBeGreaterThan(-1);
+  });
+});
