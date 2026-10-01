@@ -11050,6 +11050,22 @@ const InvoiceService = {
     // alert the office has not acted on is closed here; one it already acted
     // on (billed or dismissed) means the fee may now be billed twice — a strict
     // caller (unvoid) refuses, the others raise it for a person.
+    // A completion parks the fee under its series row lock and inserts the
+    // handoff in the same transaction, so the series this invoice's fee lives
+    // on (its claim's anchor, its own visit's root) is locked FIRST: a park
+    // racing this reinstatement is then committed and visible to the read.
+    const lockSeries = new Set();
+    for (const claim of (await conn("setup_fee_claims").where({ invoice_id: invoiceId }).select("scheduled_service_id")) || []) {
+      if (claim.scheduled_service_id) lockSeries.add(String(claim.scheduled_service_id));
+    }
+    const linkedVisitId = (await conn("invoices").where({ id: invoiceId }).first("scheduled_service_id"))?.scheduled_service_id;
+    if (linkedVisitId) {
+      const linkedVisit = await conn("scheduled_services").where({ id: linkedVisitId }).first("id", "recurring_parent_id");
+      if (linkedVisit) lockSeries.add(String(linkedVisit.recurring_parent_id || linkedVisit.id));
+    }
+    for (const seriesId of [...lockSeries].sort()) {
+      await conn("scheduled_services").where({ id: seriesId }).forUpdate().first("id");
+    }
     const handoffs = await conn("dispatch_alerts")
       .where({ type: "setup_fee_office_billing" })
       .whereRaw("payload->>'sourceInvoiceId' = ?", [String(invoiceId)])

@@ -373,7 +373,6 @@ async function putAccept(token, body = {}) {
 
 // The tab attests it rendered the "setup fee billed with your first visit"
 // promise (the accept refuses on any difference from what it would apply).
-const putAcceptShown = (token, body = {}) => putAccept(token, { ...body, setupFeeAfterFirstVisitShown: true });
 
 beforeEach(() => {
   jest.clearAllMocks();

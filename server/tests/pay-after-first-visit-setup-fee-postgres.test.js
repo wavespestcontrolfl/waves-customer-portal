@@ -506,6 +506,42 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Pre-push audit P0: a $0 completion parking the restored fee CONCURRENTLY
+  // with the un-void. The un-void locks the fee's series before it reads the
+  // handoffs, so it waits for the park to commit and then closes that handoff
+  // (never commits the reinstated invoice beside an open office bill).
+  test('un-void racing a concurrent park waits for it and closes the new handoff', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId)).toMatchObject({ status: 200 });
+      const [inv] = await mockPg('invoices').where({ customer_id: f.customerId });
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'void' });
+      const Invoices = require('../services/invoice');
+      const Obligation = require('../services/setup-fee-obligation');
+      await Invoices.restoreRodentSetupObligationForReversedInvoice(mockPg, await mockPg('invoices').where({ id: inv.id }).first());
+      const visit = await mockPg('scheduled_services').where({ id: f.childIds[0] }).first();
+
+      const parkTrx = await mockPg.transaction();
+      let unvoid;
+      try {
+        const parked = await Obligation.parkSetupFeeStampForOffice(parkTrx, {
+          parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test', visit,
+        });
+        expect(parked).toBeTruthy();
+        unvoid = mockPg.transaction((trx) => Invoices.retireRodentSetupObligationForReinstatedInvoice(trx, inv.id, { strict: true }));
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await parkTrx.commit();
+      } catch (err) {
+        await parkTrx.rollback().catch(() => {});
+        throw err;
+      }
+      await unvoid;
+      const [handoff] = await officeFeeAlerts(f);
+      expect(handoff?.payload).toMatchObject({ sourceInvoiceId: String(inv.id), systemRetired: true });
+      expect(handoff.resolved_at).not.toBeNull();
+    } finally { await cleanup(f); }
+  });
+
   test('a free CALLBACK completing on a dues-covered series never hands the stranded setup fee to the office', async () => {
     const f = await seed();
     try {
