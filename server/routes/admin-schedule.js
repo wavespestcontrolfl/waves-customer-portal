@@ -9,7 +9,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive, visitPrepPhotosLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -72,6 +72,10 @@ const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-ass
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
+const {
+  TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  activeIngredientsMentioned, bookedReasonBlock,
+} = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
@@ -5702,6 +5706,9 @@ function recurringWithoutBillableAmount({
 // inside recurringWithoutBillableAmount.
 async function seriesExtensionUnbillable(conn, {
   parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc,
+  // The cancel-reseed's in-term placement selects add-ons by the replaced
+  // occurrence, not the visit's own day — the check reads the same set.
+  addonDate = null,
 }) {
   if (!dates.length) return null;
   const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
@@ -5723,7 +5730,7 @@ async function seriesExtensionUnbillable(conn, {
     : null;
   let floor = Infinity;
   for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
     const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
     floor = Math.min(floor, price);
   }
@@ -18487,6 +18494,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // auto-dispatch due date honoured). Not compared against the broader
   // reader: its raw scheduled_date would let a dispatch shift win.
   cadenceFloorRow = null,
+  // Post-cancel reseed only (GATE_CANCEL_RESEED_IN_TERM): picks the ONE
+  // extend date itself, given this writer's own weekend / blackout / season
+  // shift and the series' occupied dates; null falls back to the cadence
+  // generator (the series-end append). Only honoured with extendByOne.
+  placementPicker = null,
+  // With a picked date: the plan position of the occurrence it replaces.
+  // Recurring add-ons follow that occurrence, not the off-cadence day the
+  // replacement lands on (a patterned add-on is due only on exact cadence
+  // dates, so the new day would silently drop it).
+  placementAddonDate = null,
 }) {
   const live = await liveUpcomingSeriesVisits(trx, parentId);
   const target = extendByOne
@@ -18609,16 +18626,24 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // Extend dates from the shared generator (update-details' pre-trx lock
   // plan runs the same one).
   const extendBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
-  const extendDates = planSeriesExtendDates({
+  const pickedDate = (extendByOne && need === 1 && placementPicker)
+    ? placementPicker({
+      shift: (d) => seasonalSafeShift(d, parent.recurring_pattern, skipParent, dirParent, extendBlackoutDates),
+      takenDates: seen,
+    })
+    : null;
+  result.placement = pickedDate ? 'in_term' : 'series_end';
+  const extendDates = pickedDate ? [pickedDate] : planSeriesExtendDates({
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
     blackoutDates: extendBlackoutDates,
   });
   // Billable-amount gate on the dates this writer will add (shared helper —
   // rationale on seriesExtensionUnbillable). Trims and unchanged counts never
   // reach here.
+  const pickedAddonDate = (pickedDate && placementAddonDate) ? placementAddonDate : null;
   const unbillableExtend = await seriesExtensionUnbillable(trx, {
     parent, dates: extendDates, cols, parentAddons, storedDiscountScope,
-    blackoutDates: extendBlackoutDates, skipParent, seriesCioc,
+    blackoutDates: extendBlackoutDates, skipParent, seriesCioc, addonDate: pickedAddonDate,
   });
   if (unbillableExtend) {
     throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
@@ -18660,6 +18685,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // carry the flag that would auto-extend past the count just set. The
     // ongoing top-up is the mirror case and stamps the flag on.
     if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
+    // An in-term reseed lands off-cadence: stamp it as a one-off exception
+    // holding the replaced occurrence's slot (rebooker.dateExceptionStamp's
+    // shape), so the extend anchor, the series sweep and a later replacement
+    // all read its cadence position, never the off-cadence day.
+    if (pickedAddonDate && cols.date_exception && cols.date_exception_cadence_date) {
+      data.date_exception = true;
+      data.date_exception_cadence_date = pickedAddonDate;
+      if (cols.date_exception_source) data.date_exception_source = 'cancel_reseed';
+      if (cols.date_exception_at) data.date_exception_at = new Date();
+    }
     if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
@@ -18674,7 +18709,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, pickedAddonDate || nd, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -20198,7 +20233,19 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
   const reductionIds = await readPlanReductionIds(trx, {
     customerId: parent.customer_id, parentId, candidateIds: laterCancelledPlanRowIds(seriesRows, cancelled.id),
   });
-  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds) };
+  return {
+    window,
+    counting,
+    expected,
+    upcomingPlanCount,
+    anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds),
+    seriesRows,
+    todayET,
+    // The occurrence an in-term replacement stands in for: its plan position
+    // (an earlier in-term replacement carries the slot it replaced as its
+    // date_exception_cadence_date).
+    replacedOccurrenceDate: planPositionDate(cancelled),
+  };
 }
 
 // Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
@@ -20227,7 +20274,9 @@ async function probeReseedOverlaps(trx, { parent, parentId, added }) {
 
 // Step 5 — the idempotency stamp, same trx as the insert, so a rolled-back
 // add leaves no stamp and a committed add can never be repeated.
-function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates }) {
+function stampReseed(trx, {
+  parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates, placement = 'series_end',
+}) {
   return trx('activity_log').insert({
     customer_id: parent.customer_id,
     action: 'recurring_cancel_reseed',
@@ -20237,7 +20286,7 @@ function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, add
       recurring_parent_id: String(parentId),
       added_service_ids: added.map((c) => String(c.id)),
       term_index: term.window.index, term_start: term.window.start, term_end: term.window.end,
-      counting: term.counting, expected: term.expected, overlap_dates: overlapDates,
+      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement,
     }),
   });
 }
@@ -20273,7 +20322,9 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // population (Codex r8 P1): 24 live rows of which some are callbacks /
 // included follow-ups would clamp live + 1 back to 24 and add nothing. The
 // cap is enforced here, on the plan-row population, instead.
-async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, anchorFloor }) {
+async function addOneReseedVisit(trx, {
+  parent, parentId, cols, upcomingPlanCount, anchorFloor, placementPicker = null, placementAddonDate = null,
+}) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
   const reconcileParent = normalizedWindow
@@ -20294,8 +20345,10 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
       // the only consumer of the claim token, is unreachable.
       claimToken: null,
       ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
+      placementPicker,
+      placementAddonDate,
     });
-    return { added: result.added, reconcileParent };
+    return { added: result.added, reconcileParent, placement: result.placement || 'series_end' };
   } catch (e) {
     // The unbillable-extension refusal fires before any write, so the trx is
     // intact; it is terminal (a retry would read the same template).
@@ -20341,14 +20394,33 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor });
+  // In-term placement (GATE_CANCEL_RESEED_IN_TERM, read live): the gap the
+  // cancel left inside this term, else the series-end append as before.
+  const { cancelReseedInTermLive } = require('../config/feature-gates');
+  const placementPicker = cancelReseedInTermLive()
+    ? ({ shift, takenDates }) => require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
+      rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates, cancelledDate: cancelled.scheduled_date,
+    })
+    : null;
+  const add = await addOneReseedVisit(trx, {
+    parent,
+    parentId,
+    cols,
+    upcomingPlanCount: term.upcomingPlanCount,
+    anchorFloor: term.anchorFloor,
+    placementPicker,
+    placementAddonDate: placementPicker ? term.replacedOccurrenceDate : null,
+  });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {
-    await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates });
+    await stampReseed(trx, {
+      parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates, placement: add.placement,
+    });
   }
   return {
     added: add.added,
+    placement: add.placement,
     skipped: add.added.length ? null : 'not_placed',
     counting: term.counting, expected: term.expected, parentId, customerId: parent.customer_id, overlapWarnings: overlapDates,
   };
@@ -20396,7 +20468,7 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
     // Same terminal re-check the auto-extend and the top-up run: a series
     // cancel can take the per-parent lock right after our commit.
     await cancelSpawnedReminderIfVisitTerminal(conn, child.id, 'recurring-cancel-reseed');
-    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (term had ${result.counting}/${result.expected})`);
+    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (${result.placement === 'in_term' ? 'inside the term' : 'at the series end'}; term had ${result.counting}/${result.expected})`);
   }
   return result;
 }
@@ -24199,12 +24271,15 @@ function customerFacingCompanionTypes(companions) {
 // are technician-recorded visit data with the same provenance split as the
 // primary findings. `findingsType` may be null on companion-only profiles
 // (e.g. lawn_tree_shrub_combo): the block then carries companions alone.
-function renderTypedGroupLines(sections) {
+// Under GATE_REPORT_WRITER_RULES the product application record (termite
+// treatment names, EPA numbers, gallons, footage) stays out of the prompt;
+// its names still feed the trade-name output screen.
+function renderTypedGroupLines(sections, { withholdProductRecord = false } = {}) {
   const parts = [];
   if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
   if (sections.objectives?.length) parts.push(`Recorded treatment objectives (targets only — not proof of a sighting, inspection, or completed application):\n${sections.objectives.join('\n')}`);
-  if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
+  if (sections.products.length && !withholdProductRecord) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
   if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
   if (sections.customer.length) parts.push(`Customer communication (the homeowner's words / what was discussed — attribute it, NEVER present as a technician-verified finding):\n${sections.customer.join('\n')}`);
   return parts;
@@ -24231,14 +24306,14 @@ function copyActivityScore(type, values, submitted) {
 // "Next steps selected" line for either the primary or companion sections.
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, companionFindings = [],
-  allowedCompanionTypes = [], activityScore = null,
+  allowedCompanionTypes = [], activityScore = null, withholdProductRecord = false,
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
     : { work: [], observations: [], products: [], advice: [], customer: [] };
   const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
-  const primaryParts = renderTypedGroupLines(primarySections);
+  const primaryParts = renderTypedGroupLines(primarySections, { withholdProductRecord });
   const allowed = new Set(allowedCompanionTypes);
   // The profile's declared companion set bounds the work — every AUTHORIZED
   // companion renders (no arbitrary numeric cap; a >4-companion profile must
@@ -24258,7 +24333,7 @@ function buildTypedFindingsPromptBlock({
       const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
       const activityLine = typedActivityLine(entry.type, entry?.activityScore);
       if (activityLine) sections.observations.push(activityLine);
-      const parts = renderTypedGroupLines(sections);
+      const parts = renderTypedGroupLines(sections, { withholdProductRecord });
       if (!parts.length) return null;
       const label = ActivityIndicators.findingsSchemaForType(entry.type)?.label || entry.type;
       return `Companion findings (${label}):\n${parts.join('\n')}`;
@@ -24294,6 +24369,11 @@ router.post('/generate-report', async (req, res) => {
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
     } = req.body;
+    // GATE_REPORT_WRITER_RULES, read once per request. It applies only to
+    // writers in its scope (never lawn or tree/shrub/palm — owner
+    // 2026-09-30, another lane owns them); see report-writer-rules.js.
+    const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
+    const writerRulesGate = reportWriterRulesLive();
 
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
@@ -24681,34 +24761,6 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     const promptObs = obs.map((x) => redactAccessCodes(x));
     const promptRecs = recs.map((x) => redactAccessCodes(x));
     const promptConcern = redactAccessCodes(concernText);
-    const userMessage = `Generate the service report copy for this visit.
-
-INPUTS
-
-Client Full Name: ${customerName || 'Not specified'}
-Service Type: ${serviceType || 'Not specified'}
-Technician Full Name: ${technicianName || 'Not specified'}
-Service Date: ${serviceDate || 'Not specified'}
-Arrival Time: ${arrivalTime || 'Not specified'}
-
-[COMPLETED WORK]
-Service Notes: ${promptNotes || 'Not specified'}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
-Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
-Products Applied / Active Ingredients: ${productsText || 'Not specified'}
-
-[OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
-Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
-
-[REPORTED BY CUSTOMER]
-Customer interaction: ${customerInteraction || 'Not specified'}
-Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
-
-[FUTURE ADVICE — not completed work]
-Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
-
-Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
 
     // TECHNICIAN PHOTO OBSERVATIONS (GATE_REPORT_PHOTO_CONTENT, owner spec
     // 2026-09-27): the tech's own reviewed/edited captions for this visit's
@@ -24946,6 +24998,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
               companionFindings: companionEntries,
               allowedCompanionTypes,
               activityScore: typedActivityScoreNum,
+              withholdProductRecord: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
@@ -24991,6 +25044,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
+
+    const writerRulesOn = writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext);
 
     // Strict re-check of the input gate now that companion authorization is
     // known: if companion facts were the ONLY thing that opened the gate and
@@ -25046,6 +25101,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         products: Array.isArray(products) ? products : [],
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
+        writerRules: writerRulesOn,
       });
       contextText = ctx.contextText || '';
       contextSignals = ctx.signals || {};
@@ -25102,21 +25158,28 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     let commsBlock = '';
     if (includeCustomerComms === true && groundingCustomerId) {
       try {
-        const { buildCompletionCommsContext } = require('../services/completion-comms-context');
-        const comms = await buildCompletionCommsContext({
+        const { buildCompletionCommsContext, buildCustomerWordsContext } = require('../services/completion-comms-context');
+        // Under the writer rules only the customer's own words, labeled and
+        // scrubbed (buildCustomerWordsContext); otherwise the mixed log.
+        const comms = await (writerRulesOn ? buildCustomerWordsContext : buildCompletionCommsContext)({
           customerId: groundingCustomerId,
           scheduledServiceId,
         });
         if (comms.text) {
-          commsBlock = `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
+          commsBlock = writerRulesOn
+            ? `\n\n${CUSTOMER_WORDS_HEADER}\n${comms.promptHint}\n${redactAccessCodes(comms.text)}`
+            : `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
         }
       } catch (commsErr) {
         logger.warn(`[generate-report] comms context failed: ${commsErr.message}`);
       }
     }
 
-    const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
-    const effectiveSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, reportPromptContext);
+    const effectiveSystemPrompt = selectReportCopyPrompt(
+      systemPrompt,
+      groundingServiceType,
+      writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
+    );
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -25124,12 +25187,66 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         retryable: true,
       });
     }
-    const fullUserMessage = `${userMessage}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
+    const userMessage = `Generate the service report copy for this visit.
+
+INPUTS
+
+Client Full Name: ${customerName || 'Not specified'}
+Service Type: ${serviceType || 'Not specified'}
+Technician Full Name: ${technicianName || 'Not specified'}
+Service Date: ${serviceDate || 'Not specified'}
+Arrival Time: ${arrivalTime || 'Not specified'}
+
+${writerRulesOn
+    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
+    : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
+Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
+${writerRulesOn
+    ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)
+    : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
+
+[OBSERVED BY TECHNICIAN]
+Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
+Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
+
+[REPORTED BY CUSTOMER]
+Customer interaction: ${customerInteraction || 'Not specified'}
+Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
+
+[FUTURE ADVICE — not completed work]
+Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
+
+Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
+    // Why the customer booked (scheduled_services.customer_request*, filled
+    // by re-service bookings), which no writer read before. Writer rules
+    // and authorized grounding only; a failed read just leaves it out.
+    let bookedReason = '';
+    if (writerRulesOn && groundingCustomerId && scheduledServiceId) {
+      try {
+        const booked = await db('scheduled_services').where({ id: scheduledServiceId })
+          .first('customer_request', 'customer_request_source', 'customer_request_pests');
+        const { scrubCustomerText } = require('../services/completion-comms-context');
+        const block = bookedReasonBlock(booked, scrubCustomerText);
+        if (block) bookedReason = `\n\n${block}`;
+      } catch { /* no booked reason: the paragraph leads with the work */ }
+    }
+    const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
     // prompt and all visit facts participate in the cache identity.
     const cacheKey = crypto.createHash('sha256')
       .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
+      // Under the writer rules product names never reach the prompt, so what
+      // the output screens check joins the key instead: a draft screened for
+      // one product set is never served for another.
+      .update(writerRulesOn
+        ? `|withheld:${JSON.stringify([
+          productsText,
+          (Array.isArray(products) ? products : []).map((prod) => [prod?.productId || null, prod?.name || null]),
+          typedProductNameGuards,
+        ])}`
+        : '')
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
@@ -25144,11 +25261,38 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // The builder propagates a catalog failure only when an id-only product
     // depends on it for its name — the guard cannot run complete, so fail
     // retryable like the other grounding outages (codex r49).
+    // Under the writer rules no product may be named, not only this
+    // visit's: a catalog product the prompt itself mentions (a note saying
+    // "the customer asked about <product>") joins the trade-name screen.
+    const mentionedCatalogNames = [];
+    const mentionedCatalogActives = [];
+    if (writerRulesOn) {
+      try {
+        const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
+        for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
+          const named = Boolean(row?.name)
+            && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
+          if (named) mentionedCatalogNames.push(row.name);
+          // Its actives too: a draft must not swap the named product for
+          // its active ingredient; and an active the prompt names on its own
+          // ("azoxystrobin" in a note) is screened even with no product name.
+          if (row?.active_ingredient && (named || activeIngredientsMentioned(fullUserMessage, row.active_ingredient))) {
+            mentionedCatalogActives.push(row.active_ingredient);
+          }
+        }
+      } catch (err) {
+        logger.warn(`[generate-report] catalog name screen build failed — failing retryable: ${err.message}`);
+        return res.status(503).json({
+          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          retryable: true,
+        });
+      }
+    }
     let screenTradeNames;
     try {
       screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
         products: Array.isArray(products) ? products : [],
-        extraNames: [...typedProductNameGuards, ...fallbackProductNames],
+        extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
       });
     } catch (err) {
@@ -25158,10 +25302,46 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         retryable: true,
       });
     }
+    // Under the writer rules the copy may not name an active ingredient
+    // either: this visit's catalog actives join the rules screen (fail-soft
+    // to the screen's common list when the catalog read misses).
+    const visitActiveIngredients = [...mentionedCatalogActives];
+    if (writerRulesOn) {
+      // By id, and by name for name-only products (a legacy or restored row
+      // has productId null), the same two ways the grounding loader matches.
+      const selectedProducts = Array.isArray(products) ? products : [];
+      const productIds = selectedProducts.map((prod) => prod?.productId).filter(Boolean);
+      const productNames = [...new Set([
+        ...selectedProducts.filter((prod) => !prod?.productId).map((prod) => String(prod?.name || '').trim()),
+        ...(selectedProducts.length ? [] : fallbackProductNames),
+      ].filter(Boolean))];
+      if (productIds.length || productNames.length) {
+        try {
+          const rows = await db('products_catalog')
+            .where((q) => {
+              if (productIds.length) q.whereIn('id', productIds);
+              if (productNames.length) q.orWhereIn('name', productNames);
+            })
+            .select('active_ingredient');
+          visitActiveIngredients.push(...(Array.isArray(rows) ? rows : []).map((row) => row?.active_ingredient).filter(Boolean));
+        } catch (err) {
+          // The screen cannot run complete without this visit's actives —
+          // fail retryable like the trade-name guard, never screen weaker.
+          logger.warn(`[generate-report] active-ingredient screen build failed — failing retryable: ${err.message}`);
+          return res.status(503).json({
+            error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+            retryable: true,
+          });
+        }
+      }
+    }
+    const writerRulesScreen = (text) => (writerRulesOn
+      ? writerRulesRejection(text, { activeIngredients: visitActiveIngredients })
+      : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
-      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null),
+      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
@@ -25176,26 +25356,41 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           retryable: true,
         });
       }
+      // Under the writer rules the last-resort copy echoes only recorded
+      // items the rules allow: an item with a timeframe, price, amount or
+      // other forbidden term is left out rather than published, and free-text
+      // recommendations are left out entirely (aftercare, next-visit timing
+      // and handling advice belong to the report's own sections).
+      const rulesItems = (items) => (writerRulesOn
+        ? items.filter((item) => !writerRulesScreen(String(item || '')))
+        : items);
       const report = buildDeterministicReportCopy({
         serviceType: fallbackServiceType,
-        areas: promptAreas,
-        actions: [...promptActions, ...typedFallbackActions],
+        areas: rulesItems(promptAreas),
+        actions: rulesItems([...promptActions, ...typedFallbackActions]),
         // Typed structured findings ride the fallback as technician work /
         // observations / next steps (profile-confirmed above; product
         // application fields excluded) — a typed-only request must not 503
         // when the free-text fields are empty. All free-text inputs arrive
         // pre-redacted (codex r34).
-        observations: [...promptObs, ...typedFallbackObservations],
-        recommendations: [...promptRecs, ...typedFallbackNextSteps],
-        ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
-        customerConcern: promptConcern,
-        applicationRecords: deterministicApplications,
+        observations: rulesItems([...promptObs, ...typedFallbackObservations]),
+        recommendations: writerRulesOn ? [] : [...promptRecs, ...typedFallbackNextSteps],
+        // A zero rating ("Recorded pest activity was none.") names no place
+        // checked, a property-wide absence the writer rules refuse (rule 4):
+        // under the rules it is left out, so the recorded work still ships.
+        ratingLabel: ratingNum !== null && !(writerRulesOn && ratingNum === 0) ? PEST_ACTIVITY_LABELS[ratingNum] : null,
+        customerConcern: rulesItems([promptConcern])[0] || '',
+        // The writer rules drop the recorded footage ("with 120 linear ft
+        // recorded") from the last-resort copy too.
+        applicationRecords: writerRulesOn
+          ? deterministicApplications.map(({ areaValue, areaUnit, ...application }) => application)
+          : deterministicApplications,
       });
       // Same request-specific trade-name guard as the AI path (codex r19):
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && screenTradeNames(report) ? null : report;
+      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
@@ -25225,6 +25420,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       model: generated.model,
       fallbackUsed: generated.failures.length > 0,
       hasGrounding: !!groundingCustomerId,
+      ...(writerRulesOn ? { writerRules: true } : {}),
       ...contextSignals,
     });
     res.json({ report, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });

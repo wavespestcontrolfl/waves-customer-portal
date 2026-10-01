@@ -210,4 +210,12 @@ describe('policy table hygiene', () => {
       expect(p.title).toBe('Your service report is ready');
     }
   });
+
+  it('the lawn watering text follows the completion notice channel choice and opens Documents', () => {
+    expect(require('../services/messaging/push-channel-routing').APP_FIRST_TYPES.has('lawn_watering_instruction')).toBe(true);
+    expect(_test.PREF_CHANNEL_COLUMN.lawn_watering_instruction).toBe('service_complete_channel');
+    expect(_test.PREF_CHANNEL_COLUMN.lawn_watering_instruction).toBe(_test.PREF_CHANNEL_COLUMN.service_report_v1);
+    const p = _test.pushPresentation('lawn_watering_instruction');
+    expect(p).toEqual({ title: 'Watering after today’s visit', link: '/?tab=documents', category: 'service' });
+  });
 });

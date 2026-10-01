@@ -13,6 +13,12 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+// The dispute-hold read is not what this suite exercises (its db is a queue of canned chains): no
+// active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', status: 'sent' } })),

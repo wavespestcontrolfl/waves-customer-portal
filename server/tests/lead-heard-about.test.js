@@ -9,7 +9,7 @@ jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(); retu
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { _test } = require('../routes/lead-webhook');
-const { sanitizeHeardAbout, buildLeadWebhookIntake } = _test;
+const { sanitizeHeardAbout, sanitizeHeardAboutPrompt, buildLeadWebhookIntake } = _test;
 
 describe('sanitizeHeardAbout — fixed allowlist', () => {
   const ALLOWED = [
@@ -73,5 +73,69 @@ describe('buildLeadWebhookIntake — heardAbout wiring', () => {
     });
     expect(intake.leadSource.source).toBe('ai_assistant');
     expect(intake.heardAbout).toBeNull();
+  });
+});
+
+// leads.heard_about_prompt — the optional "What did you ask it?" follow-up,
+// kept only when the visitor picked ChatGPT or another AI assistant.
+describe('heard_about_prompt — AI follow-up', () => {
+  const ASK = 'best pest control in Sarasota';
+
+  test('a valid prompt rides through for chatgpt and other_ai', () => {
+    for (const heard_about of ['chatgpt', 'other_ai']) {
+      const intake = buildLeadWebhookIntake({ heard_about, heard_about_prompt: ASK });
+      expect(intake.heardAbout).toBe(heard_about);
+      expect(intake.heardAboutPrompt).toBe(ASK);
+    }
+  });
+
+  test('is stored as typed — no redaction of phone-like or name-like text', () => {
+    const typed = 'is Example Pest Co at 941-555-0100 any good?';
+    const intake = buildLeadWebhookIntake({ heard_about: 'chatgpt', heard_about_prompt: typed });
+    expect(intake.heardAboutPrompt).toBe(typed);
+  });
+
+  test('is trimmed and whitespace-collapsed to a single printable line', () => {
+    const intake = buildLeadWebhookIntake({
+      heard_about: 'chatgpt',
+      heard_about_prompt: '  best   pest\n\tcontrol \u0000 near me  ',
+    });
+    expect(intake.heardAboutPrompt).toBe('best pest control near me');
+  });
+
+  test('is capped at 500 characters', () => {
+    const intake = buildLeadWebhookIntake({ heard_about: 'other_ai', heard_about_prompt: 'a'.repeat(900) });
+    expect(intake.heardAboutPrompt).toHaveLength(500);
+  });
+
+  test('is dropped when heard_about is a non-AI choice', () => {
+    for (const heard_about of ['google_search', 'friend_neighbor', 'other']) {
+      const intake = buildLeadWebhookIntake({ heard_about, heard_about_prompt: ASK });
+      expect(intake.heardAbout).toBe(heard_about);
+      expect(intake.heardAboutPrompt).toBeNull();
+    }
+  });
+
+  test('is dropped when heard_about is absent or invalid', () => {
+    expect(buildLeadWebhookIntake({ heard_about_prompt: ASK }).heardAboutPrompt).toBeNull();
+    expect(buildLeadWebhookIntake({ heard_about: 'billboard', heard_about_prompt: ASK }).heardAboutPrompt).toBeNull();
+  });
+
+  test('blank or non-string prompts resolve to null, never throw', () => {
+    for (const heard_about_prompt of ['', '   ', undefined, null, 42, { a: 1 }, ['x']]) {
+      expect(buildLeadWebhookIntake({ heard_about: 'chatgpt', heard_about_prompt }).heardAboutPrompt).toBeNull();
+    }
+  });
+
+  test('an old client that omits the field is unaffected', () => {
+    const intake = buildLeadWebhookIntake({ heard_about: 'chatgpt' });
+    expect(intake.heardAbout).toBe('chatgpt');
+    expect(intake.heardAboutPrompt).toBeNull();
+  });
+
+  test('sanitizeHeardAboutPrompt gates on the sanitized heardAbout key', () => {
+    expect(sanitizeHeardAboutPrompt(ASK, 'chatgpt')).toBe(ASK);
+    expect(sanitizeHeardAboutPrompt(ASK, 'yelp')).toBeNull();
+    expect(sanitizeHeardAboutPrompt(ASK, null)).toBeNull();
   });
 });

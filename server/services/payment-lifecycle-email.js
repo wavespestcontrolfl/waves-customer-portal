@@ -194,6 +194,10 @@ async function logPaymentLifecycleEmailAttempt({
   }
 }
 
+// Lifecycle notices whose body carries a pay / update-card link.
+const HOLD_GATED_TEMPLATES = require('./collections/collection-hold').HOLD_GATED_EMAIL_TEMPLATES;
+const CUSTOMER_INITIATED_EMAIL_CATEGORY = require('./collections/collection-hold').CUSTOMER_INITIATED_EMAIL_CATEGORY;
+
 async function sendLifecycleTemplate({
   customerId,
   templateKey,
@@ -208,11 +212,36 @@ async function sendLifecycleTemplate({
   categories = [],
   billingDeliveryCategory = null,
   beforeProviderHandoff = null,
+  // TRUSTED provenance from the caller (sendPaymentFailed, from the Stripe webhook's own PI
+  // markers): the notice answers a payment the customer just attempted themselves, so it is not
+  // billing follow-up and the dispute hold does not withhold it (the same exemption the
+  // Text/App boundary applies to a customerInitiated payment_failure).
+  customerInitiated = false,
 }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found',
     ...(billingDeliveryCategory ? { deliveryOutcome: 'not_sent' } : {}),
   };
+  // Collections DISPUTE hold (owner ruling 2026-09-30): the notices that carry a pay or
+  // update-card link (payment failed, retry notice, method-expiring) are billing follow-up the
+  // customer was told is on hold. Suppress - never queue: dunning after the release covers it.
+  // One live check at the shared send boundary (every caller - billing-cron, the retry
+  // obligation, the Stripe webhook, the expiry workflows - passes through here); fail closed.
+  // Confirmations and receipts carry no such link and are untouched.
+  const holdApplies = HOLD_GATED_TEMPLATES.has(templateKey);
+  // The customer's own payment attempt skips a plain dispute hold only; a wrong-number / wrong-party
+  // fallback hold still stops the notice (Codex #5424 r13).
+  const holdOpts = { ignoreDisputeHold: customerInitiated === true };
+  if (holdApplies) {
+    const held = await require('./collections/collection-hold').messagingHeldByCollectionHold(customer.id, undefined, holdOpts);
+    if (held.held) {
+      logger.info(`[payment-lifecycle-email] ${templateKey} suppressed for customer ${customer.id}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+      // The ONE retryable hold outcome (Codex #5424 r14): a replay handler recognises only
+      // COLLECTION_HOLD_DEFER, so a hold that commits after a caller's early check waits, never
+      // terminalizes.
+      return { ok: false, blocked: true, skipped: true, ...require('./collections/collection-hold').holdDeferOutcome(held) };
+    }
+  }
 
   const prefs = await loadPrefs(customer.id);
   if (billingDeliveryCategory) {
@@ -259,6 +288,28 @@ async function sendLifecycleTemplate({
 
   let providerStarted = false;
   let handoffGuardFailed = false;
+  // A hold that committed between the up-front check and the provider handoff: a WAIT, reported
+  // as the coded retryable COLLECTION_HOLD_DEFER (never a bare not-sent, which the retry
+  // obligation would turn into a terminal block).
+  let handoffHold = null;
+  // The FINAL hold check (round-11 P1), handed to SendGrid as sendOne's providerBoundaryCheck: it
+  // runs after every await above and after the provider's own request preparation, immediately
+  // before the fetch, so a dispute committed after the up-front read still stops the notice. A
+  // refusal throws the boundary-blocked sentinel the library turns into a definite non-send, and
+  // the coded retryable COLLECTION_HOLD_DEFER is returned below. Only the gated pay-link templates
+  // carry it; customerInitiated skips the dispute part only (holdOpts).
+  const holdBoundaryCheck = holdApplies ? async ({ database: handoffDb } = {}) => {
+    const heldNow = await require('./collections/collection-hold').messagingHeldByCollectionHold(customer.id, handoffDb, holdOpts);
+    if (heldNow.held) {
+      handoffHold = heldNow;
+      throw Object.assign(new Error('Customer has an active collections dispute hold'), {
+        code: require('./collections/collection-hold').HOLD_DEFER_CODE,
+        retryable: true,
+        providerBoundaryBlocked: true,
+      });
+    }
+    return { ok: true };
+  } : null;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -278,6 +329,14 @@ async function sendLifecycleTemplate({
               if (ownership.ok !== true) {
                 handoffGuardFailed = ownership.retryable === true || ownership.code === 'INVOICE_UNREADABLE';
                 return ownership;
+              }
+            }
+            // Dispute hold re-read at the provider boundary (see the up-front check above).
+            if (holdApplies) {
+              const heldNow = await require('./collections/collection-hold').messagingHeldByCollectionHold(customer.id, undefined, holdOpts);
+              if (heldNow.held) {
+                handoffHold = heldNow;
+                return { ok: false };
               }
             }
             const [freshCustomer, freshPrefs] = await Promise.all([
@@ -300,12 +359,19 @@ async function sendLifecycleTemplate({
               if (guard === false || guard?.ok === false) throw new Error('Delivery handoff was not acquired');
             }
             providerStarted = true;
-            await dispatch();
+            await dispatch(undefined, holdBoundaryCheck || undefined);
             return { ok: true };
           } catch (err) {
             if (!providerStarted) handoffGuardFailed = true;
             throw err;
           }
+        },
+      } : holdBoundaryCheck ? {
+        // No billing-delivery ownership to hold, but the hold-gated notice still needs the
+        // final SendGrid boundary check.
+        withProviderHandoff: async (dispatch) => {
+          await dispatch(undefined, holdBoundaryCheck);
+          return { ok: true };
         },
       } : {}),
     });
@@ -320,6 +386,14 @@ async function sendLifecycleTemplate({
       };
     }
 
+    if (!result.sent && handoffHold) {
+      await logPaymentLifecycleEmailAttempt({
+        customerId: customer.id, invoiceId, paymentId, paymentMethodId, refundId, paymentPlanId, templateKey, eventType,
+        status: 'skipped', failureReason: 'collection_hold',
+      });
+      const { holdDeferOutcome } = require('./collections/collection-hold');
+      return { ok: false, blocked: true, ...holdDeferOutcome(handoffHold) };
+    }
     const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
     await logPaymentLifecycleEmailAttempt({
       customerId: customer.id,
@@ -816,8 +890,15 @@ async function sendPaymentFailed({
     paymentMethodId: payment?.payment_method_id || null,
     idempotencyKey: dedupeKey,
     billingDeliveryCategory: 'payment_issue',
+    customerInitiated: customerInitiated === true,
+    // Stored on the email row so a provider-block retry keeps the exemption (the retry rail
+    // reads it before its dispute-hold check).
+    categories: customerInitiated === true ? [CUSTOMER_INITIATED_EMAIL_CATEGORY] : [],
   });
-  if (emailResult?.retryable) {
+  // A hold refusal (the ONE retryable COLLECTION_HOLD_DEFER outcome) is a wait, not an unavailable
+  // preference read: nothing to retry the webhook for - the Text/App legs below are gated at their own
+  // boundary and dunning after the release covers the email.
+  if (emailResult?.retryable && !require('./collections/collection-hold').isHoldSuppression(emailResult)) {
     const err = new Error('Payment-issue delivery preferences are unavailable');
     err.code = 'BILLING_PREFS_UNAVAILABLE';
     err.retryable = true;

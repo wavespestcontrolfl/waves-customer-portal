@@ -1082,6 +1082,8 @@ describe('rain-out service', () => {
       );
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
       expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('could not shift');
+      // The card opens the moved visit on its new day.
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].link).toBe('/admin/dispatch?tab=schedule&date=2026-06-12&appointment=svc-1');
     });
 
     test('same-day pushes have no date delta and never touch the series', async () => {

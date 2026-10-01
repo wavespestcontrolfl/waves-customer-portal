@@ -78,6 +78,22 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
         LEFT JOIN intervals i ON i.pattern = COALESCE(p.recurring_pattern, s.recurring_pattern)
         WHERE s.is_recurring = true
           AND s.status NOT IN (${statusPlaceholders})
+          -- A cancel replacement placed INSIDE its plan year (cancel-reseed
+          -- in-term placement) sits in the gap the cancel left, off the
+          -- cadence by design; checking it against its neighbours would flag
+          -- every one. Its neighbours are still checked against each other.
+          -- Only while it still sits where the reseed put it: any later move
+          -- re-stamps date_exception_source, and the row is audited again.
+          AND NOT (
+            COALESCE(s.date_exception_source, '') = 'cancel_reseed'
+            AND EXISTS (
+            SELECT 1 FROM activity_log al
+            WHERE al.customer_id = s.customer_id
+              AND al.action = 'recurring_cancel_reseed'
+              AND al.metadata->>'placement' = 'in_term'
+              AND al.metadata->'added_service_ids' @> to_jsonb(s.id::text)
+            )
+          )
       ),
       active_series AS (
         SELECT * FROM series_rows WHERE min_gap_days IS NOT NULL

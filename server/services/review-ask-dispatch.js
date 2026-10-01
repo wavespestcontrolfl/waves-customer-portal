@@ -18,7 +18,18 @@ async function clickGate(reviewRequestId) {
 
 // The callback includes provider delivery and its durable delivery stamp.
 // Callers retain their recipient, consent, claim and outcome handling.
-async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null } = {}) {
+//
+// skipSpacing (immediate staff composer send only): a person typing a review
+// link in Messages is never held by the 72-hour spacing, so the spacing history
+// reads and the REVIEW_ASK_SPACING block are skipped. The customer-required
+// check, the per-customer lock (it still serializes with the automatic sender),
+// the busy-lock refusal and the click gate are unchanged. The send itself still
+// lands in sms_log, where lastManualAskAt sees it, so automatic asks keep their
+// spacing around it. Confirmed prior asks never block it, but UNRESOLVED
+// evidence still does (an sms_log review-ask reservation, or a review_requests
+// follow-up reservation, whose outcome is in flight or uncertain, other than
+// this attempt's own), so a retry cannot double-text.
+async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null, skipSpacing = false } = {}) {
   if (!customerId) return { sent: false, blocked: true, code: 'REVIEW_CUSTOMER_REQUIRED',
     reason: 'Select the customer receiving this review request before sending.', httpStatus: 409 };
   const result = await runExclusive(`review-send:${customerId}`, async () => {
@@ -29,6 +40,20 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
       reason: require('./review-click-guard').REVIEW_LINK_CLICKED_REASON, httpStatus: 409 };
     if (click === 'unknown') return { sent: false, blocked: true, code: 'REVIEW_CLICK_STATE_UNAVAILABLE',
       reason: 'Could not confirm whether this customer already tapped their review link. Try again shortly.', httpStatus: 503 };
+    if (skipSpacing) {
+      let unresolvedAt;
+      try {
+        unresolvedAt = await history.lastUnresolvedAskAt(customerId, {
+          since: new Date(Date.now() - history.ASK_SPACING_MS), excludeReservationId, excludeRequestId,
+        });
+      } catch {
+        return { sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE',
+          reason: 'Could not verify recent review requests. Try again after review history is available.', httpStatus: 503 };
+      }
+      if (unresolvedAt) return { sent: false, blocked: true, code: 'REVIEW_SEND_UNRESOLVED',
+        reason: 'A review text to this customer is still being confirmed. Check the thread before sending again.', httpStatus: 409 };
+      return dispatch();
+    }
     let pipelineAt;
     let manualAt;
     try {

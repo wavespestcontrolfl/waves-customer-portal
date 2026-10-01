@@ -137,6 +137,30 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
   return { recipient };
 }
 
+// The customer row, delivery preferences and channel choice the invoice email is addressed
+// from: the raw customers row (no account-primary fallback) and the customer's own
+// notification_prefs, refused the way sendInvoiceEmail refuses. One function for the
+// sender and for anything that must know whether this email would go (the visit-summary
+// fold, billing-text-verdict.js), so they cannot drift apart.
+async function loadInvoiceEmailContext(invoice, options = {}) {
+  const customer = await db('customers').where({ id: invoice.customer_id })
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .first();
+  if (!customer) return { refusal: { ok: false, error: 'Customer not found' } };
+  let prefsLookupFailed = false;
+  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
+    prefsLookupFailed = true;
+    return null;
+  });
+  if (options.billingDeliveryCategory && !invoice.payer_id) {
+    if (prefsLookupFailed) return { refusal: { ok: false, error: 'Invoice delivery preferences unavailable', code: 'billing_prefs_unavailable' } };
+    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
+      return { refusal: { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' } };
+    }
+  }
+  return { customer, prefs };
+}
+
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
@@ -172,21 +196,9 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   }
   // Amount the customer pays = total − applied account credit (what Stripe charges).
   const amountDue = invoiceAmountDue(invoice);
-  const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
-    .first();
-  if (!customer) return { ok: false, error: 'Customer not found' };
-  let prefsLookupFailed = false;
-  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
-    prefsLookupFailed = true;
-    return null;
-  });
-  if (options.billingDeliveryCategory && !invoice.payer_id) {
-    if (prefsLookupFailed) return { ok: false, error: 'Invoice delivery preferences unavailable', code: 'billing_prefs_unavailable' };
-    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
-      return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
-    }
-  }
+  const emailContext = await loadInvoiceEmailContext(invoice, options);
+  if (emailContext.refusal) return emailContext.refusal;
+  const { customer, prefs } = emailContext;
 
   // Third-party Bill-To reroute. When this invoice carries a payer snapshot,
   // attach the payer (for the PDF bill-to block) and — unless the operator
@@ -427,6 +439,21 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
             if (ownership.ok !== true) return ownership;
           }
+          // Collections DISPUTE hold, re-read at THIS email provider boundary on the locked
+          // handle (owner ruling 2026-09-30): a hold that committed while the PDF/template
+          // rendered still stops the pay link - retryable + deferred, never terminal (savepoint
+          // read, fail closed). Payer-billed and the explicit operator/customer exemptions skip it.
+          // A trusted exemption skips a plain dispute hold only; a fallback hold still stops it.
+          if (!current.payer_id) {
+            const collectionHold = require('./collections/collection-hold');
+            const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, trx,
+              { ignoreDisputeHold: collectionHold.holdExemptionApplies(options.holdExempt) });
+            if (held.held) {
+              const defer = collectionHold.holdDeferOutcome(held);
+              boundaryRefusal = { code: defer.code, reason: defer.reason, retryable: true, deferred: true, nextAllowedAt: defer.nextAllowedAt };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
           if (options.billingDeliveryCategory && !current.payer_id) {
             let freshPrefs;
             try {
@@ -550,6 +577,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         return { ok: false, blocked: !!result.blocked, error: refusal.reason || 'Email suppressed',
           code: refusal.code, deliveryOutcome: boundaryRefusal ? 'not_sent' : result.deliveryOutcome,
           ...(refusal.retryable ? { retryable: true } : {}),
+          ...(refusal.deferred ? { deferred: true, nextAllowedAt: refusal.nextAllowedAt } : {}),
           recipient: recipientPayload };
       }
       const evidence = acceptedInvoiceEmailEvidence(result);
@@ -590,6 +618,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     if (verdict.ok !== true) return { ok: false, error: verdict.reason, code: verdict.code,
       deliveryOutcome: boundaryRefusal ? 'not_sent' : undefined,
       ...(verdict.retryable ? { retryable: true } : {}),
+      ...(verdict.deferred ? { deferred: true, nextAllowedAt: verdict.nextAllowedAt } : {}),
       recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
@@ -953,6 +982,8 @@ module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
   resolveReceiptEmailRecipient,
+  loadInvoiceEmailContext,
+  invoiceRecipientFor,
   inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,

@@ -186,7 +186,11 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
     if (blockReason) {
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
-      await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      // A recheck that could not READ the live state (round-42 P2) refuses this attempt but
+      // does NOT retire the card: nothing is known to be stale, so the reviewer can retry.
+      if (!require('../services/agent-decision-send-checks').blockReasonIsEtaInfrastructure(blockReason)) {
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      }
       return null;
     }
     return decision;
@@ -925,11 +929,11 @@ router.post('/sms', async (req, res, next) => {
           async () => {
             const consent = await ReviewService.reviewSmsAllowedNow(rr.customer_id);
             if (!consent.allowed) return { consent };
-            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
+            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id, { staffComposer: true });
             if (!gate.allowed) return { gate };
-            // The send-time click guard every review sender uses: a customer who
-            // tapped a tracked review link since this draft's anchor is not asked again.
-            if (await ClickGuard.askSuppressedByClick(rr)) return { clicked: true };
+            // No click guard here by owner ruling: the Quick Links link is the
+            // staff "send anytime" link, so a prior tap does not suppress it. A
+            // tap on THIS link is still recorded and stops the cadence (/go).
             // Both stamps the owed email leg on the claim itself, so the
             // Quick Links retry path has persisted evidence this ask asked
             // for an email (GH Codex #3856 r8 P1).
@@ -998,9 +1002,6 @@ router.post('/sms', async (req, res, next) => {
         }
         if (seam.consent) {
           return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
-        }
-        if (seam.clicked) {
-          return abortUnsent(409, `${ClickGuard.REVIEW_LINK_CLICKED_REASON} Remove the review link before sending.`);
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
@@ -1090,6 +1091,14 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       ...(cardClaim ? { operatorInitiated: true } : {}),
+      // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the decision's ETA
+      // check ran in verifyAgentDraftDecision, before this route's many link / claim /
+      // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
+      // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      ...(verifiedAgentDecision?.id ? {
+        providerPreSendCheck: require('../services/agent-decision-send-checks')
+          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+      } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —
@@ -1290,8 +1299,13 @@ router.post('/sms', async (req, res, next) => {
         return result;
       };
       return reviewLooking
+        // skipSpacing only for a Quick Links tracked link (a claimed request):
+        // that path ran the full seam (consent/review prefs, the staff-composer
+        // unscheduled gate incl. the cap, the click guard) and records the ask
+        // on review_requests. A pasted or typed link has none of that, so it
+        // keeps the 72-hour spacing exactly as on main.
         ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
-          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId })
+          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, skipSpacing: Boolean(claimedReviewRequestId) })
         : sendAndSettle();
     };
     const result = prepLinkSends
@@ -1973,7 +1987,7 @@ router.get('/log', async (req, res, next) => {
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at',
+        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at', 'messages.twilio_sid',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
@@ -2007,8 +2021,30 @@ router.get('/log', async (req, res, next) => {
 
     // Exact contact match for a lead that has no customer record yet. Never
     // use broad body/name search to choose the conversation or mark it read.
-    if (req.query.phone !== undefined) {
-      const phones = phoneMatchDigits(req.query.phone);
+    // `twilioSid` anchors the read on one message (an alert's deep link, which
+    // must not carry a phone number), under the same visibility scoping as every
+    // other read here. Alone it resolves to that message's contact; with
+    // `customerId` it leaves the customer scope as it is and only guarantees the
+    // anchor row is in the response — a sid that is not that customer's is not
+    // found, so it never pulls in a foreign row. Either way the row is added to
+    // page 1 below when the newest-first cap would leave it out.
+    let contactFilter = req.query.phone;
+    let anchorSid = null;
+    if (req.query.twilioSid !== undefined) {
+      const sid = typeof req.query.twilioSid === 'string' ? req.query.twilioSid.trim() : '';
+      const anchor = sid && await query.clone().clearSelect().clearOrder()
+        .where('messages.twilio_sid', sid)
+        .modify((q) => { if (customerId) q.where('conversations.customer_id', customerId); })
+        .first(db.raw(`${addressProjection.contactPhoneSql} as contact`));
+      if (anchor?.contact) {
+        anchorSid = sid;
+        if (!customerId) contactFilter = anchor.contact;
+      } else if (!customerId) {
+        return res.json({ messages: [], page: 1, limit: DEFAULT_SMS_LOG_LIMIT, hasMore: false, nextPage: null });
+      }
+    }
+    if (contactFilter !== undefined) {
+      const phones = phoneMatchDigits(contactFilter);
       if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
       query = query.whereRaw(`regexp_replace(${addressProjection.contactPhoneSql}, '[^0-9]', '', 'g') = ANY (?::text[])`, [phones]);
     }
@@ -2053,6 +2089,8 @@ router.get('/log', async (req, res, next) => {
       }
     }
 
+    // Every filter applied, before paging: the anchor row is read through it.
+    const filtered = anchorSid ? query.clone() : null;
     query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
 
     const requestedPage = parsePositiveInt(page) || 1;
@@ -2062,7 +2100,15 @@ router.get('/log', async (req, res, next) => {
       .limit(effectiveLimit + 1)
       .offset((requestedPage - 1) * effectiveLimit);
     const hasMore = rowsPlusOne.length > effectiveLimit;
-    const rows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    const pageRows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    // The anchored message is older than a full newest-first page: add it (same
+    // projection and scoping) rather than page around it. hasMore / nextPage
+    // still describe the ordinary pages; a later page repeats the row harmlessly
+    // (clients merge by id).
+    const anchorRow = anchorSid && requestedPage === 1 && !pageRows.some((r) => r.twilio_sid === anchorSid)
+      ? await filtered.where('messages.twilio_sid', anchorSid).first()
+      : null;
+    const rows = anchorRow ? [...pageRows, anchorRow] : pageRows;
     const priorOutboundBodies = await loadPriorOutboundBodies(db, rows, { customerScoped: !!customerId });
     for (const row of rows) {
       if (priorOutboundBodies.has(String(row.id))) {
@@ -2104,7 +2150,7 @@ router.get('/log', async (req, res, next) => {
         replyToMessageId: m.response_reply_to_message_id,
       });
       return {
-        id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
+        id: m.id, conversationId: m.conversation_id, twilioSid: m.twilio_sid || null, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
         responseMessageType,
         responseStatus,
@@ -2694,7 +2740,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 //     owned by the public page — plan state can change after the text.
 router.post('/reservice-link', requireAdmin, async (req, res) => {
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
+    const { reserviceSelfServeEnabled, loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
     if (!reserviceSelfServeEnabled()) {
       return res.status(404).json({ error: 'Self-serve re-service links are not enabled' });
     }
@@ -2747,38 +2793,45 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     // property the operator actually picked (codex P2 #3194). Remaining
     // siblings follow in a sorted (deterministic) order —
     // customerIdsForAccount has no ORDER BY of its own. First eligible row
-    // wins; none → nothing to insert.
+    // wins; none → nothing to insert. Eligibility itself is the ONE shared
+    // predicate (reservice-scheduler.loadEligibleReserviceLanes, Codex
+    // round-4 P1) — the SAME check the SMS FREE RE-SERVICE fact and the
+    // send-time promise recheck resolve through, so this route's behavior
+    // can never drift from what those report.
     const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
     const orderedIds = selectedId
       ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
       : [...customerIds].sort();
-    let eligible = null;
+    let eligibleId = null;
     let lanes = [];
     for (const id of orderedIds) {
-      const row = await db('customers')
-        .where({ id })
-        .whereNull('deleted_at')
-        .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-      if (!row || row.active === false || !row.reservice_token) continue;
-      const rowLanes = await reserviceLanesForCustomer(row);
+      // Codex round-21 P2: a lookup FAILURE aborts the whole scan (500) — never "no lanes, try the next
+      // sibling", which could text a link for a different property than the operator picked.
+      let rowLanes;
+      try {
+        rowLanes = await loadEligibleReserviceLanesStrict(id);
+      } catch (lookupErr) {
+        logger.error(`reservice-link eligibility lookup failed for ${id}: ${lookupErr.message}`);
+        return res.status(500).json({ error: 'Could not verify re-service eligibility — try again in a moment' });
+      }
       if (rowLanes.length) {
-        eligible = row;
+        eligibleId = id;
         lanes = rowLanes;
         break;
       }
     }
-    if (!eligible) {
+    if (!eligibleId) {
       return res.status(404).json({ error: 'No active recurring plan on this account — a free re-service needs an active plan' });
     }
 
     const { buildReserviceLink } = require('../services/reservice-link');
-    const { url, line } = await buildReserviceLink(eligible.id);
+    const { url, line } = await buildReserviceLink(eligibleId);
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
       url: stripSmsUrlScheme(url),
       line: stripSmsUrlScheme(line),
-      customerId: eligible.id,
+      customerId: eligibleId,
       lanes,
       firstName: recipientFirstName,
     });
@@ -2852,7 +2905,7 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
     logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${requestId}): ${firstErr.message}`);
     await ReviewService.markInlineDelivered(requestId, claimToken);
   }
-  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId) : null;
+  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true }) : null;
 }
 
 // The inline review ask once the composer's send has THROWN: a throw after
@@ -2880,7 +2933,7 @@ async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailR
   }
   await ReviewService.markInlineDelivered(requestId, claimToken);
   if (!emailRequested) return;
-  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId);
+  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true });
   err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
     ? 'the review email was sent too.'
     : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
@@ -2906,7 +2959,7 @@ async function emailReviewAskNow(primaryId) {
     // on the delivered text cannot land between the click check inside
     // sendInlineEmailCopy and the email provider call.
     const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
-    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id),
+    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id, { skipClickGuard: true }),
       { recordHealth: false, waitForSlot: false });
     if (wasLockSkipped(copy)) {
       return { status: 409, body: { error: 'A review request to this customer is already being sent. Try again in a moment.', outcome: 'blocked', code: 'REVIEW_SEND_BUSY' } };
