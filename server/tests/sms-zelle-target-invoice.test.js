@@ -356,3 +356,23 @@ describe('multiple named invoice references (round 36)', () => {
     expect(resolveZelleTargetInvoice({ openInvoices: only, openInvoicesTruncated: true }, 'Zelle invoice 0123 and 0999?')).toEqual({ invoiceId: null, reason: 'open_list_truncated' });
   });
 });
+
+// Codex round-39 P2: EVERY invoice-scoped amount must resolve - an unmatched one is an unresolved explicit target.
+describe('invoice-scoped amounts that do not all resolve (round 39)', () => {
+  const open = [
+    { id: 'a', invoiceNumber: 'WPC-2026-0123', status: 'sent', amountDue: 100 },
+    { id: 'b', invoiceNumber: 'WPC-2026-0124', status: 'sent', amountDue: 300 },
+  ];
+  test('two open invoices: "$100 and $200 invoices" abstains - the $200 target is unresolved', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle my $100 and $200 invoices?')).toEqual({ invoiceId: null, reason: 'named_amount_differs' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle my $100 invoice?')).toMatchObject({ invoiceId: 'a', reason: 'unique_amount' });
+  });
+  test('a single open invoice: every scoped amount must be its amount due', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: [open[0]] }, 'Zelle my $100 and $200 invoices?')).toEqual({ invoiceId: null, reason: 'named_amount_differs' });
+    expect(resolveZelleTargetInvoice({ openInvoices: [open[0]] }, 'Zelle my $100 invoice?').invoiceId).toBe('a');
+  });
+  test('a named number plus an extra scoped amount that is not its amount conflicts', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle invoice 0123, the $100 invoice and the $200 invoice?')).toEqual({ invoiceId: null, reason: 'reference_conflict' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle invoice 0123, the $100 invoice?').invoiceId).toBe('a');
+  });
+});

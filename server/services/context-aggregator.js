@@ -600,7 +600,7 @@ class ContextAggregator {
         // ceiling, far above any real account.
         .orderBy('created_at', 'desc')
         .limit(300)
-        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'scheduled_send_error', 'created_at')
+        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'payer_statement_id', 'scheduled_service_id', 'scheduled_send_error', 'created_at')
         // FAIL CLOSED (Codex r11): a lone invoice-query failure must not
         // read as "no invoices" — null marks billing UNAVAILABLE and the
         // facts render a visible unknown instead of "Balance: Current".
@@ -708,10 +708,18 @@ class ContextAggregator {
     }));
     // The status of the customer's recent own invoices (drafts excluded — never shown to the customer), for
     // "your invoice is paid / processing" statements (Codex round-20 P1). null = billing unavailable (unknown).
-    const invoiceStatusRows = billingUnavailable ? null : invoiceRows
+    // Codex round-39 P1: ownership is resolved LIVE (services/invoice-payer-ownership — the pay page's own verdict): a payer
+    // assigned through the scheduled service / customer default after the invoice was minted leaves payer_id NULL, yet the
+    // invoice is the payer's debt. A payer-owned row is dropped; an UNVERIFIABLE one makes the whole status list unknown
+    // (null => every invoice-status claim is ungrounded and held for review).
+    let invoiceStatusRows = billingUnavailable ? null : invoiceRows
       // a packet invoice WITHDRAWN to a third-party payer keeps payer_id NULL and a collectible status — only its
       // stamp says it is the payer's debt, never the homeowner's (Codex round-23 P1)
-      .filter((inv) => !inv.payer_id && String(inv.status) !== 'draft' && !invoiceWithdrawnFromCustomer(inv));
+      .filter((inv) => !inv.payer_id && !inv.payer_statement_id && String(inv.status) !== 'draft' && !invoiceWithdrawnFromCustomer(inv));
+    if (invoiceStatusRows) {
+      const { ownedIds, unverifiable } = await require('./invoice-payer-ownership').liveInvoiceOwnership(customer.id, invoiceStatusRows, undefined, { ownLimit: 9 }); // 8 listed + 1 to know the list is cut
+      invoiceStatusRows = unverifiable ? null : invoiceStatusRows.filter((inv) => !ownedIds.has(String(inv.id)));
+    }
     // the list is CUT at 8: a bare tail ("#0123") cannot be resolved against a cut list (Codex round-37 P2 class)
     const invoiceStatusesTruncated = !!invoiceStatusRows && invoiceStatusRows.length > 8;
     const invoiceStatuses = invoiceStatusRows && invoiceStatusRows

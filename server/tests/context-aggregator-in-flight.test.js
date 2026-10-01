@@ -9,6 +9,8 @@ jest.mock('../services/payment-history', () => ({
   ...jest.requireActual('../services/payment-history'),
   hasInFlightMoney: jest.fn(),
 }));
+const mockResolveForInvoice = jest.fn(async () => ({ payerId: null }));
+jest.mock('../services/payer', () => ({ ...jest.requireActual('../services/payer'), resolveForInvoice: (...a) => mockResolveForInvoice(...a) }));
 jest.mock('../models/db', () => {
   const windowRows = [1, 2, 3, 4, 5].map((n) => ({
     id: `p${n}`, amount: 40 + n, status: 'paid', payment_date: `2026-09-2${n}`, payer_id: null, metadata: null,
@@ -150,6 +152,38 @@ describe('collectible own invoices (sent / viewed / overdue; partially_paid flag
     expect(billing.outstandingBalance).toBe(0);
     expect(billing.openInvoice).toBeNull();
     expect(billing.invoiceStatuses.map((x) => x.id)).toEqual(['i2']); // void is shown (its status is a fact); draft + payer-billed are not
+  });
+});
+
+// Codex round-39 P1: invoice-status facts resolve payer ownership LIVE (the pay page's own verdict), not from invoices.payer_id alone.
+describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party payer', () => {
+  const db = require('../models/db');
+  const inv = (id, number, status, total, over = {}) => ({ id, invoice_number: number, status, total, credit_applied: 0, payer_id: null, scheduled_send_error: null, scheduled_service_id: null, due_date: null, created_at: `2026-09-2${id.slice(-1)}`, ...over });
+  afterEach(() => { delete db.__rows; mockResolveForInvoice.mockReset(); mockResolveForInvoice.mockResolvedValue({ payerId: null }); });
+  const billingFor = async (rows) => { db.__rows = { invoices: rows, payments: [] }; hasInFlightMoney.mockResolvedValue(false); return build(); };
+  test('a payer assigned via the scheduled service AFTER minting (payer_id still NULL) drops that invoice from the status list', async () => {
+    mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));
+    const billing = await billingFor([inv('i2', 'WPC-2026-0123', 'sent', 250, { scheduled_service_id: 'ss-ap' }), inv('i1', 'WPC-2026-0456', 'sent', 95, { scheduled_service_id: 'ss-own' })]);
+    expect(billing.invoiceStatuses.map((x) => x.id)).toEqual(['i1']);
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    expect(replyQuotesUngroundedAmount('Invoice #0123 is still unpaid.', { billing }, { byMeaning: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount('Invoice #0456 is still unpaid.', { billing }, { byMeaning: true })).toBe(false);
+  });
+  test('an unverifiable ownership lookup makes the whole status list unknown (null) - fail closed', async () => {
+    mockResolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
+    const billing = await billingFor([inv('i1', 'WPC-2026-0456', 'sent', 95)]);
+    expect(billing.invoiceStatuses).toBeNull();
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    expect(replyQuotesUngroundedAmount('Invoice #0456 is still unpaid.', { billing }, { byMeaning: true })).toBe(true);
+  });
+  test('a stamped payer_statement_id is payer-owned without a lookup; resolution is memoized per scheduled service', async () => {
+    const billing = await billingFor([
+      inv('i4', 'A-4', 'sent', 10, { payer_statement_id: 'st-1' }),
+      inv('i3', 'A-3', 'sent', 20, { scheduled_service_id: 'ss-1' }),
+      inv('i2', 'A-2', 'paid', 30, { scheduled_service_id: 'ss-1' }),
+    ]);
+    expect(billing.invoiceStatuses.map((x) => x.id)).toEqual(['i3', 'i2']);
+    expect(mockResolveForInvoice).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -518,3 +518,62 @@ describe('round-38: ambiguous invoice tail across two named full invoices', () =
     expect(replyQuotesUngroundedAmount('Invoice WPC-2026-0123 is paid.', { billing }, opts)).toBe(true);
   });
 });
+
+// Codex round-39 P1: a status claim that names SEVERAL invoice figures resolves EACH one on its own - a figure with no matching
+// invoice (or several) is ungrounded, never dropped because a sibling figure happened to match.
+describe('round-39: every named invoice figure must resolve to exactly one invoice', () => {
+  const inv = (id, number, total, status = 'paid') => ({ id, invoiceNumber: number, status, total, amountDue: status === 'paid' ? 0 : total });
+  const billing = (list) => ({ outstandingBalance: 0, recentPayments: [], invoiceStatuses: list });
+  const only100 = billing([inv('a', 'WPC-2026-0001', 100)]);
+  test('"The $100 & $999 invoices are paid" (or "...or $999...") is rejected when only the $100 invoice exists', () => {
+    expect(check('The $100 & $999 invoices are paid.', { billing: only100 })).toBe(true);
+    expect(check('The $100 or $999 invoices are paid.', { billing: only100 })).toBe(true);
+    expect(check('Your $100 invoice is paid.', { billing: only100 })).toBe(false); // the single-figure case is unchanged
+  });
+  test('both figures resolving to their own paid invoices is grounded; one of them not paid is not', () => {
+    const two = billing([inv('a', 'WPC-2026-0001', 100), inv('b', 'WPC-2026-0002', 200)]);
+    expect(check('The $100 & $200 invoices are paid.', { billing: two })).toBe(false);
+    const oneOpen = billing([inv('a', 'WPC-2026-0001', 100), inv('b', 'WPC-2026-0002', 200, 'sent')]);
+    expect(check('The $100 & $200 invoices are paid.', { billing: oneOpen })).toBe(true);
+  });
+  test('a figure that matches several invoices is ambiguous even when its sibling is unique', () => {
+    const dup = billing([inv('a', 'WPC-2026-0001', 100), inv('b', 'WPC-2026-0002', 100), inv('c', 'WPC-2026-0003', 200)]);
+    expect(check('The $100 & $200 invoices are paid.', { billing: dup })).toBe(true);
+  });
+  test('figures taken from the customer\'s message are resolved the same way', () => {
+    expect(replyQuotesUngroundedAmount('Those invoices are paid.', { billing: only100 }, { byMeaning: true, inboundMessage: 'Are my $100 and $999 invoices paid?' })).toBe(true);
+  });
+});
+
+// Codex round-39 P2: the authoritative history is capped at 200 rows. A presence / receipt claim whose identity could also match an
+// OMITTED older row cannot be judged from the loaded rows - it fails closed; an identity-free claim (the newest payment) and a
+// full-year date strictly newer than the oldest loaded day are provably covered.
+describe('round-39: identities that could match rows omitted by the history cap', () => {
+  const row = (id, status, day, over = {}) => ({ id, amount: 120, status, payment_date: day, created_at: `${day}T12:00:00Z`, payment_method_type: 'card', ...over });
+  const loaded = [row('n', 'failed', '2026-09-12'), row('m', 'paid', '2026-09-01', { amount: 55 }), row('o', 'paid', '2026-03-01', { amount: 40 })];
+  const ctx = (complete) => ({ billing: { outstandingBalance: 0, recentPayments: [loaded[0]], recentPaymentsTruncated: true, paymentHistory: { rows: loaded, complete } } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  test('a $120 card failure with no date: grounded from a COMPLETE history, rejected once the history is cut', () => {
+    const reply = 'Your $120 card payment failed.';
+    expect(rq(reply, ctx(true), 'Did my $120 card payment go through?')).toBe(false);
+    expect(rq(reply, ctx(false), 'Did my $120 card payment go through?')).toBe(true);
+  });
+  test('a year-less date could match an omitted older year: rejected when cut', () => {
+    expect(rq('Your $120 card payment from Sep 12 failed.', ctx(true))).toBe(false);
+    expect(rq('Your $120 card payment from Sep 12 failed.', ctx(false))).toBe(true);
+  });
+  test('a full-year date strictly newer than the oldest loaded day is covered; the boundary day and older are not', () => {
+    expect(rq('Your $120 card payment from Sep 12, 2026 failed.', ctx(false))).toBe(false);
+    expect(rq('We received your $40 card payment from Mar 1, 2026.', ctx(false))).toBe(true); // the oldest loaded day: only partly loaded
+  });
+  test('an identity-free status claim is about the NEWEST payment, which is always loaded', () => {
+    expect(rq('Your payment failed.', ctx(false))).toBe(false);
+  });
+  test('a refund claim naming an amount (or a "no refund" denial) is rejected on a cut history', () => {
+    const refunded = row('r', 'refunded', '2026-09-10', { refund_status: 'full', refund_amount: 120 });
+    const c = (complete) => ({ billing: { outstandingBalance: 0, recentPayments: [refunded], paymentHistory: { rows: [refunded, loaded[2]], complete } } });
+    expect(rq('Your $120 refund was issued.', c(true))).toBe(false);
+    expect(rq('Your $120 refund was issued.', c(false))).toBe(true);
+    expect(rq('No refund is showing.', c(false))).toBe(true);
+  });
+});

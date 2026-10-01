@@ -1,0 +1,59 @@
+'use strict';
+// ONE live answer to "does a third-party payer own this invoice RIGHT NOW?" (Codex round-39 P1, PR #5331).
+//
+// invoices.payer_id is a snapshot taken at creation: a payer assigned through the scheduled service or the customer
+// default AFTER the invoice was minted leaves it NULL, so the raw column (or the withdrawal stamp) alone misclassifies
+// an AP-owned invoice as the homeowner's. The pay page's Zelle visibility check, the SMS draft-time Zelle fetch, the
+// send-time Zelle recheck AND the SMS invoice-status facts (context-aggregator) all ask this one function, so none of
+// them can disagree about whose debt an invoice is.
+//
+//   null              -> verifiably the homeowner's (self-pay)
+//   'payer_owned'     -> stamped payer_id / payer_statement_id, or the live resolver names a payer
+//   'payer_unverifiable' -> no customer to resolve for, or the resolver failed: ownership is UNKNOWN (fail closed)
+const db = require('../models/db');
+const logger = require('./logger');
+
+async function invoicePayerOwnership(inv, dbh = db) {
+  if (inv.payer_id || inv.payer_statement_id) return 'payer_owned';
+  if (!inv.customer_id) return 'payer_unverifiable';
+  try {
+    const resolved = await require('./payer').resolveForInvoice({
+      database: dbh,
+      customerId: String(inv.customer_id),
+      ...(inv.scheduled_service_id ? { scheduledServiceId: String(inv.scheduled_service_id) } : {}),
+      throwOnError: true,
+    });
+    return resolved?.payerId ? 'payer_owned' : null;
+  } catch (err) {
+    logger.warn(`[invoice-payer-ownership] payer ownership check failed for invoice ${inv.id}: ${err.message}; treating as unverifiable`);
+    return 'payer_unverifiable';
+  }
+}
+
+// Batch form for a list of one customer's invoice rows (must carry scheduled_service_id / payer_statement_id when they
+// exist). Resolution depends only on (customer, scheduled service), so it is memoized per service. Returns
+// { ownedIds: Set<string> (payer-owned), unverifiable: boolean }. `ownLimit` (optional) stops resolving once that many
+// rows are verified self-pay (rows after that point are left unjudged — the caller only ever shows its first `ownLimit - 1`).
+async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity } = {}) {
+  const ownedIds = new Set();
+  let unverifiable = false;
+  let own = 0;
+  const memo = new Map();
+  for (const inv of rows) {
+    if (own >= ownLimit) break;
+    const keyed = !(inv.payer_id || inv.payer_statement_id);
+    const key = keyed ? String(inv.scheduled_service_id || '') : null;
+    let verdict;
+    if (keyed && memo.has(key)) verdict = memo.get(key);
+    else {
+      verdict = await invoicePayerOwnership({ ...inv, customer_id: inv.customer_id || customerId }, dbh);
+      if (keyed) memo.set(key, verdict);
+    }
+    if (verdict === 'payer_owned') ownedIds.add(String(inv.id));
+    else if (verdict) unverifiable = true;
+    else own += 1;
+  }
+  return { ownedIds, unverifiable };
+}
+
+module.exports = { invoicePayerOwnership, liveInvoiceOwnership };

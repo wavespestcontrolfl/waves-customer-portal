@@ -1808,6 +1808,21 @@ function mostRecentPaymentRows(rows) {
   const newestCreated = Math.max(-1, ...sameDay.map(createdKey));
   return sameDay.filter((p) => createdKey(p) === newestCreated);
 }
+// Codex round-39 P2: the authoritative history is CAPPED (newest 200 rows; complete === false when more exist). A claim whose
+// identity (amount / tender / a date that is not provably inside the loaded range) could ALSO match an OMITTED older row cannot be
+// judged from the loaded rows alone (a visible failed $120 card row vs an omitted paid one) - the caller fails closed. Only an
+// identity-free claim (the NEWEST payment - always loaded, rows are newest-first) and a full-year date strictly NEWER than the oldest
+// loaded row's day are provably covered.
+function historyMayOmitIdentity(context, { hasIdentity = true, claimedDate = null } = {}) {
+  const hist = context?.billing?.paymentHistory;
+  if (!hist || hist.complete !== false) return false;
+  if (!hasIdentity && !claimedDate) return false;
+  if (!claimedDate || claimedDate.year == null) return true;
+  const key = (d) => d.year * 10000 + d.month * 100 + d.day;
+  const oldest = Math.min(...(Array.isArray(hist.rows) ? hist.rows : []).map(paymentRowDateParts).filter(Boolean).map(key));
+  if (!Number.isFinite(oldest)) return true;
+  return key(claimedDate) <= oldest; // the boundary day itself may be only partly loaded
+}
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
   inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false, refundSubject = false,
@@ -1819,6 +1834,9 @@ function bindPaymentRow({
   // that never needed it, e.g. a non-truncated context.)
   if (!rows && context?.billing?.recentPaymentsTruncated === true && context?.billing?.paymentHistory === null
       && (family === 'paid' || PRESENCE_STATUS_FAMILIES.has(family))) return onAmbiguous;
+  // the authoritative history is CUT (more rows exist than were loaded): an identity that could match an omitted row is unjudgeable
+  if (!rows && !mostRecentOnly && (family === 'paid' || PRESENCE_STATUS_FAMILIES.has(family))
+      && historyMayOmitIdentity(context, { hasIdentity: amountCents != null || !!claimedTender, claimedDate })) return onAmbiguous;
   const allRows = rows || paymentRowsForBinding(context);
   // Codex round-19 P1: the identity (amount / date / tender) is matched across EVERY status FIRST. Two
   // attempts with the same identity but different status families (a failed + a paid $120 card payment
@@ -2303,6 +2321,8 @@ function validateRefundClaim(claim, env) {
   const askedAmounts = [...new Set(amountCentsIn(env.inboundText))];
   const figures = (claim.amounts || []).length ? claim.amounts : askedAmounts;
   const { claimedDate, claimedTender } = binding;
+  // the loaded history is CUT: an identity an omitted older refund could also match - and any "no refund" denial - is unjudgeable (round 39)
+  if (historyMayOmitIdentity(ctx, { hasIdentity: claim.state === 'absent' || figures.length > 0 || !!claimedTender, claimedDate })) return true;
   let candidates = paymentRowsForBinding(ctx).filter((p) => {
     if (refundStateOfRow(p) === null) return false;
     if (claimedTender && paymentTenderLabel(p) !== claimedTender) return false;
@@ -2441,12 +2461,20 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
       if (!invoices.includes(hit[0])) invoices.push(hit[0]);
     }
   } else {
-    const figures = amounts.length ? amounts : amountCentsIn(env.inboundText);
-    const byFigure = figures.length
-      ? list.filter((inv) => figures.includes(Math.round(Number(inv.total) * 100)) || figures.includes(Math.round(Number(inv.amountDue) * 100)))
-      : list;
-    if (byFigure.length !== 1) return true; // none / ambiguous
-    invoices = byFigure;
+    const figures = [...new Set(amounts.length ? amounts : amountCentsIn(env.inboundText))];
+    if (figures.length) {
+      // Codex round-39 P1: EVERY named figure resolves on its own to exactly ONE invoice (total or amount due) - a figure with no
+      // matching row, or matching several, makes the claim ungrounded; it is never dropped because a sibling figure matched.
+      invoices = [];
+      for (const f of figures) {
+        const hit = list.filter((inv) => f === Math.round(Number(inv.total) * 100) || f === Math.round(Number(inv.amountDue) * 100));
+        if (hit.length !== 1) return true; // none / ambiguous
+        if (!invoices.includes(hit[0])) invoices.push(hit[0]);
+      }
+    } else {
+      if (list.length !== 1) return true; // no figure and not the only recent invoice
+      invoices = [list[0]];
+    }
   }
   claim.matchedInvoices = invoices;
   claim.matchedInvoice = invoices[0];

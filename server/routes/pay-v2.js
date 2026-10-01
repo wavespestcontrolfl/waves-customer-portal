@@ -366,20 +366,8 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
 // payPageZelleVisibility): null when the invoice is
 // verifiably the homeowner's to pay, else the rejection reason.
 async function zellePayerOwnership(inv, dbh) {
-  if (inv.payer_id || inv.payer_statement_id) return 'payer_owned';
-  if (!inv.customer_id) return 'payer_unverifiable';
-  try {
-    const resolved = await require('../services/payer').resolveForInvoice({
-      database: dbh,
-      customerId: String(inv.customer_id),
-      ...(inv.scheduled_service_id ? { scheduledServiceId: String(inv.scheduled_service_id) } : {}),
-      throwOnError: true,
-    });
-    return resolved?.payerId ? 'payer_owned' : null;
-  } catch (err) {
-    logger.warn(`[pay-v2] Zelle payer ownership check failed for invoice ${inv.id}: ${err.message}; treating as unverifiable`);
-    return 'payer_unverifiable';
-  }
+  // the ONE live payer-ownership verdict (services/invoice-payer-ownership.js), shared with the SMS invoice-status facts
+  return require('../services/invoice-payer-ownership').invoicePayerOwnership(inv, dbh);
 }
 
 const ZELLE_ELIGIBILITY_TIMEOUT_MS = 8000;

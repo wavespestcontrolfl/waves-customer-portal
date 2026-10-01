@@ -36,10 +36,14 @@ function invoiceAmountsNamed(text) {
     // same SENTENCE only ("Zelle invoice X. I sent $95 last month" ties nothing)
     const before = t.slice(Math.max(0, m.index - 30), m.index).split(/[.!?;]\s/).pop();
     const after = t.slice(m.index + m[0].length, m.index + m[0].length + 30).split(/[.!?;]\s/)[0];
-    if (/\b(?:invoice|bill|statement)\b/i.test(`${before} ${after}`)) out.push(centsOf(m[0]));
+    if (/\b(?:invoices?|bills?|statements?)\b/i.test(`${before} ${after}`)) out.push(centsOf(m[0]));
   }
   return [...new Set(out)];
 }
+
+const dueCentsOf = (inv) => Math.round(Number(inv.amountDue) * 100);
+// every invoice-scoped amount the customer named is THIS invoice's amount due (Codex round-39 P2)
+const namedAmountsAllMatch = (named, inv) => named.every((a) => a === dueCentsOf(inv));
 
 function resolveZelleTargetInvoice(billing, inboundMessage) {
   const open = Array.isArray(billing?.openInvoices) && billing.openInvoices.length
@@ -87,12 +91,12 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   if (namesNumber && ambiguous) return { invoiceId: null, reason: 'ambiguous_invoice_number' };
   if (byNumber.length === 1) {
     const inv = byNumber[0];
-    if (namedAmounts.length && !namedAmounts.includes(Math.round(Number(inv.amountDue) * 100))) return { invoiceId: null, reason: 'reference_conflict' };
+    if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, inv)) return { invoiceId: null, reason: 'reference_conflict' };
     return { invoiceId: inv.id, reason: 'invoice_number' };
   }
 
   if (open.length === 1) {
-    if (namedAmounts.length && !namedAmounts.includes(Math.round(Number(open[0].amountDue) * 100))) return { invoiceId: null, reason: 'named_amount_differs' };
+    if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, open[0])) return { invoiceId: null, reason: 'named_amount_differs' };
     return { invoiceId: open[0].id, reason: 'single_open' };
   }
 
@@ -100,7 +104,10 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   // amount elsewhere in the message ("…did you receive my $100 payment?") does not. Scoped amounts win; bare amounts
   // are the fallback ONLY when the message has no invoice-scoped amount.
   if (namedAmounts.length) {
-    const byScoped = open.filter((inv) => namedAmounts.includes(Math.round(Number(inv.amountDue) * 100)));
+    // Codex round-39 P2: EVERY invoice-scoped amount must resolve to an open invoice - one that matches nothing is an unresolved
+    // explicit target, never ignored because a sibling amount matched.
+    if (namedAmounts.some((a) => !open.some((inv) => dueCentsOf(inv) === a))) return { invoiceId: null, reason: 'named_amount_differs' };
+    const byScoped = open.filter((inv) => namedAmounts.includes(dueCentsOf(inv)));
     if (byScoped.length === 1) return { invoiceId: byScoped[0].id, reason: 'unique_amount' };
     if (byScoped.length > 1) return { invoiceId: null, reason: 'ambiguous_amount' };
     return { invoiceId: null, reason: 'named_amount_differs' }; // the invoice-scoped amount matches no open invoice
