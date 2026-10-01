@@ -283,7 +283,8 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       <div style={{ fontSize: 15, fontWeight: 600, color: NAVY }}>
         {prepay
           ? (bank ? 'Annual prepay — your bank account pays for the year' : 'Annual prepay — your card pays for the year')
-          : (held ? 'Card on file — nothing charged today' : 'Auto Pay — nothing charged today')}
+          // Tender-accurate (GitHub Codex #5481 r9 P2): a bank pick is not "a card".
+          : (held ? `${bank ? 'Bank account' : 'Card'} on file — nothing charged today` : 'Auto Pay — nothing charged today')}
       </div>
       <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 4 }}>
         {prepay

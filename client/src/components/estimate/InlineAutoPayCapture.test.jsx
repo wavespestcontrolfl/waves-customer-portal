@@ -321,6 +321,17 @@ describe('InlineAutoPayCapture afterVisit consent', () => {
     expect(plain.getByText(/^Your first invoice is sent when you confirm, with a link to pay it\. After each completed service/)).toBeInTheDocument();
   });
 
+  it('r9: a held customer saving a BANK account is told "Bank account on file", never "Card on file"', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'us_bank_account', replay: true }} loadStripeSdk={loadStripeSdk} paused />,
+    );
+    await flush();
+    expect(getByText('Bank account on file — nothing charged today')).toBeInTheDocument();
+    expect(queryByText('Card on file — nothing charged today')).toBeNull();
+  });
+
   it('explicit Auto Pay off: same held shape as paused with neutral wording (no "paused" claim, no automatic-charge promise)', async () => {
     const { StripeCtor } = makeStripeStub();
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
