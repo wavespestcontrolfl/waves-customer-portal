@@ -18122,10 +18122,29 @@ const CallRecordingProcessor = {
               // the account holder stops receiving the appointment texts. Their
               // own booking confirmation is a separate primary send. An
               // unbooked or held call never reaches this line.
-              if (deferPrimaryOptOutCustomerId) {
+              // Durable across retries (pre-push codex P1): the in-memory flag is
+              // lost if processing dies between persistence and booking, and the
+              // retry's persist returns skipped_phone_on_record (no callback). So
+              // ALSO derive eligibility from the saved state: the row's first slot
+              // phone is one of THIS call's grounded on-site contacts and the
+              // row's consent source is the on-site rule.
+              let primaryOptOutFromState = false;
+              if (!deferPrimaryOptOutCustomerId && customerId && callSecondaryContacts.some(onSiteNotifyConsent)) {
+                try {
+                  const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+                  const onSitePhones = new Set(callSecondaryContacts.filter(onSiteNotifyConsent).map((c) => optLast10(c.phone)).filter(Boolean));
+                  const row = await db('customers').where({ id: customerId }).first('service_contact_phone', 'service_contacts_consent_source');
+                  primaryOptOutFromState = !!row
+                    && row.service_contacts_consent_source === 'call_pipeline_onsite_contact'
+                    && onSitePhones.has(optLast10(row.service_contact_phone));
+                } catch (stateErr) {
+                  logger.warn(`[call-proc] deferred primary opt-out state read failed for ${maskSid(callSid)}: ${safeErrorToken(stateErr)}`);
+                }
+              }
+              if (deferPrimaryOptOutCustomerId || primaryOptOutFromState) {
                 try {
                   await db('notification_prefs')
-                    .insert({ customer_id: deferPrimaryOptOutCustomerId, appointment_notify_primary: false })
+                    .insert({ customer_id: deferPrimaryOptOutCustomerId || customerId, appointment_notify_primary: false })
                     .onConflict('customer_id')
                     .merge({ appointment_notify_primary: false });
                 } catch (prefsErr) {

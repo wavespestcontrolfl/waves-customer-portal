@@ -1424,11 +1424,11 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
     const applied = src.indexOf('appointment_notify_primary: false }', landed);
     expect(landed).toBeGreaterThan(-1);
     expect(applied).toBeGreaterThan(landed);
-    expect(applied - landed).toBeLessThan(3500);
-    expect(src.slice(landed, applied)).toContain('if (deferPrimaryOptOutCustomerId)');
+    expect(applied - landed).toBeLessThan(5200);
+    expect(src.slice(landed, applied)).toContain('if (deferPrimaryOptOutCustomerId || primaryOptOutFromState)');
     // The ONLY false write in the file is that one statement (insert + merge).
     expect(src.split('appointment_notify_primary: false').length - 1).toBe(2);
-    expect(src.lastIndexOf('appointment_notify_primary: false') - landed).toBeLessThan(3500);
+    expect(src.lastIndexOf('appointment_notify_primary: false') - landed).toBeLessThan(5200);
   });
 
   test('phone on record + another unconsented slot phone: distinct withheld status (the card says why)', async () => {
@@ -1611,5 +1611,19 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('beforeStamp: claimOptinBeforeStamp');
     expect(src).toContain("['written', 'written_consent_withheld', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow");
+  });
+});
+
+// Pre-push codex P1: the deferred opt-out must survive a crash + retry between
+// persistence and booking — the booking site also derives it from saved state.
+describe('deferred caller opt-out is derived from saved state on a retry (#5467)', () => {
+  test('booking site reads the first slot phone + consent source when the in-memory flag is absent', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = src.indexOf('let primaryOptOutFromState = false;');
+    expect(at).toBeGreaterThan(-1);
+    const block = src.slice(at, at + 1600);
+    expect(block).toContain("row.service_contacts_consent_source === 'call_pipeline_onsite_contact'");
+    expect(block).toContain('onSitePhones.has(optLast10(row.service_contact_phone))');
+    expect(block).toContain('if (deferPrimaryOptOutCustomerId || primaryOptOutFromState) {');
   });
 });
