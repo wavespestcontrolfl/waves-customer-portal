@@ -25,6 +25,8 @@ describe('EstimateViewPage setup-fee promise attestation', () => {
   it('the 409 answer wins for THIS selection only, so a lane /data could not predict does not loop', () => {
     expect(src).toMatch(/if \(typeof body\.setupFeePromise === 'boolean'\) \{\s*setSetupFeePromiseOverride\(\{ key: setupFeeSelectionKeyRef\.current, value: body\.setupFeePromise \}\);/);
     expect(src).toMatch(/setupFeeSelectionKeyRef\.current = afterVisitSelectionKey;/);
+    // A consent / billing refusal clears it: the refetched /data decides again.
+    expect(src).toMatch(/if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,2400}setSetupFeePromiseOverride\(null\);\s*recurringCardSetupIntentIdRef\.current = null;/);
     expect(src).toMatch(/const setupFeeServerAnswer = setupFeePromiseOverride\?\.key === afterVisitSelectionKey \? setupFeePromiseOverride\.value : null;/);
     expect(src).toMatch(/const setupFeePromiseEnabled = setupFeeServerAnswer \?\? !!data\?\.recurringCardPolicy\?\.setupFeeAfterFirstVisit;/);
     expect(src).toMatch(/enabled: setupFeePromiseEnabled,/);
