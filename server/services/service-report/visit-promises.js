@@ -80,6 +80,23 @@ function promiseCheckInScope(serviceType, completionProfile, options = {}) {
   return writerRulesInScope(serviceType, writerScopeContext(completionProfile, options));
 }
 
+// Every row a ledger reader returns, page by page. Both readers order
+// overdue and oldest first and cap a page at 200, and the text reader counts
+// customer and office rows too, so one page could leave out the newest
+// promise (Codex #5516). Bounded, so a runaway ledger cannot stall the card.
+const LEDGER_PAGE = 200;
+const LEDGER_MAX_PAGES = 10;
+async function allLedgerPages(read) {
+  const rows = [];
+  for (let page = 0; page < LEDGER_MAX_PAGES; page += 1) {
+    const batch = await read({ limit: LEDGER_PAGE, offset: page * LEDGER_PAGE });
+    rows.push(...batch);
+    if (batch.length < LEDGER_PAGE) return rows;
+  }
+  logger.warn(`[visit-promises] ledger read stopped at ${rows.length} rows`);
+  return rows;
+}
+
 // Every open promise of a kind a technician keeps, newest first. Each
 // source joins only while its own ledger is on, so a promise listed here is
 // one the office could settle too.
@@ -88,9 +105,9 @@ async function openVisitPromises(conn, { customerId }) {
   const rows = [];
   if (isEnabled('callCommitments')) {
     const { listOpenCommitments } = require('../call-commitments');
-    const callRows = await listOpenCommitments(conn, {
-      party: 'waves', kinds: VISIT_PROMISE_KINDS, customerId, prepare: false, limit: 200,
-    });
+    const callRows = await allLedgerPages((page) => listOpenCommitments(conn, {
+      party: 'waves', kinds: VISIT_PROMISE_KINDS, customerId, prepare: false, ...page,
+    }));
     for (const row of callRows) {
       rows.push({ id: row.id, description: row.description, source: 'call', madeAt: row.call_started_at || row.created_at });
     }
@@ -99,7 +116,7 @@ async function openVisitPromises(conn, { customerId }) {
   const smsLedger = smsCommitmentsEnabled();
   const emailLedger = gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
   if (smsLedger || emailLedger) {
-    const textRows = await listSmsCommitments(conn, { customerId, limit: 200 });
+    const textRows = await allLedgerPages((page) => listSmsCommitments(conn, { customerId, ...page }));
     for (const row of textRows) {
       if (row.party !== 'waves' || !VISIT_PROMISE_KINDS.includes(row.kind)) continue;
       const email = row.channel === 'email';

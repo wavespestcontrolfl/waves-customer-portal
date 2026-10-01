@@ -109,6 +109,24 @@ describe('the promises listed', () => {
     expect(promises[0].version).toBe(V(long));
   });
 
+  test('every page of both ledgers is read, so the newest promise is never cut off', async () => {
+    // The readers order overdue and oldest first, 200 to a page; the text
+    // reader's pages also carry customer and office rows.
+    const old = (i) => ({ ...CALL_ROW, id: ID(1000 + i), call_started_at: '2026-01-01T12:00:00Z' });
+    CallCommitments.listOpenCommitments.mockImplementation(async (_conn, { limit, offset }) => (
+      offset === 0 ? Array.from({ length: limit }, (_, i) => old(i)) : [{ ...CALL_ROW, id: ID(7), call_started_at: '2026-09-30T18:00:00Z' }]
+    ));
+    SmsActions.listSmsCommitments.mockImplementation(async (_conn, { limit, offset }) => (
+      offset === 0 ? Array.from({ length: limit }, () => CUSTOMER_TODO) : [TEXT_ROW]
+    ));
+    const { promises, total } = await VisitPromises.loadVisitPromises(LIST_DB, { customerId: 'cust-1' });
+    expect(promises[0].id).toBe(ID(7));
+    expect(promises.some((promise) => promise.id === ID(2))).toBe(true);
+    expect(total).toBe(202);
+    expect(CallCommitments.listOpenCommitments).toHaveBeenCalledWith(LIST_DB, expect.objectContaining({ limit: 200, offset: 200 }));
+    expect(SmsActions.listSmsCommitments).toHaveBeenCalledWith(LIST_DB, { customerId: 'cust-1', limit: 200, offset: 200 });
+  });
+
   test('the card lists the newest ten', async () => {
     CallCommitments.listOpenCommitments.mockResolvedValue(Array.from({ length: 14 }, (_, i) => ({
       ...CALL_ROW, id: ID(100 + i), call_started_at: `2026-09-${String(10 + i).padStart(2, '0')}T12:00:00Z`,
