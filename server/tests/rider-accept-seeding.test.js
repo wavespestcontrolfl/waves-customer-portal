@@ -88,11 +88,13 @@ describe('rider context fall-backs', () => {
   const originalVisitGroups = gates.visitGroups;
   const VisitGroups = require('../services/visit-groups');
   let groupSpy;
+  let grouped;
   beforeEach(() => {
     process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT = 'true';
     gates.visitGroups = true;
-    // Canonical grouping preview: the rider joins the lawn unless a test says otherwise.
-    groupSpy = jest.spyOn(VisitGroups, 'maybeGroupRow').mockResolvedValue({ preview: true, rowIds: ['pest', 'lawn'] });
+    // Canonical grouping: the rider joins the lawn's visit unless a test says otherwise.
+    grouped = true;
+    groupSpy = jest.spyOn(VisitGroups, 'maybeGroupRow').mockImplementation(async () => (grouped ? { id: 'v1' } : null));
   });
   afterEach(() => {
     if (originalGate === undefined) delete process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT;
@@ -130,8 +132,12 @@ describe('rider context fall-backs', () => {
     d.setUTCDate(d.getUTCDate() + 42 * (k + 1));
     return d.toISOString().slice(0, 10);
   });
+  // After maybeGroupRow ran and succeeded, both first visits read visit v1.
   const conn = Object.assign((table) => ({
-    whereIn: () => ({ select: async () => [] }),
+    whereIn: () => ({
+      select: async () => (groupSpy.mock.calls.length && grouped
+        ? [{ id: 'pest', visit_id: 'v1' }, { id: 'lawn', visit_id: 'v1' }] : []),
+    }),
     where: (w) => ({ update: async (u) => { conn.updates.push({ table, w, u }); return 1; } }),
   }), { updates: [] });
   // The lawn seeds first in this accept, with these follow-up dates.
@@ -192,10 +198,10 @@ describe('rider context fall-backs', () => {
     expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 
-  test('a rider whose first visit would NOT group with the lawn is not a ride', async () => {
+  test('a rider whose first visit does NOT end up in the lawn\'s visit is not a ride (apply refused)', async () => {
     const ctx = RiderAccept.createContext();
     await seedLawn(ctx);
-    groupSpy.mockResolvedValue(null);
+    grouped = false;
     expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 

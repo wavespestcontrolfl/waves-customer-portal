@@ -61,16 +61,20 @@ function hostRow(parentRow, pattern) {
   };
 }
 
-// The first rider visit and the first lawn visit must form ONE stop under the
-// canonical grouping rules (gate, property, placed window, family, status,
-// autopay, technician): already in the same visit, or visit-groups' own
-// preview says the rider would join the lawn. Anything else is not a ride.
+// The first rider visit and the first lawn visit must ACTUALLY be one stop:
+// run the canonical grouping (visit-groups.maybeGroupRow — gate, property,
+// placed window, family, status, autopay, technician and its apply-time
+// guards; savepoint-wrapped and idempotent) and then require both rows to
+// carry the same visit_id. A preview is not proof: apply can still refuse.
 async function firstVisitsGroup(conn, riderId, lawnId) {
-  const rows = await inSavepoint(conn, (sp) => sp('scheduled_services').whereIn('id', [riderId, lawnId]).select('id', 'visit_id'));
-  const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
-  if (visitOf(riderId) && String(visitOf(riderId)) === String(visitOf(lawnId))) return true;
-  const preview = await require('./visit-groups').maybeGroupRow(riderId, { database: conn, preview: true });
-  return !!preview?.rowIds?.some((id) => String(id) === String(lawnId));
+  const shared = async () => {
+    const rows = await inSavepoint(conn, (sp) => sp('scheduled_services').whereIn('id', [riderId, lawnId]).select('id', 'visit_id'));
+    const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
+    return !!visitOf(riderId) && String(visitOf(riderId)) === String(visitOf(lawnId));
+  };
+  if (await shared()) return true;
+  await require('./visit-groups').maybeGroupRow(riderId, { database: conn, createdBy: 'converter' });
+  return shared();
 }
 
 // The converter's seeding of this lawn failed: later riders must not plan
