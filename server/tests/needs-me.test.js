@@ -237,11 +237,44 @@ test('an older open FIX behind more than a page of newer rows is still listed an
     .toEqual([['2026-09-30 12:00:00.999500+00', 'p00499'], ['2026-09-30 12:00:00.999000+00', 'p00999']]);
 });
 
-test('a scan that reaches the runaway cap says so instead of answering short', async () => {
-  let n = 0;
-  mockPages = Array.from({ length: 41 }, () => Array.from({ length: 500 }, () => row({ id: `r${String(n++).padStart(6, '0')}` })));
-  const out = await listNeedsMe({});
-  expect(out.warnings).toEqual([{ source: 'notifications', error: 'truncated' }]);
+test('a scan that reaches the cap says so, and its cursor continues the scan past the cap', async () => {
+  const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const at = (n) => `2026-09-30 12:00:00.${String(999999 - n).padStart(6, '0')}+00`;
+  const work = (n) => row({ id: uuid(n), created_at: '2026-09-30T12:00:00Z', created_at_cursor: at(n), metadata: { triggerKey: 'sms_reply' } });
+  const windowPages = () => { let n = 0; return Array.from({ length: 41 }, () => Array.from({ length: 500 }, () => work(n++))); };
+  computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'q', severity: 'warn', count: 1, label: 'Queue', href: '/admin/leads' }] });
+
+  mockPages = windowPages();
+  const first = await listNeedsMe({ limit: 5 });
+  expect(first.warnings).toEqual([{ source: 'notifications', error: 'truncated' }]);
+  expect(first.items[0].id).toBe('live:q');
+  expect(decodeCursor(first.next)).toMatchObject({ s: null });
+
+  // The window's last item (same time, lowest id) leaves nothing in the window:
+  // next now starts a new window where the scan stopped (row 19999).
+  mockPages = windowPages();
+  const lastKey = [1, new Date('2026-09-30T12:00:00Z').getTime(), uuid(0)];
+  const end = await listNeedsMe({ limit: 5, after: { k: lastKey, s: null } });
+  expect(end.items).toEqual([]);
+  const resume = decodeCursor(end.next);
+  expect(resume).toEqual({ k: null, s: { at: at(19999), id: uuid(19999) } });
+
+  // The continued window scans from there, holds the rows past the cap, and no standing item repeats.
+  mockPages = [[work(20000), work(20001)]];
+  mockCalls.length = 0;
+  const past = await listNeedsMe({ limit: 5, after: resume });
+  expect(mockCalls.find(([name, sql]) => name === 'whereRaw' && /^\(created_at, id\) </.test(sql))[2]).toEqual([at(19999), uuid(19999)]);
+  expect(past.items.map((i) => i.id)).toEqual([uuid(20001), uuid(20000)]);
+  expect(past.warnings).toEqual([]);
+  expect(past.next).toBeNull();
+});
+
+test('a cursor that is not one we issued is refused', () => {
+  const enc = (v) => Buffer.from(JSON.stringify(v)).toString('base64url');
+  expect(decodeCursor(enc([1, 2, 'x']))).toBeNull();
+  expect(decodeCursor(enc({ k: null, s: null }))).toBeNull();
+  expect(decodeCursor(enc({ k: null, s: { at: 'nope', id: 'x' } }))).toBeNull();
+  expect(decodeCursor(enc({ k: [1, 2, 'x'], s: null }))).toEqual({ k: [1, 2, 'x'], s: null });
 });
 
 test('the router guards by role as well as authentication', () => {

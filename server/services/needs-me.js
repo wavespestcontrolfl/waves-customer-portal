@@ -197,13 +197,15 @@ function mapStanding(alert) {
 // Every open row, walked newest first in (created_at, id) keyset pages — the
 // bell's own order, served by notifications_admin_open_keyset_idx: area, severity and who are judged in JS, so
 // a newest-N read would drop an older open finding from a filtered list and its totals.
-// SCAN_CAP is a runaway guard only; reaching it is reported as a warning, never silent.
-async function openAlertRows(role) {
+// SCAN_CAP bounds one call, never what is reachable: reaching it is reported as a
+// warning and returns `resumeAt` (the last row read), and the response's `next`
+// cursor carries it so the following page continues the scan past the cap.
+async function openAlertRows(role, start = null) {
   // Activity-only rows (feed 'activity': engineering findings, quiet standing digests) are
   // included on purpose: the bell never shows them, but they are open work, and the
   // engineering ones are the Claude work. Each carries activityOnly: true.
   const rows = [];
-  let after = null;
+  let after = start;
   for (;;) {
     const query = NotificationService.scopeAdminFeedToRole(db('notifications').where({ recipient_type: 'admin' }), role);
     if (after) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [after.at, after.id]);
@@ -215,10 +217,10 @@ async function openAlertRows(role) {
       // rows sharing a millisecond are never skipped or repeated.
       .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', 'read_at', db.raw('created_at::text AS created_at_cursor'));
     rows.push(...page);
-    if (page.length < PAGE_SIZE) return { rows, truncated: false };
-    if (rows.length >= SCAN_CAP) return { rows, truncated: true };
+    if (page.length < PAGE_SIZE) return { rows, truncated: false, resumeAt: null };
     const last = page[page.length - 1];
     after = { at: last.created_at_cursor, id: last.id };
+    if (rows.length >= SCAN_CAP) return { rows, truncated: true, resumeAt: after };
   }
 }
 
@@ -238,19 +240,31 @@ function compareKeys(a, b) {
   return (a[0] - b[0]) || (b[1] - a[1]) || (a[2] < b[2] ? 1 : a[2] > b[2] ? -1 : 0);
 }
 const compareItems = (a, b) => compareKeys(sortKey(a), sortKey(b));
-const encodeCursor = (key) => Buffer.from(JSON.stringify(key)).toString('base64url');
+// A cursor is { k, s }: k = the last item's sort key in this scan window (null
+// at a window's start), s = where the window's database scan began (null = the
+// newest row). A window ends at SCAN_CAP rows; the next one starts at s.
+const encodeCursor = (cursor) => Buffer.from(JSON.stringify(cursor)).toString('base64url');
+const validKey = (k) => Array.isArray(k) && k.length === 3 && Number.isFinite(k[0]) && Number.isFinite(k[1]) && typeof k[2] === 'string';
+// created_at::text as Postgres prints it (e.g. 2026-09-30 12:00:00.123456+00).
+const PG_TIMESTAMPTZ_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?([+-]\d{2}(:?\d{2})?|Z)$/;
+const validScan = (v) => v && typeof v === 'object' && typeof v.at === 'string' && PG_TIMESTAMPTZ_RE.test(v.at)
+  && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v.id));
 // A cursor from `next`; anything else is null (the route answers 400).
 function decodeCursor(raw) {
   if (typeof raw !== 'string' || !raw) return null;
   try {
-    const key = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
-    const ok = Array.isArray(key) && key.length === 3 && Number.isFinite(key[0]) && Number.isFinite(key[1]) && typeof key[2] === 'string';
-    return ok ? key : null;
+    const c = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+    if (!(c.k === null || validKey(c.k)) || !(c.s === null || validScan(c.s))) return null;
+    if (c.k === null && c.s === null) return null;
+    return { k: c.k, s: c.s };
   } catch { return null; }
 }
 
 async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
   const generatedAt = new Date();
+  const scanStart = after?.s || null;
+  let resumeAt = null;
   const warnings = [];
   let items = [];
   const attempt = async (source, load) => {
@@ -260,7 +274,9 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
     }
   };
   await attempt('notifications', async () => {
-    const { rows, truncated } = await openAlertRows(role);
+    const scan = await openAlertRows(role, scanStart);
+    const { rows, truncated } = scan;
+    resumeAt = scan.resumeAt;
     if (truncated) {
       logger.warn(`[needs-me] stopped at ${SCAN_CAP} open notification rows`);
       warnings.push({ source: 'notifications', error: 'truncated' });
@@ -268,7 +284,8 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
     return rows.map(mapAlertRow);
   });
   // Standing conditions carry finance totals and owner-only links: admin only, like the bell overlay.
-  if (!role || role === 'admin') {
+  // They belong to the first scan window only, so a continued window never repeats them.
+  if ((!role || role === 'admin') && !scanStart) {
     await attempt('dashboard_alerts', async () => {
       const result = await computeDashboardAlerts();
       // computeDashboardAlerts fail-softs per generator: a queue that threw is missing from
@@ -287,7 +304,7 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
   const tally = (key) => sorted.reduce((acc, item) => ({ ...acc, [item[key]]: (acc[item[key]] || 0) + 1 }), {});
   const max = Math.min(Math.max(parseInt(limit, 10) || DEFAULT_LIMIT, 1), ROW_CAP);
   // Keyset paging over the same total order: strictly after the cursor's item.
-  const remaining = after ? matching.filter((item) => compareKeys(sortKey(item), after) > 0) : matching;
+  const remaining = after?.k ? matching.filter((item) => compareKeys(sortKey(item), after.k) > 0) : matching;
   const page = remaining.slice(0, max);
   return {
     generatedAt: generatedAt.toISOString(),
@@ -296,7 +313,10 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
     unsortedTotal: matching.length - sorted.length,
     counts: { byArea: tally('area'), byWho: tally('who'), bySeverity: tally('severity') },
     items: page,
-    next: remaining.length > page.length ? encodeCursor(sortKey(page[page.length - 1])) : null,
+    // More in this window: continue after the last item. Window done but the scan
+    // stopped at the cap: the next window starts where it stopped.
+    next: remaining.length > page.length ? encodeCursor({ k: sortKey(page[page.length - 1]), s: scanStart })
+      : resumeAt ? encodeCursor({ k: null, s: resumeAt }) : null,
     warnings,
   };
 }
