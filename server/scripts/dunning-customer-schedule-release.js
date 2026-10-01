@@ -120,7 +120,8 @@ function landingText(landing, rawStepIdAt) {
   const stepIdAt = (i) => rawStepIdAt(i) || i;
   switch (landing.kind) {
     case 'complete': return 'COMPLETED (the delivered final notice named it)';
-    case 'paused': return `PAUSED at step ${stepIdAt(landing.stepIndex)} (the schedule is paused: ${landing.pausedReason})`;
+    // The pause reason is free text staff typed (it can name the customer): ids only here.
+    case 'paused': return `PAUSED at step ${stepIdAt(landing.stepIndex)} (the schedule is paused; reason on the admin page)`;
     case 'pause_for_person': return landing.reason === 'released_final_notice_unreadable'
       ? 'PAUSED (its final notice went out but cannot be read back; the office is alerted)'
       : 'PAUSED (past its final step; the office is alerted)';

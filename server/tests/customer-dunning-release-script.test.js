@@ -131,7 +131,8 @@ describe('planRelease / executeRelease', () => {
     expect(out).toMatch(/schedule s1 {2}customer [0-9a-f-]{36} {2}active {2}step d30_final/);
     expect(out).toMatch(/member invoice i1 {2}seq q1 {2}-> step e {2}next 2026-10-07T14:16:00\.000Z/);
     expect(out).toMatch(/member invoice i2 {2}seq q2 {2}-> PAUSED \(past its final step/);
-    expect(out).toMatch(/member invoice i3 {2}seq q3 {2}-> PAUSED at step d30_final \(the schedule is paused: customer called\)/);
+    expect(out).toMatch(/member invoice i3 {2}seq q3 {2}-> PAUSED at step d30_final \(the schedule is paused; reason on the admin page\)/);
+    expect(out).not.toContain('customer called'); // free-text reason never printed
     expect(out).toMatch(/member invoice i4 {2}seq q4 {2}-> COMPLETED/);
   });
 
