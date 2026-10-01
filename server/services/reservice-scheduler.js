@@ -549,7 +549,7 @@ const RESERVICE_LOCATION_PHRASE_RE = new RegExp(
 // A pest noun that is really a SERVICE name ("pest control", "ant service", "ant plan") is not a sighting.
 const RESERVICE_NOUN_NOT_SERVICE = '(?!\\s+(?:control|service|services|treatment|treatments|plan|plans|program|visit|visits|schedule|contract|guarantee|coverage|company|inspection|inspections|spray|application|appointment)\\b)';
 // Codex round-37 P2: ongoing-presence predicates ("the ants remain", "they persist", "keep showing up") are active-report predicates too
-const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|remain(?:s|ed|ing)?\\b|persist(?:s|ed|ing)?\\b|(?:never|haven'?t|hasn'?t|hadn'?t|didn'?t|won'?t|wouldn'?t|can'?t|not)\\s+(?:(?:yet|even|really|fully|completely|entirely)\\s+)?(?:went\\s+away|gone(?:\\s+away)?|go(?:ne|ing)?\\s+away|stopp\\w+|stop|left|leave|leaving)\\b|returned?|returning|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
+const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|remain(?:s|ed|ing)?\\b|persist(?:s|ed|ing)?\\b|(?:never|haven'?t|hasn'?t|hadn'?t|didn'?t|won'?t|wouldn'?t|can'?t|not)\\s+(?:(?:yet|even|really|fully|completely|entirely)\\s+)?(?:went\\s+away|gone(?:\\s+away)?|go(?:ne|ing)?\\s+away|stopp\\w+|stop|left|leave|leaving)\\b|return(?:s|ed|ing)?\\b|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
 // Codex round-41 P2: the covered pests' own qualified names ("carpenter ants", "ghost ants", "large roaches", "black widow spiders") — a
 // BOUNDED modifier vocabulary (at most 2), so plain possession "I have carpenter ants" reads, while "I have a question about ants" does not.
 const RESERVICE_PEST_MODIFIER = "(?:carpenter|ghost|big-?headed|fire|acrobat|crazy|argentine|white-?footed|pharaoh|odorous|sugar|house|large|big|huge|giant|little|small|tiny|flying|black|red|brown|american|australian|smoky-?brown|palmetto|wolf|jumping|widow|recluse|banded|cellar|camel|brown-?banded|oriental|field|cave|house)";
@@ -602,7 +602,12 @@ function reserviceClauseIsQuestion(clause, delimiter) {
   }
   return reserviceClauseIsQuestionCore(clause, delimiter);
 }
+// Codex round-43 P2: "When the ants come back, what should I do?" / "Once the roaches return I'll call" — when / whenever / once / as soon as
+// + a pest noun + a PRESENT-tense return is a future condition, not a report. "The ants came back when it rained" (marker BEFORE no pest,
+// past tense) stays active.
+const RESERVICE_FUTURE_CONDITION_RE = new RegExp(`\\b(?:when|whenever|once|as\\s+soon\\s+as)\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_ANY_PEST_NOUN}\\b(?:\\W+[\\w'’-]+){0,3}?\\W+(?:come|comes|return|returns|show\\s+up|shows\\s+up|appear|appears|reappear|reappears|get\\s+back|gets\\s+back|are\\s+back|is\\s+back)\\b`, 'i');
 function reserviceClauseIsQuestionCore(clause, delimiter) {
+  if (RESERVICE_FUTURE_CONDITION_RE.test(clause)) return true;
   // if / whether / unless make the clause hypothetical only when they GOVERN the pest activity — i.e. a pest noun
   // FOLLOWS the marker ("If ants are back…", "tell me if ants are back"). "Ants are back if you can believe it"
   // asserts the recurrence (Codex round-29 P2).
@@ -692,7 +697,7 @@ function reservicePestReportFacts(text) {
 }
 // A pronoun return ("they're back", "it is coming back") in a clause that still counts, with a pest noun
 // (not a service name) anywhere in another surviving clause: "the roach poison is not working, they are back".
-const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|was|keep|keeps))?\s+(?:(?:coming|showing)\s+(?:back|up)|back|everywhere|returned|returning|remain(?:s|ed|ing)?|persist(?:s|ed|ing)?)\b/i;
+const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|was|keep|keeps))?\s+(?:(?:coming|showing)\s+(?:back|up)|(?:came|come|comes)\s+back|back|everywhere|return(?:s|ed|ing)?|remain(?:s|ed|ing)?|persist(?:s|ed|ing)?)\b/i;
 const RESERVICE_PEST_NOUN_UNBOUND_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i');
 // Codex round-32 P2: plain possession with an explicit PAST-TIME marker is history, not an active report ("Last year I had
 // ants. What did you use?"). The persistence / sighting constructions are unaffected.
@@ -716,10 +721,18 @@ function namesOtherService(text, lane) {
   const located = s.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
   return RESERVICE_LANE_WORD_PATTERNS.some(([other, rx]) => other !== lane && rx.test(located));
 }
+// Codex round-43 P2: a pest named in a RESOLVED clause is still the antecedent of a later pronoun return — "Ants were gone but they came back",
+// "Roaches disappeared; now they are back". The resolved clause is dropped from `kept`, so the antecedent is read from `clauses`.
+function pronounReturnAntecedents(facts) {
+  if (!facts.asserted.some((clause) => RESERVICE_PRONOUN_RETURN_RE.test(clause))) return [];
+  return facts.clauses.filter((clause) => RESERVICE_PEST_NOUN_UNBOUND_RE.test(clause) && reserviceClauseResolved(clause));
+}
 function isActivePestReport(text) {
-  const { kept, asserted } = reservicePestReportFacts(text);
+  const facts = reservicePestReportFacts(text);
+  const { kept, asserted } = facts;
   if (activePestClauses(asserted).length) return true;
-  return asserted.some((clause) => RESERVICE_PRONOUN_RETURN_RE.test(clause)) && kept.some((clause) => RESERVICE_PEST_NOUN_UNBOUND_RE.test(clause));
+  return asserted.some((clause) => RESERVICE_PRONOUN_RETURN_RE.test(clause))
+    && (kept.some((clause) => RESERVICE_PEST_NOUN_UNBOUND_RE.test(clause)) || pronounReturnAntecedents(facts).length > 0);
 }
 
 // Codex round-24 P2: does the message AFFIRM a term (a hand-off word, an anger word)? A clause that mentions
@@ -773,7 +786,8 @@ function reportedReserviceLanes(text) {
   const active = activeAll.filter((clause) => !fireAntYardClause(clause));
   if (activeAll.length && !active.length) return []; // only a scope-dependent fire-ant-in-the-yard report
   if (excluded && !active.length) return [];
-  const basis = active.length ? active.join(' , ') : facts.survivingText;
+  const antecedents = active.length ? [] : pronounReturnAntecedents(facts).filter((clause) => !fireAntYardClause(clause));
+  const basis = active.length ? active.join(' , ') : [facts.survivingText, ...antecedents].join(' , ');
   let located = basis.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
   if (excluded) located = located.replace(EXCLUDED_ALWAYS_G_RE, ' ').replace(TREE_SHRUB_G_RE, ' ');
   // TURF insects (chinch bugs, mole crickets, armyworms, grubs, sod webworms) are LAWN, matched before the generic

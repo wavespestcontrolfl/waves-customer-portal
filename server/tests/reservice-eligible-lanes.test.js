@@ -542,6 +542,23 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['Fire ant mounds are back by the foundation', true, 'pest', false],
     ['Fire ants are back around the house and in the yard', true, 'pest', false],
     ['Ghost ants are back in the yard', true, 'pest', false],
+    // Codex round-43 P2: the pest named in a RESOLVED clause is the antecedent of a later pronoun return
+    ['Ants were gone but they came back', true, 'pest', false],
+    ['Roaches disappeared; now they are back', true, 'pest', false],
+    ['The roaches are gone, they are back again', true, 'pest', false],
+    ['The ants are gone', false, null, false],
+    ['They came back', false, null, false],
+    // Codex round-43 P2: a future condition (when / once / whenever + pest + present-tense return) is not a report
+    ['When the ants come back, what should I do?', false, 'pest', false],
+    ['Once the roaches return I will call', false, 'pest', false],
+    ['Whenever ants show up I spray', false, 'pest', false],
+    ['The ants came back when it rained', true, 'pest', false],
+    ['It rained and then the ants came back', true, 'pest', false],
+    // Codex round-43 P2: return / returns / returning (the inflection)
+    ['The ants return every week', true, 'pest', false],
+    ['The roaches returns', true, 'pest', false],
+    ['The ants are returning', true, 'pest', false],
+    ['The ants returned', true, 'pest', false],
     // several reported lanes: active, but the single-lane view is null (see reportedReserviceLanes below)
     ['Ants and chinch bugs are back', true, null, false],
   ];

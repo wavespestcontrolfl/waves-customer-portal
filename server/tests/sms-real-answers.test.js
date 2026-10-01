@@ -3940,6 +3940,32 @@ describe('free re-service is an entitlement resolved through the existing mechan
       }
     });
 
+    // Codex round-43 P2: "tonight / this morning / this afternoon / this evening" are lexical times — unverifiable unless the full window is stated.
+    test('lexical day-part words (tonight, this morning / afternoon / evening) are asserted times: blocked unless the full live window is stated', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-08'); // the callback is TODAY
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        const send = async (body) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        await expect(send('Your pest re-service is scheduled for today.')).resolves.toBeNull();
+        await expect(send('Your pest re-service is scheduled for today, 9-11 AM.')).resolves.toBeNull();
+        await expect(send('Your pest re-service is scheduled for this morning, 9-11 AM.')).resolves.toBeNull();
+        for (const bad of ['Your pest re-service is scheduled for tonight.', 'Your pest re-service is scheduled for this morning.', 'Your pest re-service is scheduled for this afternoon.', 'Your pest re-service is scheduled for this evening.', 'Your pest re-service is scheduled for later today.']) {
+          await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
+        }
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
     // Codex round-39 P2: a MERIDIEM-FREE range is an asserted window — compared modulo 12h on BOTH endpoints.
     test('meridiem-free ranges in a callback claim are asserted times (live Thursday 9:00 - 11:00): a wrong or one-sided range is blocked', async () => {
       const dt = require('../utils/datetime-et');
@@ -4154,7 +4180,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
         // a promise of the free link/visit is rejected too (nothing can be booked)
         expect(validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: covered(), intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage }).ok).toBe(false);
         // the right shape: acknowledge, hand to the office, SLA wording — converges (no offer is owed)
-        expect(validateReserviceOffer({ reply: "I'm so sorry about the ants. I've passed this to the office and they'll get back to you within the hour.", factsBlock: covered(), intendedActions: [{ type: 'escalate', note: 'ants are back - covered, link unavailable' }], inboundMessage })).toMatchObject({ ok: true });
+        expect(validateReserviceOffer({ reply: `I'm so sorry about the ants. I've passed this to the office and they'll get back to you ${require('../services/sms-shadow-drafter').followupSlaPhrase()}.`, factsBlock: covered(), intendedActions: [{ type: 'escalate', note: 'ants are back - covered, link unavailable' }], inboundMessage })).toMatchObject({ ok: true });
         // a pronoun-only report with a pest relationship is guarded the same way
         const ctx = { customer: { id: 'c1' }, serviceHistory: [{ type: 'General Pest Control' }] };
         expect(validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: covered(), intendedActions: [], inboundMessage: "they're back", offeredTimes: slot, context: ctx }).ok).toBe(false);

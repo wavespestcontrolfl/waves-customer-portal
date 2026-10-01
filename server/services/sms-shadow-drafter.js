@@ -1687,7 +1687,9 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
 // {"type":"escalate","note":"send_reservice_link"} action (validateReserviceOffer
 // requires it to converge), and ANY escalate action makes autoSendActionsSafe
 // return false — auto_send_safe is false for these drafts unconditionally,
-// so they never reach the auto-send claim/executor path at all.
+// so they never reach the auto-send claim/executor path at all. (A reply that only REFERS to an
+// already-booked callback has no such action: the auto-send executor rechecks it through
+// reserviceBookedReferenceBlock — sms-auto-send.js reserviceBookedHandoffCheck, round 43.)
 //
 // promisedLanes is what validateReserviceOffer resolved at DRAFT time
 // (persisted in input_snapshot). Codex round-4 P2: a REVIEWED card's body can
@@ -1797,7 +1799,7 @@ function reserviceAssertedDays(sentence) {
   return out;
 }
 // The clock times / windows a sentence asserts, as minutes-of-day with an optional meridiem: "1–3 PM", "at 9", "9:30 am".
-const RESERVICE_LEXICAL_TIME_RE = /\b(?:noon|midnight|midday|mornings?|afternoons?|evenings?|first\s+thing|end\s+of\s+(?:the\s+)?day|after\s+lunch|before\s+lunch|after\s+work|before\s+work|o['’]clock)\b/gi;
+const RESERVICE_LEXICAL_TIME_RE = /\b(?:noon|midnight|midday|tonight|later\s+today|this\s+(?:morning|afternoon|evening)|mornings?|afternoons?|evenings?|first\s+thing|end\s+of\s+(?:the\s+)?day|after\s+lunch|before\s+lunch|after\s+work|before\s+work|o['’]clock)\b/gi;
 function reserviceAssertedTimes(sentence) {
   const out = [];
   let rest = String(sentence);
@@ -4167,11 +4169,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // guarantees this returns ok:true here). Carried into publishSuggestion's
     // input_snapshot below so a send-time recheck (reservicePromiseStillEligible)
     // knows WHICH lane to revalidate without re-deriving it from a possibly
-    // human-edited outgoing body. Not threaded into maybeAutoSend/claimAutoSend:
+    // human-edited outgoing body. The PROMISE lanes are not threaded into maybeAutoSend/claimAutoSend:
     // a re-service-offer reply always carries an
     // {"type":"escalate","note":"send_reservice_link"} action, and ANY
     // escalate action makes autoSendActionsSafe return false, so these
-    // drafts never reach the auto-send claim/executor path at all.
+    // drafts never reach the auto-send claim/executor path at all. A reply that merely REFERS to an
+    // already-booked callback has no such action and CAN auto-send, so the booked snapshot is threaded
+    // (round 43) and rechecked live before provider entry.
     const reserviceLanesSnapshot = validateReserviceOffer({
       reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context,
     }).promisedLanes || null;
@@ -4210,6 +4214,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // input_snapshot so slaDraftedAt can anchor the deadline to it
           // instead of the row's own (later) created_at.
           factsGeneratedAt,
+          // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
+          reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -4397,6 +4403,7 @@ module.exports = {
   reserviceCarriesLinkAction,
   RESERVICE_OFFER_SPAN_RES,
   reserviceBookedSnapshot,
+  reserviceBookedReferenceBlock,
   reserviceSnapshotVersionEmitted,
   reserviceBodyPrescreen,
   PRE_DEPLOY_PROMPT_IDENTITIES,
