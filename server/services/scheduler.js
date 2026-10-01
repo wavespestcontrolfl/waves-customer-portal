@@ -4572,10 +4572,17 @@ function initScheduledJobs() {
                 // decision (an edit may not add label timing); the visit recheck
                 // only for a body that still copies a snapshotted sentence.
                 // (a decision row that cannot be read blocks the send: never "no snapshot, so send")
-                labelStale = Boolean(await require('./agent-decision-send-checks').scheduledLabelFactsBlock({ decision: labelDecision, outgoingBody: msg.message_body }));
+                const labelReason = await require('./agent-decision-send-checks').scheduledLabelFactsBlock({ decision: labelDecision, outgoingBody: msg.message_body });
+                // An unreadable latest visit (Codex #5416 r31 P2) says nothing about the message: do NOT retire the decision
+                // here. The send proceeds to the provider-boundary label check, which re-reads and, if still unreadable,
+                // refuses RETRYABLY onto the bounded retry rail - never sent unverified, never permanently stale.
+                if (require('./agent-decision-send-checks').blockReasonIsLabelInfrastructure(labelReason)) {
+                  logger.warn(`[scheduled-sms] ${msg.id} label-facts recheck unreadable; deferring to the provider-boundary check`);
+                } else {
+                  labelStale = Boolean(labelReason);
+                }
               } catch (err) {
-                logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
-                labelStale = true;
+                logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; deferring to the provider-boundary check`);
               }
             }
             // Re-service promise revalidation (Codex round-3 P2): the same
