@@ -76,6 +76,10 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     mockDatabase = app;
     await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); t.timestamp('deleted_at'); t.text('first_name'); t.text('last_name'); });
     await app.schema.createTable('notification_prefs', (t) => { t.uuid('customer_id'); });
+    // the collections-hold table the send boundary reads (no rows = no hold)
+    await app.schema.createTable('collections_flags', (t) => {
+      t.increments('id'); t.uuid('customer_id'); t.text('flag'); t.text('reason'); t.timestamp('released_at'); t.text('created_by');
+    });
     await app.schema.createTable('invoices', (t) => {
       t.uuid('id').primary();
       t.uuid('customer_id');
@@ -812,6 +816,22 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       await app.transaction(async (trx) => {
         expect(await check({ database: trx })).toMatchObject({ ok: false, code: 'DUNNING_CUSTOMER_DELETED', retryable: false });
       });
+    });
+
+    test('collections hold: a real hold row (dispute or wrong-party) is the retryable COLLECTION_HOLD_DEFER wait on the pool and a transaction; released => passes; an operator skips a plain dispute hold only', async () => {
+      const { c, claim, s, check } = await claimedWithBoundary();
+      const operatorCheck = Boundary.check(Boundary.snapshotOf(c, setFor([{ invoiceId: 'x' }]), { scheduleId: s.id, claimStamp: claim.claimStamp, operatorInitiated: true }));
+      mockResolve.mockImplementation(async () => setFor([{ invoiceId: 'x' }]));
+      const [{ id }] = await app('collections_flags').insert({ customer_id: c, flag: 'collection_hold', reason: 'Dispute: customer says the work was not done', created_by: 'test' }).returning('id');
+      for (const handle of [app]) expect(await check({ database: handle })).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true });
+      await app.transaction(async (trx) => {
+        expect(await check({ database: trx })).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true });
+        expect(await operatorCheck({ database: trx })).not.toMatchObject({ code: 'COLLECTION_HOLD_DEFER' }); // the exemption skips a plain dispute row
+      });
+      await app('collections_flags').where({ id }).update({ released_at: NOW });
+      expect((await check({ database: app })).code).not.toBe('COLLECTION_HOLD_DEFER');
+      await app('collections_flags').insert({ customer_id: c, flag: 'collection_hold', reason: 'Wrong number', created_by: 'test' });
+      expect(await operatorCheck({ database: app })).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER' }); // a fallback hold still waits
     });
 
     test('pause after the claim: the boundary refuses (pool and transaction) and the schedule stays paused', async () => {

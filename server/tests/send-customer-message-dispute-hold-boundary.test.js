@@ -110,6 +110,19 @@ describe('the hold is re-checked in providerPreparationCheck', () => {
     expect(result).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
   });
 
+  test('the customer-level dunning schedule entry point is gated at the boundary too (shared purpose), and the operator send-now skips a plain dispute hold only', async () => {
+    const input = { ...BASE_INPUT, purpose: 'payment_link', entryPoint: 'invoice_followup_customer' };
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
+    expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
+    Hold.messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (opts.ignoreDisputeHold ? { held: false } : { held: true, reason: 'hold' }));
+    try {
+      expect(await sendCustomerMessage({ ...input, operatorInitiated: true, holdExempt: 'operator' })).toMatchObject({ sent: true });
+    } finally {
+      Hold.messagingHeldByCollectionHold.mockReset();
+      Hold.messagingHeldByCollectionHold.mockResolvedValue({ held: false });
+    }
+  });
+
   // A realistic predicate: a trusted exemption (ignoreDisputeHold) skips a plain DISPUTE row only; a
   // wrong-number / wrong-party FALLBACK row always holds (Codex #5424 r13).
   const holdKind = (kind) => Hold.messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (

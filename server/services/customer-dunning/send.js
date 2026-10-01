@@ -91,7 +91,8 @@ async function sendTextLeg(ctx, channel, ledger) {
     invoiceId: set.anchor.id,
     entryPoint: 'invoice_followup_customer',
     hasEmailLeg: ctx.channels.includes('email'),
-    ...(ctx.operatorInitiated ? { operatorInitiated: true } : {}),
+    // the office "send now" keeps its pay link through a plain dispute hold (a fallback hold still waits)
+    ...(ctx.operatorInitiated ? { operatorInitiated: true, holdExempt: 'operator' } : {}),
     metadata: {
       original_message_type: 'invoice_followup',
       notificationEventKey: ctx.eventKey,
@@ -267,7 +268,9 @@ async function sendEmailLeg(ctx, ledger) {
   // Only the decision to ADD the stamp depends on default channels: a definite
   // non-send (retryable refusal or a provider/preparation failure), not a
   // terminal refusal, used no frequency window.
-  const notSent = result?.deliveryOutcome === 'not_sent' && !isTerminalEmailRefusal(result);
+  // (A collections-hold refusal is a WAIT: the reservation is released, so there is nothing to stamp.)
+  const notSent = result?.deliveryOutcome === 'not_sent' && !isTerminalEmailRefusal(result)
+    && !require('../collections/collection-hold').isHoldSuppression(result);
   if (!ctx.explicit && notSent) await stampNeverContacted(ledger, true);
   return result;
 }

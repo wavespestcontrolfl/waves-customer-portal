@@ -80,6 +80,10 @@ postgres('customer-dunning email authority on the run\'s handle (PostgreSQL)', (
       t.uuid('id').primary(); t.text('first_name'); t.text('email'); t.text('phone'); t.timestamp('deleted_at');
     });
     await app.schema.createTable('notification_prefs', (t) => { t.uuid('customer_id'); t.jsonb('invoice_channels'); });
+    // the collections-hold table the send boundary reads (no rows = no hold)
+    await app.schema.createTable('collections_flags', (t) => {
+      t.increments('id'); t.uuid('customer_id'); t.text('flag'); t.text('reason'); t.timestamp('released_at'); t.text('created_by');
+    });
     await app.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.uuid('customer_id'); t.string('status'); t.timestamp('created_at'); t.timestamp('sent_at'); t.timestamp('sms_sent_at'); t.uuid('payer_id'); t.string('scheduled_send_error'); });
     await app.schema.createTable('invoice_followup_sequences', (t) => {
       t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()')); t.uuid('invoice_id'); t.uuid('customer_id'); t.string('status'); t.integer('step_index').defaultTo(0);

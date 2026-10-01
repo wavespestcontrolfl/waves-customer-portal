@@ -39,6 +39,7 @@ const {
   findReminderReservation,
 } = require('../billing-reminder-delivery');
 const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
+const collectionHold = require('../collections/collection-hold');
 const { OPEN_STATUSES, SOURCE, eventKey } = require('./constants');
 const { resolveDunnableSet } = require('./balance-set');
 const { oldestActive } = require('./seed');
@@ -63,6 +64,8 @@ function staleWrite(run, writer) {
 }
 const hold = async (run, reason) => (await Schedule.markHeld(run.schedule, reason, run) ? outcome('held', { reason }) : staleWrite(run, 'markHeld'));
 const pause = async (run, reason) => (await Schedule.markPaused(run.schedule, reason, run) ? outcome('paused', { reason }) : staleWrite(run, 'markPaused'));
+
+const COLLECTION_HOLD = 'collection_hold';
 
 async function readPrefs(run) {
   try {
@@ -413,7 +416,7 @@ function attemptSend(run, set) {
   const ctx = {
     schedule: run.schedule, step: run.step, customer: run.customer, set, channels: run.sendChannels,
     explicit: run.explicit, eventKey: run.eventKey, operatorInitiated: run.operatorInitiated,
-    snapshot: Boundary.snapshotOf(run.schedule.customer_id, set, { scheduleId: run.schedule.id, claimStamp: run.claimStamp }), claimStamp: run.claimStamp,
+    snapshot: Boundary.snapshotOf(run.schedule.customer_id, set, { scheduleId: run.schedule.id, claimStamp: run.claimStamp, operatorInitiated: run.operatorInitiated }), claimStamp: run.claimStamp,
   };
   return sendReminderChannels({
     customerId: run.schedule.customer_id,
@@ -487,10 +490,15 @@ async function deliveryFacts(run, result) {
 const customerArchived = (result) => Object.values(result.results || {})
   .some((r) => r?.code === Boundary.CUSTOMER_DELETED || r?.reason === Boundary.CUSTOMER_DELETED);
 
+// A leg a collections hold refused at the provider boundary (the one COLLECTION_HOLD_DEFER outcome): a WAIT.
+// sendReminderChannels already released that leg's reservation; with nothing delivered the schedule holds.
+const heldByCollectionHold = (facts) => Object.values(facts.results || {}).some((r) => collectionHold.isHoldSuppression(r));
+
 async function dispose(run, facts) {
   // Archived at the provider boundary with nothing delivered: pause as decideCustomer does (the email leg's
   // generic not-sent would otherwise read as retryable and keep the schedule held).
   if (!facts.delivered?.size && customerArchived(facts)) return pause(run, 'customer_deleted');
+  if (!facts.delivered?.size && heldByCollectionHold(facts)) return hold(run, COLLECTION_HOLD);
   const verdict = Schedule.dispositionOf(facts);
   if (verdict.kind === 'advance') return finishDelivered(run, facts);
   if (verdict.kind === 'told') {
@@ -523,7 +531,16 @@ const decideEmptySet = (set) => (set.kind !== 'hold' && !sendable(set) ? decideE
 // A set HOLD (unused account credit, a paused member, ...) comes before the autopay guard: it is a hold the
 // office must hear about (markHeld alerts it), while an autopay hold only parks the schedule silently.
 async function decideAfterSet(run, set) {
-  return decideEmptySet(set) || (set.kind === 'hold' ? decideEndOfSet(set) : null) || await decideAutopay(run);
+  return decideEmptySet(set) || (set.kind === 'hold' ? decideEndOfSet(set) : null) || await decideAutopay(run)
+    || await decideCollectionHold(run);
+}
+
+// A collections hold (dispute, or the wrong-number / wrong-party fallback) is a WAIT, as in the per-invoice
+// ladder: nothing is sent, nothing is reserved, nothing fails, and the touch stays due (held, revisited daily;
+// no office alert - the office placed the hold). An operator send-now skips a plain dispute hold only.
+async function decideCollectionHold(run) {
+  const held = await collectionHold.messagingHeldByCollectionHold(run.schedule.customer_id, db, { ignoreDisputeHold: run.operatorInitiated === true });
+  return held.held ? decision('hold', COLLECTION_HOLD) : null;
 }
 
 async function runClaimed(claimed, opts) {

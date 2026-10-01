@@ -56,6 +56,7 @@ const REASON_TEXT = Object.freeze({
   no_reachable_channel: 'there is no way to reach them',
   all_channels_terminal: 'every channel was refused',
   customer_deleted: 'the customer was archived',
+  collection_hold: 'a collections hold is active',
 });
 const reasonText = (reason) => REASON_TEXT[reason] || 'a delivery problem';
 
@@ -621,6 +622,8 @@ async function alertHeld(schedule, reason, now, database) {
   const since = new Date(heldSince(schedule, now));
   const long = now.getTime() - since.getTime() >= HELD_ALERT_DAYS * 24 * HOUR_MS;
   const office = OFFICE_HOLD_REASONS.includes(reason);
+  // A collections hold is a WAIT the office placed itself: like the per-invoice ladder, no alert.
+  if (reason === 'collection_hold') return false;
   if (schedule.hold_alerted_at || (!long && !office)) return false;
   // held_since is part of the key: one alert per HOLD, so a hold that comes
   // back after a release or resume rings again (notifyAdmin dedupes a key for good).

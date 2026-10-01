@@ -41,12 +41,19 @@ jest.mock('../services/email-template-library', () => ({
 // handle it is given; the pool mock (models/db) and the transaction both serve it.
 let mockScheduleRow = null;
 const mockLocked = [];
+// An active collections hold on the customer: null, or { kind: 'dispute' | 'fallback' }. A plain dispute hold is
+// skipped by the trusted operator exemption (the query's `where(fn)` branch), a fallback hold never is.
+let mockHold = null;
+const holdRow = (exempt) => (mockHold && !(exempt && mockHold.kind === 'dispute') ? { id: 'hold-1' } : undefined);
 const mockScheduleReader = (table) => {
+  let exempt = false;
   const q = {
-    where() { return q; },
+    where(cond) { if (typeof cond === 'function') exempt = true; return q; },
+    whereNull() { return q; },
+    whereRaw() { return q; },
     select() { return q; },
     forUpdate() { mockLocked.push(table); return q; },
-    first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : (table === 'customers' ? customer : undefined)),
+    first: async () => (table === 'collections_flags' ? holdRow(exempt) : table === 'customer_dunning_schedules' ? mockScheduleRow : (table === 'customers' ? customer : undefined)),
   };
   return q;
 };
@@ -117,6 +124,13 @@ jest.mock('../services/collections/contact-ledger', () => {
       merge(mockLedger.find((r) => r.id === entry.id), { send_failed: true, ...extra });
       return true;
     }),
+    // a collections-hold WAIT: the reservation this attempt took is deleted (neither delivered nor resolved)
+    releaseHeldReservation: jest.fn(async (entry) => {
+      const at = mockLedger.findIndex((r) => r.id === entry.id);
+      if (at < 0 || mockLedger[at].metadata.delivered === true || mockLedger[at].metadata.resolved === true) return false;
+      mockLedger.splice(at, 1);
+      return true;
+    }),
   };
 });
 // The one db module the engine runs on: customers / prefs / templates / interactions / schedules are served from
@@ -124,7 +138,8 @@ jest.mock('../services/collections/contact-ledger', () => {
 let mockOpenSchedules = [];
 const mockWrites = [];
 const mockTables = {
-  first: (table, target, targetKey) => {
+  first: (table, target, targetKey, exempt) => {
+    if (table === 'collections_flags') return holdRow(exempt);
     if (table === 'customers') return customer;
     if (table === 'notification_prefs') return prefs;
     if (table === 'sms_templates') return smsTemplateRow;
@@ -140,14 +155,17 @@ jest.mock('../models/db', () => {
     let target = null;
     let targetKey = null; // a keyed-reservation lookup (idempotency_key)
     let minOccurred = null; // reminderProgress' 90-day window
+    let exempt = false; // the operator hold exemption adds a where(fn) branch
     const chain = {
       where(cond, op, val) {
+        if (typeof cond === 'function') exempt = true;
         if (cond && cond.id) target = cond.id;
         if (cond && cond.idempotency_key) targetKey = cond.idempotency_key;
         if (cond === 'occurred_at' && op === '>') minOccurred = val;
         return chain;
       },
       whereIn() { return chain; },
+      whereNull() { return chain; },
       whereRaw() { return chain; },
       select() { return chain; },
       orderBy() { return chain; },
@@ -163,7 +181,7 @@ jest.mock('../models/db', () => {
         }
         return 1;
       },
-      first: async () => mockTables.first(table, target, targetKey),
+      first: async () => mockTables.first(table, target, targetKey, exempt),
       // copies, as a real query returns: an in-memory view change (a repair's reflected verdict) never edits the stored row
       then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred).map((r) => ({ ...r, metadata: { ...r.metadata } })) : table === 'customer_dunning_schedules' ? mockOpenSchedules : []),
     };
@@ -261,6 +279,7 @@ function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-
   fakeDb.mockImplementation(fakeDb.implementation);
   mockOpenSchedules = [];
   mockWrites.length = 0;
+  mockHold = null;
   schedule = {
     id: SCHEDULE_ID, customer_id: CUSTOMER_ID, episode: 1, status: stepStatus, step_index: stepIndex,
     next_touch_at: ago(0), touches_sent: stepIndex, held_since: null, hold_alerted_at: null, link_digest: null, link_url: null,
@@ -2973,5 +2992,128 @@ describe('every admin alert the engine raises passes the real composeAdminAlert 
     await actual.alertStaff({ verb: 'review a stopped reminder schedule', generic: 'review a stopped reminder schedule', why: 'A reminder schedule pointed at a customer record that no longer exists, so it was closed.', doneWhen: 'schedule_reviewed', dedupeKey: 'y', customerId: null, subject: { type: 'check', id: row.id } });
     expect(mockNotify.mock.calls[0][1]).toBe('Billing — review a stopped reminder schedule');
     expect(mockNotify.mock.calls[0][3]).toMatchObject({ link: '/admin/invoices', metadata: { subject: { type: 'check', id: row.id } } });
+  });
+});
+
+describe('collections hold (dispute / wrong-party): a WAIT everywhere, as in the per-invoice ladder', () => {
+  const logger = require('../services/logger');
+  const Hold = require('../services/collections/collection-hold');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const landDuringRender = (kind = 'dispute') => mockShorten.mockImplementationOnce(async (url) => {
+    mockHold = { kind }; // the hold commits while the pay link is being minted / the message rendered
+    return `https://short.example.test/${Buffer.from(url).toString('hex').slice(-6)}`;
+  });
+  const expectWait = (out) => {
+    expect(out).toMatchObject({ outcome: 'held', reason: 'collection_hold' });
+    expect(Schedule.markHeld).toHaveBeenCalledWith(expect.anything(), 'collection_hold', expect.anything());
+    expect(mockNotify).not.toHaveBeenCalled(); // the office placed the hold: no alert, as the per-invoice ladder
+    expect(Schedule.advance).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  };
+
+  test('registration: the engine\'s entry point is hold-gated, and every text / push it sends carries it', async () => {
+    expect(Hold.HOLD_GATED_DUNNING_ENTRY_POINTS.has('invoice_followup_customer')).toBe(true);
+    await run();
+    expect(mockSendMessage.mock.calls.length).toBeGreaterThan(0);
+    for (const [input] of mockSendMessage.mock.calls) {
+      expect(input.entryPoint).toBe('invoice_followup_customer');
+      expect(input.purpose).toBe('payment_link');
+    }
+  });
+
+  test('a hold present at the decide phase: nothing is rendered, reserved or sent; the schedule HOLDS collection_hold, with no alert', async () => {
+    mockHold = { kind: 'dispute' };
+    expectWait(await run());
+    expect(mockLedger).toHaveLength(0);
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockShorten).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['sms', { invoice_channels: ['sms'] }],
+    ['email', { invoice_channels: ['email'] }],
+    ['push', { invoice_channels: ['push'] }],
+    ['email + sms', { invoice_channels: ['email', 'sms'] }],
+  ])('a hold landing DURING render / provider preparation on %s: suppressed, reservation released, no send, held; released hold => the next run sends', async (_label, channelPrefs) => {
+    prefs = channelPrefs;
+    landDuringRender();
+    expectWait(await run());
+    expect(mockLedger).toHaveLength(0); // every reservation this attempt took was released
+    expect(ContactLedger.releaseHeldReservation).toHaveBeenCalled();
+    expect(mockEmailMessages).toHaveLength(0);
+    expect(mockSendMessage.mock.results.every((r) => r.type === 'return')).toBe(true);
+    const providerAccepted = (await Promise.all(mockSendMessage.mock.results.map((r) => r.value))).filter((v) => v?.sent === true);
+    expect(providerAccepted).toHaveLength(0);
+
+    // the hold is released: the very next run sends the touch (the reservation was released, not stamped failed)
+    mockHold = null;
+    Schedule.markHeld.mockClear();
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockLedger.some((r) => r.metadata.delivered === true)).toBe(true);
+  });
+
+  test('operator send-now: a plain dispute hold is skipped (holdExempt operator), a wrong-party FALLBACK hold still waits', async () => {
+    customer.phone = '+19415550100';
+    mockHold = { kind: 'dispute' };
+    expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
+    expect(mockSendMessage.mock.calls[0][0]).toMatchObject({ operatorInitiated: true, holdExempt: 'operator' });
+
+    setup();
+    mockLedger.length = 0;
+    Schedule.advance.mockClear();
+    mockHold = { kind: 'fallback' };
+    expectWait(await run({ operatorInitiated: true, force: true }));
+  });
+
+  test('operator EMAIL (comms-lock handoff): a fallback hold landing during render vetoes it; a dispute hold landing does not', async () => {
+    customer.phone = null;
+    landDuringRender('fallback');
+    expectWait(await run({ operatorInitiated: true, force: true }));
+    expect(mockEmailMessages).toHaveLength(0);
+
+    setup();
+    mockLedger.length = 0;
+    mockEmailMessages.length = 0;
+    Schedule.markHeld.mockClear();
+    customer.phone = null;
+    landDuringRender('dispute');
+    expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
+    expect(mockEmailMessages).toHaveLength(1);
+  });
+
+  test('the boundary itself: a hold is the retryable COLLECTION_HOLD_DEFER wait on the pool and on a transaction; operators skip a plain dispute hold only', async () => {
+    mockResolve.mockResolvedValue(makeSet(['inv-a', 'inv-b', 'inv-c']));
+    const plain = Boundary.check(Boundary.snapshotOf(CUSTOMER_ID, makeSet(['inv-a', 'inv-b', 'inv-c'])));
+    const operator = Boundary.check(Boundary.snapshotOf(CUSTOMER_ID, makeSet(['inv-a', 'inv-b', 'inv-c']), { operatorInitiated: true }));
+    mockHold = { kind: 'dispute' };
+    for (const args of [{}, { database: MOCK_TRX }]) {
+      const verdict = await plain(args);
+      expect(verdict).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true });
+      expect(Hold.isHoldSuppression(verdict)).toBe(true);
+      expect(await operator(args)).toEqual({ ok: true });
+    }
+    mockHold = { kind: 'fallback' };
+    expect(await operator({ database: MOCK_TRX })).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER' });
+  });
+
+  test('a delivered leg is not undone by a hold: email delivered, the text suppressed by a hold landing => TOLD (the text waits), not paused', async () => {
+    prefs = { invoice_channels: ['email', 'sms'] };
+    mockSendMessage.mockImplementationOnce(async () => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true }));
+    const out = await run();
+    expect(out.outcome).toBe('told');
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+    expect(mockLedger.filter((r) => r.channel === 'sms')).toHaveLength(0); // the text reservation was released
+  });
+
+  test('SHADOW: a hold is a would-HOLD collection_hold (read-only, no alert, nothing written)', async () => {
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    mockHold = { kind: 'dispute' };
+    const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }]);
+    await Runner.shadowRun(NOW);
+    expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=collection_hold/);
+    expect(database.writes).toEqual([]);
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(Schedule.markHeld).not.toHaveBeenCalled();
   });
 });
