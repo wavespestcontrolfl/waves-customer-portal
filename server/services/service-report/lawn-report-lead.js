@@ -34,11 +34,13 @@ const STOCK_NO_ACTION = /^no action is needed\b/i;
 // Watering and moisture wording a lead field may not carry under a watering
 // banner. Plans phrase the water story without the word "water" ("Recheck
 // the moisture balance next visit."), so moisture, dryness, drought, damp and
-// rain count too (codex P0 #5496 r1).
-const WATERING_WORDS = /water|irrigat|sprinkl|moist|\bdr(?:y|ier|ies|ied|ying|yness)\b|drought|damp|\brain/i;
-// Insight categories whose plans and actions belong to the water card: under a
-// banner their text is never a lead source, whatever words it uses.
-const WATER_OWNED_CATEGORIES = new Set(['water', 'coverage']);
+// rain count too (codex P0 #5496 r1), and so does sprinkler "coverage".
+// This wording test is the ONE rule for banner ownership. Lead fields are
+// copied from insight cards through several snapshot aliases (statusHeadline,
+// wavesNext, rootCause), so a rule keyed on which card a string came from
+// leaks through each alias in turn (codex #5496 r2, r3); every water and
+// coverage card string the customer sees carries one of these words.
+const WATERING_WORDS = /water|irrigat|sprinkl|moist|\bdr(?:y|ier|ies|ied|ying|yness)\b|drought|damp|\brain|coverage/i;
 
 function clean(value) {
   const text = typeof value === 'string' ? value.trim() : '';
@@ -93,9 +95,8 @@ function deriveYourPart(reportV2, topIssue, bannerPresent) {
 // the line is left empty rather than swapped for a different plan, so the
 // lead never presents a second plan as the follow-up (and the top finding
 // card keeps its own plan, see LawnInsightCards). Without a follow-up the
-// top finding's plan is the only source: snapshot.wavesNext is that same plan
-// copied at build time, so reading it would let an excluded water-owned
-// finding back in under a banner (codex P0 #5496 r2).
+// top finding's plan is the only source (snapshot.wavesNext is that same plan
+// copied at build time).
 function deriveNext(reportV2, topIssue, bannerPresent) {
   const followUpReason = clean(reportV2.followUp && reportV2.followUp.reason);
   if (followUpReason) return pick([followUpReason], bannerPresent);
@@ -112,11 +113,7 @@ function deriveLawnLead(reportV2) {
   const snapshot = reportV2 && reportV2.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return null;
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
-  const rankedIssue = topIssueOf(reportV2);
-  // Under a banner a water-owned top issue contributes nothing to the lead:
-  // its plan and action are the water card's to print.
-  const topIssue = bannerPresent && rankedIssue && WATER_OWNED_CATEGORIES.has(rankedIssue.category)
-    ? null : rankedIssue;
+  const topIssue = topIssueOf(reportV2);
   return {
     headline: pick([snapshot.statusHeadline], bannerPresent),
     why: pick([snapshot.rootCause, snapshot.scoreExplanation], bannerPresent),
@@ -135,10 +132,20 @@ function countWords(text) {
   return t ? t.split(/\s+/).length : 0;
 }
 
+// The date half of the client's "Next visit" line (LawnLeadCard's
+// nextVisitSentence): the label, plus "Expected around" and the cadence
+// phrase on an estimate.
+function nextVisitDateWords(nextVisit) {
+  if (!nextVisit || !nextVisit.label || nextVisit.label === 'Invalid Date') return 0;
+  if (nextVisit.source !== 'estimated') return countWords(nextVisit.label);
+  return countWords(`Expected around ${nextVisit.label}${nextVisit.cadenceWeeks ? ` (about every ${nextVisit.cadenceWeeks} weeks)` : ''}`);
+}
+
 /**
  * Visible-word total of the lead region: the banner lines (and mow hold line)
- * the page prints right above it, every lead field, and a constant for the
- * static labels. The word-budget test holds this at 250 or less.
+ * the page prints right above it, every lead field, the next-visit date the
+ * client joins to lead.next, and a constant for the static labels. The
+ * word-budget test holds this at 250 or less.
  */
 function leadWords(reportV2) {
   const lead = (reportV2 && reportV2.lead) || null;
@@ -150,7 +157,8 @@ function leadWords(reportV2) {
     parts.push(lead.headline, lead.why, lead.progress, lead.applied, lead.next);
     if (Array.isArray(lead.yourPart)) parts.push(...lead.yourPart);
   }
-  return parts.reduce((sum, part) => sum + countWords(part), 0) + STATIC_LABEL_WORDS;
+  const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;
+  return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + STATIC_LABEL_WORDS;
 }
 
 module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS, WATERING_WORDS };

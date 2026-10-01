@@ -1686,11 +1686,12 @@ different plan), otherwise the top finding's next-visit plan, else null. It is d
 `applyLawnReportReconciliation` from the final reconciled strings, so it carries
 the same wording as the rest of the report. When `reportV2.banner` carries
 watering lines the banner owns the watering task: `yourPart` is the top
-finding's own step (dropped when it restates the aftercare task), a water or
-coverage top finding contributes nothing, and `headline`, `why`, `progress`,
-`yourPart` and `next` carry no watering or moisture wording (water, irrigation,
-sprinkler, moisture, dry, drought, damp, rain); such a field falls to its next
-source or null. The web report mounts the lead card right under the watering
+finding's own step (dropped when it restates the aftercare task), and
+`headline`, `why`, `progress`, `yourPart` and `next` carry no watering or
+moisture wording (water, irrigation, sprinkler, moisture, dry, drought, damp,
+rain, coverage); such a field falls to its next source or null. That wording
+test is the whole rule: a non-watering string from a water or coverage finding
+(e.g. "Stable — watching thin areas") may lead. The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and the follow-up card and opens with the photo strip. The
 PDF is unchanged and ignores it.

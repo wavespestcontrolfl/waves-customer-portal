@@ -168,18 +168,23 @@ describe('deriveLawnLead', () => {
       expect(deriveLawnLead(withReason(undefined)).next).toBe(reason);
     });
 
-    test('a water or coverage top issue contributes no yourPart or next under a banner, but does without one', () => {
-      for (const category of ['water', 'coverage']) {
-        const insights = [issue({ category, customerAction: 'Raise your mower to 4 inches this week.', nextVisitPlan: 'Spot-treat the edge weeds.' })];
-        const under = deriveLawnLead(reportOf({ banner: HOLD_BANNER, insights }));
-        expect(under.yourPart).toEqual([]);
-        // No follow-up: the water-owned issue's plan is not a lead source, and
-        // neither is snapshot.wavesNext (the same plan copied at build time).
-        expect(under.next).toBeNull();
-        const bare = reportOf({ insights });
-        expect(deriveLawnLead(bare).yourPart).toEqual(['Raise your mower to 4 inches this week.']);
-        expect(deriveLawnLead(bare).next).toBe('Spot-treat the edge weeds.');
-      }
+    test('banner ownership is the wording test alone: the real coverage card strings drop, its plain headline leads', () => {
+      const coverage = issue({
+        category: 'coverage',
+        customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
+        nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
+      });
+      const r = reportOf({ banner: HOLD_BANNER, insights: [coverage] });
+      r.snapshot.statusHeadline = 'Stable — watching thin areas';
+      r.snapshot.wavesNext = coverage.nextVisitPlan;
+      const lead = deriveLawnLead(r);
+      expect(lead.yourPart).toEqual([]);
+      expect(lead.next).toBeNull();
+      expect(lead.headline).toBe('Stable — watching thin areas');
+      // A non-watering step on a water or coverage card is an ordinary task.
+      const mower = reportOf({ banner: HOLD_BANNER, insights: [issue({ category: 'coverage', customerAction: 'Raise your mower to 4 inches this week.', nextVisitPlan: 'Spot-treat the edge weeds.' })] });
+      expect(deriveLawnLead(mower).yourPart).toEqual(['Raise your mower to 4 inches this week.']);
+      expect(deriveLawnLead(mower).next).toBe('Spot-treat the edge weeds.');
     });
 
     test('applied is a statement of record: "watered in" stays under a banner', () => {
@@ -226,6 +231,18 @@ describe('leadWords', () => {
     // banner 8 + 7, mow 6, headline 2, applied 3, yourPart 4, next 3, static 24
     expect(leadWords(r)).toBe(8 + 7 + 6 + 2 + 3 + 4 + 3 + 24);
     expect(leadWords({})).toBe(24);
+  });
+
+  test('counts the next-visit date the client joins to lead.next', () => {
+    const r = reportOf();
+    r.lead = { headline: null, why: null, progress: null, applied: null, yourPart: [], next: 'Recheck the edge.' };
+    r.snapshot.nextVisit = { label: 'Tuesday, October 13', source: 'scheduled' };
+    expect(leadWords(r)).toBe(3 + 3 + 24);
+    r.snapshot.nextVisit = { label: 'Tuesday, October 13', source: 'estimated', cadenceWeeks: 4 };
+    // "Expected around Tuesday, October 13 (about every 4 weeks)"
+    expect(leadWords(r)).toBe(3 + 9 + 24);
+    r.snapshot.nextVisit = { label: 'Invalid Date', source: 'scheduled' };
+    expect(leadWords(r)).toBe(3 + 24);
   });
 });
 
