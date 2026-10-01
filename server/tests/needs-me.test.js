@@ -274,6 +274,6 @@ test('the bar tool carries a digest\'s bounded detail and report link', async ()
   mockRows = [row({ id: 'd9', category: 'ops_digest', body: null, detail: `Diagnosis here. ${'Zed '.repeat(2000)}`, link: '/admin/communications', metadata: { kind: 'FIX', audience: 'engineering', feed: 'activity' } })];
   const out = await executeNeedsMeTool('needs_me', { who: 'claude' });
   expect(out.items[0]).toMatchObject({ why: 'Diagnosis here.', report_link: '/admin/agents?tab=activity&focus=d9' });
-  expect(out.items[0].detail.length).toBeLessThanOrEqual(1200);
+  expect(out.items[0].detail.length).toBeLessThanOrEqual(600);
   expect((await executeNeedsMeTool('needs_me', { who: 'either' })).items).toHaveLength(0);
 });

@@ -15,7 +15,7 @@ const { AREAS, WHO, cutAtWord } = require('../admin-alert-compose');
 const MAX_ITEMS = 100;
 const HEADLINE_CHARS = 80;
 const WHY_CHARS = 140;
-const DETAIL_CHARS = 1200; // an engineering digest's diagnosis can live only in detail
+const DETAIL_CHARS = 600; // an engineering digest's diagnosis can live only in detail; report_link has the rest
 
 const NEEDS_ME_TOOLS = [
   {
