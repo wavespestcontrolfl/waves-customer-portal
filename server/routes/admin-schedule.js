@@ -10,6 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -5116,6 +5117,10 @@ async function loadProjectCompletionContextByServiceId(services, { userId = null
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
       // Tree & Shrub Fast Complete: gate AND the requesting tech's user flag.
       treeShrubFastCompleteEnabled,
+      // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
+      // lawn re-service sheet (instead of the typed Dispatch form) when on.
+      // Read at call time; no per-tech flag.
+      lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
       // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
@@ -6241,6 +6246,7 @@ router.get('/', async (req, res, next) => {
         // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
+        lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
@@ -6833,6 +6839,7 @@ router.get('/week', async (req, res, next) => {
           // Same field as the day view above (PR C).
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
+          lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,

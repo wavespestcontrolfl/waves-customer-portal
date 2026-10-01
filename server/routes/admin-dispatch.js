@@ -70,6 +70,7 @@ const {
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -4204,6 +4205,30 @@ router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
     if (!(await assertRecapOwnership(req, res))) return;
     const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/lawn-reservice/fast-context
+// What the lawn re-service Fast Complete sheet loads: the visit identity
+// (echoed back as `expectedVisit` on /complete), the customer's booking words,
+// the active catalog the picker searches, and the property's last completed
+// lawn visit with its products (suggestion tiles, amounts only from what that
+// visit recorded). Read-only; dark behind GATE_LAWN_RESERVICE_FAST_COMPLETE (no
+// per-tech flag). A visit whose live completion profile is not lawn_re_service
+// is refused (409 not_lawn_re_service); any other ineligibility answers 200
+// `eligible: false` with a reason, like the tree-shrub context. See
+// services/lawn-reservice-fast-context.js.
+router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => {
+  try {
+    if (!lawnReserviceFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/lawn-reservice-fast-context').buildLawnReserviceFastContext(req.params.serviceId);
+    if (!ctx.ok) {
+      const status = ctx.reason === 'not_lawn_re_service' ? 409 : recapStatusForReason(ctx.reason);
+      return res.status(status).json({ error: ctx.reason, code: ctx.reason });
+    }
     const { ok, ...body } = ctx;
     res.json({ enabled: true, ...body });
   } catch (err) { next(err); }
