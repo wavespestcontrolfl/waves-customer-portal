@@ -2463,14 +2463,13 @@ function shouldAutoInvoiceCompletion({
  */
 // An incomplete or customer-declined closeout of a street-level hold settles it exactly like cancel / skip
 // (owner ruling): the review card closes with a note, the address is NOT approved (no field stamp, no
-// office-confirm activation, no inspection credit). No-op for every other visit; best-effort, answers null.
+// office-confirm activation, no inspection credit). No-op (null) for every other visit; false when the
+// settlement FAILED, so the caller keeps the closeout resumable (503) and a retry settles it.
 async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
-  if (svc?.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
-    await require('./street-level-hold').closeHoldCardForEndedVisit(svc.id, 'completed', undefined, {
-      note: `Visit closed out ${visitOutcome} — address not confirmed`, closedOut: String(visitOutcome),
-    });
-  }
-  return null;
+  if (svc?.source_action !== 'voice_agent' || svc.customer_confirmed === true) return null;
+  return require('./street-level-hold').closeHoldCardForEndedVisit(svc.id, 'completed', undefined, {
+    note: `Visit closed out ${visitOutcome} — address not confirmed`, closedOut: String(visitOutcome),
+  });
 }
 
 async function completeScheduledService(completionInput, packetContext = null) {

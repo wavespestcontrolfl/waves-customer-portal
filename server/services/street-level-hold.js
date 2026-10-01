@@ -77,13 +77,21 @@ async function findStreetLevelHoldCard(conn, { callLogId, visitId }) {
 // address confirmation: resolve its open review card and recompute the call's
 // review_status, under the shared per-call lock. Gated on the card signal (only
 // a voice_agent-source visit with a street-level card is touched), idempotent,
-// best-effort — never throws.
+// never throws. Tri-state like releaseStreetLevelHoldForCompletion:
+//   null  = nothing to do (not a hold, card already settled, visit no longer in `toStatus`)
+//   true  = THIS call settled the card
+//   false = a hold that could not be settled (database failure) — callers that must not
+//           lose the settlement (the unsuccessful closeout) keep the work resumable on it.
 async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db, { note = null, closedOut = null } = {}) {
   try {
     const visit = await conn('scheduled_services').where({ id: visitId, source_action: 'voice_agent' }).first('id', 'source_call_log_id');
-    if (!visit?.source_call_log_id) return false;
+    if (!visit?.source_call_log_id) return null;
     const card = await findStreetLevelHoldCard(conn, { callLogId: visit.source_call_log_id, visitId });
-    if (!card || !['open', 'in_progress'].includes(card.status)) return false;
+    if (!card) return null;
+    const cardOpen = ['open', 'in_progress'].includes(card.status);
+    // A card someone already resolved is nothing to do — except an unsuccessful closeout still has to
+    // mark it (the marker is what stops the completed visit reading as a live hold).
+    if (!cardOpen && !(closedOut && !card.payload?.closed_out)) return null;
     const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
     return await conn.transaction(async (trx) => {
       await lockTriageCall(trx, visit.source_call_log_id);
@@ -91,19 +99,20 @@ async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db, { note =
       // went live, so cancellation-processor restores the prior status), and the card
       // must close only while the visit is still in the terminal status that released it.
       const live = await trx('scheduled_services').where({ id: visitId }).forUpdate().first('status', 'customer_confirmed');
-      if (!live || String(live.status) !== String(toStatus)) return false;
+      if (!live || String(live.status) !== String(toStatus)) return null;
       const resolved = await trx('triage_items')
         .where({ id: card.id })
-        .whereIn('status', ['open', 'in_progress'])
+        .whereIn('status', cardOpen ? ['open', 'in_progress'] : ['resolved', 'dismissed'])
         .update({
-          status: 'resolved', resolved_at: new Date(), updated_at: new Date(),
-          resolution_note: note || `Visit ${toStatus} — the address hold no longer applies.`,
+          updated_at: new Date(),
+          // An already-settled card keeps its own status and note; only the marker is added.
+          ...(cardOpen ? { status: 'resolved', resolved_at: new Date(), resolution_note: note || `Visit ${toStatus} — the address hold no longer applies.` } : {}),
           // An unsuccessful closeout settles the hold without approving the address: the card carries the
           // marker the hold predicates read (a completed visit would otherwise still read as a live hold).
           ...(closedOut ? { payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ closed_out: closedOut })]) } : {}),
         });
       await syncCallReviewStatus(trx, visit.source_call_log_id);
-      return resolved > 0;
+      return resolved > 0 ? true : null;
     });
   } catch (err) {
     logger.warn(`[street-level-hold] closing the hold card for ${visitId} failed: ${err.code || err.name || 'error'}`);

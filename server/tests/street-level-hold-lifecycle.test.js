@@ -49,7 +49,7 @@ describe('closeHoldCardForEndedVisit', () => {
   test('byte-identical for everything else: not a voice_agent visit, no street-level card, or the card is already closed', async () => {
     for (const opts of [{ visit: null }, { visit: { id: 'v', source_call_log_id: null } }, { holdCard: null }, { holdCard: card('resolved') }]) {
       const { conn, log } = makeConn(opts);
-      expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', conn)).toBe(false);
+      expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', conn)).toBeNull();
       expect(log.updates).toHaveLength(0);
       expect(log.locked).toBe(false);
     }
@@ -57,14 +57,14 @@ describe('closeHoldCardForEndedVisit', () => {
   test('a COMPENSATED cancellation (the tech went live, the prior status was restored) leaves the card open', async () => {
     for (const restored of ['confirmed', 'en_route', 'pending']) {
       const { conn, log } = makeConn({ liveStatus: restored });
-      expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', conn)).toBe(false);
+      expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', conn)).toBeNull();
       expect(log.rechecked).toBe(true);
       expect(log.updates).toHaveLength(0);
     }
     const gone = makeConn({ liveStatus: null });
-    expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', gone.conn)).toBe(false);
+    expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', gone.conn)).toBeNull();
   });
-  test('never throws', async () => {
+  test('never throws; a database failure answers false (retryable), distinct from a no-op (null)', async () => {
     expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', () => { throw new Error('db down'); })).toBe(false);
   });
   test('the shared status writer runs it for cancelled and skipped only', () => {
@@ -236,7 +236,7 @@ describe('r16: order-independent close / reopen around a compensated cancellatio
 
   test('ordering B: the restoration ran first, so the close finds the visit live and leaves the card open', async () => {
     const { w, conn } = makeWorld({ visitStatus: 'pending', cardStatus: 'open' });
-    expect(await closeHoldCardForEndedVisit('v1', 'cancelled', conn)).toBe(false);
+    expect(await closeHoldCardForEndedVisit('v1', 'cancelled', conn)).toBeNull();
     expect(w.card.status).toBe('open');
     // ...and a reopen then has nothing to do.
     expect(await reopenHoldCardForRestoredVisit('v1', conn)).toBe(false);
@@ -409,6 +409,38 @@ describe('r22: an incomplete / declined closeout settles a hold like cancel / sk
     });
   }
 
+  test('a database failure while settling answers false (not null), and a retry then settles (true)', async () => {
+    const opts = { note: 'Visit closed out incomplete — address not confirmed', closedOut: 'incomplete' };
+    const ok = make(card);
+    let failOnce = true;
+    const flaky = (table) => {
+      const q = ok.conn(table);
+      if (table === 'triage_items') { const u = q.update; q.update = async (x) => { if (failOnce) { failOnce = false; throw new Error('deadlock'); } return u(x); }; }
+      return q;
+    };
+    flaky.raw = ok.conn.raw; flaky.transaction = async (fn) => fn(flaky);
+    expect(await closeHoldCardForEndedVisit('v1', 'completed', flaky, opts)).toBe(false);
+    expect(ok.log.updates).toHaveLength(0);
+    expect(await closeHoldCardForEndedVisit('v1', 'completed', flaky, opts)).toBe(true);
+    expect(ok.log.updates.some((u) => u.table === 'triage_items')).toBe(true);
+  });
+
+  test('a closed-out card that was already resolved without the marker still gets marked; an already-marked one is a no-op (null)', async () => {
+    const opts = { note: 'n', closedOut: 'incomplete' };
+    const unmarked = make({ ...card, status: 'resolved' });
+    expect(await closeHoldCardForEndedVisit('v1', 'completed', unmarked.conn, opts)).toBe(true);
+    const marked = make({ ...card, status: 'resolved', payload: { ...card.payload, closed_out: 'incomplete' } });
+    expect(await closeHoldCardForEndedVisit('v1', 'completed', marked.conn, opts)).toBeNull();
+    expect(marked.log.updates).toHaveLength(0);
+  });
+
+  test('the engine turns a failed settlement into the retryable 503 (release for resume), at both commit sites; cancel/skip ignore the result', () => {
+    const c = read('../services/complete-scheduled-service.js');
+    expect(c).toContain('return require(\'./street-level-hold\').closeHoldCardForEndedVisit(svc.id, \'completed\'');
+    expect(c.split("if (holdRelease === false) {").length - 1).toBe(2);
+    expect(read('../services/job-status.js')).toContain("void require('./street-level-hold').closeHoldCardForEndedVisit(jobId, toStatus).catch(");
+  });
+
   test('the engine settles (and never releases) for those outcomes; the hold predicates read the marker; the lazy activation still refuses the closed-out hold', () => {
     const c = read('../services/complete-scheduled-service.js');
     expect(c.split(': await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);').length - 1).toBe(2);
@@ -419,5 +451,16 @@ describe('r22: an incomplete / declined closeout settles a hold like cancel / sk
     expect(t).toContain('payload.closed_out) return false;');
     // The activation recognizes a hold by its card in ANY state (closed out stays non-activatable).
     expect(read('../services/outbound-review-confirm.js')).toContain('await isStreetLevelHoldVisit(serviceId, db, { includeClosedOut: true })');
+  });
+});
+
+
+describe('an unsuccessful closeout whose settlement fails stays retryable (pre-push P1)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+  test('settleHoldAfterUnsuccessfulCloseout returns the close helper result, so false reaches the 503 resume exit', () => {
+    const body = src.slice(src.indexOf('async function settleHoldAfterUnsuccessfulCloseout'), src.indexOf('async function completeScheduledService'));
+    expect(body).toMatch(/return require\('\.\/street-level-hold'\)\.closeHoldCardForEndedVisit\(/);
+    expect(body).not.toMatch(/return null;\s*\}\s*$/);
+    expect(src).toMatch(/settleHoldAfterUnsuccessfulCloseout\(svc, visitOutcome\);\s*\n[\s\S]{0,400}if \(holdRelease === false\)/);
   });
 });
