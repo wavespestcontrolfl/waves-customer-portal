@@ -144,6 +144,47 @@ describe('the injection record', () => {
     expect(screen.getByLabelText('Trunk (inches across, chest high)').value).toBe('20');
   });
 
+  it('keeps a saved tsp dose in tsp while its amount is replaced', () => {
+    render(<Block injectionProducts={[]} initial={{ injectionRecord: { product: 'Tree-age', dose: '3 tsp' } }} />);
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '' } });
+    expect(screen.getByLabelText('Dose unit').value).toBe('tsp');
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '2' } });
+    expect(record().dose).toBe('2 tsp');
+  });
+
+  it('saves the picked band with the record, and reads it back', () => {
+    const { unmount } = render(
+      <Block
+        injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]}
+        initial={{ injectionRecord: { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' } }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Label rate'), { target: { value: 'low' } });
+    expect(record().labelBand).toEqual({ product: IMA_JET.name, key: 'low' });
+    const saved = record();
+    unmount();
+    render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} initial={{ injectionRecord: { ...saved, dose: '2 fl oz' } }} />);
+    expect(screen.getByLabelText('Label rate').value).toBe('low');
+    expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows/);
+  });
+
+  it('stores no trunk of zero', async () => {
+    render(<Block injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(PHOSPHO_JET.name));
+    for (const typed of ['.', '0', '0.0']) {
+      fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: typed } });
+      expect(record().sizeClassOrDbh).toBe('');
+    }
+  });
+
+  it('follows the visit when the product it named itself is replaced', async () => {
+    const { rerender } = render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(IMA_JET.name));
+    rerender(<Block injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(PHOSPHO_JET.name));
+    expect(screen.getByLabelText('Injection product').value).toBe(PHOSPHO_JET.name);
+  });
+
   it('never reads a saved trunk size in another unit as inches', () => {
     render(
       <Block

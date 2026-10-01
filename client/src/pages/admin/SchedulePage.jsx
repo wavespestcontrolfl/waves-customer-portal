@@ -11039,10 +11039,13 @@ export function TreeShrubCloseoutBlock({
   // with the dose for the tree measured. The dose is a number of tsp or fl oz.
   const record = value.injectionRecord || {};
   const [otherProduct, setOtherProduct] = useState(false);
-  const [doseUnitPick, setDoseUnitPick] = useState("fl_oz");
-  // The label band the tech picks (target pest, season, palm size), kept for
-  // the product it was picked for; trunk size settles a size-banded label.
-  const [bandPick, setBandPick] = useState({ product: "", key: "" });
+  // The unit a dose is entered in: the saved dose's own, so clearing its
+  // amount never switches tsp to fl oz under the tech.
+  const [doseUnitPick, setDoseUnitPick] = useState(() => parseDose(record.dose).unit || "fl_oz");
+  // The label band the tech picks (target pest, season, palm size), saved
+  // with the record for the product it was picked for (a restored draft keeps
+  // it); trunk size settles a size-banded label.
+  const bandPick = record.labelBand || {};
   // What the tech is typing in the dose and trunk fields: the record keeps
   // only a number it can read ("1 1/2" reads 1.5), never digits run together.
   // A draft stands only while the record still holds what it stored; any
@@ -11073,12 +11076,21 @@ export function TreeShrubCloseoutBlock({
   const trunkTyping = trunkDraft ?? trunkInches;
   const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
   // One injection product on this visit: the record names it, until the tech
-  // chooses or types a product of their own (then it is never put back).
+  // chooses or types a product of their own (then it is never put back). A
+  // product the form named itself follows the visit: when that product leaves
+  // the visit, the record names the new only one, or none.
   const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
   const productTouched = useRef(false);
+  const autoProduct = useRef("");
   useEffect(() => {
-    if (injectionVisible && onlyInjection && !record.product && !productTouched.current) setInjectionField("product", onlyInjection);
-  }, [injectionVisible, onlyInjection, record.product]);
+    if (!injectionVisible || productTouched.current) return;
+    const autoNamed = record.product && record.product === autoProduct.current;
+    const stale = autoNamed && !injectionProducts.some((product) => product.name === record.product);
+    if ((!record.product || stale) && (onlyInjection || stale)) {
+      autoProduct.current = onlyInjection;
+      setInjectionField("product", onlyInjection);
+    }
+  }, [injectionVisible, onlyInjection, record.product, injectionProducts]);
   const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
   const hint = { fontSize: 14, color: colors.muted };
   const problem = { fontSize: 14, color: colors.error };
@@ -11270,7 +11282,7 @@ export function TreeShrubCloseoutBlock({
               <select
                 aria-label={labelRate.pick}
                 value={pickKey}
-                onChange={(e) => setBandPick({ product: record.product, key: e.target.value })}
+                onChange={(e) => setInjectionField("labelBand", { product: record.product, key: e.target.value })}
                 style={select}
               >
                 <option value="" disabled>{`Pick the ${labelRate.pick.toLowerCase()}`}</option>
@@ -11290,8 +11302,9 @@ export function TreeShrubCloseoutBlock({
                 value={trunkTyping}
                 onChange={(e) => {
                   const typed = e.target.value;
+                  // Only a trunk above zero is stored; "." or "0" stays a draft.
                   const inches = quantityOf(typed);
-                  const stored = inches ? `${inches} in DBH` : "";
+                  const stored = Number(inches) > 0 ? `${inches} in DBH` : "";
                   setTrunkTyped({ typed, stored });
                   setInjectionField("sizeClassOrDbh", stored);
                 }}
@@ -11332,6 +11345,7 @@ export function TreeShrubCloseoutBlock({
                 onChange={(e) => {
                   const typed = e.target.value;
                   const stored = doseText(quantityOf(typed), doseUnit);
+                  setDoseUnitPick(doseUnit);
                   setDoseTyped({ typed, stored });
                   setInjectionField("dose", stored);
                 }}
