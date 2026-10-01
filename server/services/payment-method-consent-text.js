@@ -117,6 +117,42 @@ const PREPAY_ACH_CONSENT_TEXT = [
 // contract code working without a forced refactor in this PR.
 const CONSENT_TEXT = CARD_CONSENT_TEXT;
 
+// ── Rendered-version attestation (codex #5434 r1 P1) ──────────────────────
+// The client bundles its own copy of this text, so a tab that loaded an
+// OLDER bundle keeps rendering the older copy after a deploy bumps this
+// module. Every customer-facing request that captures a consent therefore
+// carries `consentTextVersion` — the CONSENT_VERSION of the text that tab
+// RENDERED beside its checkbox — and the route refuses a capture whose
+// version is not this server's current one BEFORE any Stripe work or
+// ledger write, with a 409 the client surfaces as "refresh the page".
+// A mint route that stamps `consent_text_version` into the Stripe intent's
+// metadata lets the webhook mirrors apply the same rule to captures the
+// browser never finishes. Existing rows are untouched: the enrollment
+// floor (consentVersionQualifiesForEnrollment, v8+) is unchanged, so no
+// existing customer is re-asked.
+const CONSENT_VERSION_STALE_CODE = 'CONSENT_VERSION_STALE';
+const CONSENT_VERSION_STALE_MESSAGE = 'The payment authorization text was updated. Please refresh the page and try again.';
+// Stripe metadata key for the version the minting tab rendered.
+const CONSENT_VERSION_METADATA_KEY = 'consent_text_version';
+
+/** True only for a request/intent attesting EXACTLY this server's CONSENT_VERSION. */
+function renderedConsentVersionIsCurrent(value) {
+  return typeof value === 'string' && value.trim() === CONSENT_VERSION;
+}
+
+/** The JSON body for the 409 a capture route answers a stale (or absent) attestation with. */
+function consentVersionStaleResponse() {
+  return { error: CONSENT_VERSION_STALE_MESSAGE, code: CONSENT_VERSION_STALE_CODE };
+}
+
+/** Error form of the same refusal, for service-layer captures that throw. */
+function consentVersionStaleError() {
+  const err = new Error(CONSENT_VERSION_STALE_MESSAGE);
+  err.status = 409;
+  err.code = CONSENT_VERSION_STALE_CODE;
+  return err;
+}
+
 function getConsentText(methodType, { variant = null } = {}) {
   // Accept both Stripe-style ('us_bank_account') and DB-style ('ach')
   // to be forgiving at call sites.
@@ -139,5 +175,11 @@ module.exports = {
   PREPAY_ACH_CONSENT_TEXT,
   RATE_IN_EFFECT_SENTENCE,
   CONSENT_VERSION,
+  CONSENT_VERSION_STALE_CODE,
+  CONSENT_VERSION_STALE_MESSAGE,
+  CONSENT_VERSION_METADATA_KEY,
+  renderedConsentVersionIsCurrent,
+  consentVersionStaleResponse,
+  consentVersionStaleError,
   getConsentText,
 };

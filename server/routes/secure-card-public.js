@@ -190,6 +190,19 @@ router.post('/:token/replace-intent', async (req, res) => {
 router.post('/:token/complete', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+  // Rendered-version attestation (codex #5434 r1 P1): the page bundles its
+  // own copy of the saved-payment-method consent text, so the completing
+  // tab sends the CONSENT_VERSION it rendered beside the checkbox and the
+  // capture is refused — before any save, consent row or enrollment — when
+  // that is not this server's current version (or absent: a bundle from
+  // before the attestation existed). The client surfaces the 409 as
+  // "refresh the page"; a fresh load re-mints under the current text.
+  {
+    const { consentVersionStaleResponse, renderedConsentVersionIsCurrent } = require('../services/payment-method-consent-text');
+    if (!renderedConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+      return res.status(409).json(consentVersionStaleResponse());
+    }
+  }
   try {
     const result = await completeSecureCardCapture({
       token,

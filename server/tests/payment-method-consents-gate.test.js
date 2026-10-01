@@ -151,3 +151,65 @@ describe('findConsentedChargeableCard — Auto Pay opt-out is sacred', () => {
     expect(pm).toMatchObject({ id: 'pm-1' });
   });
 });
+
+// Rendered-version attestation (codex #5434 r1 P1): the client bundles its
+// own copy of the consent text, so a capture attests the version it
+// rendered and the server refuses any other — including none.
+describe('rendered consent version (codex #5434 r1 P1)', () => {
+  const text = require('../services/payment-method-consent-text');
+
+  test('only the exact current CONSENT_VERSION is current; older, absent and malformed are stale', () => {
+    expect(text.renderedConsentVersionIsCurrent(text.CONSENT_VERSION)).toBe(true);
+    expect(text.renderedConsentVersionIsCurrent(` ${text.CONSENT_VERSION} `)).toBe(true);
+    for (const stale of ['v11_2026-08-25', 'v12', '', null, undefined, 12, {}, 'V12_2026-09-30']) {
+      expect(text.renderedConsentVersionIsCurrent(stale)).toBe(false);
+    }
+  });
+
+  test('the refusal names the refresh action and a code the client can branch on', () => {
+    expect(text.consentVersionStaleResponse()).toEqual({ error: expect.stringMatching(/refresh the page/i), code: 'CONSENT_VERSION_STALE' });
+    const err = text.consentVersionStaleError();
+    expect(err.status).toBe(409);
+    expect(err.code).toBe('CONSENT_VERSION_STALE');
+    // Existing customers are never re-asked: the enrollment floor is unchanged.
+    expect(consentVersionQualifiesForEnrollment('v11_2026-08-25')).toBe(true);
+  });
+
+  describe('deferredCaptureConsentVersionCurrent (webhook mirrors)', () => {
+    const { deferredCaptureConsentVersionCurrent } = require('../services/payment-method-consents');
+    const alerts = require('../services/admin-alert-compose');
+    let raise;
+    beforeEach(() => { raise = jest.spyOn(alerts, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' }); });
+    afterEach(() => raise.mockRestore());
+
+    test('a current stamp lets the mirror record, silently', async () => {
+      await expect(deferredCaptureConsentVersionCurrent({ id: 'si_1', metadata: { consent_text_version: text.CONSENT_VERSION } }, { customerId: 'cust-1' })).resolves.toBe(true);
+      expect(raise).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['a stale stamp', { consent_text_version: 'v11_2026-08-25' }],
+      ['no stamp', {}],
+      ['no metadata at all', undefined],
+    ])('%s refuses and parks ONE billing bell per intent for the office to re-collect', async (_name, metadata) => {
+      await expect(deferredCaptureConsentVersionCurrent({ id: 'si_9', metadata }, { context: 'test mirror', customerId: 'cust-1' })).resolves.toBe(false);
+      expect(raise).toHaveBeenCalledTimes(1);
+      const [category, spec, opts] = raise.mock.calls[0];
+      expect(category).toBe('billing');
+      expect(spec).toMatchObject({ area: 'Billing', severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' }, doneWhen: 'consent_recorded', who: 'person', link: '/admin/customers?customerId=cust-1' });
+      // The composer accepts the copy as written (headline/why limits, no forbidden tokens).
+      expect(() => alerts.composeAdminAlert(spec)).not.toThrow();
+      expect(opts.dedupeKey).toBe('consent_version_stale:si_9');
+    });
+
+    test('a refusal with no customer id logs only (nothing to link the bell to) and still refuses', async () => {
+      await expect(deferredCaptureConsentVersionCurrent({ id: 'si_2', metadata: {} }, {})).resolves.toBe(false);
+      expect(raise).not.toHaveBeenCalled();
+    });
+
+    test('a bell failure never flips the refusal', async () => {
+      raise.mockRejectedValue(new Error('bell down'));
+      await expect(deferredCaptureConsentVersionCurrent({ id: 'si_3', metadata: {} }, { customerId: 'cust-1' })).resolves.toBe(false);
+    });
+  });
+});

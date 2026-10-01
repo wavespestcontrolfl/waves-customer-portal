@@ -625,7 +625,30 @@ message (no plan, parent or reason detail rides the payload), and `/finalize`
 additionally runs its charge UNDER the renewal gate with the same check
 repeated inside it, so a prior-plan change either waits for the charge or is
 seen by it. `/confirm`, receipts and `invoice.pdf` are unchanged — recording a
-payment Stripe already collected always remains available),
+payment Stripe already collected always remains available). RENDERED CONSENT
+VERSION (2026-09-30, codex #5434 r1 P1 — every surface that captures a
+saved-payment-method consent): the client bundles its own copy of the consent
+text (`client/src/lib/paymentMethodConsentText.js`), so a tab left open across
+a copy change keeps rendering the older text. Every save-the-method capture
+therefore carries `consentTextVersion`, the `CONSENT_VERSION` the tab
+rendered beside its checkbox. `/setup`, `/update-amount` and `/finalize`
+refuse a save (requested, or forced by a required-save invoice) whose
+attestation is not the server's current version — or is absent — with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` BEFORE any Stripe work, and
+thread the version into the mint, which stamps it on the PaymentIntent
+(`metadata.consent_text_version`, beside `save_card_opt_in`; carried across a
+tender replacement). `/capture-setup` does the same and stamps the
+SetupIntent. `/consent` and `/setup-complete` record ONLY under the intent's
+own current stamp — never the posting bundle's constant, since a redirect
+return posts from a freshly loaded, possibly newer bundle — answering the
+same 409 otherwise (the payment itself already settled; only the saved-method
+authorization is withheld), and the `payment_intent.succeeded` save mirror and
+the `covered_capture` webhook apply the identical rule: a stale or absent
+stamp keeps the method saved but unconsented and unenrolled and parks one
+Billing bell per intent for the office to re-collect the authorization. A
+plain one-off payment (no save) attests nothing and is unchanged. Existing
+rows are untouched — the enrollment floor (v8+) does not move, so no existing
+customer is re-asked),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -3029,6 +3052,18 @@ mode, recording the verbatim snapshot for that scope or refusing a
 mismatch — or a current version with no scope — with the same reloadable
 409 `TERMS_VERSION_STALE` as a stale version, so no acceptance is ever
 recorded under a Services line the tab did not render.
+The accept's saved-payment-method consent is attested the same way
+(codex #5434 r1 P1): an accept that carries a verified Auto Pay capture
+(`recurringCardSetupIntentId` under a required recurring-card policy — the
+inline capture / capture modal rendered the card, ACH or prepay variant of
+the bundle's consent text) or acknowledges the prepay exact-total quote
+(`prepayChargeConsentAccepted`, whose checkbox rendered the prepay variant)
+sends `consentTextVersion`, the client's `CONSENT_VERSION`; the route
+refuses any other value, or none, with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` before any mutation, so the
+post-commit consent snapshot (recorded from the server's current text) is
+never written for a tab that rendered older copy. An accept that captures no
+consent ignores the field.
 When `/data` includes a `proposal` for document rendering or an enabled
 public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
 the normalized rows that the document actually prints. React document mode
@@ -4316,7 +4351,13 @@ payer-billed, or Auto Pay is already active (the pending row is RETIRED to
 and chargeable; the POST runs the same
 live-verify (purpose `autopay_setup_link` + request id) and the same
 save → consent → enroll tail under the same claim/lease; `select-plan`
-is not applicable to these rows. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
+is not applicable to these rows. `/complete` (both kinds) carries
+`consentTextVersion`, the saved-payment-method consent version the page
+rendered beside the capture checkbox (2026-09-30, codex #5434 r1 P1), and is
+refused with `409 { error, code: 'CONSENT_VERSION_STALE' }` before the
+capture service runs — no save, consent row or enrollment — when that is not
+the server's current version or is absent; the page prompts a refresh, which
+re-mints under the current text. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
 AND the `secure_appointment_card` SMS template are both enabled, and
 unreachable until the funnel mints links. Bearer token
 (`appointment_card_requests.token` — 22-char base64url / 128-bit since

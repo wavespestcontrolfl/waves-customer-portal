@@ -52,11 +52,18 @@ const mockRecordConsent = jest.fn(async () => ({ id: 'consent-1' }));
 const mockHasConsentFor = jest.fn(async () => true);
 const mockHasEnrollmentScopedConsent = jest.fn(async () => true);
 const mockLinkPaymentMethodId = jest.fn(async () => {});
+// The deferred-capture version rule (codex #5434 r1 P1) runs REAL against
+// the mocked intent's stamp: a consent is recorded here only under the
+// current consent text version the minting tab attested.
+const mockDeferredCaptureConsentVersionCurrent = jest.fn(async (intent) => (
+  intent?.metadata?.consent_text_version === jest.requireActual('../services/payment-method-consent-text').CONSENT_VERSION
+));
 jest.mock('../services/payment-method-consents', () => ({
   recordConsent: (...a) => mockRecordConsent(...a),
   hasConsentFor: (...a) => mockHasConsentFor(...a),
   hasEnrollmentScopedConsent: (...a) => mockHasEnrollmentScopedConsent(...a),
   linkPaymentMethodId: (...a) => mockLinkPaymentMethodId(...a),
+  deferredCaptureConsentVersionCurrent: (...a) => mockDeferredCaptureConsentVersionCurrent(...a),
 }));
 
 const mockEnroll = jest.fn(async () => ({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' }));
@@ -90,11 +97,13 @@ const {
   _handleSetupIntentFailed: handleSetupIntentFailed,
 } = require('../routes/stripe-webhook');
 
+const { CONSENT_VERSION } = jest.requireActual('../services/payment-method-consent-text');
 const setupIntent = (over = {}) => ({
   id: 'si_1',
   status: 'succeeded',
   payment_method: 'pm_bank_1',
-  metadata: { purpose: 'portal_add_method', waves_customer_id: 'cust-1' },
+  // Stamped at mint (/cards/setup-intent) from the rendering tab's attestation.
+  metadata: { purpose: 'portal_add_method', waves_customer_id: 'cust-1', consent_text_version: CONSENT_VERSION },
   ...over,
 });
 
@@ -150,6 +159,19 @@ test('hold-scoped-only history: the portal consent the customer just granted is 
   await handleSetupIntentSucceeded(setupIntent());
   expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_bank', methodType: 'ach' }));
   expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_bank' }));
+});
+
+test.each([
+  ['a stale stamp (minted under older copy)', { purpose: 'portal_add_method', waves_customer_id: 'cust-1', consent_text_version: 'v11_2026-08-25' }],
+  ['no stamp (minted before stamps existed)', { purpose: 'portal_add_method', waves_customer_id: 'cust-1' }],
+])('a SetupIntent carrying %s: the verified row is kept but NO consent is recorded and NO enrollment runs (codex #5434 r1 P1)', async (_name, metadata) => {
+  mockHasEnrollmentScopedConsent.mockResolvedValue(false);
+  await handleSetupIntentSucceeded(setupIntent({ metadata }));
+  expect(mockDeferredCaptureConsentVersionCurrent).toHaveBeenCalledWith(expect.objectContaining({ id: 'si_1' }), expect.objectContaining({ customerId: 'cust-1' }));
+  // The bank still verifies — the method is saved, just inert.
+  expect(updatesFor('payment_methods').map((u) => u.patch)).toContainEqual({ ach_status: 'verified' });
+  expect(mockRecordConsent).not.toHaveBeenCalled();
+  expect(mockEnroll).not.toHaveBeenCalled();
 });
 
 test('ownership mismatch skips everything', async () => {

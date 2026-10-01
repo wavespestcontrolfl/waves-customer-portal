@@ -1,4 +1,5 @@
 import { clearNativeBadge } from '../native/nativeBadge';
+import { consentAttestation } from '../lib/paymentMethodConsentText';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const REFRESH_LOCK_NAME = 'waves-customer-refresh';
@@ -555,17 +556,22 @@ export class ApiClient {
     return this.request('/billing/processor');
   }
 
+  // Every portal request that captures a saved-payment-method consent
+  // attests the consent text version THIS bundle renders beside the
+  // checkbox (consentAttestation); the server refuses a stale one with
+  // 409 CONSENT_VERSION_STALE, which the modal surfaces as "refresh the
+  // page" (codex #5434 r1 P1).
   createSetupIntent(paymentMethodType = 'card') {
     return this.request('/billing/cards/setup-intent', {
       method: 'POST',
-      body: JSON.stringify({ paymentMethodType }),
+      body: JSON.stringify({ paymentMethodType, ...consentAttestation() }),
     });
   }
 
   saveStripeCard(paymentMethodId, setupIntentId) {
     return this.request('/billing/cards', {
       method: 'POST',
-      body: JSON.stringify({ paymentMethodId, setupIntentId }),
+      body: JSON.stringify({ paymentMethodId, setupIntentId, ...consentAttestation() }),
     });
   }
 
@@ -580,10 +586,11 @@ export class ApiClient {
   }
 
   setDefaultCard(cardId, opts) {
-    // opts carries consent_accepted on the retry after a consent_required 409.
+    // opts carries consent_accepted on the retry after a consent_required
+    // 409 — that retry also attests the consent text version it rendered.
     return this.request(`/billing/cards/${cardId}/default`, {
       method: 'PUT',
-      ...(opts ? { body: JSON.stringify(opts) } : {}),
+      ...(opts ? { body: JSON.stringify(opts.consent_accepted === true ? { ...opts, ...consentAttestation() } : opts) } : {}),
     });
   }
 
@@ -593,9 +600,12 @@ export class ApiClient {
   }
 
   updateAutopay(patch) {
+    // A consent_accepted retry (after a consent_required 409) attests the
+    // consent text version the authorization prompt rendered.
+    const body = patch && patch.consent_accepted === true ? { ...patch, ...consentAttestation() } : patch;
     return this.request('/billing/autopay', {
       method: 'PUT',
-      body: JSON.stringify(patch),
+      body: JSON.stringify(body),
     });
   }
 

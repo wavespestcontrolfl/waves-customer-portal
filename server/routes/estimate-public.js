@@ -161,6 +161,10 @@ function lawnCalendarBlock(services) {
   return Object.keys(programs).length ? { lawnCalendar: { programs } } : {};
 }
 const acceptanceTerms = require('../services/acceptance-terms-text');
+const {
+  consentVersionStaleResponse: paymentConsentVersionStaleResponse,
+  renderedConsentVersionIsCurrent: paymentConsentVersionIsCurrent,
+} = require('../services/payment-method-consent-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
 const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
@@ -10026,6 +10030,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           code: 'RECURRING_CARD_REQUIRED',
         });
       }
+      // The capture's consent (card / ACH / the prepay variants) is recorded
+      // post-commit from the server's copy of the text: the tab must attest
+      // the consent text version it rendered beside the capture checkbox
+      // (render-bound like termsVersion), and a stale or absent attestation
+      // — a bundle left open across a copy change — is refused before any
+      // mutation with the reloadable 409 (codex #5434 r1 P1).
+      if (!paymentConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+        return res.status(409).json(paymentConsentVersionStaleResponse());
+      }
     }
 
     // Annual-prepay service-mix eligibility is adjudicated BELOW, after
@@ -10448,6 +10461,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               capturedMethod: prepayChargeMethod.source === 'fresh_capture',
             },
           });
+        }
+        // …and the consent text version that checkbox rendered (codex #5434
+        // r1 P1): the prepay authorization snapshot recorded post-commit is
+        // the server's current text, so a tab attesting another version (or
+        // none) is refused before any mutation with the reloadable 409.
+        if (!paymentConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+          return res.status(409).json(paymentConsentVersionStaleResponse());
         }
         prepayChargePlan = { method: prepayChargeMethod, quote: chargeInfo, projectedOfferAmount: prepayQuoteOfferContribution };
       }

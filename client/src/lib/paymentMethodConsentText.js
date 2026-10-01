@@ -4,6 +4,25 @@ import { WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 
 export const CONSENT_VERSION = 'v12_2026-09-30';
 
+// Rendered-version attestation (codex #5434 r1 P1): every request that
+// captures a payment-method consent sends the CONSENT_VERSION of the text
+// THIS bundle rendered beside its checkbox. The server refuses a capture
+// whose version is not its current one (409 CONSENT_VERSION_STALE — the
+// text changed under an open tab) before any Stripe work or ledger write,
+// so a tab left open across a copy change can never be recorded as
+// agreeing to text it never showed. Spread into the request body.
+export const CONSENT_VERSION_STALE_CODE = 'CONSENT_VERSION_STALE';
+export function consentAttestation() {
+  return { consentTextVersion: CONSENT_VERSION };
+}
+
+// The refresh prompt the capture UIs show for that 409 (the server's own
+// message when it sent one).
+export const CONSENT_VERSION_STALE_MESSAGE = 'The payment authorization text was updated. Please refresh the page and try again.';
+export function isConsentVersionStale(body) {
+  return body?.code === CONSENT_VERSION_STALE_CODE;
+}
+
 // v12: the rate sentence shared by every variant — mirror of the server's
 // RATE_IN_EFFECT_SENTENCE.
 export const RATE_IN_EFFECT_SENTENCE = 'Each invoice is billed at the rate then in effect, including rates changed on at least 30 days’ written notice.';

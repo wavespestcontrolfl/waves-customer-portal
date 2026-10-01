@@ -28,6 +28,7 @@ import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
 import { fmtMoney } from '../lib/money';
 import { loadStripeSdk } from '../lib/stripeLoader';
+import { consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE } from '../lib/paymentMethodConsentText';
 import {
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
@@ -216,7 +217,10 @@ export default function SecureAppointmentPage() {
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ setupIntentId, stickyDisclosureVersion: sdv || undefined }),
+      // …plus the saved-payment-method consent text version this bundle
+      // rendered beside the capture checkbox (codex #5434 r1 P1): the
+      // server refuses a stale one before any save (refresh prompt below).
+      body: JSON.stringify({ setupIntentId, stickyDisclosureVersion: sdv || undefined, ...consentAttestation() }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -424,6 +428,12 @@ export default function SecureAppointmentPage() {
         setCaptureState({ ready: false, agreed: false, loadFailed: false });
         await refresh();
         setError('Bank accounts aren’t available right now — please use a card.');
+        return;
+      }
+      // The authorization text changed under this tab: a fresh load renders
+      // (and re-mints under) the current text.
+      if (err?.code === CONSENT_VERSION_STALE_CODE) {
+        setError(err.message || CONSENT_VERSION_STALE_MESSAGE);
         return;
       }
       setError('We could not finish saving your card. Please try again, or text us and we’ll help.');

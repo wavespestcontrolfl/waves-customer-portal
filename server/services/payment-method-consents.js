@@ -12,7 +12,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
+const {
+  CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY, getConsentText, renderedConsentVersionIsCurrent,
+} = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
 const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'autopay_setup_link', 'portal_autopay_enable', 'portal_set_default']);
@@ -244,8 +246,51 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
   return { total: orphans.length, linked, stale };
 }
 
+/**
+ * The rendered-version rule for DEFERRED captures (codex #5434 r1 P1) —
+ * webhook mirrors and deferred completions that record a consent long
+ * after the browser left. The mint stamped the version the tab rendered
+ * into the Stripe intent's metadata (`consent_text_version`); recording
+ * may proceed only when that stamp is this server's current
+ * CONSENT_VERSION. A stale stamp — or none (an intent minted before stamps
+ * existed) — must never be recorded as agreement to the current text:
+ * the method may still be saved, but it stays unconsented and therefore
+ * unenrolled, and ONE deduped billing bell asks the office to re-collect
+ * the authorization. Returns true when recording may proceed. Never
+ * throws (the bell is best-effort).
+ */
+async function deferredCaptureConsentVersionCurrent(intent, { context = 'capture', customerId = null } = {}) {
+  const stamped = intent?.metadata?.[CONSENT_VERSION_METADATA_KEY];
+  if (renderedConsentVersionIsCurrent(stamped)) return true;
+  const intentId = intent?.id || 'unknown';
+  logger.warn(`[consent] ${context}: consent text version ${stamped ? `'${stamped}'` : 'absent'} on intent ${intentId} is not the current ${CONSENT_VERSION} — authorization NOT recorded (customer ${customerId || 'unknown'})`);
+  if (customerId) {
+    try {
+      // docs/admin-notifications.md: an event, needs a person, one row per
+      // intent (the dedupe key), cleared once the authorization is on file.
+      await require('./admin-alert-compose').raiseAdminAlert('billing', {
+        area: 'Billing',
+        action: 're-collect the saved-payment authorization',
+        why: 'A payment method finished saving after the authorization text changed, so nothing was recorded or enrolled.',
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${customerId}`,
+        subject: { type: 'customer', id: String(customerId) },
+        doneWhen: 'consent_recorded',
+        who: 'person',
+      }, {
+        metadata: { customerId, intentId, context, stampedVersion: stamped || null, currentVersion: CONSENT_VERSION },
+        dedupeKey: `consent_version_stale:${intentId}`,
+      });
+    } catch (bellErr) {
+      logger.warn(`[consent] stale-version bell failed for intent ${intentId}: ${bellErr.message}`);
+    }
+  }
+  return false;
+}
+
 module.exports = {
   recordConsent,
+  deferredCaptureConsentVersionCurrent,
   hasConsentSnapshotForVariant,
   hasConsentFor,
   hasEnrollmentScopedConsent,

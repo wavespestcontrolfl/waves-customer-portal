@@ -1755,6 +1755,65 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
   });
 });
 
+describe('Payment consent attestation on consent-bearing accepts (codex #5434 r1 P1)', () => {
+  // The inline Auto Pay capture / capture modal render the bundle's own copy
+  // of the saved-payment-method consent text; the accept that records that
+  // consent (post-commit) must attest the version the tab rendered.
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  const spies = [];
+
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1', tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null,
+      recurringConversionSkipped: false, welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+    });
+  }
+
+  beforeEach(() => {
+    resetStore(recurringPestEstimate({ id: 'est-consent-1', token: 'tok-consent-1-x012345678' }));
+    // A recurring plan whose Auto Pay card capture is REQUIRED and verified.
+    spies.push(
+      jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ enforced: true, required: true, exemptReason: null }),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({ ok: true, setupIntentId: 'si_cof_1', paymentMethodId: 'pm_cof_1', methodType: 'card' }),
+      jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true, paymentMethodRowId: 'pm-row-1' }),
+    );
+  });
+  afterEach(() => { while (spies.length) spies.pop().mockRestore(); });
+
+  test('the current version passes the attestation (the accept proceeds past the capture gate)', async () => {
+    conversionOk();
+    const res = await putAccept('tok-consent-1-x012345678', { recurringCardSetupIntentId: 'si_cof_1', consentTextVersion: CONSENT_VERSION });
+    expect(res.data.code).not.toBe('CONSENT_VERSION_STALE');
+    expect(RecurringCards.verifyRecurringCardIntent).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'si_cof_1' }));
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test.each([
+    ['a stale version', 'v11_2026-08-25'],
+    ['no version (a bundle that predates the attestation)', undefined],
+  ])('a verified Auto Pay capture attesting %s → 409 CONSENT_VERSION_STALE before any mutation', async (_name, consentTextVersion) => {
+    const res = await putAccept('tok-consent-1-x012345678', { recurringCardSetupIntentId: 'si_cof_1', consentTextVersion });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VERSION_STALE');
+    expect(res.data.error).toMatch(/refresh the page/i);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(RecurringCards.completeRecurringCardEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('an accept that captures no consent (no card owed) ignores the attestation entirely', async () => {
+    RecurringCards.resolveRecurringCardPolicyForEstimate.mockResolvedValue({ enforced: true, required: false, exemptReason: 'not_required' });
+    conversionOk();
+    const res = await putAccept('tok-consent-1-x012345678', {});
+    expect(res.status).toBe(200);
+    expect(RecurringCards.verifyRecurringCardIntent).not.toHaveBeenCalled();
+  });
+});
+
 describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the accept txn', () => {
   // A plan_restart estimate accepts through the SAME public path — the
   // revalidation re-checks the churn stamp + residual ownership under the

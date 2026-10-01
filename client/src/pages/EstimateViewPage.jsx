@@ -54,7 +54,10 @@ import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimat
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import {
+  ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT,
+  consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE,
+} from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -7210,6 +7213,15 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // scope from the estimate and this accept's service mode and
           // 409s TERMS_VERSION_STALE on a mismatch (codex #5434 r1 P0).
           termsScope: (paymentPreference !== 'prepay_annual' && renderedAcceptanceTermsScope(data?.acceptanceTerms, serviceMode)) || undefined,
+          // The saved-payment-method consent text version THIS BUNDLE
+          // renders beside every capture checkbox (inline Auto Pay capture,
+          // the capture modal, the prepay exact-total step — card, ACH and
+          // both prepay variants). The server refuses a consent-bearing
+          // accept whose version is not its current one with 409
+          // CONSENT_VERSION_STALE (codex #5434 r1 P1), so a tab left open
+          // across a copy change is never recorded under text it never
+          // showed; a plain accept with no capture ignores it.
+          ...consentAttestation(),
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -7312,6 +7324,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // one more tap.
             await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'The terms were updated — please review the line above Accept and confirm again.');
+          }
+          if (body.code === CONSENT_VERSION_STALE_CODE) {
+            // The saved-payment-method authorization text changed since
+            // this tab loaded: nothing was accepted or recorded. A reload
+            // renders the current text; the reservation survives in the
+            // server-side hold.
+            throw new Error(body.error || CONSENT_VERSION_STALE_MESSAGE);
           }
           if (body.code === 'PREPAY_QUOTE_STALE') {
             // The acknowledged prepay total drifted (credit/deposit change

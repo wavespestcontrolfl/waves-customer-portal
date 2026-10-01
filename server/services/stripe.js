@@ -7,6 +7,18 @@ const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlacehold
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
+const { CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
+
+// Rendered-version stamp for a consent captured through an intent (codex
+// #5434 r1 P1): the saved-payment-method consent version the MINTING tab
+// attested rides the intent's metadata, so the deferred recorders (the
+// webhook mirrors, a redirect return from a reloaded bundle) can refuse to
+// record a consent under text that tab never rendered. Empty when nothing
+// is being saved — Stripe metadata updates merge, so the empty string also
+// CLEARS a stale stamp when the customer unticks the box.
+function consentVersionStamp(saveCard, consentTextVersion) {
+  return { [CONSENT_VERSION_METADATA_KEY]: saveCard && consentTextVersion ? String(consentTextVersion) : '' };
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Lazy-init Stripe client — don't crash if key is missing
@@ -4072,6 +4084,7 @@ const StripeService = {
             // longer charges).
             combined_allocation: combinedAllocation ? PayCombined.encodeAllocation(combinedAllocation) : '',
             save_card_opt_in: saveCard ? 'true' : 'false',
+            ...consentVersionStamp(saveCard, opts.consentTextVersion),
             selected_method_category: 'card',
             // CLEAR any surcharge-finalization metadata (Stripe metadata updates
             // MERGE) so a reused PI that was previously finalized can't carry a
@@ -4570,6 +4583,7 @@ const StripeService = {
         pay_session_touched_at: paySessionTouchedAt(),
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
+        ...consentVersionStamp(saveCard, opts.consentTextVersion),
         // CLEAR any surcharge-finalization metadata (Stripe metadata updates
         // MERGE) — a declined /finalize leaves surcharge_policy_version on the
         // PI, and the webhook's surcharge-bypass quarantine reads that stale key
@@ -5092,6 +5106,7 @@ const StripeService = {
         surcharge_policy_version: policyVersion,
         card_funding: funding || 'unknown',
         save_card_opt_in: saveCard ? 'true' : 'false',
+        ...consentVersionStamp(saveCard, opts.consentTextVersion),
       },
     };
 

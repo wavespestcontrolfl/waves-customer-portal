@@ -2542,6 +2542,16 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
           logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
         }
         const mirrorNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
+        // A consent row is created here only under the opt-in's OWN stamp of
+        // the consent text version the minting tab rendered (/setup and
+        // /update-amount write it beside save_card_opt_in — codex #5434 r1
+        // P1). A stale or absent stamp means the customer read older copy:
+        // the method stays mirrored but unconsented and unenrolled, and the
+        // office is asked to re-collect the authorization.
+        if (mirrorNeedsConsentRow
+          && !(await ConsentService.deferredCaptureConsentVersionCurrent(paymentIntent, { context: 'pay-page save mirror', customerId: wavesCustomerId }))) {
+          return;
+        }
         if (mirrorNeedsConsentRow) {
           // Record the consent snapshot SERVER-SIDE — same recipe as the
           // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
@@ -5200,6 +5210,13 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // ran before a Stripe round-trip, and a Bill-To change during it would
       // otherwise leave consent recorded for a withdrawn invoice.
       const coveredNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
+      // Same rule as /setup-complete: the stamp /capture-setup made from the
+      // rendering tab's attestation must be this server's current consent
+      // text version, or nothing is recorded or enrolled (codex #5434 r1 P1).
+      if (coveredNeedsConsentRow
+        && !(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'covered-capture webhook', customerId: wavesCustomerId }))) {
+        return;
+      }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
       // authorizedAt: this webhook can complete DAYS after the customer
@@ -5407,6 +5424,13 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // consent-gated: the row below is the authority, never SI metadata
       // (Codex #2507 P1).
       if (!(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId))) {
+        // Same rule as POST /cards: the stamp /cards/setup-intent made from
+        // the rendering tab's attestation must be this server's current
+        // consent text version, or nothing is recorded or enrolled (codex
+        // #5434 r1 P1). The verified row above stays saved but inert.
+        if (!(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) {
+          return;
+        }
         await ConsentService.recordConsent({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,

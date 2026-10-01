@@ -101,6 +101,7 @@ import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates'
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
 import { getStripe } from '../lib/stripeLoader';
 import { fetchWithNetworkRetry } from '../lib/fetchRetry';
+import { consentAttestation, CONSENT_VERSION_STALE_MESSAGE, isConsentVersionStale } from '../lib/paymentMethodConsentText';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -848,6 +849,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
           methodCategory,
           saveCard: saveCardOverride !== undefined ? saveCardOverride : !!saveCard,
+          // The consent text version this bundle renders beside the
+          // save-method checkbox (codex #5434 r1 P1) — the server stamps it
+          // on the PaymentIntent and refuses a stale one.
+          ...consentAttestation(),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -859,6 +864,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           window.location.reload();
           return new Promise(() => {});
         }
+        // The consent text changed under this tab: refresh prompt, never a
+        // silent save under copy the customer did not read.
+        if (isConsentVersionStale(data)) throw serverReportedError(data.error || CONSENT_VERSION_STALE_MESSAGE);
         throw serverReportedError(data.error || 'Could not update payment total');
       }
       // The server minted a fresh PaymentIntent for this tender (the old one
@@ -1370,10 +1378,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       const finalRes = await fetch(`${API_BASE}/pay/${token}/finalize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quoteToken: quoteData.quoteToken, saveCard: !!saveCard }),
+        body: JSON.stringify({ quoteToken: quoteData.quoteToken, saveCard: !!saveCard, ...consentAttestation() }),
       });
       const result = await finalRes.json().catch(() => ({}));
-      if (!finalRes.ok) throw serverReportedError(result.error || 'Payment failed');
+      if (!finalRes.ok) throw serverReportedError(result.error || (isConsentVersionStale(result) ? CONSENT_VERSION_STALE_MESSAGE : 'Payment failed'));
 
       if (result.requiresAction && result.clientSecret) {
         const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });
@@ -1789,7 +1797,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
       const res = await fetch(`${API_BASE}/pay/${token}/setup-complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ setupIntentId }),
+        body: JSON.stringify({ setupIntentId, ...consentAttestation() }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1978,7 +1986,7 @@ export default function PayPageV2() {
         fetch(`${API_BASE}/pay/${token}/setup-complete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ setupIntentId: returnedSetupIntentId }),
+          body: JSON.stringify({ setupIntentId: returnedSetupIntentId, ...consentAttestation() }),
         })
           .then(async (r) => {
             const body = await r.json().catch(() => ({}));
@@ -2027,7 +2035,7 @@ export default function PayPageV2() {
       const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify(consentAttestation()),
       });
       (async () => {
         let saveFlow = saveCardDefault;
@@ -2071,7 +2079,9 @@ export default function PayPageV2() {
     fetch(`${API_BASE}/pay/${token}/capture-setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      // The capture form renders the locked consent: attest the version
+      // this bundle renders so the mint can stamp it (codex #5434 r1 P1).
+      body: JSON.stringify(consentAttestation()),
     })
       .then(async (r) => {
         const body = await r.json().catch(() => ({}));
@@ -2167,7 +2177,10 @@ export default function PayPageV2() {
       // a PaymentIntent against an invoice an admin edited after our GET
       // (staleInvoice 409 below), so the customer never confirms a charge
       // for line items they aren't looking at.
-      body: JSON.stringify({ saveCard: saveCardDefault, invoiceVersion: data.invoice.version ?? undefined }),
+      // …and the consent text version this bundle renders beside the
+      // save-method checkbox (codex #5434 r1 P1): the mint stamps it on
+      // the PaymentIntent and refuses a stale one (409, refresh prompt).
+      body: JSON.stringify({ saveCard: saveCardDefault, invoiceVersion: data.invoice.version ?? undefined, ...consentAttestation() }),
     })
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
@@ -2392,7 +2405,7 @@ export default function PayPageV2() {
       const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method, methodCategory }),
+        body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method, methodCategory, ...consentAttestation() }),
       });
       try {
         let res = await postConsent();
