@@ -876,26 +876,25 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       .where({ id: serviceId })
       .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
         'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
-        'is_callback', 'estimated_price');
+        'is_callback', 'estimated_price', 'field_confirmed_at');
     if (!row || !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) || row.customer_confirmed) {
       return false;
     }
     // A street-level address hold is released ONLY by the office's explicit confirm: no writer that
     // merely moves the visit (SmartRebooker, update-details, the bulk paths, the sweep) may activate it.
     // Status 'confirmed' is NOT proof (SmartRebooker writes it on a move); the proof is a recorded
-    // pending -> confirmed transition BY A USER (SmartRebooker's own row has transitioned_by NULL).
-    // A hold the office confirmed whose hook then failed stays on the retry rail, and a COMPLETED hold
-    // (completion is field confirmation; only the completion engine completes one) may retry too —
-    // without the card funnel, exactly as the completion release itself runs. Fails closed.
-    let holdOpts = {};
+    // pending -> confirmed transition BY A USER (SmartRebooker's own row has transitioned_by NULL), or,
+    // for a COMPLETED hold, the field-confirmation stamp the completion engine commits with the status
+    // when the closeout was performed at the property (an incomplete / declined closeout carries none, and
+    // the stamp also keeps the card funnel off in the hook). A hold the office confirmed whose hook then
+    // failed stays on the retry rail. Fails closed.
     if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db)) {
-      const approved = row.status === 'completed'
+      const approved = (row.status === 'completed' && !!row.field_confirmed_at)
         || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId));
       if (!approved) {
         logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
         return false;
       }
-      holdOpts = { skipCardRequest: row.status === 'completed' };
     }
     // Rejected rows are not activated (a cancelled/skipped booking was the office declining it);
     // completed/no_show rows DO — the lead conversion / card resolution / credit evidence are what a
@@ -926,7 +925,6 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // guarded UPDATE below still keeps the stamp itself at-most-once.
     const coreLegsOk = await runOutboundReviewConfirmHook(db, row, routeTag, {
       suppressCardAskWithoutClearance: true,
-      ...holdOpts,
       // The completion instant a failed in-trx evidence write froze — the
       // belt marker retry must carry it, not a fresh now() (Codex #3361
       // r16 P1).

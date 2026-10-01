@@ -433,23 +433,31 @@ describe('a moved hold stays out of customer self-service (status confirmed, cus
   });
 });
 
-describe('r21: the lazy activator of a COMPLETED hold runs in the completion\'s field mode (no card funnel)', () => {
-  test('the activation hands skipCardRequest to the hook for a completed hold, never for a confirmed (office-approved) one', () => {
-    const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
-    expect(s).toContain("holdOpts = { skipCardRequest: row.status === 'completed' };");
-    const hook = s.indexOf('const coreLegsOk = await runOutboundReviewConfirmHook(db, row, routeTag, {\n      suppressCardAskWithoutClearance: true,\n      ...holdOpts,');
-    expect(hook).toBeGreaterThan(s.indexOf('let holdOpts = {};'));
-    // skipCardRequest wins in the hook: no auto-secure, no enrollment link, no clearance-gated send.
-    expect(s).toContain('if (opts.skipCardRequest) {\n    logger.info(`[${routeTag}] Skipping card-on-file request');
-  });
-  test('behavior: a completed hold passes the guard and the hook is told to skip the card request', async () => {
+describe('r22: a COMPLETED hold activates lazily only with the completion\'s field-confirmation stamp', () => {
+  const act = async (visit) => {
     const calls = { hold: 0, updates: [] };
-    const handle = makeHandle({ visit: baseVisit({ status: 'completed' }), held: true, calls });
-    const mod = require('../services/outbound-review-confirm');
-    const spy = jest.spyOn(require('../services/appointment-card-request'), 'requestCardForAppointment');
-    await mod.activateLegacyOutboundReviewRowIfNeeded(handle, 'v1', 'job-status-legacy-activation').catch(() => {});
-    expect(spy).not.toHaveBeenCalled();
-    spy.mockRestore();
+    const handle = makeHandle({ visit, held: true, history: false, calls });
+    const out = await activateLegacyOutboundReviewRowIfNeeded(handle, 'v1', 'job-status-legacy-activation').catch(() => false);
+    return { out, calls };
+  };
+  test('an incomplete / declined closeout (completed status, no stamp) is skipped: nothing stamped, nothing converted', async () => {
+    const { out, calls } = await act(baseVisit({ status: 'completed', field_confirmed_at: null }));
+    expect(out).toBe(false);
+    expect(calls.updates).toHaveLength(0);
+  });
+  test('a closeout performed at the property (the stamp committed with the status) passes the guard', async () => {
+    const { calls } = await act(baseVisit({ status: 'completed', field_confirmed_at: new Date() }));
+    expect(calls.updates.length).toBeGreaterThan(0);
+  });
+  test('the completion engine stamps field_confirmed_at in the record transaction (before any post-commit activator) and releases only for performed outcomes', () => {
+    const s = fs.readFileSync(require.resolve('../services/complete-scheduled-service.js'), 'utf8');
+    expect(s).toContain("const addressConfirmingOutcome = visitOutcome !== 'incomplete' && visitOutcome !== 'customer_declined';");
+    const stamp = s.indexOf('scheduledServiceUpdate.field_confirmed_at = svc.field_confirmed_at || new Date();');
+    expect(stamp).toBeGreaterThan(s.indexOf('const scheduledServiceUpdate = { ...lifecycleUpdates };'));
+    expect(stamp).toBeLessThan(s.indexOf("toStatus: 'completed',", stamp));
+    expect(s.split('addressConfirmingOutcome ? await require').length - 1).toBe(2);
+    const o = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
+    expect(o).toContain("(row.status === 'completed' && !!row.field_confirmed_at)");
   });
 });
 
