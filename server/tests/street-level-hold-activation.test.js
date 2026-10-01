@@ -403,3 +403,29 @@ describe('r20: the confirm is bound to the address the office was shown', () => 
     expect(visitServiceAddressLine(row)).toBe('1234 Sample Newbuild Trl, Parrish, FL, 34219');
   });
 });
+
+describe('a moved hold stays out of customer self-service (status confirmed, customer_confirmed false)', () => {
+  const { isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
+  const svc = (extra = {}) => ({ source_action: 'voice_agent', status: 'pending', customer_confirmed: false, ...extra });
+
+  test('pending and moved-to-confirmed voice rows are unreviewed; confirmed-by-office, other statuses and other sources are not', () => {
+    expect(isUnreviewedDispatchOwned(svc())).toBe(true);
+    expect(isUnreviewedDispatchOwned(svc({ status: 'confirmed' }))).toBe(true);           // SmartRebooker's move
+    expect(isUnreviewedDispatchOwned(svc({ status: 'confirmed', customer_confirmed: true }))).toBe(false);
+    expect(isUnreviewedDispatchOwned(svc({ status: 'completed' }))).toBe(false);
+    // The legacy outbound-review and follow-up rows keep their exact prior (pending-only) behavior.
+    expect(isUnreviewedDispatchOwned(svc({ source_action: 'ai_call_outbound_review', status: 'confirmed' }))).toBe(false);
+    expect(isUnreviewedDispatchOwned(svc({ source_action: 'ai_call_outbound_review' }))).toBe(true);
+    expect(isUnreviewedDispatchOwned(svc({ source_action: 'ai_call_pipeline', status: 'pending' }))).toBe(false);
+  });
+
+  test('every customer-facing reader uses it: lists (SQL twin), confirm, reschedule, the bearer-token page and eligibility', () => {
+    const read = (f) => fs.readFileSync(require.resolve(f), 'utf8');
+    const sched = read('../routes/schedule.js');
+    expect(sched.split('NOT ${UNREVIEWED_VOICE_MOVED_SQL}').length - 1).toBe(4);
+    expect(sched.split('isUnreviewedDispatchOwned(service)').length - 1).toBe(2);
+    expect(read('../routes/appointment-public.js')).toContain('return isUnreviewedDispatchOwned(svc);');
+    expect(read('../services/reschedule-eligibility.js')).toContain('isUnreviewedDispatchOwned(svc)');
+    expect(UNREVIEWED_VOICE_MOVED_SQL).toContain("source_action = 'voice_agent'");
+  });
+});
