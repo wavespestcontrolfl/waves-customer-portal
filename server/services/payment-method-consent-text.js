@@ -131,7 +131,9 @@ const PREPAY_CONSENT_MARKER = '12-month annual prepay invoice';
 // that text under its own version (not a 'v<N>' card-copy version, so it can
 // never read as Auto Pay enrollment consent; hold rows are also excluded by
 // source). Mirror of EstimateViewPage.jsx CardHoldModal — keep in lockstep.
-const CARD_HOLD_CONSENT_VERSION = 'card_hold_v1_2026-10-01';
+// ≤ 20 chars: payment_method_consents.consent_text_version is varchar(20)
+// (migration 20260424000014) — pre-push Codex on #5434.
+const CARD_HOLD_CONSENT_VERSION = 'hold_v1_2026-10-01';
 const SURCHARGE_RATE_PHRASE = (CARD_CONSENT_TEXT.match(/up to \d+(?:\.\d+)?%/) || [])[0];
 const CARD_SURCHARGE_DISCLOSURE = SURCHARGE_RATE_PHRASE
   ? `A credit card surcharge of ${SURCHARGE_RATE_PHRASE} may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.`
