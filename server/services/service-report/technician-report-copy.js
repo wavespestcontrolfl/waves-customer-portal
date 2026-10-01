@@ -171,7 +171,15 @@ const REPORT_ACCESS_CODE_RES = [
 // 2468ft" is still a credential, even though "400 ft" beside a gate can be
 // legitimate work detail. Inspect the original text before measurement
 // suppression and count digits in compact or grouped numeric tokens.
-const REPORT_NUMERIC_CREDENTIAL_GROUP = String.raw`[A-Za-z#*]*\d[A-Za-z0-9#*]*`;
+// Bound the number of digit-bearing groups in a candidate below. Compact
+// groups retain both affixes and every digit: a long credential must not
+// become safe merely because its token exceeds a matching-size limit.
+// Assert the first digit once, then consume the compact group in one pass.
+// Splitting the same run into "letters before a digit" and "anything after"
+// gives the regex engine thousands of equivalent split points on long mixed
+// or all-digit input, even though only the complete token can satisfy the
+// surrounding boundary.
+const REPORT_NUMERIC_CREDENTIAL_GROUP = String.raw`(?=[A-Za-z#*]*\d)[A-Za-z0-9#*]+`;
 // Do not let the optional leading affix consume the device noun itself in
 // suffix forms such as "rear gate 2468-AB"; the contextual detector still
 // needs that noun after normalization.
@@ -187,7 +195,7 @@ const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AND|THEN|OR|BUT|
 // lowercase words separated by spaces are ordinary surrounding prose.
 const REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP = String.raw`(?=[A-Za-z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
 const REPORT_CREDENTIAL_TRAILING_AFFIX_RE = new RegExp(String.raw`^${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}$`);
-const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:(?:\s+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}|\s*[–—-]\s*${REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP})){0,3}`;
+const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP}){0,7}(?:(?:\s+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}|\s*[–—-]\s*${REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP})){0,3}`;
 const REPORT_MEASUREMENT_UNIT_TEXT = String.raw`(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)`;
 const REPORT_MEASURED_MATERIAL_TEXT = String.raw`(?:treatment|product|lubricant|oil|bait|granules?|dust|spray|seal(?:ant)?)`;
 const REPORT_WORK_ACTION_TEXT = String.raw`(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|replac(?:e|es|ed|ing)|remov(?:e|es|ed|ing)?|install(?:s|ed|ing)?|mix(?:es|ed|ing)?|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?|spread(?:s|ing)?|broadcast(?:s|ed|ing)?|distribut(?:e|es|ed|ing))`;
@@ -645,29 +653,52 @@ const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
 ];
 const REPORT_POSITIONAL_USE_CODE_RE = /\b(?:use|using)\s+\d{3,8}\b\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i;
+const REPORT_LONG_COMPACT_TOKEN_RE = /[A-Za-z0-9#*]{65,}/g;
+
+function boundedCredentialScanText(text) {
+  return text.replace(REPORT_LONG_COMPACT_TOKEN_RE, (token) => {
+    const digits = token.replace(/\D/g, '');
+    if (!digits) return 'ordinary';
+    if (digits.length < 3) return `A${digits}B`;
+    // Relationship scanners intentionally accept three-to-eight digit access
+    // values. Keep a long compact candidate in that conservative class rather
+    // than making an access instruction safe because its token is enormous.
+    return digits.slice(0, 8);
+  });
+}
 
 function containsReportAccessCode(text) {
   const raw = String(text || '');
-  if (containsExplicitNumericCredential(raw)) return true;
-  if (containsPositionalCredentialInterface(raw)) return true;
-  if (containsPastAccessCredential(raw)) return true;
-  if (containsAccessPredicateCredential(raw)) return true;
+  // Direct callers also screen legacy recommendations, captions, and raw
+  // visual-moment notes, so they do not inherit the drafted report's
+  // 1,600-character parser cap. No single customer-copy field approaches
+  // this ceiling (captions are capped at 1,500; custom tips at 240). Fail
+  // closed before any credential regex on an implausibly large value.
+  if (raw.length > MAX_CUSTOMER_COPY_SCREEN_CHARS) return true;
+  // Regexes below deliberately retain complete compact credentials of normal
+  // size. Collapse only pathological unbroken runs in one linear pass so a
+  // contextual matcher never searches thousands of equivalent token endings.
+  const scanText = boundedCredentialScanText(raw);
+  if (containsExplicitNumericCredential(scanText)) return true;
+  if (containsPositionalCredentialInterface(scanText)) return true;
+  if (containsPastAccessCredential(scanText)) return true;
+  if (containsAccessPredicateCredential(scanText)) return true;
   // Direct token-to-device relationships outrank fertilizer context. Check the
   // original copy before an application qualifier can mask an N-P-K-shaped
   // credential ("Applied override 24-0-11 to open the rear gate").
-  const originalRelationship = accessCodeDetectionText(raw);
-  if (containsRawAccessDeviceCredential(raw)) return true;
-  if (containsSubordinateAccessCredential(raw)) return true;
-  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(raw) || re.test(originalRelationship))) return true;
-  if (REPORT_PAST_ACCESS_CONTEXT_RE.test(raw)) {
-    const normalizedPastInput = maskPastAccessWorkDetails(maskFertilizerAnalyses(maskStructuredDates(raw)))
+  const originalRelationship = accessCodeDetectionText(scanText);
+  if (containsRawAccessDeviceCredential(scanText)) return true;
+  if (containsSubordinateAccessCredential(scanText)) return true;
+  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(scanText) || re.test(originalRelationship))) return true;
+  if (REPORT_PAST_ACCESS_CONTEXT_RE.test(scanText)) {
+    const normalizedPastInput = maskPastAccessWorkDetails(maskFertilizerAnalyses(maskStructuredDates(scanText)))
       .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
     if (REPORT_AFFIXED_OR_GROUPED_NUMBER_RE.test(normalizedPastInput)) {
       const normalizedPastRelationships = accessCodeDetectionText(normalizedPastInput);
       if (containsPastAccessCredential(normalizedPastRelationships)) return true;
     }
   }
-  const fertilizerScreened = maskPastAccessWorkDetails(maskFertilizerAnalyses(raw));
+  const fertilizerScreened = maskPastAccessWorkDetails(maskFertilizerAnalyses(scanText));
   const value = fertilizerScreened.replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
   const normalized = accessCodeDetectionText(value);
   if (REPORT_POSITIONAL_USE_CODE_RE.test(normalized)) return true;
@@ -682,6 +713,7 @@ const { EXTRA_FORBIDDEN } = require('./visit-summary-narrative');
 // anything far beyond that is not the drafted report (a paste, a runaway
 // edit) and must not become an unbounded customer summary.
 const MAX_REPORT_CHARS = 1600;
+const MAX_CUSTOMER_COPY_SCREEN_CHARS = 16000;
 
 const WHAT_WE_DID_HEADER = /^\s*WHAT WE DID:?\s*$/;
 const WHAT_WE_FOUND_HEADER = /^\s*WHAT WE FOUND:?\s*$/;
@@ -830,6 +862,7 @@ function summaryCopySignature(service = {}) {
 // Returns the matched violations; an empty array means the text may render.
 function customerCopyViolations(text) {
   const raw = String(text || '');
+  if (raw.length > MAX_CUSTOMER_COPY_SCREEN_CHARS) return ['too_long'];
   // The approved conditional re-entry idiom ("safe once dry" WITH an
   // affirmative technician timing confirmation) is normalized away before
   // the vocabulary screens run — the one sanctioned "safe" never rejects
@@ -850,4 +883,5 @@ module.exports = {
   customerCopyViolations,
   summaryCopySignature,
   MAX_REPORT_CHARS,
+  MAX_CUSTOMER_COPY_SCREEN_CHARS,
 };

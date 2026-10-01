@@ -17,10 +17,14 @@
  *  - template-only output is byte-identical to before (no bodySource key).
  */
 
+const { spawnSync } = require('node:child_process');
+
 const {
   technicianReportCustomerCopy,
   summaryCopySignature,
   MAX_REPORT_CHARS,
+  MAX_CUSTOMER_COPY_SCREEN_CHARS,
+  containsReportAccessCode,
   customerCopyViolations,
 } = require('../services/service-report/technician-report-copy');
 const {
@@ -106,6 +110,8 @@ const CREDENTIAL_CASES = {
     'Broadcast granular before unlocking rear gate with 24-0-11',
   ],
   shared: [
+    'Use ABCDEFGHIJKL2468MNOPQRSTUVWX to open the gate',
+    `Gate code ${'1234567890'.repeat(6)}ft`,
     'Gate code 1234ft 5678ft 9012ft',
     'Gate code 1234ft 5678ft 9ft',
     'Gate PIN AB1234ml 5678ml 9012ml',
@@ -456,6 +462,47 @@ describe('custom action credential screening', () => {
     ...LEGITIMATE_CASES.sharedWork,
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
+  });
+
+  test('bounds adversarial mixed credential groups before shared copy screening', () => {
+    const adversarial = `Use ${'AB-'.repeat(2000)}2468-${'XY-'.repeat(2000)}ordinary at the gate`;
+    const started = performance.now();
+    expect(customerCopyViolations(adversarial)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  test.each([
+    ['a long compact affixed credential', 'affixed', true],
+    ['a long compact numeric credential', 'digits', true],
+    ['long compact ordinary copy', 'ordinary', false],
+  ])('bounds %s in an isolated scanner process', (_label, kind, expected) => {
+    const probe = [
+      "const { containsReportAccessCode } = require(process.argv[1]);",
+      "const kind = process.argv[2];",
+      "const samples = {",
+      "  affixed: `Use ${'A'.repeat(7900)}2468${'B'.repeat(7900)} to open the gate`,",
+      "  digits: `Use ${'1'.repeat(15970)} to open the gate`,",
+      "  ordinary: `Applied ${'A'.repeat(15000)} around the exterior`,",
+      "};",
+      "process.stdout.write(String(containsReportAccessCode(samples[kind])));",
+    ].join('\n');
+    const result = spawnSync(
+      process.execPath,
+      ['-e', probe, require.resolve('../services/service-report/technician-report-copy'), kind],
+      { encoding: 'utf8', env: process.env, timeout: 1500 },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe(String(expected));
+  });
+
+  test('fails closed before regex screening on implausibly large direct-caller values', () => {
+    const overLimit = 'ordinary service detail '.repeat(Math.ceil(MAX_CUSTOMER_COPY_SCREEN_CHARS / 24) + 1);
+    expect(overLimit.length).toBeGreaterThan(MAX_CUSTOMER_COPY_SCREEN_CHARS);
+    expect(customerCopyViolations(overLimit)).toEqual(['too_long']);
+    expect(containsReportAccessCode(overLimit)).toBe(true);
   });
 });
 
