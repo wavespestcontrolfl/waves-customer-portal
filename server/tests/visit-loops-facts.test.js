@@ -421,46 +421,36 @@ describe('weOwe and customerWaiting', () => {
     const out = await run(ctxConn({}));
     expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves', limit: 50 }));
     // no resolved deadline: the spoken words, dated to the call
-    expect(out.weOwe).toEqual([{ id: 'c-1', rev: expect.stringMatching(/^[0-9a-f]{12}$/), kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow (said Wed, Sep 30)', source: 'call' }]);
+    expect(out.weOwe).toEqual([{ id: 'c-1', rev: expect.stringMatching(/^[0-9a-f]{12}$/), kind: 'send_estimate', description: 'Send the estimate', since: '2026-09-30', source: 'call' }]);
     expect(out.customerWaiting).toEqual([]);
     expect(out.weOwe).toHaveLength(1);
   });
 
-  test('sms gate on: basis request is the customer waiting, basis promise is ours; due text from sms_context, else ET stamp', async () => {
+  test('sms gate on: basis request is the customer waiting, basis promise is ours; each carries the day it was asked', async () => {
     smsCommitmentsEnabled.mockReturnValue(true);
     listSmsCommitments.mockResolvedValue([
       smsRow({ id: 's-1' }),
       smsRow({ id: 's-2', kind: 'send_report', description: 'Report requested', due_at: null, sms_started_at: '2026-09-30T10:00:00Z' }),
     ]);
     const out = await run(ctxConn({ 's-1': { basis: 'promise', due_text: 'later today' }, 's-2': { basis: 'request' } }));
-    // a resolved deadline wins over the spoken "later today"
-    expect(out.weOwe).toEqual([{ id: 's-1', rev: expect.any(String), kind: 'callback', description: 'Call back about ants', dueText: 'Thu, Oct 1, 5:00 PM', source: 'sms' }]);
+    expect(out.weOwe).toEqual([{ id: 's-1', rev: expect.any(String), kind: 'callback', description: 'Call back about ants', since: '2026-10-01', source: 'sms' }]);
     expect(out.customerWaiting).toEqual([{ id: 's-2', rev: expect.any(String), kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
-    // no spoken due text: the due instant, formatted in ET
-    const noText = await run(ctxConn({ 's-1': { basis: 'promise' } }));
-    expect(noText.weOwe[0].dueText).toBe('Thu, Oct 1, 5:00 PM');
   });
 
-  test('a passed deadline reads as overdue, never as a future time', async () => {
-    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'by Monday', due_at: '2026-09-28T21:00:00Z' })]);
-    const out = await run(ctxConn({}));
-    expect(out.weOwe[0].dueText).toBe('overdue since Mon, Sep 28, 5:00 PM');
+  test('no deadline is ever restated (stated, default reminder, floor, snooze or passed)', async () => {
+    listOpenCommitments.mockResolvedValue([callRow({ due_at: '2026-09-28T21:00:00Z', effective_due_at: '2026-10-02T21:00:00Z', due_type: 'floor', due_basis: 'default_kind' })]);
+    const [item] = (await run(ctxConn({}))).weOwe;
+    expect(item).not.toHaveProperty('dueText');
+    expect(JSON.stringify(item)).not.toMatch(/2026-09-28|2026-10-02/);
+    expect(item.since).toBe('2026-09-30'); // the day it was asked anchors any relative wording in the description
   });
 
-  test('a staff snooze (effective_due_at) never replaces the stated deadline', async () => {
-    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'by Monday', due_at: '2026-09-28T21:00:00Z', effective_due_at: '2026-10-02T21:00:00Z' })]);
-    expect((await run(ctxConn({}))).weOwe[0].dueText).toBe('overdue since Mon, Sep 28, 5:00 PM');
-    // no stated deadline: an inferred/snoozed effective one is not shown; the spoken words are
-    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'soon', due_at: null, effective_due_at: '2026-10-02T21:00:00Z' })]);
-    expect((await run(ctxConn({}))).weOwe[0].dueText).toBe('soon (said Wed, Sep 30)');
-  });
-
-  test('the revision changes when staff edit the wording or the deadline', async () => {
+  test('the revision changes when staff edit the wording or kind, and only then', async () => {
     const { commitmentRevision } = require('../services/visit-loops-facts');
     const base = { kind: 'callback', description: 'Call back', due_at: '2026-10-01T21:00:00Z' };
-    expect(commitmentRevision(base)).toBe(commitmentRevision({ ...base, due_at: new Date('2026-10-01T21:00:00Z') }));
+    expect(commitmentRevision(base)).toBe(commitmentRevision({ ...base, due_at: '2026-10-02T21:00:00Z' }));
     expect(commitmentRevision({ ...base, description: 'Call back after 3' })).not.toBe(commitmentRevision(base));
-    expect(commitmentRevision({ ...base, due_at: '2026-10-02T21:00:00Z' })).not.toBe(commitmentRevision(base));
+    expect(commitmentRevision({ ...base, kind: 'send_estimate' })).not.toBe(commitmentRevision(base));
   });
 
   test('email rows need their own gate; sms off + email on keeps only email rows', async () => {

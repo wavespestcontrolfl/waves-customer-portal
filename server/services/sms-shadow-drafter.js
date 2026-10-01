@@ -4533,9 +4533,10 @@ function renderVisitLoopsSection(visitLoops) {
     visitLoopLateLine(v.lateAlert),
     visitLoopPastWindowLine(v.pastWindow, v.techPosition),
     visitLoopMissedLine(v.missedVisit),
+    // the day it was asked, never a deadline (visit-loops-facts: no due time is restated)
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
-      const due = visitLoopText(i.dueText, 60);
-      return due ? ` (due ${due})` : '';
+      const since = visitLoopText(formatEtDate(i.since), 40);
+      return since ? ` (since ${since})` : '';
     }),
     ...visitLoopItemLines(v.customerWaiting, 'THEY ARE WAITING ON US FOR', (i) => {
       const since = visitLoopText(formatEtDate(i.since), 40);

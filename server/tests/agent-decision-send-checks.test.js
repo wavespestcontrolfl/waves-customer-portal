@@ -24,6 +24,9 @@ jest.mock('../services/sms-eta-freshness', () => ({
   isEtaInfrastructureFailure: (reason) => jest.requireActual('../services/sms-eta-freshness').isEtaInfrastructureFailure(reason),
 }));
 jest.mock('../models/db', () => jest.fn());
+// the open-loop recheck asks the canonical commitment readers (PR #5499)
+jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn(async () => []) }));
+jest.mock('../services/sms-operational-actions', () => ({ listSmsCommitments: jest.fn(async () => []) }));
 const db = require('../models/db');
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
@@ -313,7 +316,7 @@ describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provide
     expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks }');
     expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
     // PR #5499: the open-loop recheck is composed at the same boundary
-    expect(src).toContain('openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
+    expect(src).toContain('openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),');
     // ...and its early queued-send recheck never retires a reply on an unreadable read
     expect(src).toContain("if (rawOpenLoopsReason === 'open_loops_recheck_failed') {");
     expect(src).toContain('} else if (rawOpenLoopsReason != null) {\n                openLoopsReason = rawOpenLoopsReason;\n                openLoopsStale = true;');
@@ -436,70 +439,83 @@ describe('provider-boundary ETA predicates use the handoff connection (dbi)', ()
 // promise was fulfilled or dismissed elsewhere; a read error fails closed.
 describe('open-loop commitments recheck', () => {
   const { openLoopsBlockReason, scheduledOpenLoopsBlockReason } = require('../services/agent-decision-send-checks');
-  const withIds = (ids) => decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_commitment_ids: ids }) });
-  const commitmentsDb = (rows) => (table) => {
-    const q = { whereIn: () => q, whereRaw: (sql) => { q.raws = [...(q.raws || []), sql]; return q; }, select: async () => rows, where: () => q, first: async () => ({ input_snapshot: JSON.stringify({ visit_loop_commitment_ids: ['cc-1'] }) }) };
-    return table === 'call_commitments as cc' || table === 'agent_decisions' ? q : null;
+  const { listOpenCommitments } = require('../services/call-commitments');
+  const { listSmsCommitments } = require('../services/sms-operational-actions');
+  const { commitmentRevision } = require('../services/visit-loops-facts');
+  const withIds = (ids, over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_commitment_ids: ids }), ...over });
+  // the customer's current open lists, from the same canonical readers the facts used
+  const openFor = ({ calls = [], texts = [] } = {}) => {
+    listOpenCommitments.mockReset().mockResolvedValue(calls);
+    listSmsCommitments.mockReset().mockResolvedValue(texts);
+  };
+  const decisionRowDb = (row = { input_snapshot: JSON.stringify({ visit_loop_commitment_ids: ['cc-1'] }), customer_id: 'c1' }) => (table) => {
+    const q = { where: () => q, first: async () => row };
+    return table === 'agent_decisions' ? q : null;
   };
 
   test('no ids on the snapshot: no read, no block', async () => {
-    db.mockReset();
+    openFor();
     await expect(openLoopsBlockReason({ decision: decision() })).resolves.toBeNull();
-    expect(db).not.toHaveBeenCalled();
+    expect(listOpenCommitments).not.toHaveBeenCalled();
   });
 
-  test('every id still open passes; a closed or missing one blocks', async () => {
-    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']), dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }, { id: 'cc-2', status: 'open' }]) })).resolves.toBeNull();
-    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']), dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }, { id: 'cc-2', status: 'fulfilled' }]) })).resolves.toBe('commitment_closed');
-    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh: commitmentsDb([]) })).resolves.toBe('commitment_closed');
+  test('every ref still in the customer\'s open lists passes; one missing from them blocks', async () => {
+    openFor({ calls: [{ id: 'cc-1' }], texts: [{ id: 'cc-2' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']) })).resolves.toBeNull();
+    // the readers are asked for THIS customer, Waves-owned call promises
+    expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves' }));
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1' }));
+    // closed, dismissed, superseded by a reprocess, or relinked to another customer: absent from the lists
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']) })).resolves.toBe('commitment_closed');
   });
 
-  test('the recheck applies the canonical readers\' stale-AI-row exclusion (a superseded row reads as closed)', async () => {
-    let seen = null;
-    const dbh = (table) => {
-      const q = { whereIn: () => q, whereRaw: (sql) => { seen = sql; return q; }, select: async () => [] };
-      return table === 'call_commitments as cc' ? q : null;
-    };
-    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh })).resolves.toBe('commitment_closed');
-    expect(seen).toMatch(/^NOT COALESCE\(\(cc\.human_state IS NULL AND cc\.source = 'ai'.*last_seen_generation/);
+  test('no customer on the decision: refused (ownership cannot be shown)', async () => {
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1'], { customer_id: null }) })).resolves.toBe('commitment_closed');
   });
 
-  test('a staff edit to a still-open commitment (wording or deadline) refuses; an unedited one passes', async () => {
-    const { commitmentRevision } = require('../services/visit-loops-facts');
-    const row = { id: 'cc-1', status: 'open', kind: 'callback', description: 'Call back about the quote', due_at: '2026-10-01T21:00:00Z' };
+  test('a staff edit to a still-open commitment refuses; an unedited one passes', async () => {
+    const row = { id: 'cc-1', kind: 'callback', description: 'Call back about the quote' };
     const ref = `cc-1:${commitmentRevision(row)}`;
-    await expect(openLoopsBlockReason({ decision: withIds([ref]), dbh: commitmentsDb([row]) })).resolves.toBeNull();
-    await expect(openLoopsBlockReason({ decision: withIds([ref]), dbh: commitmentsDb([{ ...row, description: 'Call back after 3' }]) })).resolves.toBe('commitment_closed');
-    await expect(openLoopsBlockReason({ decision: withIds([ref]), dbh: commitmentsDb([{ ...row, due_at: '2026-10-03T21:00:00Z' }]) })).resolves.toBe('commitment_closed');
+    openFor({ calls: [row] });
+    await expect(openLoopsBlockReason({ decision: withIds([ref]) })).resolves.toBeNull();
+    openFor({ calls: [{ ...row, description: 'Call back after 3' }] });
+    await expect(openLoopsBlockReason({ decision: withIds([ref]) })).resolves.toBe('commitment_closed');
   });
 
   test('a read error fails closed', async () => {
-    const broken = () => { throw new Error('db down'); };
-    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh: broken })).resolves.toBe('open_loops_recheck_failed');
-    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: broken })).resolves.toBe('open_loops_recheck_failed');
+    listOpenCommitments.mockReset().mockRejectedValue(new Error('db down'));
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']) })).resolves.toBe('open_loops_recheck_failed');
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: () => { throw new Error('db down'); } })).resolves.toBe('open_loops_recheck_failed');
   });
 
   test('the immediate send path refuses with the open-loop reason', async () => {
-    db.mockReset().mockImplementation(commitmentsDb([{ id: 'cc-1', status: 'dismissed' }]));
+    openFor();
     await expect(agentDecisionSendBlockReason({ decision: withIds(['cc-1']), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' }))
       .resolves.toBe('open-loop facts stale (commitment_closed)');
   });
 
-  test('the scheduler form reads the decision row, then the commitments', async () => {
-    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }]) })).resolves.toBeNull();
-    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: commitmentsDb([{ id: 'cc-1', status: 'fulfilled' }]) })).resolves.toBe('commitment_closed');
+  test('the scheduler form reads the decision row (with its customer), then the open lists', async () => {
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: decisionRowDb() })).resolves.toBeNull();
+    openFor();
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: decisionRowDb() })).resolves.toBe('commitment_closed');
   });
 
   test('provider-boundary form: no ids → no check; closed → refused; unreadable → refused retryably; repeatable', async () => {
     const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
     expect(openLoopsProviderPreSendCheck({ commitmentIds: [] })).toBeUndefined();
     expect(openLoopsProviderPreSendCheck({ commitmentIds: null })).toBeUndefined();
-    const check = openLoopsProviderPreSendCheck({ commitmentIds: ['cc-1'] });
+    const check = openLoopsProviderPreSendCheck({ commitmentIds: ['cc-1'], customerId: 'c1' });
     expect(check.afterMarker).toBe(check);
-    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'open' }]) })).resolves.toEqual({ ok: true });
-    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'fulfilled' }]) }))
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(check({ dbi: () => null })).resolves.toEqual({ ok: true });
+    openFor();
+    await expect(check({ dbi: () => null }))
       .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)' });
-    await expect(check({ dbi: () => { throw new Error('down'); } }))
+    listOpenCommitments.mockReset().mockRejectedValue(new Error('down'));
+    await expect(check({ dbi: () => null }))
       .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true });
   });
 
@@ -556,7 +572,7 @@ describe('open-loop commitments recheck', () => {
 
     test('the provider-boundary form recounts from the in-memory position', async () => {
       const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
-      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, status: { position }, factsGeneratedAt: new Date(), getBody: () => 'Two stops before yours now.' });
+      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, status: { position }, factsGeneratedAt: new Date() });
       await expect(check({ dbi: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toEqual({ ok: true });
       await expect(check({ dbi: routeDb({ visit: visit(), ahead: 1 }) }))
         .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (stop_count_stale)' });
@@ -565,10 +581,12 @@ describe('open-loop commitments recheck', () => {
 
   test('decision-row boundary form (composer / scheduled replay): reads through the handoff connection', async () => {
     const { openLoopsDecisionProviderPreSendCheck } = require('../services/agent-decision-send-checks');
-    const check = openLoopsDecisionProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'ok' });
+    const check = openLoopsDecisionProviderPreSendCheck({ decisionId: 'd1' });
     expect(check.afterMarker).toBe(check);
-    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'open' }]) })).resolves.toEqual({ ok: true });
-    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'fulfilled' }]) }))
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(check({ dbi: decisionRowDb() })).resolves.toEqual({ ok: true });
+    openFor();
+    await expect(check({ dbi: decisionRowDb() }))
       .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)' });
     await expect(check({ dbi: () => { throw new Error('down'); } }))
       .resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });

@@ -128,20 +128,6 @@ function windowLabel(row, deriveWindow) {
   return tw ? tw.charAt(0).toUpperCase() + tw.slice(1) : null;
 }
 
-const ET_DAY = { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' };
-// The customer's or caller's own due words, anchored to the day they were said.
-function spokenDue(r) {
-  const said = clip(r.sms_context?.due_text || r.due_text, 80);
-  if (!said) return null;
-  const at = rowSourceAt(r);
-  return at ? `${said} (said ${at.toLocaleDateString('en-US', ET_DAY)})` : null;
-}
-const ET_STAMP = { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
-const formatEtStamp = (value) => {
-  const d = toDate(value);
-  return d ? d.toLocaleString('en-US', ET_STAMP) : null;
-};
-
 // ── today's visits ──────────────────────────────────────────────────────────
 // ALL of the customer's live visits today (ET), earliest first — not the
 // aggregator's upcoming list, which caps at three rows (a four-service day exists).
@@ -393,11 +379,10 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
 }
 
 // ── open promises / asks ────────────────────────────────────────────────────
-// A short fingerprint of the commitment fields a draft can restate (kind, wording,
-// stated deadline): a staff edit that keeps the row open changes it.
+// A short fingerprint of the commitment fields a draft can restate (kind, wording):
+// a staff edit that keeps the row open changes it.
 function commitmentRevision(r) {
-  const due = toDate(r && r.due_at);
-  const basis = [r && r.kind, r && r.description, due ? due.toISOString() : ''].map((v) => (v == null ? '' : String(v))).join('|');
+  const basis = [r && r.kind, r && r.description].map((v) => (v == null ? '' : String(v))).join('|');
   return require('crypto').createHash('sha1').update(basis).digest('hex').slice(0, 12);
 }
 // Redact before clipping: a credential straddling the cap would lose the words
@@ -452,11 +437,13 @@ async function loadCommitments({ conn, customerId, now }) {
   const isWaiting = (r) => r.__source !== 'call' && r.sms_context?.basis === 'request';
   const isWeOwe = (r) => (r.__source === 'call' ? r.party === 'waves' : r.party === 'waves' && r.sms_context?.basis !== 'request');
 
+  // No deadline is restated: due_at can be an internal default (a 48h reminder for
+  // an untimed "I'll call you back"), an earliest-action floor ("after 3 PM") or
+  // pass between draft and send, and effective_due_at can be a staff snooze. Each
+  // line carries the day it was asked instead, which also anchors any relative
+  // timing the description itself holds ("later today").
   const weOwe = unique.filter(isWeOwe).sort(byRecent).slice(0, LIST_MAX).map((r) => {
-    // The promise's own stated deadline (due_at). effective_due_at can be a staff
-    // snooze or an inferred operational deadline — never a customer-facing time.
-    const dueAt = toDate(r.due_at);
-    const overdue = Boolean(dueAt) && dueAt.getTime() <= now.getTime();
+    const at = rowSourceAt(r);
     return {
       // call_commitments.id + a revision of what is rendered — the send boundary
       // re-checks it is still open and unedited.
@@ -464,13 +451,7 @@ async function loadCommitments({ conn, customerId, now }) {
       rev: commitmentRevision(r),
       kind: r.kind || null,
       description: safeDescription(r.description),
-      // A passed deadline is said as overdue, never restated as a future time; a
-      // resolved deadline is the ET instant (spoken "tomorrow" from yesterday's call
-      // would read as a day later today); only without one is the spoken text used,
-      // dated to when it was said.
-      dueText: overdue
-        ? `overdue since ${formatEtStamp(dueAt)}`
-        : dueAt ? formatEtStamp(dueAt) : spokenDue(r),
+      since: at ? etDateString(at) : null,
       source: r.__source,
     };
   });

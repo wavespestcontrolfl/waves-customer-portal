@@ -201,18 +201,17 @@ function markRepeatable(check) {
 // Open-loop commitments at the provider boundary, for a caller holding the ids in
 // memory (the auto-send executor's claim). Closed → refused; an unreadable recheck
 // → refused retryably (nothing is known to be stale). No ids → undefined (no check).
-function openLoopsProviderPreSendCheck({ commitmentIds, status = null, factsGeneratedAt = null, getBody = null }) {
+function openLoopsProviderPreSendCheck({ commitmentIds, customerId = null, status = null, factsGeneratedAt = null }) {
   const ids = Array.isArray(commitmentIds) ? commitmentIds.filter((id) => typeof id === 'string' && id) : [];
   if (!ids.length && !status) return undefined;
   const generatedIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime()) ? factsGeneratedAt.toISOString() : factsGeneratedAt;
   const check = async ({ dbi } = {}) => {
-    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     const snapshot = {
       visit_loop_commitment_ids: ids,
       ...(status ? { visit_loop_status: status } : {}),
       ...(generatedIso ? { facts_generated_at: generatedIso } : {}),
     };
-    const reason = await openLoopsBlockReason({ decision: { input_snapshot: snapshot }, outgoingBody, dbh: dbi });
+    const reason = await openLoopsBlockReason({ decision: { input_snapshot: snapshot }, customerId, dbh: dbi });
     if (reason == null) return { ok: true };
     const retryable = reason === 'open_loops_recheck_failed';
     return {
@@ -230,14 +229,13 @@ function openLoopsProviderPreSendCheck({ commitmentIds, status = null, factsGene
 // LIVE ETA boundary form, a row that reads back absent carries nothing to recheck
 // (the earlier send-time check already failed closed on it); a read error refuses
 // retryably.
-function openLoopsDecisionProviderPreSendCheck({ decisionId, getBody }) {
+function openLoopsDecisionProviderPreSendCheck({ decisionId }) {
   const check = async ({ dbi } = {}) => {
-    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     let reason;
     try {
       const conn = dbi || require('../models/db');
-      const row = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot');
-      reason = await openLoopsBlockReason({ decision: row || {}, outgoingBody, dbh: conn });
+      const row = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'customer_id');
+      reason = await openLoopsBlockReason({ decision: row || {}, dbh: conn });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] open-loop boundary recheck failed for decision ${decisionId}: ${err.message}; blocking send`);
       reason = 'open_loops_recheck_failed';
@@ -319,19 +317,24 @@ function visitStatusExpired(snapshot, nowMs) {
   const at = Date.parse(snapshot?.facts_generated_at || '');
   return !Number.isFinite(at) || nowMs - at > ETA_FRESHNESS_WINDOW_MS;
 }
-async function commitmentsChanged(conn, refs) {
-  const { staleAiRowSql } = require('./call-commitments');
+// Each ref must still be in THIS customer's open list from the same canonical
+// readers the facts came from: that one question covers closed, dismissed,
+// superseded-by-reprocess (staleAiRowSql) and relinked-to-another-customer rows;
+// the revision covers a staff edit to a row that stayed open.
+async function commitmentsChanged(conn, refs, customerId) {
+  if (!customerId) return true;
+  const { listOpenCommitments } = require('./call-commitments');
+  const { listSmsCommitments } = require('./sms-operational-actions');
   const { commitmentRevision } = require('./visit-loops-facts');
-  const rows = await conn('call_commitments as cc').whereIn('cc.id', refs.map((r) => r.id))
-    // the canonical readers' liveness: an AI row superseded by a later processing
-    // generation stays status 'open' but is no longer live
-    .whereRaw(`NOT COALESCE(${staleAiRowSql('cc')}, false)`)
-    .select('cc.id', 'cc.status', 'cc.kind', 'cc.description', 'cc.due_at');
-  const live = new Map((rows || []).filter((r) => r.status === 'open').map((r) => [String(r.id), r]));
+  const [calls, texts] = await Promise.all([
+    listOpenCommitments(conn, { customerId, party: 'waves', limit: 200 }),
+    listSmsCommitments(conn, { customerId, limit: 201 }),
+  ]);
+  const live = new Map([...(calls || []), ...(texts || [])].map((r) => [String(r.id), r]));
   return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));
 }
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
-async function openLoopsBlockReason({ decision, dbh, now = new Date() }) {
+async function openLoopsBlockReason({ decision, customerId = decision?.customer_id, dbh, now = new Date() }) {
   const snapshot = objectOrNull(parseInputSnapshot(decision?.input_snapshot)) || {};
   const refs = [...new Set([].concat(snapshot.visit_loop_commitment_ids || []))]
     .filter((ref) => typeof ref === 'string' && ref)
@@ -342,7 +345,7 @@ async function openLoopsBlockReason({ decision, dbh, now = new Date() }) {
   if (!refs.length && !position) return null;
   try {
     const conn = dbh || require('../models/db');
-    if (refs.length && await commitmentsChanged(conn, refs)) return 'commitment_closed';
+    if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
     if (position) {
       const count = await require('./visit-loops-facts').currentStopsAhead({ conn, visitId: position.visitId, techId: position.techId });
       if (count == null || Number(count) !== Number(position.stopsAhead)) return 'stop_count_stale';
@@ -353,17 +356,17 @@ async function openLoopsBlockReason({ decision, dbh, now = new Date() }) {
     return 'open_loops_recheck_failed';
   }
 }
-async function openLoopsBlock({ decision, outgoingBody }) {
-  const reason = await openLoopsBlockReason({ decision, outgoingBody });
+async function openLoopsBlock({ decision }) {
+  const reason = await openLoopsBlockReason({ decision });
   return reason ? `open-loop facts stale (${reason})` : null;
 }
 // The scheduler's queued-send form: reads the decision row itself; fails closed.
-async function scheduledOpenLoopsBlockReason({ agentDecisionId, outgoingBody = null, dbh }) {
+async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
   try {
     const conn = dbh || require('../models/db');
-    const row = await conn('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot');
+    const row = await conn('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot', 'customer_id');
     if (!row) throw new Error('agent decision row not found');
-    return await openLoopsBlockReason({ decision: row, outgoingBody, dbh: conn });
+    return await openLoopsBlockReason({ decision: row, dbh: conn });
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed for decision ${agentDecisionId}: ${err.message}; blocking send`);
     return 'open_loops_recheck_failed';
@@ -379,7 +382,7 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || followupBlock({ decision, outgoingBody })
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
-    || (await openLoopsBlock({ decision, outgoingBody }))
+    || (await openLoopsBlock({ decision }))
     || (await etaBlock({ decision, outgoingBody }));
 }
 

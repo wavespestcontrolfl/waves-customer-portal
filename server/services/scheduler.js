@@ -4547,7 +4547,7 @@ function initScheduledJobs() {
             let openLoopsReason = null;
             if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !reserviceStale) {
               const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
-              const rawOpenLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, dbh: db });
+              const rawOpenLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, dbh: db });
               // An unreadable recheck says nothing about the message (same as the LIVE ETA
               // leg below): never retire on it — the provider-boundary open-loop check re-reads
               // and, if still unreadable, refuses retryably onto the bounded retry rail.
@@ -4887,7 +4887,7 @@ function initScheduledJobs() {
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
               // open-loop facts (PR #5499) at the same boundary
-              openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),
             );
           }
           return require('./messaging/deferred-replay-registry')

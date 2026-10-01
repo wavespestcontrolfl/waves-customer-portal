@@ -1102,7 +1102,7 @@ router.post('/sms', async (req, res, next) => {
           const checks = require('../services/agent-decision-send-checks');
           return checks.composeProviderPreSendChecks(
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
-            checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
           );
         })(),
       } : {}),

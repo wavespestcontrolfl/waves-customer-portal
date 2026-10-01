@@ -810,7 +810,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       const { etaSnapshotProviderPreSendCheck, openLoopsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
-        openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt, getBody: () => reply }),
+        openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
         laneFields.providerPreSendCheck,
       );
     })(),
