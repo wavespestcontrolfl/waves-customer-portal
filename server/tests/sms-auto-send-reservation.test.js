@@ -15,7 +15,8 @@ jest.mock('../services/sms-suggest-mode', () => ({
   reopenScheduledSuggestions: jest.fn(async () => 1),
   ignoreParkedSuggestions: jest.fn(async () => 1),
 }));
-jest.mock('../services/sms-shadow-drafter', () => ({ resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })) }));
+jest.mock('../services/sms-shadow-drafter', () => ({
+  reserviceBookedReferenceBlock: jest.fn(async () => null), resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })) }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 

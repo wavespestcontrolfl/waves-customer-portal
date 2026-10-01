@@ -440,9 +440,11 @@ describe('purpose, policy and template registry', () => {
 describe('completion route wiring', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
-  test('the watering text is attempted on all three exits of the completion text lane', () => {
+  test('the watering text is attempted on every exit of the completion text lane', () => {
     const calls = source.match(/await sendLawnWateringSmsOnce\(\);/g) || [];
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(4);
+    // dispute-hold hand-over failure, before its release-for-resume 503
+    expect(source).toMatch(/await sendLawnWateringSmsOnce\(\);\s*\n\s*await queueServiceReportEmailIfEligible\(\);\s*\n\s*await sendPayerInvoiceToApIfEligible\(\);\s*\n\s*const released = await CompletionAttempts\.releaseCompletionAttemptForResume\(completionAttempt, handOverErr\)/);
     // token-withheld early exit, before the release-for-resume 503
     expect(source).toMatch(/await sendLawnWateringSmsOnce\(\);\s*\n\s*\/\/ The payer AP channel[\s\S]*?const withheldErr/);
     // completion-text resume exit

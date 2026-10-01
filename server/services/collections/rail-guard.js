@@ -44,6 +44,30 @@ function warnShadowWithoutPolicy() {
 }
 
 /**
+ * Active collections hold on the customer (dispute, or the wrong-number / wrong-party fallback; owner ruling 2026-09-30:
+ * while it stands no pay link reaches them, and the Day 3-90 ladder and every
+ * other reminder rail wait, then start after the release). Consulted by every
+ * dunning/reminder rail through THESE two functions, independent of
+ * GATE_COLLECTIONS_POLICY: the gate's policy-flag denial only applies when it
+ * is on, and it reads as a durable stop. This is a transient wait - the owed
+ * touch stays pending and fires after the release. Fail closed: a lookup that
+ * cannot answer holds it too. Reads on `database` when given (savepoint on a
+ * transaction).
+ */
+async function disputeHoldHolds(customerId, database, holdExempt = null) {
+  // Messaging waits on ANY active collection_hold (a dispute or a wrong-number / wrong-party
+  // fallback, Codex #5424 r13). Only a deliberate operator send, or a send the customer asked for
+  // themselves (the voice "text me the link" tool), skips the DISPUTE part (owner ruling
+  // 2026-09-30) - never a fallback hold, exactly as ContactPolicy's ignoreDisputeHold; every
+  // automated rail still waits. The policy gate's own verdict is unaffected.
+  const collectionHold = require('./collection-hold');
+  if (!customerId) return false;
+  const { held } = await collectionHold.messagingHeldByCollectionHold(customerId, database || undefined,
+    { ignoreDisputeHold: collectionHold.holdExemptionApplies(holdExempt) });
+  return held;
+}
+
+/**
  * Verdict-returning consult (codex r8): aggregate rails that quote a SET of
  * invoices must restrict that set to the policy's eligible ids — a boolean
  * alone lets an excluded invoice (payer re-resolved, dunning-stopped) ride
@@ -63,8 +87,13 @@ async function collectionsChannelVerdict({
   spacingExcludeKey = null,
   spacingExcludeEventKey = null,
   logTag = 'collections',
+  holdExempt = null,
   database,
 }) {
+  if (await disputeHoldHolds(customerId, database, holdExempt)) {
+    logger.info(`[${logTag}] dispute hold: ${channel} for customer ${customerId} deferred until it is released`);
+    return { permitted: false, eligibleInvoiceIds: [], hold: true };
+  }
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
     warnShadowWithoutPolicy();
     return { permitted: true, eligibleInvoiceIds: null };
@@ -74,6 +103,9 @@ async function collectionsChannelVerdict({
     const ContactPolicy = require('./contact-policy');
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      // The precheck above skipped the dispute hold for a trusted exemption; the policy must too,
+      // or its own collection_hold denial would still block that send (dispute rows only).
+      ...(require('./collection-hold').holdExemptionApplies(holdExempt) ? { ignoreDisputeHold: true } : {}),
       ...(database ? { database } : {}),
       ...shadowSpacingArgs(source, spacingExcludeKey, spacingExcludeEventKey),
     });
@@ -118,11 +150,16 @@ async function collectionsChannelPermitted({
   spacingExcludeEventKey = null,
   logTag = 'collections',
   detail = false,
+  holdExempt = null,
   database,
 }) {
   const answer = (allowed, durable = false, balanceIncomplete = false) => (detail
     ? { allowed, durable, ...(balanceIncomplete ? { balanceIncomplete } : {}) }
     : allowed);
+  if (await disputeHoldHolds(customerId, database, holdExempt)) {
+    logger.info(`[${logTag}] dispute hold: ${channel} for customer ${customerId} deferred until it is released`);
+    return detail ? { allowed: false, durable: false, hold: true } : false;
+  }
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
     warnShadowWithoutPolicy();
     return answer(true);
@@ -132,6 +169,9 @@ async function collectionsChannelPermitted({
     const ContactPolicy = require('./contact-policy');
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      // The precheck above skipped the dispute hold for a trusted exemption; the policy must too,
+      // or its own collection_hold denial would still block that send (dispute rows only).
+      ...(require('./collection-hold').holdExemptionApplies(holdExempt) ? { ignoreDisputeHold: true } : {}),
       ...(database ? { database } : {}),
       ...shadowSpacingArgs(source, spacingExcludeKey, spacingExcludeEventKey),
     });

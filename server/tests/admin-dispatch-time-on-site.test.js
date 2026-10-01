@@ -1506,7 +1506,9 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // bundled review line dropped at send time (#5367 r6): the stripped body
     // and cleared bundle keys, merged under the review lock before the
     // provider call — a key-merge too.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(18);
+    // 19 with the dispute-hold hand-over marker (invoiceSenderOwnsPayLinkFor) —
+    // a key-merge too.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(19);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

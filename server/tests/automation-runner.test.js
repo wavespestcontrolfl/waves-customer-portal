@@ -1,3 +1,9 @@
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),
@@ -68,6 +74,7 @@ function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => Promise.resolve(updateResult));
+  q.del = jest.fn(() => Promise.resolve(1));
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(() => Promise.resolve(returning || []));
   q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -441,6 +448,66 @@ describe('automation runner suppression guardrails', () => {
     expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       email: 'bookkeeper@example.com', first_name: 'Jordan', last_name: 'Lee',
     }));
+  });
+
+  // Collections DISPUTE hold (owner ruling 2026-09-30, #5424 round 10): the payment-failed
+  // email's hold check rides the authority's preSendCheck, which the authority re-runs at the
+  // FINAL provider boundary - not only in the one-time suppression callback.
+  describe('collections dispute hold rides the authority\'s final provider-boundary check', () => {
+    const Hold = require('../services/collections/collection-hold');
+    afterEach(() => { Hold.messagingHeldByCollectionHold.mockReset().mockResolvedValue({ held: false }); });
+
+    test('the authority call carries a hold-aware preSendCheck that refuses with the retryable defer code', async () => {
+      paymentFailedQueues();
+      authorizeBillingRecipient();
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-billing' });
+      await sendStep('enrollment-1');
+      const { preSendCheck, emailSuppression } = BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mock.calls[0][0];
+      expect(preSendCheck).toEqual(expect.any(Function));
+
+      const trx = jest.fn();
+      await expect(preSendCheck({ channel: 'email', database: trx, providerBoundary: true })).resolves.toEqual({ ok: true });
+      expect(Hold.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('cust-1', trx);
+
+      Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true });
+      await expect(preSendCheck({ channel: 'email', database: trx, providerBoundary: true })).resolves.toMatchObject({
+        ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true,
+      });
+      Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'lookup_failed' });
+      await expect(preSendCheck({ channel: 'email', database: trx })).resolves.toMatchObject({
+        ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, reason: expect.stringContaining('lookup failed'),
+      });
+      // The one-time suppression callback no longer owns the hold read.
+      Hold.messagingHeldByCollectionHold.mockClear();
+      await emailSuppression(jest.fn(() => chain({ result: [] })), 'customer@example.com');
+      expect(Hold.messagingHeldByCollectionHold).not.toHaveBeenCalled();
+    });
+
+    test('a hold that commits during request preparation is caught at the final boundary: no send, step deferred, enrollment kept', async () => {
+      const { enrollmentUpdate } = paymentFailedQueues();
+      authorizeBillingRecipient();
+      // Emulate the authority's providerBoundaryCheck: it re-runs preSendCheck (providerBoundary
+      // true) right before the request, and a refusal lands on state.boundaryBlock.
+      BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ preSendCheck, dispatch, state }) => {
+        const boundary = async () => {
+          const verdict = await preSendCheck({ channel: 'email', database: 'authority-trx', providerBoundary: true });
+          if (verdict.ok === true) return { ok: true };
+          state.boundaryBlock = BillingEmailAuthority.blocked(verdict.code, verdict.reason, { retryable: verdict.retryable });
+          throw Object.assign(new Error(verdict.reason), { providerBoundaryBlocked: true });
+        };
+        // Clear at the pre-dispatch read; a hold commits while the provider request is prepared.
+        await preSendCheck({ channel: 'email', database: 'authority-trx' });
+        Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true });
+        try { await dispatch('authority-trx', boundary); } catch (err) { if (!err.providerBoundaryBlocked) throw err; }
+        return { ok: false };
+      });
+      sendgrid.sendOne.mockImplementationOnce(async ({ providerBoundaryCheck }) => { await providerBoundaryCheck(); return { messageId: 'never' }; });
+
+      const result = await sendStep('enrollment-1');
+      expect(result).toMatchObject({ sent: false, deferred: true, held: true });
+      expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ next_send_at: expect.any(Date) }));
+      expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+    });
   });
 
   // service_renewal is termite-bond renewal copy: an enrollment queued before
