@@ -5054,6 +5054,16 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} was retired by the customer (replaced by ${live.metadata.replaced_by || 'n/a'}) — not enrolling (estimate ${estimate.id})`);
         return;
       }
+      // PR-B (r3 pre-push P0): an intent minted for the after-visit existing-
+      // customer flow only ever enrolls through the accept that bound it. An
+      // UNBOUND one (abandoned tab, refused accept, the sub-gate since turned
+      // off) is never a legacy capture — recovering it would enroll with base
+      // consent and could undo an Auto Pay opt-out. Genuine legacy captures
+      // (minted without the stamp) keep today's recovery.
+      if (live.metadata?.paf_after_visit === 'true') {
+        logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} was minted for the after-visit flow but never bound by an accept — not enrolling (estimate ${estimate.id})`);
+        return;
+      }
     }
     if (!boundToAccept && Array.isArray(setupIntent.payment_method_types) && setupIntent.payment_method_types.includes('us_bank_account')) {
       const pmRef = setupIntent.payment_method;

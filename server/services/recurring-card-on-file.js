@@ -833,6 +833,23 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
   });
 }
 
+// Provenance for a capture minted under the PR-B after-visit flow (r3 pre-push
+// P0): an abandoned / orphaned intent must never be recovered as a legacy
+// capture once the sub-gate (or the policy) moves, whatever the next accept
+// carries. The stamp rides the intent's Stripe metadata; the recovery refuses
+// an UNBOUND intent that carries it. ok:false = Stripe could not confirm, and
+// the mint route then offers no capture (fail closed).
+async function markAfterVisitCaptureIntent(setupIntentId) {
+  if (!setupIntentId) return { ok: false, reason: 'no_setup_intent' };
+  try {
+    await StripeService.markSetupIntentAfterVisit(setupIntentId);
+  } catch (err) {
+    logger.warn(`[recurring-cof] after-visit provenance stamp failed for ${setupIntentId}`, { error: err.message });
+    return { ok: false, reason: 'stamp_failed' };
+  }
+  return { ok: true };
+}
+
 // An accept refused because the live policy no longer expects the capture the
 // tab made (CONSENT_VARIANT_STALE) leaves that SetupIntent succeeded in Stripe
 // and unbound. Retire it so no later recovery can treat it as a legacy capture
@@ -1971,6 +1988,7 @@ module.exports = {
   createRecurringCardSetupIntentForEstimate,
   replaceRecurringCardIntent,
   retireOrphanedCaptureIntent,
+  markAfterVisitCaptureIntent,
   resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
   verifyRecurringCardIntentUnderLock,

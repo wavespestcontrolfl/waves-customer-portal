@@ -135,6 +135,14 @@ describe('accept route wiring (source pins)', () => {
     }
   });
 
+  test('r3 pre-push P0: the mint route stamps after-visit provenance (fail closed) before offering the capture, and the webhook refuses an unbound stamped intent', () => {
+    const slots = read('routes/estimate-slots-public.js');
+    expect(slots).toMatch(/if \(policy\.afterVisitCard === true\) \{\s*const stamped = await markAfterVisitCaptureIntent\(intent\.setupIntentId\);\s*if \(!stamped\.ok\) \{\s*return res\.status\(503\)/);
+    expect(slots.indexOf('markAfterVisitCaptureIntent(intent.setupIntentId)')).toBeLessThan(slots.indexOf('CHECKOUT_KIND.RECURRING_CARD'));
+    expect(read('services/stripe.js')).toMatch(/metadata: \{ paf_after_visit: 'true' \}/);
+    expect(read('routes/stripe-webhook.js')).toMatch(/if \(live\.metadata\?\.paf_after_visit === 'true'\) \{[\s\S]{0,400}return;/);
+  });
+
   test('locked-customer drift aborts the accept with a reloadable 409 BEFORE any conversion / enrollment (inside the accept transaction)', () => {
     expect(src).toMatch(
       /if \(recurringCardPolicy\.afterVisitCard === true\s*&& await RecurringCards\.pafExistingDriftUnderLock\(trx, \{ customerId, policy: recurringCardPolicy \}\)\) \{[\s\S]{0,1200}err\.status = 409;[\s\S]{0,120}err\.code = 'ACCEPT_BILLING_CHANGED';\s*throw err;/,

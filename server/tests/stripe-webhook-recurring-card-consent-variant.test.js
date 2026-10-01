@@ -154,6 +154,20 @@ describe('estimate_recurring_card recovery skips an orphaned capture the rejecte
     expect(mockCompleteEnrollment).not.toHaveBeenCalled();
   });
 
+  test('capture -> ABANDON (no accept) -> gate off -> accept without an intent (no marker) -> webhook retry: the after-visit capture is never recovered', async () => {
+    wireDb(estimateRow({}));
+    require('../services/stripe').retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_1', metadata: { paf_after_visit: 'true' } });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('an after-visit capture the accept DID bind still recovers (bound path skips the live provenance read)', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1', acceptedRecurringCardConsentVariant: 'after_visit_card' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
+  });
+
   test('control: a genuine legacy capture (not retired) on an unstamped accept still enrolls', async () => {
     wireDb(estimateRow({}));
     require('../services/stripe').retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_1', metadata: {} });

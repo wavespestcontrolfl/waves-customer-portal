@@ -1164,6 +1164,21 @@ const StripeService = {
     });
   },
 
+  /**
+   * Stamp a recurring-card SetupIntent as minted for the pay-after-first-visit
+   * existing-customer flow (GATE_PAF_EXISTING_CUSTOMERS). Rides the intent's
+   * metadata so the setup_intent.succeeded recovery can tell, from Stripe
+   * alone, that this capture must only ever enroll through an explicit accept
+   * bind. A metadata update (not a create param), so the deterministic
+   * idempotency-keyed mint is unaffected.
+   */
+  async markSetupIntentAfterVisit(setupIntentId) {
+    if (!setupIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.update(setupIntentId, { metadata: { paf_after_visit: 'true' } });
+  },
+
   async retrievePaymentMethod(paymentMethodId) {
     if (!paymentMethodId) return null;
     const stripe = getStripe();

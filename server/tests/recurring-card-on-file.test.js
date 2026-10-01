@@ -39,12 +39,14 @@ const mockCreateRecurringCardSetupIntent = jest.fn();
 const mockSavePaymentMethod = jest.fn();
 const mockRetrievePaymentMethod = jest.fn();
 const mockRetireSetupIntent = jest.fn();
+const mockMarkAfterVisit = jest.fn();
 jest.mock('../services/stripe', () => ({
   retrieveSetupIntent: (...a) => mockRetrieveSetupIntent(...a),
   createRecurringCardSetupIntent: (...a) => mockCreateRecurringCardSetupIntent(...a),
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
   retrievePaymentMethod: (...a) => mockRetrievePaymentMethod(...a),
   retireSetupIntent: (...a) => mockRetireSetupIntent(...a),
+  markSetupIntentAfterVisit: (...a) => mockMarkAfterVisit(...a),
 }));
 
 const mockQualifyingRows = jest.fn(async () => []);
@@ -1191,6 +1193,18 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
         expect(await bankTenderAllowedUnderLock(trxFor(null, true), { customerId: 'c1', methodType: 'us_bank_account' })).toBe(false);
       });
     });
+  });
+});
+
+describe('markAfterVisitCaptureIntent (PAF-B r3 pre-push P0 — capture provenance at mint)', () => {
+  const { markAfterVisitCaptureIntent } = require('../services/recurring-card-on-file');
+  it('stamps the intent through Stripe metadata; a failed stamp is ok:false (the mint route offers no capture)', async () => {
+    mockMarkAfterVisit.mockResolvedValueOnce({});
+    expect(await markAfterVisitCaptureIntent('seti_1')).toEqual({ ok: true });
+    expect(mockMarkAfterVisit).toHaveBeenCalledWith('seti_1');
+    mockMarkAfterVisit.mockRejectedValueOnce(new Error('stripe down'));
+    expect(await markAfterVisitCaptureIntent('seti_1')).toEqual({ ok: false, reason: 'stamp_failed' });
+    expect(await markAfterVisitCaptureIntent('')).toEqual({ ok: false, reason: 'no_setup_intent' });
   });
 });
 
