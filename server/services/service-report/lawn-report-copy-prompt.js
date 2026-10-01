@@ -4,7 +4,7 @@
 const { detectServiceLine } = require('./service-line-configs');
 const { TREE_SHRUB_MAIN_REPORT_PROMPT, RECURRING_PEST_MAIN_REPORT_PROMPT } = require('./pest-tree-copy-prompt');
 const {
-  selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION,
+  selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION, REMAINING_SERVICE_MODIFIERS,
 } = require('./remaining-service-copy-prompts');
 const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt } = require('./report-writer-rules');
 
@@ -219,7 +219,12 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   };
   const selected = modules[writer];
   if (!selected) return null;
-  return compose([selected[0], sharedSafety, ...selected.slice(1)]);
+  // Under the writer rules a pest re-service gets the remaining-service
+  // callback modifier, which the pest writer never received.
+  const callback = writerRules && writer === 'pest'
+    && (context.isCallback === true || context.serviceKey === 'pest_re_service')
+    ? [REMAINING_SERVICE_MODIFIERS.callback] : [];
+  return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback]);
 }
 
 module.exports = { LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, selectReportCopyPrompt, writerRulesInScope };

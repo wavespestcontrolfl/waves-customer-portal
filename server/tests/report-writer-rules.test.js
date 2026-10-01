@@ -6,8 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
 const {
-  OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned,
+  OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned, bookedReasonBlock,
 } = require('../services/service-report/report-writer-rules');
+const { scrubCustomerText } = require('../services/completion-comms-context');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
 
 // The real v4 hard constraints, sliced from the route source. Only template
@@ -354,5 +355,65 @@ describe('writerRulesRejection', () => {
     ['mosquito', 'WHAT WE DID\n\nWe treated the shrub leaves along your back fence and the beds around the pool cage and lanai, where adult mosquitoes rest, keeping spray off the blooming hibiscus. We emptied two plant saucers on the lanai and flipped a bucket by the shed.\n\nWHAT WE FOUND\n\nMosquito activity was light along the back fence; we saw none at the front. The saucers and bucket were holding water, the kind of spot mosquitoes can breed in, and about 1.4 inches of rain fell in the seven days before the visit. You mentioned evening bites on the lanai, so we focused there.'],
   ])('passes the approved %s example', (_family, copy) => {
     expect(writerRulesRejection(copy)).toBeNull();
+  });
+});
+
+describe('pest re-service callback guidance', () => {
+  const CALLBACK = 'CROSS-SERVICE MODIFIER — CALLBACK / RESERVICE';
+
+  test('pest re-service gets the callback modifier only under the rules', () => {
+    const context = { serviceKey: 'pest_re_service', findingsType: null };
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true })).toContain(CALLBACK);
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', context)).not.toContain(CALLBACK);
+  });
+
+  test('a recurring pest visit flagged as a callback gets it too; an ordinary one does not', () => {
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_general_quarterly', findingsType: null, isCallback: true, writerRules: true })).toContain(CALLBACK);
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_general_quarterly', findingsType: null, writerRules: true })).not.toContain(CALLBACK);
+  });
+
+  test('lawn re-service stays byte-identical', () => {
+    const context = { serviceKey: 'lawn_re_service', findingsType: 'one_time_lawn_treatment', isCallback: true };
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true }))
+      .toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', context));
+  });
+});
+
+describe('bookedReasonBlock', () => {
+  test('labels the source, attributes the words, drops access details and lists the picked pests', () => {
+    const block = bookedReasonBlock({
+      customer_request: 'Ants by the sink again. Gate code is blue. Roaches in unit A12B too. Please come after lunch.',
+      customer_request_source: 'picker',
+      customer_request_pests: ['ants', 'german_roaches'],
+    }, scrubCustomerText);
+    expect(block).toContain('typed on the re-service page');
+    expect(block).toContain('never a finding');
+    expect(block).toContain('Reason: Ants by the sink again. Roaches in unit [redacted] too.');
+    expect(block).not.toMatch(/gate code|blue|A12B|after lunch/i);
+    expect(block).toContain('Pests picked: ants, german roaches');
+    expect(block).not.toContain('4821');
+  });
+
+  test('a call booking is marked as an AI summary, and JSON-text pests still read', () => {
+    const block = bookedReasonBlock({
+      customer_request: 'Customer says roaches in the kitchen at night.',
+      customer_request_source: 'call',
+      customer_request_pests: '["roaches"]',
+    }, scrubCustomerText);
+    expect(block).toContain('an AI summary of what they said');
+    expect(block).toContain('Pests picked: roaches');
+  });
+
+  test('keeps the whole reason and adds nothing when there is nothing recorded', () => {
+    // The re-service page and call bookings store up to 400 characters.
+    const long = bookedReasonBlock({ customer_request: `${'Ants on the counter. '.repeat(19)}Ants in the garage too.`, customer_request_source: 'text' }, scrubCustomerText);
+    expect(long).toContain('Ants in the garage too.');
+    expect(bookedReasonBlock({ customer_request: 'Please come after lunch.', customer_request_pests: [] }, scrubCustomerText)).toBe('');
+    expect(bookedReasonBlock(null, scrubCustomerText)).toBe('');
+    expect(bookedReasonBlock({ customer_request: '  ', customer_request_pests: [] }, scrubCustomerText)).toBe('');
+  });
+
+  test('without a scrub the reason is left out, never passed on raw', () => {
+    expect(bookedReasonBlock({ customer_request: 'Gate code 4821. Ants again.', customer_request_pests: ['ants'] })).toBe('');
   });
 });
