@@ -448,6 +448,74 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     expect(await snapshot()).toBe(before);
   });
 
+  // Unstamped roots (no property_id, no stamped address: scope resolves from
+  // the customer's primary address KEY) whose child rows carry only a stamped
+  // property_id. The mixed shapes used to read as 'different', so findHostRow
+  // dropped every child lawn row (no_host_visit_on_target_date).
+  describe('unstamped roots with id-stamped child rows', () => {
+    async function propertyAt(fields) {
+      const [p] = await trx('customer_properties').insert({
+        id: randomUUID(), customer_id: customerId, ...fields,
+      }).returning('*');
+      return p.id;
+    }
+    const stampChildren = (parentId, propertyId) => trx('scheduled_services')
+      .where({ recurring_parent_id: parentId }).update({ property_id: propertyId });
+    const SAME_ADDRESS = { address_line1: '100 Test Lane', city: 'Test City', zip: '00000' };
+
+    test('lawn AND pest children stamped at the same property: the host row is found and the pair applies', async () => {
+      const pair = await buildPair();
+      const same = await propertyAt(SAME_ADDRESS);
+      await stampChildren(pair.lawnParent.id, same);
+      await stampChildren(pair.pestParent.id, same);
+      const approved = await approvedFor(pair);
+      const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      expect(res.pairs[0]).toMatchObject({ status: 'applied' });
+      for (const m of approved.results[0].move) {
+        const moved = await trx('scheduled_services').where({ id: m.id }).first();
+        expect(dateOnly(moved.scheduled_date)).toBe(m.to);
+        expect(moved.technician_id).toBe(techId);
+      }
+    });
+
+    test('lawn children restamped at a DIFFERENT property after approval: no host visit, nothing written', async () => {
+      const pair = await buildPair();
+      const same = await propertyAt(SAME_ADDRESS);
+      await stampChildren(pair.lawnParent.id, same);
+      const approved = await approvedFor(pair);
+      const other = await propertyAt({ address_line1: '999 Elsewhere Road', city: 'Other City', zip: '11111' });
+      await stampChildren(pair.lawnParent.id, other);
+      const before = await snapshot();
+      const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'no_host_visit_on_target_date' });
+      expect(await snapshot()).toBe(before);
+    });
+
+    test('lawn children restamped at a property with no address: no host visit (fail closed)', async () => {
+      const pair = await buildPair();
+      const same = await propertyAt(SAME_ADDRESS);
+      await stampChildren(pair.lawnParent.id, same);
+      const approved = await approvedFor(pair);
+      const blank = await propertyAt({ address_line1: null, city: null, zip: null, state: null });
+      await stampChildren(pair.lawnParent.id, blank);
+      const before = await snapshot();
+      const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'no_host_visit_on_target_date' });
+      expect(await snapshot()).toBe(before);
+    });
+
+    test('a pest occurrence stamped at a different property than the unstamped pest root is still refused', async () => {
+      const pair = await buildPair();
+      const approved = await approvedFor(pair);
+      const other = await propertyAt({ address_line1: '999 Elsewhere Road', city: 'Other City', zip: '11111' });
+      await trx('scheduled_services').where({ id: approved.results[0].move[0].id }).update({ property_id: other });
+      const before = await snapshot();
+      const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'row_property_differs' });
+      expect(await snapshot()).toBe(before);
+    });
+  });
+
   test('a compatible second pest root introduced after approval makes the pair ambiguous and skips it', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);
