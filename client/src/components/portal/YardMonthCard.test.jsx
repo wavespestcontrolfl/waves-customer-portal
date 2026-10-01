@@ -139,6 +139,16 @@ describe('lawn + pest customer', () => {
     expect(screen.getByText('Seasonal guide reviewed Sep 30 · not a finding on your property')).toBeInTheDocument();
   });
 
+  it('in the native app the report opens through the in-app preview handler, not a new window', async () => {
+    const { rerender } = await renderCard();
+    const onOpenReport = vi.fn();
+    rerender(<YardMonthCard yard={YARD} onOpenPhotoId={vi.fn()} onOpenReport={onOpenReport} />);
+    const link = screen.getByRole('link', { name: /View service report/ });
+    const notPrevented = fireEvent.click(link);
+    expect(notPrevented).toBe(false);
+    expect(onOpenReport).toHaveBeenCalledWith('/report/tok123');
+  });
+
   it('a visit with no report link shows the date only; no visit shows no row; no handler hides Photo ID', async () => {
     const { rerender } = await renderCard({ ...YARD, lastLawnVisit: { date: '2026-09-18', reportUrl: null } }, null);
     expect(screen.getByText('Last lawn visit: Sep 18')).toBeInTheDocument();

@@ -148,7 +148,7 @@ function lawnTeaser(items, monthName) {
   return `Your lawn in ${monthName}: ${top.map((i) => i.name).join(' and ')} ${verb} ${lawn[0].level === 3 ? 'at peak' : 'in season'}.`;
 }
 
-export default function YardMonthCard({ yard, onOpenPhotoId }) {
+export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null }) {
   const baseId = useId();
   const [weather, setWeather] = useState(null);
   const tabs = yardTabsFor(yard.plan);
@@ -330,6 +330,7 @@ export default function YardMonthCard({ yard, onOpenPhotoId }) {
               href={yard.lastLawnVisit.reportUrl}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={onOpenReport ? (e) => { e.preventDefault(); onOpenReport(yard.lastLawnVisit.reportUrl); } : undefined}
               style={{ color: '#065A8C', fontWeight: 700, textDecoration: 'none', fontSize: 14, whiteSpace: 'nowrap' }}
             >
               View service report →

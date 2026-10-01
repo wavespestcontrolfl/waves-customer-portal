@@ -27,6 +27,10 @@ const { loadCustomerGrassContext } = require('./lawn-grass-context');
 const { applyPropertyPredicate, isSecondarySelection } = require('./account-properties');
 const { etParts } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
+const { detectServiceLine } = require('./service-report/service-line-configs');
+
+// How many recent completions the last-lawn-visit lookup scans.
+const LAWN_VISIT_SCAN = 100;
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -53,11 +57,14 @@ const PLAN_KEY_TO_LINE = {
 // Forecast pest keys (pest-forecast/pests.js) onto the service line that
 // covers them. Mosquito and rodent service are separate lines from general
 // pest control, so a pest-only customer sees them as "not in your plan".
+// German-roach cleanouts and fleas are separate specialty services unless
+// expressly included (estimate-service-details.js), so no plan line claims
+// them: they always list as "not in your plan".
 const PEST_LINE = {
   ants: 'pest',
-  german_roach: 'pest',
+  german_roach: 'specialty',
   palmetto_roach: 'pest',
-  fleas_ticks: 'pest',
+  fleas_ticks: 'specialty',
   wasps: 'pest',
   mosquitoes: 'mosquito',
   rodents: 'rodent',
@@ -194,23 +201,25 @@ function parseNotes(value) {
 // completion and never for a typed completion held in internal-only shadow.
 async function loadLastLawnVisit(customerId, scope, knex) {
   try {
+    // Lawn by the canonical service line, falling back to the label the way
+    // every runtime reader does (detectServiceLine), so legacy labels such as
+    // "Fertilization" or "Chinch Bug" count. Recent completions are scanned
+    // newest first; the first lawn one is the visit.
     let query = knex('service_records')
       .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
       .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' })
-      .where(function lawnOnly() {
-        this.whereRaw('LOWER(service_records.service_type) LIKE ?', ['%lawn%'])
-          .orWhereRaw('LOWER(service_records.service_type) LIKE ?', ['%turf%']);
-      })
       .select(
         'service_records.id',
         'service_records.service_date',
+        'service_records.service_line',
+        'service_records.service_type',
         'service_records.report_view_token',
         'service_records.structured_notes',
         'service_records.completion_source',
       )
       .orderBy('service_records.service_date', 'desc')
       .orderBy('service_records.id', 'desc')
-      .limit(1);
+      .limit(LAWN_VISIT_SCAN);
     if (scope && scope.enabled && scope.scoped) {
       // A record without a visit (property_id NULL) belongs to the primary,
       // like an unstamped visit; "every house retired" matches nothing.
@@ -218,7 +227,8 @@ async function loadLastLawnVisit(customerId, scope, knex) {
         ? query.whereRaw('1 = 0')
         : applyPropertyPredicate(query, scope, 'scheduled_services');
     }
-    const row = await query.first();
+    const rows = await query;
+    const row = (rows || []).find((r) => (r.service_line || detectServiceLine(r.service_type)) === 'lawn');
     if (!row) return null;
     const notes = parseNotes(row.structured_notes);
     const isProject = row.completion_source === 'project_completion' || notes.projectCompletion === true;

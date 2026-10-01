@@ -27,7 +27,12 @@ function fakeKnex(row, calls = []) {
     orWhereRaw: (...a) => { calls.push(['orWhereRaw', ...a]); return builder; },
     orWhereNull: (...a) => { calls.push(['orWhereNull', ...a]); return builder; },
     whereNull: (...a) => { calls.push(['whereNull', ...a]); return builder; },
-    first: async () => row,
+    first: async () => (Array.isArray(row) ? row[0] : row),
+    // Awaiting the builder itself resolves the list read.
+    then(resolve, reject) {
+      const rows = Array.isArray(row) ? row : (row ? [row] : []);
+      return Promise.resolve(rows).then(resolve, reject);
+    },
   };
   const knex = (table) => { calls.push(['table', table]); return builder; };
   return knex;
@@ -216,6 +221,21 @@ describe('home pests', () => {
     expect(byKey).toMatchObject({ mosquitoes: true, ants: true, rodents: false, subterranean_termites: true });
   });
 
+  test('German roaches and fleas are specialty services, never in a general pest plan', async () => {
+    ownedKeys = ['pest_control'];
+    forecastPests = [
+      { key: 'german_roach', label: 'German roaches', score10: 6, level: 'elevated', note: 'g' },
+      { key: 'fleas_ticks', label: 'Fleas & ticks', score10: 5, level: 'moderate', note: 'f' },
+      { key: 'palmetto_roach', label: 'Palmetto bugs', score10: 5, level: 'moderate', note: 'p' },
+    ];
+    const card = await build({});
+    expect(card.homePests.map((p) => [p.key, p.line, p.inPlan])).toEqual([
+      ['german_roach', 'specialty', false],
+      ['fleas_ticks', 'specialty', false],
+      ['palmetto_roach', 'pest', true],
+    ]);
+  });
+
   test('forecast failure drops the pest list, not the card', async () => {
     forecastPests = new Error('weather down');
     const card = await build({});
@@ -226,7 +246,7 @@ describe('home pests', () => {
 
 describe('last lawn visit', () => {
   const row = (over = {}) => ({
-    id: 'sr-1', service_date: '2026-09-18', report_view_token: 'tok123', structured_notes: null, completion_source: null, ...over,
+    id: 'sr-1', service_date: '2026-09-18', service_line: 'lawn', service_type: 'Lawn Care', report_view_token: 'tok123', structured_notes: null, completion_source: null, ...over,
   });
 
   test('returns the date and the /report/<token> link the services route uses', async () => {
@@ -248,11 +268,22 @@ describe('last lawn visit', () => {
     expect(card.lastLawnVisit).toEqual({ date: '2026-09-18', reportUrl: null });
   });
 
-  test('only lawn visits that completed, for this customer', async () => {
+  test('only completed visits for this customer, lawn by canonical line or legacy label', async () => {
     const calls = [];
-    await build({ knex: fakeKnex(row(), calls) });
+    const rows = [
+      row({ id: 'sr-pest', service_date: '2026-09-25', service_line: 'pest', service_type: 'Pest Control' }),
+      row({ id: 'sr-legacy', service_date: '2026-09-20', service_line: null, service_type: 'Fertilization', report_view_token: 'legacy' }),
+      row({ id: 'sr-old', service_date: '2026-08-01' }),
+    ];
+    const card = await build({ knex: fakeKnex(rows, calls) });
     expect(calls).toContainEqual(['where', { 'service_records.customer_id': 'cust-1', 'service_records.status': 'completed' }]);
-    expect(calls.filter((c) => c[0] === 'whereRaw' || c[0] === 'orWhereRaw').map((c) => c[2][0])).toEqual(['%lawn%', '%turf%']);
+    expect(card.lastLawnVisit).toEqual({ date: '2026-09-20', reportUrl: '/report/legacy' });
+  });
+
+  test('a canonical lawn line wins over a label that says otherwise', async () => {
+    const rows = [row({ service_line: 'lawn', service_type: 'Chinch Bug', report_view_token: 'chinch' })];
+    const card = await build({ knex: fakeKnex(rows) });
+    expect(card.lastLawnVisit.reportUrl).toBe('/report/chinch');
   });
 
   test('a selected secondary property scopes the visit to that property; the primary also takes unstamped visits', async () => {

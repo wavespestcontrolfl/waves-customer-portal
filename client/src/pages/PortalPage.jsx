@@ -9088,6 +9088,14 @@ const ARTICLES = [
 // path shows a different placeholder.
 function LocalConditionsSlot({ customer, nextService, onOpenPhotoId }) {
   const yard = useYardMonth();
+  // Capacitor shell: target=_blank strands the SPA (F-017), so the app opens
+  // the report in the same in-app overlay the Services tab uses.
+  const { preview, openPagePreview, closePreview } = useReportPreview(
+    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
+  );
+  const onOpenReport = isNativeApp()
+    ? (url) => openPagePreview({ id: 'yard-last-lawn-visit', title: 'Lawn service report' }, url)
+    : null;
   if (yard.status === 'loading') return (
     <PortalStatePanel
       icon="cloud"
@@ -9096,7 +9104,12 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId }) {
       message="Checking weather and seasonal pest pressure for your area."
     />
   );
-  if (yard.status === 'on') return <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} />;
+  if (yard.status === 'on') return <>
+    <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} />
+    {preview && <DocumentPreviewOverlay key="report-preview"
+      preview={preview} onClose={closePreview}
+      onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />}
+  </>;
   return <WeatherPestWidget customer={customer} nextService={nextService} />;
 }
 
