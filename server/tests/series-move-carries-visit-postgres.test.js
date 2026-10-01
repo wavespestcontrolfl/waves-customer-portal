@@ -333,6 +333,32 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     expect(dateOnly(pest.scheduled_date)).toBe(dateOnly(f.pest[0].scheduled_date));
   });
 
+  test('a retried committed carry replays even after the gate is turned off', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const anchor = f.lawn[0];
+    const target = addDays(dateOnly(anchor.scheduled_date), 1);
+    const opts = { allowLive: true, sourceSurface: 'dispatch_board', notifyRequested: false, overlapAdvisory: true, operationKey: `retry-${randomUUID()}` };
+    const first = await rebooker.rescheduleSeries(anchor.id, target, '09:00-10:00', 'admin', 'admin', opts);
+    delete process.env.GATE_SERIES_MOVE_CARRIES_VISIT;
+    const again = await rebooker.rescheduleSeries(anchor.id, target, '09:00-10:00', 'admin', 'admin', opts);
+    expect(again.seriesMoveId).toBe(first.seriesMoveId);
+    expect(again.replayed).toBe(true);
+  });
+
+  test('a legacy row with no status in the partner plan still holds its day', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const [legacy] = await db('scheduled_services').insert({
+      id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, status: 'pending',
+      recurring_parent_id: f.pestParent.id, recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
+      service_id: f.pest[0].service_id, scheduled_date: addDays(dateOnly(f.lawn[0].scheduled_date), 1),
+      window_start: '15:00', window_end: '16:00', estimated_duration_minutes: 30,
+    }).returning('id');
+    await db.raw('UPDATE scheduled_services SET status = NULL WHERE id = ?', [legacy.id || legacy]);
+    await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', memberId: f.pest[0].id });
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

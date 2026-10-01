@@ -912,7 +912,8 @@ async function assertPartnerPlanDayFree(trx, partner, dateStr, excludeIds) {
   const clash = await trx('scheduled_services')
     .whereRaw('(id = ? OR recurring_parent_id = ?)', [root, root])
     .whereNotIn('id', excludeIds)
-    .whereNotIn('status', ['completed', 'cancelled'])
+    // NULL-safe: a legacy row with no status is live and holds its day.
+    .whereRaw("COALESCE(status, '') NOT IN ('completed', 'cancelled')")
     .where('scheduled_date', dateStr)
     .first('id');
   if (clash) {
@@ -2318,6 +2319,16 @@ class SmartRebooker {
     // single-member visit proceeds as a series.
     const carriesVisit = seriesCarriesVisitFor(initiatedBy, options);
     if (options.visitPolicy !== 'single' && service.visit_id) {
+      // A retry of a move that already COMMITTED (a carried grouped stop
+      // keeps its visit) replays it before any grouped-visit eligibility
+      // check: those govern new moves only — a gate flipped off, or a visit
+      // that froze since, must not turn a committed move into a reported
+      // failure and skip its replay cleanup.
+      const committed = await findPriorSeriesMove(db, serviceId, seriesOperationKey(serviceId, newDate, newWindow, options), service, newDate, options.expectAnchor || null);
+      if (committed) {
+        await replaySeriesMoveCleanup(committed);
+        return replaySeriesMoveWithQuality(committed, newDate, serviceId, options);
+      }
       const unit = await require('./visit-groups').moveVisitAsUnit({
         rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy,
         // The caller asked for a SERIES move explicitly: the primary re-enters
