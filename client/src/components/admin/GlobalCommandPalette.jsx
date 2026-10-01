@@ -648,7 +648,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
           setActiveTask(data.taskId ? data : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
-          knowledgeGaps.load(data.knowledgeMisses);
+          knowledgeGaps.load(data.knowledgeMisses, data.taskId || null);
           setConversationHistory(data.conversationHistory || []);
           if (data.threadId) {
             setThreadId(data.threadId);
@@ -715,7 +715,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
       setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
       setToolActivity(data.toolActivity || []);
-      knowledgeGaps.load(data.knowledgeMisses);
+      knowledgeGaps.load(data.knowledgeMisses, data.taskId || id);
       setShowThreads(false);
     } catch (err) {
       if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);

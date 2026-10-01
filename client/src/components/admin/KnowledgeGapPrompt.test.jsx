@@ -11,13 +11,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 
 // Mirrors the palette: the gap state lives in the parent, and the prompt
 // unmounts while the palette is closed.
-function Harness({ misses, save, variant }) {
+function Harness({ misses, save, variant, scope = null }) {
   const gaps = useKnowledgeGaps();
   const [open, setOpen] = useState(true);
-  useEffect(() => { gaps.load(misses); }, [misses]);
+  useEffect(() => { gaps.load(misses, scope); }, [misses]);
   return (
     <>
       <button type="button" onClick={() => setOpen((o) => !o)}>toggle palette</button>
+      {/* A task status refresh re-delivers the same payload. */}
+      <button type="button" onClick={() => gaps.load([...misses], scope)}>refresh task</button>
+      <button type="button" onClick={() => gaps.load([...misses], "other-task")}>open other task</button>
       {open && <KnowledgeGapPrompt gaps={gaps.gaps} update={gaps.update} save={save} variant={variant} />}
     </>
   );
@@ -94,6 +97,36 @@ describe("KnowledgeGapPrompt", () => {
     togglePalette();
     expect(screen.getByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Add to knowledge gaps|Try again/ })).toBeNull();
+  });
+
+  it.each([
+    ["after a save that landed", vi.fn(async () => ({ success: true })), /Added to Monday's knowledge-gaps email: "chinch bugs"/],
+    ["after an ambiguous failed save", vi.fn(async () => { throw new Error("Network error"); }), /Network error/],
+  ])("refreshing the same task keeps the box as it was %s", async (_label, save, shown) => {
+    render(<Harness misses={["Smith chinch bugs"]} save={save} scope="task-1" />);
+    fireEvent.change(box(), { target: { value: "chinch bugs" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    await screen.findByText(shown);
+    const key = save.mock.calls[0][1];
+    fireEvent.click(screen.getByRole("button", { name: "refresh task" }));
+    expect(screen.getByText(shown)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add to knowledge gaps" })).toBeNull();
+    const retry = screen.queryByRole("button", { name: "Try again" });
+    if (retry) {
+      expect(box()).toHaveValue("chinch bugs");
+      fireEvent.click(retry);
+      await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+      expect(save.mock.calls[1]).toEqual(["chinch bugs", key]);
+    }
+  });
+
+  it("a different task's payload starts fresh", async () => {
+    const save = vi.fn(async () => ({ success: true }));
+    render(<Harness misses={["chinch bugs"]} save={save} scope="task-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    await screen.findByText(/Added to Monday's knowledge-gaps email/);
+    fireEvent.click(screen.getByRole("button", { name: "open other task" }));
+    expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeInTheDocument();
   });
 
   it("disables the button when the text is under 3 characters", () => {

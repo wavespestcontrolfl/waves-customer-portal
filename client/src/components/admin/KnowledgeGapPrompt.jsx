@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { uuid } from "../../utils/ibSession";
 
 /**
@@ -25,6 +25,7 @@ const normalize = (text) => String(text || "").replace(/\s+/g, " ").trim();
 export function gapsFromMisses(misses) {
   const list = Array.isArray(misses) ? misses.filter((m) => typeof m === "string" && m.trim()) : [];
   return list.map((m) => ({
+    miss: m,
     // One key per box: a retry after a lost response re-sends it, so the
     // server saves this gap once however many times the button is tapped.
     requestKey: uuid(),
@@ -38,10 +39,23 @@ export function gapsFromMisses(misses) {
   }));
 }
 
+// `scope` names the exchange the misses came from (its task id). Loading the
+// same scope again (a task status refresh) keeps every box that is still
+// listed exactly as it was — key, draft, locked text, status — so a refresh
+// can never re-arm a saved gap under a new key or undo an edit. Any other
+// scope, or none, starts fresh.
 export function useKnowledgeGaps() {
   const [gaps, setGaps] = useState([]);
-  const load = useCallback((misses) => setGaps(gapsFromMisses(misses)), []);
-  const reset = useCallback(() => setGaps([]), []);
+  const scopeRef = useRef(null);
+  const load = useCallback((misses, scope = null) => {
+    const sameScope = scope !== null && scope === scopeRef.current;
+    scopeRef.current = scope;
+    const fresh = gapsFromMisses(misses);
+    setGaps((rows) => (sameScope
+      ? fresh.map((f) => rows.find((r) => r.miss === f.miss) || f)
+      : fresh));
+  }, []);
+  const reset = useCallback(() => { scopeRef.current = null; setGaps([]); }, []);
   const update = useCallback((requestKey, patch) => {
     setGaps((rows) => rows.map((r) => (r.requestKey === requestKey ? { ...r, ...patch } : r)));
   }, []);
