@@ -330,7 +330,7 @@ describe('exception rules', () => {
     ['one_time lane on a recurring series', { billingLane: 'one_time' }, 'lane_cleanup'],
     ['engine replay needs a human (manual review / heuristic turf / LOW confidence)', { listLowConfidence: true }, 'list_low_confidence'],
     ['unclassified service family', { familyKey: 'other' }, 'unsupported_family'],
-    ['lane inferred from a legacy NULL billing_mode (informational beside the lane rule)', { laneInferred: true }, 'lane_inferred'],
+    ['a ledger component the engine replay did not price (palm sold on a separate estimate)', { listBundleIncomplete: true }, 'list_bundle_incomplete'],
     ['two live prepay terms could cover the line', { prepayTermAmbiguous: true }, 'prepay_term_ambiguous'],
     ['monthly dues with no per-family attribution', { rateUnattributed: true }, 'rate_unattributed'],
     ['facts loader failed (fail closed)', { facts: null }, 'facts_unavailable'],
@@ -540,6 +540,10 @@ describe('current rate per billing lane', () => {
     const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'monthly_membership', laneInferred: true, anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 5500, rateUnit: 'month', listRateCents: 5500, facts: fixture.facts() });
     expect(row.flags).toContain('lane_inferred');
     expect(row.flags).not.toContain('lane_cleanup');
+    // informational only — the lane rule itself decides any hold; an inferred monthly member ranks normally
+    expect(row.status).not.toBe('exception');
+    expect(row.flags.filter((f) => rateReview.EXCEPTION_FLAGS.includes(f))).toEqual([]);
+    expect(P.evaluateExceptions({ familyKey: 'pest_control', billingLane: 'monthly_membership', laneInferred: true, anniversaryDate: '2025-01-10', tenureMonths: 21, facts: fixture.facts() })).toEqual([]);
     // a NULL mode with no tier / dues infers per_visit → cleanup, as before
     const bare = fixture.customer(1, { billing_mode: null, waveguard_tier: null, monthly_rate: null });
     expect(resolveBillingLane(bare).mode).toBe('per_visit');
@@ -1154,6 +1158,55 @@ describe('engine replay guards', () => {
     expect(dues).toMatch(/sum\(amount - COALESCE\(refund_amount, 0\)\)/);
     expect(dues).toMatch(/sum\(i\.total\) - COALESCE\(sum\(\(/);
     expect(dues).toMatch(/GREATEST\(COALESCE\(inv\.amount, 0\), COALESCE\(pay\.amount, 0\)\)/);
+  });
+  test('the current rate is the recurring application\'s own price (rowServicePrice), never a composite visit\'s appointment total', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
+    // estimate-membership-context.js rowServicePrice: no add-ons → estimated_price; composite → primary net of its line discount; appointment-level discount → withheld
+    expect(planQuery).toMatch(/NOT EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\)/);
+    expect(planQuery).toMatch(/COALESCE\(s\.discount_dollars, 0\) > 0 OR s\.discount_type IS NOT NULL OR s\.discount_id IS NOT NULL THEN NULL/);
+    expect(planQuery).toMatch(/s\.primary_line_price - COALESCE\(s\.line_discount_dollars, 0\) > 0/);
+    expect(planQuery).toMatch(/WITHIN GROUP \(ORDER BY service_price\) FILTER \(WHERE service_price > 0\) AS median_price/);
+    expect(planQuery).not.toMatch(/ORDER BY estimated_price/);
+    expect(planQuery).toMatch(/count\(\*\) FILTER \(WHERE service_price IS NULL AND estimated_price > 0\)::int AS withheld_visits/);
+    // every priced open visit composite with an unattributable discount → no application price → held, never the account fee
+    const customer = fixture.customer(1, { billing_mode: 'per_application', per_application_fee: 95 });
+    const withheld = P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', null, { withheld_visits: 3 }), liveTerms: [], ledgerSlice: null });
+    expect(withheld).toMatchObject({ cents: 0, source: 'none', unit: 'application', rateUnattributed: true, compositeWithheld: true });
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 0, currentRateSource: 'none', rateUnit: 'application', rateUnattributed: true, compositeWithheld: true, facts: fixture.facts() });
+    expect(row.status).toBe('skipped');
+    expect(row.flags).toEqual(expect.arrayContaining(['rate_unattributed', 'composite_discount_withheld', 'no_current_rate']));
+    // visits that do decompose still price the line; an unpriced book still falls to the fee
+    expect(P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', 117, { withheld_visits: 1 }), liveTerms: [], ledgerSlice: null })).toMatchObject({ cents: 11700, source: 'visit_median' });
+    expect(P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', null), liveTerms: [], ledgerSlice: null })).toMatchObject({ cents: 9500, source: 'per_application_fee' });
+  });
+  test('a combined completion-packet invoice credits each member its own settled share, never its whole total to the anchor member', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const revenue = src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));
+    // visit-completion-invoice.js mintPacketInvoice: one invoice under billed[0].member.id, members linked via visit_completion_packet_items.invoice_id
+    expect(revenue).toMatch(/OR EXISTS \(SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2\.invoice_id = i\.id AND pm2\.scheduled_service_id = s\.id\)/);
+    expect(revenue).toMatch(/LEFT JOIN LATERAL \(/);
+    expect(revenue).toMatch(/COALESCE\(s\.estimated_price, 0\) \/ sum\(m\.estimated_price\)/);
+    expect(revenue).toMatch(/HAVING count\(\*\) > 1/);
+    expect(revenue).toMatch(/\) \* COALESCE\(share\.fraction, 1\)\)/);
+    expect(revenue).not.toMatch(/WHERE i\.scheduled_service_id = s\.id AND/);
+  });
+  test('a monthly replay must price every ledger component — a palm program sold on a separate estimate is no rider of the bed replay', () => {
+    const bedOnly = { lineItems: [{ service: 'tree_shrub', annualAfterDiscount: 360, visitsPerYear: 6 }], waveGuard: { tier: 'silver' } };
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toEqual({ bundleIncomplete: true, missingServices: ['palm_injection'], tier: 'silver' });
+    // the reverse: a palm-only replay cannot stand in for a slice that also pays for the bed program
+    const palmOnly = { lineItems: [{ service: 'palm_injection', annualAfterDiscount: 300, visitsPerYear: 2 }], waveGuard: { tier: 'bronze' } };
+    expect(P.listRateFromEngineResult(palmOnly, 'tree_shrub', 'semiannual', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ bundleIncomplete: true, missingServices: ['tree_shrub'] });
+    // a slice that carries only what the replay priced is complete; the per-application lane never needs riders
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub'] })).toMatchObject({ monthlyCents: 3000, riderServices: [] });
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ perAppCents: 6000 });
+    // ledger keys outside this line's engine programs (an unrelated family in the slice) are not required of the replay
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'unattributed'] })).toMatchObject({ monthlyCents: 3000 });
+    // and the held line is an exception, not a silent one-program comparison
+    expect(rateReview.EXCEPTION_FLAGS).toContain('list_bundle_incomplete');
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'tree_shrub', cadence: 'bimonthly', visitsPerYear: 6, billingLane: 'monthly_membership', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 4250, rateUnit: 'month', listRateCents: null, listBundleIncomplete: true, facts: fixture.facts() });
+    expect(row.status).toBe('exception');
+    expect(row.flags).toContain('list_bundle_incomplete');
   });
   test('a family restarted on a new estimate takes the first completed visit of the current series', () => {
     const first = { first_visit: '2024-03-10', completed_dates: ['2024-03-10', '2024-06-10', '2026-07-02', '2026-10-02'] };

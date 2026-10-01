@@ -36,6 +36,11 @@ router.use((req, res, next) => {
   return next();
 });
 
+function lockBusy(res, locked) {
+  if (locked.reason === 'lease_held') return res.status(409).json({ error: 'A rate review build is running right now — try again in a minute.', reason: 'build_in_progress' });
+  return res.status(503).json({ error: 'The rate review build lock is unavailable — try again shortly.', reason: 'lock_unavailable' });
+}
+
 function validBatchKey(req, res) {
   const key = String(req.params.key || '');
   if (!BATCH_KEY_RE.test(key)) {
@@ -84,30 +89,58 @@ router.post('/batches/:key/build', async (req, res) => {
       // the updated one (the same ops email to contact@; never a customer
       // send) — inside the same lock, so no tick interleaves.
       let digest = result.digestReset ? 'reset' : 'unchanged';
+      let digestStatus = null;
       if (result.digestReset) {
         try {
           const sent = await rateReview.sendBatchEmail({ batchKey: key });
           digest = sent && sent.sent ? 'resent' : 'reset';
         } catch (err) {
-          logger.error(`[admin-rate-review] updated digest for ${key} could not be sent (status ${Number.isInteger(err && err.status) ? err.status : 'network'})`);
+          digest = 'failed';
+          digestStatus = Number.isInteger(err && err.status) ? err.status : 'network';
+          logger.error(`[admin-rate-review] updated digest for ${key} could not be sent (status ${digestStatus})`);
         }
       }
-      return { result, digest };
+      return { result, digest, digestStatus };
     }, { recordHealth: false, waitForSlot: false });
-    if (wasLockSkipped(locked)) {
-      if (locked.reason === 'lease_held') return res.status(409).json({ error: 'A rate review build is running right now — try again in a minute.', reason: 'build_in_progress' });
-      return res.status(503).json({ error: 'The rate review build lock is unavailable — try again shortly.', reason: 'lock_unavailable' });
-    }
-    const { result, digest } = locked;
+    if (wasLockSkipped(locked)) return lockBusy(res, locked);
+    const { result, digest, digestStatus } = locked;
     if (!result.ok && result.reason === 'batch_has_sent_rows') {
       return res.status(409).json({ error: 'This batch already has rows that were sent to customers — it cannot be recomputed.', reason: result.reason });
     }
     if (!result.ok) return res.status(409).json({ error: 'Rate review batch could not be built', reason: result.reason });
-    return res.json({ ok: true, batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances, digest });
+    const built = { batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances, digest };
+    // The rebuild landed but the owner's updated digest did not. The batch
+    // now carries no delivery marker, so a later rebuild sees nothing to
+    // reset and would never resend: the failure is answered as one (502,
+    // with the batch), and POST …/digest below delivers it on demand.
+    if (digest === 'failed') {
+      return res.status(502).json({ ...built, ok: false, built: true, reason: 'digest_delivery_failed', digestStatus, error: 'The batch was rebuilt, but its updated digest could not be delivered — send it again from the batch.' });
+    }
+    return res.json({ ok: true, ...built });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] build failed for ${key}: ${err.message}`);
     return res.status(500).json({ error: 'Could not build the rate review batch' });
+  }
+});
+
+// On-demand delivery of a batch's owner digest — the same ops email the
+// monthly tick sends to contact@ (never a customer send): the retry for a
+// rebuild whose updated digest failed, or a catch-up batch built by hand.
+// Under the tick's lock, like the build.
+router.post('/batches/:key/digest', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  try {
+    const locked = await runExclusive(BUILD_LOCK, () => rateReview.sendBatchEmail({ batchKey: key }), { recordHealth: false, waitForSlot: false });
+    if (wasLockSkipped(locked)) return lockBusy(res, locked);
+    const sent = locked || {};
+    if (sent.skipped === 'no_batch') return res.status(404).json({ error: 'No rate review batch has that key', reason: 'no_batch' });
+    return res.json({ ok: true, batchKey: key, sent: !!sent.sent, stamped: !!sent.stamped, skipped: sent.skipped || null, subject: sent.subject || null });
+  } catch (err) {
+    const status = Number.isInteger(err && err.status) ? err.status : 'network';
+    logger.error(`[admin-rate-review] digest for ${key} could not be sent (status ${status})`);
+    return res.status(502).json({ error: 'The rate review digest could not be delivered — try again.', reason: 'digest_delivery_failed', digestStatus: status });
   }
 });
 
