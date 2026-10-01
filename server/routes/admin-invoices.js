@@ -1911,7 +1911,18 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     const result = await StripeService.chargeInvoiceWithSavedCard(
       req.params.id,
       paymentMethodId,
-      { expectedTotal },
+      // Staff ordered this charge explicitly: exempt from the default
+      // collections dispute-hold guard (an operator may override a hold).
+      // The override is recorded at the charge boundary (stripe.js) when a
+      // dispute hold is active, naming this admin.
+      {
+        expectedTotal,
+        operatorOverride: true,
+        overrideTrail: {
+          actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
+          route: 'admin_invoice_charge_card', invoiceId: req.params.id,
+        },
+      },
     );
     res.json({ success: true, ...result });
   } catch (err) {

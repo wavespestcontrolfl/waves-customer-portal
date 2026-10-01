@@ -4,6 +4,7 @@
  */
 
 const db = require('../models/db');
+const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const { computeMrrBreakdown } = require('./mrr-breakdown');
 const { tierBreakdown, pendingPrepayIds } = require('./mrr-snapshot');
 const logger = require('./logger');
@@ -256,7 +257,7 @@ async function executeBITool(toolName, input) {
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', lastMonthStart).where('payment_date', '<=', lastMonthEnd).sum('amount as total').first(),
         computeMrrBreakdown(db, todayDate, pendingIds),
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
-        db('payments').whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id').sum('amount as total').first(),
+        excludeNeverAttemptedHoldDeferrals(db('payments').whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id')).sum('amount as total').first(),
         tierBreakdown(db, pendingIds),
       ]);
 
@@ -562,8 +563,8 @@ async function executeBITool(toolName, input) {
 
       // Payment failure spike
       try {
-        const thisWeek = await db('payments').where('status', 'failed').whereNull('superseded_by_payment_id').where('payment_date', '>=', weekAgo).count('* as count').first();
-        const lastWeek = await db('payments').where('status', 'failed').whereNull('superseded_by_payment_id').where('payment_date', '>=', twoWeeksAgo).where('payment_date', '<', weekAgo).count('* as count').first();
+        const thisWeek = await excludeNeverAttemptedHoldDeferrals(db('payments').where('status', 'failed').whereNull('superseded_by_payment_id').where('payment_date', '>=', weekAgo)).count('* as count').first();
+        const lastWeek = await excludeNeverAttemptedHoldDeferrals(db('payments').where('status', 'failed').whereNull('superseded_by_payment_id').where('payment_date', '>=', twoWeeksAgo).where('payment_date', '<', weekAgo)).count('* as count').first();
         const tw = parseInt(thisWeek?.count || 0), lw = parseInt(lastWeek?.count || 0);
         if (tw > lw * 1.5 && tw > 2) anomalies.push({ type: 'payment_failures', severity: 'warning', detail: `${tw} failed payments this week (was ${lw} last week)` });
       } catch {}

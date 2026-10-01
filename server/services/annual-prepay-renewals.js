@@ -199,6 +199,18 @@ function whereCallbackRow(cols) {
   };
 }
 const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
+const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
+
+// Card-expiry WARNING path (not money): a hold-lookup failure must not reject
+// the whole exemption pass. Treat it as "not exempt" so the warning stays.
+async function collectionHoldStopsExtendedLane(customerId, conn) {
+  try {
+    return await customerHasActiveCollectionHold(customerId, conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] collection-hold lookup failed for customer ${customerId} - card-expiry warning stays (not exempt): ${err.message}`);
+    return false;
+  }
+}
 const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
 const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
 
@@ -6266,6 +6278,12 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // is about to MINT — priced by the same completionInvoiceAmount
       // precedence the prediction reports (the setup-fee allowance rides
       // the cap verdict, so a first-visit fee line cannot push it over).
+      // Active collections collection_hold (dispute on a collections call,
+      // B10): the shared Stripe primitives refuse EVERY off-session charge for
+      // the customer, so no lane (per-application, appointment-card,
+      // estimate-card-hold, extended, pending-mint) is a forthcoming charge -
+      // exempt before any lane-specific / reused-invoice branch.
+      if (await collectionHoldStopsExtendedLane(reused?.customer_id || v.customer_id, conn)) continue;
       const perApplicationBilling = v.billing_mode === 'per_application';
       const annualPrepayBilling = v.billing_mode === 'annual_prepay';
       const explicitMembershipLane = v.billing_mode === 'monthly_membership';
