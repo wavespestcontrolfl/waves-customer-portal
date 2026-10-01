@@ -15,13 +15,19 @@ const MAX_SPECIES = 3;
 // the answer) so the weekly knowledge-gaps email can list what the
 // knowledge base could not answer. A missing or malformed line records NULL.
 const COVERAGE_RULE = ' After your answer, add one final line exactly "COVERAGE: full", "COVERAGE: partial" or "COVERAGE: none" — full when the articles fully answer the question, partial when they answer only part of it, none when they do not answer it.';
-const COVERAGE_LINE = /^[ \t]*[*_`]*COVERAGE:[ \t]*(full|partial|none)[*_`. \t]*$/gim;
+// Only the END of the answer is read: the upper-case COVERAGE token, any
+// markdown around it, the value, and anything after it on that line (a
+// trailing explanation). Ordinary text such as a "Coverage: none" row in a
+// warranty table is never touched.
+const COVERAGE_TAIL = /(^|[\s.;)])[>*_`\s-]*COVERAGE[*_`]*[ \t]*[:=][ \t*_`]*([A-Za-z]+)[^\n]*\s*$/;
+const COVERAGE_VALUES = new Set(['full', 'partial', 'none']);
 
 function splitCoverage(text) {
   const raw = String(text || '');
-  let coverage = null;
-  for (const m of raw.matchAll(COVERAGE_LINE)) coverage = m[1].toLowerCase();
-  return { answer: raw.replace(COVERAGE_LINE, '').trimEnd(), coverage };
+  const m = raw.match(COVERAGE_TAIL);
+  const coverage = m ? m[2].toLowerCase() : null;
+  if (!m || !COVERAGE_VALUES.has(coverage)) return { answer: raw.trimEnd(), coverage: null };
+  return { answer: raw.slice(0, m.index + m[1].length).trimEnd(), coverage };
 }
 const CATALOG_FILE_BACK_REASON = 'Answer drew on the species catalog; it is not filed back into the knowledge base';
 

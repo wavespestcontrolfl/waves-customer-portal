@@ -11,7 +11,10 @@
 // field Q&A, admin Q&A, content agents) and the Intelligence Bar logs a
 // knowledge search that found nothing at all.
 //
-// Cron: Monday 8:41am ET in scheduler.js, inside runExclusive.
+// Cron: Monday 8:41am ET in scheduler.js, inside runExclusive, then hourly
+// at :41 through Tuesday as catch-up ticks — the once-per-week stamp makes
+// them no-ops after a successful send, and a failed send or a deploy over
+// 8:41 is retried the same week.
 // Kill: KNOWLEDGE_GAPS_WEEKLY=off. Recipient: KNOWLEDGE_GAPS_EMAIL
 // (internal inboxes only, default contact@).
 
@@ -71,11 +74,12 @@ async function loadWeek(now = new Date()) {
 }
 
 // Pure: the week's gap rows → subject + plain-text body.
-function composeGapsEmail(rows = [], now = new Date()) {
+function composeGapsEmail(allRows = [], now = new Date()) {
+  // A question with no words (punctuation only) is not a gap anyone can fill.
+  const rows = allRows.filter((r) => questionKey(r.query));
   const groups = new Map();
   for (const r of rows) {
     const key = questionKey(r.query);
-    if (!key) continue;
     const g = groups.get(key) || { question: r.query, count: 0, none: 0, sources: new Set(), last: 0 };
     g.count += 1;
     if (r.coverage === 'none') g.none += 1;

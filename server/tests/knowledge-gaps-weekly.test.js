@@ -46,6 +46,12 @@ describe('composeGapsEmail', () => {
     });
   });
 
+  test('a punctuation-only question is left out of every count', () => {
+    const { text, gaps } = composeGapsEmail([row('door sweeps'), row('???', 'tech_field')], NOW);
+    expect(gaps).toBe(1);
+    expect(text).toMatch(/Asked by: lead agent 1\./);
+  });
+
   test('question key ignores case, punctuation and spacing', () => {
     expect(questionKey('  Is it SAFE for my dog?! ')).toBe(questionKey('is it safe for my dog'));
   });
@@ -107,7 +113,7 @@ describe('runKnowledgeGapsWeekly', () => {
     expect(mailer.sendOne).not.toHaveBeenCalled();
   });
 
-  test('a failed send is not stamped, so the next tick retries', async () => {
+  test('a failed send is not stamped, so the next catch-up tick retries', async () => {
     mailer.sendOne = jest.fn(async () => ({ ok: false, error: 'boom' }));
     expect(await run()).toMatchObject({ sent: false, error: true });
     expect(stampSent).not.toHaveBeenCalled();

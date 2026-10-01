@@ -37,6 +37,13 @@ describe('splitCoverage', () => {
     ['Use bait.\n\nCOVERAGE: full', 'Use bait.', 'full'],
     ['Partly.\nCOVERAGE: partial.', 'Partly.', 'partial'],
     ['Not here.\n**COVERAGE: None**', 'Not here.', 'none'],
+    ['x\n**COVERAGE:** full', 'x', 'full'],
+    ['x\nCOVERAGE: **partial**', 'x', 'partial'],
+    ['x\nCOVERAGE: partial — the articles cover X but not Y', 'x', 'partial'],
+    ['Use bait. COVERAGE: full', 'Use bait.', 'full'],
+    ['| Plan | Coverage: none |\nok\nCOVERAGE: full', '| Plan | Coverage: none |\nok', 'full'],
+    // Ordinary answer text is never touched: lower-case "Coverage", or not at the end.
+    ['Termite plan\nCoverage: none', 'Termite plan\nCoverage: none', null],
     ['No line at all.', 'No line at all.', null],
     ['COVERAGE: maybe', 'COVERAGE: maybe', null],
   ])('%j', (text, answer, coverage) => {

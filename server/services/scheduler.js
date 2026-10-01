@@ -1624,10 +1624,13 @@ function initScheduledJobs() {
   // =========================================================================
   // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:41am ET (owner 2026-10-01: "send
   // me a weekly email" of the questions the knowledge base could not fully
-  // answer). Minute 41 is free in every schedule here, step patterns
-  // included. Kill: KNOWLEDGE_GAPS_WEEKLY=off.
+  // answer), then hourly at :41 until Tuesday 8:41pm as catch-up ticks: the
+  // once-per-week send stamp makes them no-ops after a successful send, so a
+  // failed send or a deploy over 8:41 still reports that week. Minute 41 is
+  // free in every schedule here, step patterns included.
+  // Kill: KNOWLEDGE_GAPS_WEEKLY=off.
   // =========================================================================
-  cron.schedule('41 8 * * 1', async () => {
+  cron.schedule('41 8-20 * * 1,2', async () => {
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('knowledge-gaps-weekly', async () => {
