@@ -85,6 +85,7 @@ const Schedule = require('../services/customer-dunning/schedule');
 const Runner = require('../services/customer-dunning/runner');
 const Admin = require('../services/customer-dunning/admin');
 const Wiring = require('../services/customer-dunning/wiring');
+const BalanceSet = require('../services/customer-dunning/balance-set');
 const { OPEN_STATUSES, lockKey } = require('../services/customer-dunning/constants');
 
 const NOW = new Date('2026-10-07T14:16:00Z'); // Wednesday, inside the send window
@@ -93,6 +94,12 @@ const CUST2 = '0b6f4a52-6a0e-4c8e-9c7e-2f3a9d8e1a02';
 const IN_FLIGHT_COPY = 'The reminder is sending right now. Try again in a minute.';
 
 const writes = () => mockDb.log.filter((e) => e.write);
+// A resolved set (balance-set.js shape) whose members carry these sequence statuses.
+const setOf = (statuses) => ({
+  kind: statuses.length >= 2 ? 'multi' : 'single',
+  reason: null,
+  members: statuses.map((seqStatus, i) => ({ invoice_id: `inv-${i}`, cents: 1000, seqStatus, quiet: seqStatus === 'completed' || seqStatus === 'none' })),
+});
 const tablesRead = () => mockDb.log.filter((e) => e.table).map((e) => e.table);
 
 beforeEach(() => {
@@ -579,19 +586,54 @@ describe('send-now and staff controls', () => {
 
   test('customerScheduleSummary: the open schedule, the human name of its step and how many invoices it covers; null otherwise', async () => {
     const openFor = jest.spyOn(Schedule, 'openScheduleFor');
-    const members = jest.spyOn(Schedule, 'activeMemberRows');
+    const resolve = jest.spyOn(BalanceSet, 'resolveDunnableSet');
     expect(await Wiring.customerScheduleSummary('not-a-uuid')).toBeNull();
     expect(openFor).not.toHaveBeenCalled();
     openFor.mockResolvedValueOnce(undefined);
     expect(await Wiring.customerScheduleSummary(CUST)).toBeNull();
+    expect(resolve).not.toHaveBeenCalled();
     const next = new Date(NOW.getTime() + 86400000);
     openFor.mockResolvedValueOnce({ ...openRow, step_index: 4, next_touch_at: next });
-    members.mockResolvedValueOnce([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    resolve.mockResolvedValueOnce(setOf(['active', 'active', 'active']));
     expect(await Wiring.customerScheduleSummary(CUST)).toEqual({
       id: 'sched-1', status: 'active', stepIndex: 4, stepLabel: Schedule.STEPS[4].label, invoiceCount: 3, nextTouchAt: next,
     });
     expect(Schedule.STEPS[4].label).toBe('60-day reminder');
-    expect(members).toHaveBeenCalledWith(CUST);
+    expect(resolve).toHaveBeenCalledWith(CUST, { now: expect.any(Date) });
+  });
+
+  // Codex local review P2: the count came from the ACTIVE sequence rows, but the send (and its pay link) covers
+  // every member of the resolved set, quiet ones (completed / no sequence) included.
+  describe('the invoice count is the send authority\'s, read-only, and degrades to no number', () => {
+    beforeEach(() => { jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue({ ...openRow, step_index: 4 }); });
+
+    test('2 active + 1 with no sequence: 3, the number the message and pay link cover (not the 2 active rows)', async () => {
+      const members = jest.spyOn(Schedule, 'activeMemberRows').mockResolvedValue([{ id: 'a' }, { id: 'b' }]);
+      jest.spyOn(BalanceSet, 'resolveDunnableSet').mockResolvedValue(setOf(['active', 'active', 'none']));
+      expect((await Wiring.customerScheduleSummary(CUST)).invoiceCount).toBe(3);
+      expect(members).not.toHaveBeenCalled();
+      expect(writes()).toEqual([]);
+    });
+
+    test('a hold still names the invoices the balance covers; a set that resolved nothing gives no number', async () => {
+      const resolve = jest.spyOn(BalanceSet, 'resolveDunnableSet');
+      resolve.mockResolvedValueOnce({ ...setOf(['active', 'completed']), kind: 'hold', reason: 'member_paused' });
+      expect((await Wiring.customerScheduleSummary(CUST)).invoiceCount).toBe(2);
+      resolve.mockResolvedValueOnce({ kind: 'hold', reason: 'balance_incomplete', members: [] });
+      expect((await Wiring.customerScheduleSummary(CUST)).invoiceCount).toBeNull();
+      resolve.mockResolvedValueOnce({ kind: 'empty', reason: 'no_open_invoices', members: [] });
+      expect((await Wiring.customerScheduleSummary(CUST)).invoiceCount).toBeNull();
+    });
+
+    test('a throw or a slow read never fails the GET: the summary comes back without a number', async () => {
+      const resolve = jest.spyOn(BalanceSet, 'resolveDunnableSet');
+      resolve.mockRejectedValueOnce(new Error('stripe down'));
+      expect(await Wiring.customerScheduleSummary(CUST)).toMatchObject({ id: 'sched-1', stepIndex: 4, invoiceCount: null });
+      resolve.mockImplementationOnce(() => new Promise(() => {})); // never settles
+      const pending = Wiring.customerScheduleSummary(CUST, { countTimeoutMs: 50 });
+      await jest.advanceTimersByTimeAsync(60);
+      expect(await pending).toMatchObject({ id: 'sched-1', stepLabel: '60-day reminder', invoiceCount: null });
+    });
   });
 
   test('404: a non-uuid id (no query) and a customer with no open schedule', async () => {

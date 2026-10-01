@@ -9023,13 +9023,23 @@ function CreateInvoice({
 
 const pluralInvoices = (n) => `${n} invoice${n === 1 ? "" : "s"}`;
 
+// Who a combined send reaches, as the confirm names it. No number when the server sent none (it could not
+// read the balance in time): "all invoices", never a count that may be wrong.
+const combinedAudience = (invoiceCount) => {
+  if (!Number.isInteger(invoiceCount) || invoiceCount < 1) return "all invoices";
+  return invoiceCount === 1 ? "the 1 invoice" : `all ${invoiceCount} invoices`;
+};
+
 // The panel's line for a customer on combined reminders (GET /:id/followup
 // `customerSchedule`): this invoice is reminded together with the customer's
 // other overdue invoices, at the combined step. Exported for tests.
 export function combinedReminderSummary(customerSchedule) {
   if (!customerSchedule) return null;
   const { stepLabel, invoiceCount, status, nextTouchAt } = customerSchedule;
-  const lead = `On combined reminders with ${pluralInvoices(invoiceCount)} for this customer.`;
+  // invoiceCount is null when the server could not read the balance in time: no number then.
+  const lead = Number.isInteger(invoiceCount) && invoiceCount > 0
+    ? `On combined reminders with ${pluralInvoices(invoiceCount)} for this customer.`
+    : "On combined reminders for this customer.";
   if (status === "paused") return `${lead} Combined reminders are paused.`;
   if (!stepLabel) return lead;
   const when = nextTouchAt ? ` on ${new Date(nextTouchAt).toLocaleString()}` : "";
@@ -9048,7 +9058,7 @@ export function followupSendNowPlan(data) {
   const { id, stepIndex, stepLabel, invoiceCount } = customerSchedule;
   const step = stepLabel ? `the ${stepLabel}` : "the current combined reminder";
   return {
-    confirmText: `This customer is on combined reminders. Send ${step} now to ${invoiceCount === 1 ? "the 1 invoice" : `all ${invoiceCount} invoices`} on their balance, not just this one?`,
+    confirmText: `This customer is on combined reminders. Send ${step} now to ${combinedAudience(invoiceCount)} on their balance, not just this one?`,
     body: { combined: true, scheduleId: id, stepIndex },
   };
 }

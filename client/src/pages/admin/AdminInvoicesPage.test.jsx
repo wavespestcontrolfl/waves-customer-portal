@@ -455,6 +455,19 @@ describe("FollowupPanel send-now on combined reminders (Codex #5503 r2 P1)", () 
     expect(combinedReminderSummary({ ...customerSchedule, invoiceCount: 1 })).toMatch(/with 1 invoice for/);
   });
 
+  // Codex local review P2: the server omits the count (null) when it cannot read the balance in time; the
+  // copy then names no number rather than one that may be wrong.
+  it("no count from the server: the confirm and the panel line say \"all invoices\", never a number", () => {
+    const noCount = { ...customerSchedule, invoiceCount: null };
+    expect(followupSendNowPlan({ customerSchedule: noCount }).confirmText).toBe(
+      "This customer is on combined reminders. Send the 60-day reminder now to all invoices on their balance, not just this one?",
+    );
+    expect(followupSendNowPlan({ customerSchedule: noCount }).body).toEqual({ combined: true, scheduleId: customerSchedule.id, stepIndex: 4 });
+    expect(combinedReminderSummary(noCount)).toBe("On combined reminders for this customer. Next: the 60-day reminder.");
+    expect(combinedReminderSummary({ ...noCount, invoiceCount: undefined })).not.toMatch(/undefined|null|NaN/);
+    expect(followupSendNowPlan({ customerSchedule: { ...noCount, invoiceCount: 0 } }).confirmText).toMatch(/to all invoices on/);
+  });
+
   it("a refused action shows the server's own words, else the generic toast", () => {
     const refused = Object.assign(new Error("This customer is on combined reminders. Reload to see the combined step before sending."), {
       status: 409,

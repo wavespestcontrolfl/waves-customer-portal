@@ -24,6 +24,7 @@ const { OPEN_STATUSES } = require('./constants');
 const Schedule = require('./schedule');
 const Admin = require('./admin');
 const Runner = require('./runner');
+const BalanceSet = require('./balance-set');
 
 /** The live engine covers this customer: the gate and its prerequisites are on, and the allowlist (if any) names them. */
 function liveForCustomer(customerId) {
@@ -174,23 +175,51 @@ function sendNowForInvoiceOnSchedule(scheduleId, customerId, confirmed, { now = 
 /** The send-now answer for a confirmed combined step whose customer has no open schedule any more. */
 const combinedScheduleClosed = (scheduleId) => ({ routedTo: 'customer_schedule', scheduleId, ...COMBINED_SCHEDULE_CLOSED });
 
+// How long the panel's GET waits for the invoice count before showing the step without it.
+const SUMMARY_COUNT_TIMEOUT_MS = 4000;
+
+/**
+ * How many invoices a combined send would cover right now: the members of the set the send itself resolves
+ * (resolveDunnableSet, the pay page's own authority, so quiet members with a completed or absent sequence
+ * count too), never the active sequence rows alone (Codex local review P2: 2 active + 1 sequence-less read
+ * "all 2 invoices" while the message and pay link covered 3). Read-only. null when the set cannot be read
+ * in time or names nothing (a hold that could not resolve the balance, nothing open): the panel then says
+ * "all invoices on their balance" rather than a number that may be wrong.
+ */
+async function combinedInvoiceCount(customerId, { now = new Date(), timeoutMs = SUMMARY_COUNT_TIMEOUT_MS } = {}) {
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    const set = await Promise.race([BalanceSet.resolveDunnableSet(customerId, { now }), timeout]);
+    const count = Array.isArray(set?.members) ? set.members.length : 0;
+    return count > 0 ? count : null;
+  } catch (err) {
+    logger.warn(`[customer-dunning] invoice count for customer ${customerId} unreadable: ${redactContact(err.message)}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * What the invoice panel shows (GET /api/admin/invoices/:id/followup) for a customer on combined
- * reminders: the open schedule, the human name of its current step and how many invoices it covers.
- * null when the customer has no open schedule.
+ * reminders: the open schedule, the human name of its current step and how many invoices a send would
+ * cover (combinedInvoiceCount; null when it cannot be read). null when the customer has no open schedule.
  */
-async function customerScheduleSummary(customerId) {
+async function customerScheduleSummary(customerId, { now = new Date(), countTimeoutMs } = {}) {
   if (!UUID.test(String(customerId || ''))) return null;
   const schedule = await Schedule.openScheduleFor(customerId);
   if (!schedule) return null;
-  const members = await Schedule.activeMemberRows(customerId);
   const stepIndex = Number(schedule.step_index);
   return {
     id: schedule.id,
     status: schedule.status,
     stepIndex,
     stepLabel: Schedule.STEPS[stepIndex]?.label || null,
-    invoiceCount: members.length,
+    invoiceCount: await combinedInvoiceCount(customerId, { now, timeoutMs: countTimeoutMs }),
     nextTouchAt: schedule.next_touch_at || null,
   };
 }
