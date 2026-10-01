@@ -1892,7 +1892,7 @@ router.get('/churn-reasons', dashboardCache, async (req, res, next) => {
 // call↔lead linkage is call-SID based. Shaping in services/lead-funnel.js.
 router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
   try {
-    const { buildLeadFunnel } = require('../services/lead-funnel');
+    const { buildLeadFunnel, buildFunnelBreakdown, FUNNEL_BREAKDOWN_SQL } = require('../services/lead-funnel');
     const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     // Effective paid signal mirrors splitFacebookByPaid: a Meta click id
     // (fbclid/_fbc) OR the explicit flag — is_paid alone is NULL on most
@@ -1911,31 +1911,47 @@ router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
     // must clean this card too), and internal/test names are excluded via the
     // linked lead OR customer — both joins are LEFT and the name expressions
     // COALESCE to '', so unlinked rows are never silently dropped.
-    const qb = db('ad_service_attribution as asa')
-      .leftJoin('leads as l', 'l.id', 'asa.lead_id')
-      .leftJoin('customers as c', 'c.id', 'asa.customer_id')
-      .where('asa.lead_date', '>=', win.from)
-      .where('asa.lead_date', '<=', win.to)
-      .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)');
-    if (INTERNAL_TEST_CUSTOMERS.length) {
-      const marks = INTERNAL_TEST_CUSTOMERS.map(() => '?').join(',');
-      qb.whereRaw(
-        `LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) NOT IN (${marks})`,
-        INTERNAL_TEST_CUSTOMERS,
-      ).whereRaw(
-        `LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) NOT IN (${marks})`,
-        INTERNAL_TEST_CUSTOMERS,
-      );
-    }
-    const rows = await qb
-      .groupBy('asa.lead_source', 'asa.funnel_stage', db.raw(PAID_SQL))
-      .select(
-        'asa.lead_source',
-        'asa.funnel_stage',
-        db.raw(`${PAID_SQL} as is_paid`),
-        db.raw('COUNT(*) as n'),
-      );
-    res.json({ period: win, ...buildLeadFunnel(rows) });
+    const base = () => {
+      const qb = db('ad_service_attribution as asa')
+        .leftJoin('leads as l', 'l.id', 'asa.lead_id')
+        .leftJoin('customers as c', 'c.id', 'asa.customer_id')
+        // A self-booking's row has no lead; its captured page lives on the
+        // booking (one row per id, so the join never multiplies counts).
+        .leftJoin('self_booked_appointments as sba', 'sba.id', 'asa.self_booked_appointment_id')
+        .where('asa.lead_date', '>=', win.from)
+        .where('asa.lead_date', '<=', win.to)
+        .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)');
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        const marks = INTERNAL_TEST_CUSTOMERS.map(() => '?').join(',');
+        qb.whereRaw(
+          `LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) NOT IN (${marks})`,
+          INTERNAL_TEST_CUSTOMERS,
+        ).whereRaw(
+          `LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) NOT IN (${marks})`,
+          INTERNAL_TEST_CUSTOMERS,
+        );
+      }
+      return qb;
+    };
+    // Completed revenue the attribution sync credited to each row.
+    const REVENUE_SQL = 'COALESCE(SUM(asa.completed_revenue), 0) as revenue';
+    const [rows, ...breakdownRows] = await Promise.all([
+      base()
+        .groupBy('asa.lead_source', 'asa.funnel_stage', db.raw(PAID_SQL))
+        .select(
+          'asa.lead_source',
+          'asa.funnel_stage',
+          db.raw(`${PAID_SQL} as is_paid`),
+          db.raw('COUNT(*) as n'),
+          db.raw(REVENUE_SQL),
+        ),
+      ...Object.values(FUNNEL_BREAKDOWN_SQL).map((expr) => base()
+        .groupByRaw(`${expr}, asa.funnel_stage`)
+        .select(db.raw(`${expr} as group_key`), 'asa.funnel_stage', db.raw('COUNT(*) as n'), db.raw(REVENUE_SQL))),
+    ]);
+    const breakdowns = Object.fromEntries(Object.keys(FUNNEL_BREAKDOWN_SQL)
+      .map((dim, i) => [dim, buildFunnelBreakdown(breakdownRows[i], dim)]));
+    res.json({ period: win, ...buildLeadFunnel(rows), breakdowns });
   } catch (err) { next(err); }
 });
 
