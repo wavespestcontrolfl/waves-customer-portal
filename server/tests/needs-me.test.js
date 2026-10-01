@@ -7,6 +7,8 @@ jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn(), req
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   scopeAdminFeedToRole: jest.fn((q) => q),
+  // agent-activity (whose legacy title reader needs-me reuses) reads this at load.
+  _private: { NOTIFICATION_VERSION_SQL: jest.requireActual('../services/notification-service')._private.NOTIFICATION_VERSION_SQL },
 }));
 
 let mockRows;
