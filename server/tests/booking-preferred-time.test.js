@@ -959,6 +959,12 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed });
   });
 
+  test('a merge repoints the visit between the owner read and the lock (codex #5477 r13): the close judges the winner in the same run, not later', async () => {
+    mockLockedVisitChange = { customer_id: 'cust-winner' };
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 1 });
+    expect(closeWrites()).toHaveLength(1);
+  });
+
   test('the audit row and the FYI name the visit as locked, not the earlier read (codex #5477 r10)', async () => {
     mockLockedVisitChange = { scheduled_date: '2026-10-09' };
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ closed: 1 });
@@ -968,7 +974,8 @@ describe('a completed booking closes the customer\'s open preferred-time request
 
   test('the customer share lock is taken before the visit lock (codex #5477 r9: a merge locks customer, then visits)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
-    const customerLock = src.indexOf("trx('customers').where({ id: ownerId }).forShare()");
+    expect(src).toMatch(/const readCustomer = \(id\) => trx\('customers'\)\.where\(\{ id \}\)\.forShare\(\)/);
+    const customerLock = src.indexOf('let liveCustomer = await readCustomer(ownerId);');
     const visitLock = src.indexOf("trx('scheduled_services').where({ id: visit.id }).forUpdate()");
     expect(customerLock).toBeGreaterThan(-1);
     expect(visitLock).toBeGreaterThan(customerLock);

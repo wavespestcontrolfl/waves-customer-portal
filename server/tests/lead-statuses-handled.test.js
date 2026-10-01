@@ -98,6 +98,9 @@ describe("lead status 'handled'", () => {
     for (const t of tools) expect(t.input_schema.properties.new_status.enum).not.toContain('handled');
     const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
     expect(route).toMatch(/if \(updates\.status === 'handled' && existingLead\.status !== 'handled'\) \{\s*return res\.status\(400\)/);
+    // a status edit made from a stale open view never reopens a request the booking closed meanwhile (codex #5477 r13)
+    expect(route).toMatch(/if \(updates\.status !== undefined && current\.status === 'handled' && existingLead\.status !== 'handled'\) \{\s*return \{ closedMeanwhile: true \};/);
+    expect(route).toMatch(/if \(responseLead\.closedMeanwhile\) \{\s*return res\.status\(409\)/);
     // the board's handled column shows handled requests but takes no drops (codex #5477 r11)
     const board = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
     expect(board).toMatch(/const acceptsDrops = stage !== "handled";/);

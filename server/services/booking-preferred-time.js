@@ -643,14 +643,21 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         // committed since the booking repointed the visit to the winner and retired
         // the loser's phone, so the booking's own customer id may be stale.
         const owner = await trx('scheduled_services').where({ id: visit.id }).first('customer_id');
-        const ownerId = (owner && owner.customer_id) || customerId;
-        const liveCustomer = await trx('customers').where({ id: ownerId }).forShare()
+        let ownerId = (owner && owner.customer_id) || customerId;
+        const readCustomer = (id) => trx('customers').where({ id }).forShare()
           .first('phone', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'zip');
+        let liveCustomer = await readCustomer(ownerId);
         const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate()
           .first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id', 'service_address_line1', 'service_address_line2', 'service_address_zip');
         if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
-        // A merge between the owner read and the lock: leave it to the next closer.
-        if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) return null;
+        // A merge repointed the visit between the owner read and the lock (codex #5477
+        // r13): it has committed (the visit lock waited for it), so judge the request
+        // on the winner now instead of leaving it for a later closer the primary
+        // booking path may never run.
+        if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) {
+          ownerId = liveVisit.customer_id;
+          liveCustomer = await readCustomer(ownerId);
+        }
         // Re-read the lead under a row lock (codex #5399 r14): staff may have
         // reassigned its phone, linked it to another customer or closed it since
         // the open-lead query above, and the customer may have refreshed the

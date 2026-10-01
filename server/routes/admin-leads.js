@@ -1164,6 +1164,12 @@ router.put('/:id', async (req, res, next) => {
     const responseLead = await db.transaction(async (trx) => {
       const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
       if (!current) return null;
+      // The customer's own booking closed this request ('handled') after staff loaded
+      // it (codex #5477 r13): a status change made from the stale open view must not
+      // reopen it. Reopening a request staff SAW handled stays possible.
+      if (updates.status !== undefined && current.status === 'handled' && existingLead.status !== 'handled') {
+        return { closedMeanwhile: true };
+      }
       previousStatus = current.status;
       // Email-specific correction provenance (Codex round-4 P1 on the
       // V1/V2 email-disagreement hold, PR #4802): stamped ONLY when the
@@ -1202,6 +1208,9 @@ router.put('/:id', async (req, res, next) => {
       return statusChanged ? trx('leads').where('id', lead.id).first() : lead;
     });
     if (!responseLead) return res.status(404).json({ error: 'Lead not found' });
+    if (responseLead.closedMeanwhile) {
+      return res.status(409).json({ error: 'This request closed on its own: the customer booked online. Reload to see it.' });
+    }
 
     // Existing best-effort funnel settlement runs after the atomic lead/history write.
     if (updates.status && updates.status !== previousStatus) {
