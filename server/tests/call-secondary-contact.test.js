@@ -458,6 +458,20 @@ describe('persistCallSecondaryContact', () => {
     });
   });
 
+  test('the caller opt-out is written only AFTER the slot write commits — a 0-row slot race leaves the caller on (pre-push codex P1)', async () => {
+    const spouseContact = { first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true };
+    const raced = makeDb({ customer: bareCustomer, updateRows: 0 });
+    expect(await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe('skipped_slot_race');
+    expect(raced.prefsMerges.map((m) => m.mergePayload)).toEqual([]);
+    const landed = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe('written');
+    expect(landed.prefsMerges.map((m) => m.mergePayload)).toEqual([{ appointment_notify_primary: false }]);
+    // The TRUE flip for an ordinary first phone still precedes the slot write.
+    const ordinary = makeDb({ customer: bareCustomer, updateRows: 0 });
+    await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' });
+    expect(ordinary.prefsMerges.map((m) => m.mergePayload)).toEqual([{ appointment_notify_primary: true }]);
+  });
+
   test('a lost race (slot filled between read and write) is a no-op, not an overwrite', async () => {
     const writes = makeDb({ customer: bareCustomer, updateRows: 0 });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_slot_race');
@@ -1367,5 +1381,39 @@ describe('unconsented phone write re-checks the consent stamp atomically (#5467)
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at, at + 1500);
     expect(block).toContain("if (effectivePhone && !smsConsentExplicit) {\n    write = write.whereNull('service_contacts_consent_at');");
+  });
+});
+
+// Pre-push codex P1: evidence pointers use the MODEL's secondary_contacts
+// indices; when normalization drops a non-object shell (or the cap of 3 cuts
+// the tail) the pointers are remapped to the kept entry's new position and
+// pointers to dropped entries are removed.
+describe('V2 normalization keeps evidence indices aligned with secondary_contacts', () => {
+  const { normalizeExtractionV2, remapSecondaryContactEvidence } = require('../utils/normalize-extraction-v2');
+  const contact = (n) => ({ name_full: `Sample ${n}`, first_name: 'Sample', last_name: String(n), phone_e164: `+1555010010${n}`, role: 'tenant', wants_notifications: true, wants_appointment_texts: true, on_site: true });
+
+  test('a dropped shell shifts later pointers; the shell\'s own pointers are removed', () => {
+    const out = normalizeExtractionV2({
+      secondary_contacts: ['garbage', contact(1), contact(2)],
+      evidence: [
+        { field_path: '/secondary_contacts/0/on_site', quote: 'x', speaker: 'caller' },
+        { field_path: '/secondary_contacts/1/on_site', quote: 'one on site', speaker: 'caller' },
+        { field_path: '/secondary_contacts/2/wants_appointment_texts', quote: 'two texts', speaker: 'caller' },
+        { field_path: '/property/service_address', quote: 'addr', speaker: 'caller' },
+      ],
+    });
+    expect(out.secondary_contacts).toHaveLength(2);
+    expect(out.evidence.map((e) => e.field_path)).toEqual([
+      '/secondary_contacts/0/on_site', '/secondary_contacts/1/wants_appointment_texts', '/property/service_address',
+    ]);
+    expect(out.evidence[0].quote).toBe('one on site');
+  });
+
+  test('no drops → evidence untouched; pointers past the cap of 3 are removed', () => {
+    const ev = [{ field_path: '/secondary_contacts/0/on_site', quote: 'q' }, { field_path: '/secondary_contacts/3/on_site', quote: 'late' }];
+    const out = normalizeExtractionV2({ secondary_contacts: [contact(1), contact(2), contact(3), contact(4)], evidence: ev });
+    expect(out.secondary_contacts).toHaveLength(3);
+    expect(out.evidence).toEqual([ev[0]]);
+    expect(remapSecondaryContactEvidence(undefined, new Map())).toBeUndefined();
   });
 });

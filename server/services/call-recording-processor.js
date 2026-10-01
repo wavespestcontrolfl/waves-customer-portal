@@ -3077,8 +3077,14 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // receiving them (appointment_notify_primary FALSE). Their own same-call
   // booking confirmation is a separate primary send and is unchanged. Every
   // other first slot phone keeps the default: the caller stays in the loop.
+  // ORDER differs by direction: the TRUE flip lands before the slot write
+  // (a crash between the two must leave the caller receiving texts); the
+  // FALSE flip lands only AFTER the slot write succeeds — suppressing the
+  // caller on a 0-row slot race would leave the account with NO recipient
+  // (pre-push codex P1). See suppressPrimaryAfterWrite below.
   const onSiteOwnsTexts = smsConsentExplicit && smsConsentSource === 'call_pipeline_onsite_contact';
-  if (effectivePhone && !hadSlotPhone) prefsToSet.appointment_notify_primary = !onSiteOwnsTexts;
+  const suppressPrimaryAfterWrite = !!effectivePhone && !hadSlotPhone && onSiteOwnsTexts;
+  if (effectivePhone && !hadSlotPhone && !onSiteOwnsTexts) prefsToSet.appointment_notify_primary = true;
   if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
     await db('notification_prefs')
@@ -3150,6 +3156,15 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // timestamp, keeping timeline order.
   const slotWriteAt = new Date();
   if (!updated) return 'skipped_slot_race';
+  if (suppressPrimaryAfterWrite) {
+    // The on-site contact is now the texting recipient; the caller becomes a
+    // contact (owner ruling 2026-09-30). Written only once the slot is proven
+    // committed, so the account can never end up with nobody to text.
+    await db('notification_prefs')
+      .insert({ customer_id: customerId, appointment_notify_primary: false })
+      .onConflict('customer_id')
+      .merge({ appointment_notify_primary: false });
+  }
   // 360 timeline event — post-write, best-effort, awaited (the recorder
   // never throws). The conditional WHERE proved the slot was still empty at
   // write time, so merging slotWrite over the read snapshot diffs to exactly
