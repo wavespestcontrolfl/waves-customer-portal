@@ -1061,8 +1061,9 @@ function languageTokens(text) {
   let sentenceStart = true;
   raws.forEach((raw, i) => {
     const endsSentence = /[.!?]["\u201d\u2019')]*$/.test(raw);
-    if (skip.has(i) || /^\d/.test(raw)) { sentenceStart = endsSentence; return; }
-    for (const word of stripMarks(raw).match(/[A-Za-z]+/g) || []) {
+    if (skip.has(i)) { sentenceStart = endsSentence; return; }
+    // a number glued to a word ("2godziny", "4hrs") still contributes the word; a bare number contributes nothing
+    for (const word of stripMarks(raw.replace(/^[\d.,:/-]+/, '')).match(/[A-Za-z]+/g) || []) {
       const lower = word.toLowerCase();
       const capitalized = /^[A-Z]/.test(word);
       if (!((capitalized && !sentenceStart && !keepCapitalized) || lower.length < 2)) tokens.push(lower);
@@ -1082,7 +1083,8 @@ function isUnverifiedLanguageInbound(inbound) {
   const tokens = languageTokens(original);
   if (!tokens.length) return false;
   const foreign = foreignWordSet();
-  if (tokens.length <= 3) return tokens.some((w) => foreign.has(w));
+  // (also held: a short text with no known English word at all, "Pot iesi?" - a language on no list, which the reply guards cannot read)
+  if (tokens.length <= 3) return tokens.some((w) => foreign.has(w)) || !tokens.some(englishKnown);
   const known = tokens.filter(englishKnown).length;
   return known / tokens.length < ENGLISH_SHARE;
 }
@@ -1203,7 +1205,7 @@ const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:
 // thread was about; with nothing classifiable in the thread it is treated as asking both kinds (fail closed).
 // A BARE first-person modal follow-up (Codex #5416 r30: "Can we now?", "Can I now?", "Are we allowed now?") is elliptical too: the
 // whole message is the modal plus a closed vocabulary of re-entry / timing words, so "can I clean the grill now?" stays its own question.
-const FIRST_PERSON_FOLLOWUP_RE = /^(?:(?:so|ok|okay|but)\s+)?(?:can|could|may|should|are|am)\s+(?:we|i)\b(?:\s+(?:now|yet|then|today|tonight|too|also|still|go|be|allowed|ok|okay|good|fine|safe|to|out|outside|inside|in|back|there|it|on|walk|wait|let|the|dogs?|kids?|pets?|cats?|them|again|already))*[\s?.!]*$/;
+const FIRST_PERSON_FOLLOWUP_RE = /^(?:(?:so|ok|okay|but)\s+)?(?:can|could|may|should|are|am)\s+(?:we|i)\b(?:\s+(?:now|yet|then|today|tonight|too|also|still|go|be|allowed|ok|okay|good|fine|safe|to|out|outside|inside|in|back|there|it|on|walk|wait|let|the|dogs?|kids?|pets?|cats?|them|again|already|please|pls|plz|just|maybe|really))*[\s?.!]*$/;
 const ELLIPTICAL_RE = /^and\s+\w+|^(?:(?:so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this|everyone|everybody)|are\s+they|can\s+(?:they|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
 const NOT_ELLIPTICAL_RE = new RegExp([BUSINESS_RE.source, SCHEDULE_WORD_RE.source, /\b(?:arrive|arrives|come|coming|call|text|schedule|reschedule|appointment|book|booking|visit|pay|price|cost|service)\b/.source].join('|'));
 function isEllipticalInbound(text) {
@@ -1236,14 +1238,16 @@ function cleaningKinds(text) {
   return WASH_VERB_RE.test(text) && WASH_TREATMENT_RE.test(text) ? ['rain'] : null;
 }
 // Whether watering will hurt the treatment ("Will the sprinklers weaken it?", "does irrigation affect the spray?") is the rain-fast question
-// in other words (Codex #5416 r34), not general watering advice.
-const WATERING_EFFECT_RE = /\b(?:weaken\w*|affect\w*|effect\w*|hurt\w*|harm\w*|ruin\w*|undo\w*|dilut\w*|impact\w*|reduc\w*|cancel\w*|mess(?:es|ed)?\s+(?:up|with)|interfer\w*|matter|bother|(?:a\s+)?(?:problem|issue))\b/;
+// in other words (Codex #5416 r34), not general watering advice. A generic noun (problem / issue / matter) counts only when it is tied
+// to the treatment ("will the sprinklers be a problem for the treatment?"); "Sprinkler issue in zone 2" is an equipment report.
+const WATERING_EFFECT_RE = /\b(?:weaken\w*|affect\w*|effect\w*|hurt\w*|harm\w*|ruin\w*|undo\w*|dilut\w*|impact\w*|reduc\w*|cancel\w*|mess(?:es|ed)?\s+(?:up|with)|interfer\w*)\b|\b(?:matter|bother|problem|issue)\b[^.?!]{0,30}\b(?:treatment|treated|spray\w*|application|applied|product|granules?|fertiliz\w*|it|that)\b/;
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return cleaningKinds(text);
   const context = WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text);
   if (context) return ['reentry', 'rain'];
-  if (WATERING_EFFECT_RE.test(text)) return ['rain'];
-  return OTHER_REENTRY_TOPIC_RE.test(text) ? null : [];
+  // a re-entry topic beside the watering ("will the sprinklers hurt the dogs if they walk on it?") goes to the general classifier first
+  if (OTHER_REENTRY_TOPIC_RE.test(text)) return null;
+  return WATERING_EFFECT_RE.test(text) ? ['rain'] : [];
 }
 
 function askedKindsOf(inboundText) {
@@ -1543,7 +1547,7 @@ const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upc
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
-const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|a|one|two|three|four|five|six|seven|eight|nine|ten|a\s+few|a\s+couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|times?)\s+(?:ago|back|before|earlier|prior)|second\s+to\s+last)\b/;
+const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|a|one|two|three|four|five|six|seven|eight|nine|ten|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|times?)\s+(?:ago|back|before|earlier|prior)|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);

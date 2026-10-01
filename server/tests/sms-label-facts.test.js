@@ -3246,7 +3246,7 @@ describe('follow-up (#5416 r29): counted prior-visit references', () => {
   test('a counted visit, service or treatment reference names another visit', () => {
     for (const text of [
       'When can the dogs go out after the treatment three visits ago?', 'two visits ago', '3 treatments ago', 'a couple services back',
-      'a few sprays ago', 'four applications before', 'two rounds back', 'the spray 2 appointments ago', 'several treatments earlier',
+      'a few sprays ago', 'couple visits ago', 'few treatments back', 'four applications before', 'two rounds back', 'the spray 2 appointments ago', 'several treatments earlier',
     ]) expect([text, other(text)]).toEqual([text, true]);
   });
 
@@ -3270,7 +3270,7 @@ describe('follow-up (#5416 prod sweep): the inbound language check counts only l
   });
 
   test('a short text is held on positive evidence: a function word of a language the guards cannot read', () => {
-    for (const text of ['Dlaczego nie', 'Poczekaj dwie godziny', 'khi nao', 'KIEDY PSY MOGA WYJSC', 'Kailan Puwedeng Lumabas Ang Aso', '2 godziny wystarczy?', '2 hours later czy mozna wyjsc?']) {
+    for (const text of ['Dlaczego nie', 'Poczekaj dwie godziny', 'khi nao', 'KIEDY PSY MOGA WYJSC', 'Kailan Puwedeng Lumabas Ang Aso', '2 godziny wystarczy?', '2 hours later czy mozna wyjsc?', '2godziny wystarczy?', 'Pot iesi?', 'Kutyak kimehetnek?']) { // #5520 r1: a number glued to a word keeps the word
       expect([text, english(text)]).toEqual([text, false]);
     }
   });
@@ -3282,7 +3282,7 @@ describe('follow-up (#5416 prod sweep): the inbound language check counts only l
 
 describe('follow-up (#5416 r30): first-person follow-ups inherit the thread', () => {
   test('a short first-person modal follow-up to a label question asks that kind', () => {
-    for (const current of ['Can we now?', 'Can I now?', 'Are we allowed now?', 'Could we go out now?', 'Should we wait?', 'Am I ok to walk on it?', 'Is everyone ok to go out?']) {
+    for (const current of ['Can we now?', 'Can I now?', 'Are we allowed now?', 'Can we please now?', 'Can we just go out now?', 'Could we go out now?', 'Should we wait?', 'Am I ok to walk on it?', 'Is everyone ok to go out?']) {
       expect([current, labelFactsLib.askedLabelKinds([current, 'When can the dogs go out after the spray?'])]).toEqual([current, ['reentry']]);
     }
   });
@@ -3295,13 +3295,17 @@ describe('follow-up (#5416 r30): first-person follow-ups inherit the thread', ()
 
 describe('follow-up (#5416 r34): whether watering hurts the treatment asks rainfast', () => {
   test('an effect question about sprinklers / irrigation asks rain; general watering advice asks no kind', () => {
-    for (const text of ['Will the sprinklers weaken it?', 'will the sprinklers hurt it', 'will my sprinklers be a problem', 'does the irrigation dilute it']) {
+    for (const text of ['Will the sprinklers weaken it?', 'will the sprinklers hurt it', 'will the sprinklers be a problem for the treatment?', 'does the irrigation dilute it']) {
       expect([text, labelFactsLib.askedLabelKinds(text).includes('rain')]).toEqual([text, true]);
     }
-    for (const text of ['what days should I water my lawn?', 'how often should I water']) expect([text, labelFactsLib.askedLabelKinds(text)]).toEqual([text, []]);
+    for (const text of ['what days should I water my lawn?', 'how often should I water', 'Sprinkler issue in zone 2', 'my irrigation has a problem']) expect([text, labelFactsLib.askedLabelKinds(text)]).toEqual([text, []]); // #5520 r1 P2
   });
   test('a bare contextual answer to it is held', () => {
     const asked = labelFactsLib.askedLabelKinds(['Will the sprinklers weaken it?']);
     expect(labelFactsLib.replyClaimsUngroundedLabelTiming("No, they won't make it less effective.", '', asked)).toBe(true);
   });
+});
+
+test('#5520 r1 review: a watering question that also names a re-entry topic asks both kinds', () => {
+  expect(labelFactsLib.askedLabelKinds('Will the sprinklers hurt the dogs if they walk on it?')).toEqual(['reentry', 'rain']);
 });

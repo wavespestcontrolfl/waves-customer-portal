@@ -160,3 +160,10 @@ test('a recheck that could not read the visit releases the claim (retryable), re
   expect(suggest.settleReplyHoldingReservation).toHaveBeenCalled();
   expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
 });
+
+// #5520 r1 P2: the label boundary recheck's unreadable-visit refusal releases the claim like the live-ETA one.
+test('a LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY provider refusal releases the claim instead of failing it', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' });
+  await attempt({ labelFactsSnapshot: LABEL_SNAPSHOT });
+  expect(decisions.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+});

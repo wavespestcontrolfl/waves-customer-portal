@@ -495,9 +495,11 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 // round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
 // either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
 // the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
+// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2).
+const RETRYABLE_BOUNDARY_CODES = new Set(['LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY']);
 function isRetryableEtaBoundaryRefusal(result) {
   return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
-    && result.retryable === true && result.code === 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY';
+    && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
 }
 
 // Release a claim that never reached the provider WITHOUT recording a failed auto-send (the row
