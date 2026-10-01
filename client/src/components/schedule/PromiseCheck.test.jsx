@@ -85,6 +85,13 @@ describe('promise mark helpers', () => {
     expect([...group.querySelectorAll('button')].some((button) => button.getAttribute('aria-pressed') === 'true')).toBe(false);
   });
 
+  it('Partly counts once it says what is still left', () => {
+    const marks = { 'p-2': { mark: 'partly', version: '2222222222222222', stillLeft: '  ' } };
+    expect(promiseMarksPayload(marks, PROMISES)).toEqual([]);
+    render(<PromiseCheck promises={PROMISES} marks={marks} onChange={() => {}} />);
+    expect(screen.getByText(/Add what’s still left\. The mark counts once you do\./)).toBeTruthy();
+  });
+
   it('says when only the newest promises are shown', () => {
     expect(promiseCountLabel(2, 2)).toBe('2 open');
     expect(promiseCountLabel(10, 14)).toBe('10 of 14 open');

@@ -199,6 +199,51 @@ describe('the promise check on the completion form', () => {
     await waitFor(() => expect(notes().value).toBe('Ghost ants on the slider track.'));
   });
 
+  it('a marked promise that changed since the report asks: OK sends as is, Cancel reloads the list', async () => {
+    const changed = Object.assign(new Error('A promise you marked changed after the report was written (the office closed, reworded or moved it). The report may still mention it.'), { code: 'promise_marks_changed' });
+    const onSubmit = vi.fn().mockRejectedValueOnce(changed).mockRejectedValueOnce(changed).mockResolvedValue({});
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    await renderPanel({ onSubmit });
+    await screen.findByText('Promises we made');
+    fireEvent.click(markButton('Check under the dishwasher', 'Done'));
+    const promiseReads = () => fetch.mock.calls.filter(([url]) => String(url).includes('/promises')).length;
+    const before = promiseReads();
+
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(expect.stringContaining('A promise you marked changed')));
+    await waitFor(() => expect(promiseReads()).toBeGreaterThan(before)); // Cancel reloaded the list
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+
+    confirm.mockReturnValue(true);
+    await act(async () => fireEvent.click(submit));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(3));
+    expect(onSubmit.mock.calls[2][1]).toEqual(expect.objectContaining({ promiseMarksConfirmed: true }));
+  });
+
+  it('Complete waits while restored marks are still loading', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/promises')) return new Promise(() => {});
+      return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+    }));
+    localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+      serviceId: service.id,
+      savedAt: Date.now(),
+      notes: 'Ghost ants on the slider track.',
+      promiseMarks: { [PROMISES[0].id]: { mark: 'done', version: PROMISES[0].version, stillLeft: '' } },
+    }));
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await renderPanel({ onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    expect(alert).toHaveBeenCalledWith('Still loading the promises you marked. Try again in a moment.');
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it('no card and no marks when the server says the check is unavailable', async () => {
     promiseResponse = { available: false, promises: [] };
     const onSubmit = vi.fn().mockResolvedValue({});

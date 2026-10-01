@@ -635,7 +635,7 @@ router.get('/:serviceId/promises', async (req, res, next) => {
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id');
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit (the customer's
     // promises are customer data); admins keep office-wide reach.
@@ -645,6 +645,12 @@ router.get('/:serviceId/promises', async (req, res, next) => {
       assignedTechnicianId: svc.technician_id,
     });
     if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    // …and only while it is a current assignment: not cancelled or moved
+    // off them, inside the field access window (the shared predicate;
+    // Codex #5516).
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
     const VisitPromises = require('../services/service-report/visit-promises');
     let profileFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(svc)

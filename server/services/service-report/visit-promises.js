@@ -134,6 +134,9 @@ function promiseMarksFromBody(value) {
     const version = String(entry?.version || '').toLowerCase();
     if (!UUID_RE.test(id) || !MARKS.includes(mark) || !VERSION_RE.test(version)) continue;
     const stillLeft = mark === 'partly' ? cleanText(entry?.stillLeft, MAX_STILL_LEFT_CHARS) : '';
+    // Partly says what is still left, or it is no mark: the report must say
+    // what remains (rule 18) and the office note must carry it (Codex #5516).
+    if (mark === 'partly' && !stillLeft) continue;
     byId.set(id.toLowerCase(), { id, mark, version, ...(stillLeft ? { stillLeft } : {}) });
   }
   return [...byId.values()];
@@ -143,6 +146,16 @@ function promiseMarksFromBody(value) {
 // technician saw them, with each promise's own description and source. A
 // mark for anything else (closed or reworded since, another customer's, an
 // office kind) is dropped.
+// The submitted marks that no longer hold (the promise was closed, reworded
+// or moved to another customer since the tech marked it): the report
+// written from them may speak to a promise that changed.
+async function staleVisitPromiseMarks(conn, { customerId, marks }) {
+  const valid = promiseMarksFromBody(marks);
+  if (!valid.length) return [];
+  const resolved = new Set((await resolveVisitPromiseMarks(conn, { customerId, marks: valid })).map((entry) => String(entry.id).toLowerCase()));
+  return valid.filter((entry) => !resolved.has(entry.id.toLowerCase())).map((entry) => entry.id);
+}
+
 async function resolveVisitPromiseMarks(conn, { customerId, marks }) {
   const valid = promiseMarksFromBody(marks);
   if (!valid.length || !customerId) return [];
@@ -231,10 +244,10 @@ async function addStillLeftNote(conn, promise, customerId, line) {
     const current = String(row.human_note || '');
     if (current.includes(line)) return false;
     const combined = current ? `${current}\n${line}` : line;
-    await trx('call_commitments').where({ id: promise.id }).update({
-      human_note: combined.length > MAX_HUMAN_NOTE_CHARS ? combined.slice(-MAX_HUMAN_NOTE_CHARS) : combined,
-      updated_at: new Date(),
-    });
+    // The office's own note is never cut to make room: a note too full for
+    // the line keeps everything it says and gets no line (Codex #5516).
+    if (combined.length > MAX_HUMAN_NOTE_CHARS) return false;
+    await trx('call_commitments').where({ id: promise.id }).update({ human_note: combined, updated_at: new Date() });
     return true;
   });
 }
@@ -293,6 +306,7 @@ module.exports = {
   promiseVersion,
   loadVisitPromises,
   promiseMarksFromBody,
+  staleVisitPromiseMarks,
   resolveVisitPromiseMarks,
   writerPromiseLines,
   visitDayLabel,

@@ -1116,6 +1116,12 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // something the report leaves out. Returns the confirm() text, or null for
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
+export function completionPromiseMarksPrompt(error) {
+  if (error?.code !== "promise_marks_changed") return null;
+  const lead = String(error?.message || "").trim();
+  return `${lead}\n\nOK — send as is.\nCancel — go back (the promise list reloads).`;
+}
+
 export const PROMISE_MARKS_CHANGED_PROMPT = "You changed a promise mark after the report was written, so the report may not match it.\n\nOK — send as is.\nCancel — go back and write the report again.";
 
 export function completionReportRulesPrompt(error) {
@@ -13332,6 +13338,7 @@ export function CompletionPanel({
   // promises the tech can mark, and the marks by promise id.
   const [promiseCheck, setPromiseCheck] = useState(null);
   const [promiseCheckLoading, setPromiseCheckLoading] = useState(true);
+  const [promiseReloadKey, setPromiseReloadKey] = useState(0);
   const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
   const [techTipsError, setTechTipsError] = useState("");
@@ -14738,7 +14745,7 @@ export function CompletionPanel({
         if (!cancelled) setPromiseCheckLoading(false);
       });
     return () => { cancelled = true; };
-  }, [service.id]);
+  }, [service.id, promiseReloadKey]);
   const visitPromises = promiseCheck?.promises || [];
   // No marks while Quick complete hides the report, on a backdated closeout
   // (the marks would never apply) or on a visit that did no work: declined
@@ -17339,7 +17346,7 @@ export function CompletionPanel({
     }
   }
 
-  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false, rulesConfirmed = false } = {}) {
+  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false, rulesConfirmed = false, promisesConfirmed = false } = {}) {
     // The status poll's "resumable" verdict re-enters here while submitting
     // is STILL true (the button stayed in its completing state through the
     // whole chain) — that re-entry is the continuation of the same logical
@@ -17375,6 +17382,13 @@ export function CompletionPanel({
     // completion posted now would ship notes without it (pre-push P1).
     if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
+      return;
+    }
+    // Marks restored with a draft are checked against the promise list once
+    // it loads; completing before then would drop them (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll
+      && promiseCheckLoading && promiseMarksSignature(promiseMarks).length) {
+      alert("Still loading the promises you marked. Try again in a moment.");
       return;
     }
     // A promise mark changed after the report was written and the tech kept
@@ -17921,6 +17935,9 @@ export function CompletionPanel({
         // edited from, and the tech's "send as is" on the resubmit.
         reportDraftBase: installedReportDraftRef.current || null,
         ...(rulesConfirmed ? { reportRulesConfirmed: true } : {}),
+        // The tech chose to send though a marked promise changed since the
+        // report was written (promise_marks_changed).
+        ...(promisesConfirmed ? { promiseMarksConfirmed: true } : {}),
         // The promise check: Done closes the promise in the office list,
         // Partly adds the still-left note (applied after the save).
         ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
@@ -18236,7 +18253,7 @@ export function CompletionPanel({
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
-      return settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed);
+      return settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed, promisesConfirmed);
     }
     setSubmitting(false);
   }
@@ -18258,7 +18275,7 @@ export function CompletionPanel({
 
   // Every non-success outcome of a completion POST — the fresh build and
   // the committed replay end here.
-  async function settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed = false) {
+  async function settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed = false, promisesConfirmed = false) {
     // Any outcome but another quiet side-effects retry ends the retry
     // COUNT — the committed flag and body snapshot deliberately survive
     // (see the ref declarations): after a committed 409, even the manual
@@ -18283,7 +18300,7 @@ export function CompletionPanel({
     if (reconcileText) {
       setSubmitting(false);
       if (window.confirm(reconcileText)) {
-        return handleSubmit(true, { rulesConfirmed });
+        return handleSubmit(true, { rulesConfirmed, promisesConfirmed });
       }
       return;
     }
@@ -18293,8 +18310,20 @@ export function CompletionPanel({
     if (rulesText) {
       setSubmitting(false);
       if (window.confirm(rulesText)) {
-        return handleSubmit(reconcileConfirmed, { rulesConfirmed: true });
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed: true, promisesConfirmed });
       }
+      return;
+    }
+    // A marked promise changed after the report was written (409, key
+    // preserved): OK sends as is; Cancel reloads the promises so the tech
+    // can mark them again and write the report again.
+    const promiseText = completionPromiseMarksPrompt(e);
+    if (promiseText) {
+      setSubmitting(false);
+      if (window.confirm(promiseText)) {
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed, promisesConfirmed: true });
+      }
+      setPromiseReloadKey((key) => key + 1);
       return;
     }
     if (completionResumeOwedError(e)) {

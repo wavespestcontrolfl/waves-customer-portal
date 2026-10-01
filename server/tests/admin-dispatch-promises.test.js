@@ -71,7 +71,8 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
   });
 }
 
-const SERVICE = { id: 'svc-1', service_id: 'cat-1', service_type: 'Pest Re-Service', customer_id: 'cust-1', technician_id: 'tech-1' };
+const TODAY = new Date().toISOString().slice(0, 10);
+const SERVICE = { id: 'svc-1', service_id: 'cat-1', service_type: 'Pest Re-Service', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: TODAY };
 const PROMISES = [{ id: 'p-1', description: 'Check under the dishwasher', source: 'call', madeAt: '2026-09-29T15:00:00.000Z' }];
 
 function serviceDb(service, calls) {
@@ -115,6 +116,17 @@ describe('GET /:serviceId/promises', () => {
     mockDbCurrent = serviceDb(SERVICE, []);
     const res = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-2' });
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(loadVisitPromises).not.toHaveBeenCalled();
+  });
+
+  test("an old or cancelled assignment is outside the technician's window", async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockDbCurrent = serviceDb({ ...SERVICE, scheduled_date: '2026-01-05' }, []);
+    const old = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-1' });
+    expect(old.statusCode).toBe(403);
+    mockDbCurrent = serviceDb({ ...SERVICE, status: 'cancelled' }, []);
+    const cancelled = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-1' });
+    expect(cancelled.statusCode).toBe(403);
     expect(loadVisitPromises).not.toHaveBeenCalled();
   });
 

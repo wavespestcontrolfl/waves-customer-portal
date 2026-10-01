@@ -119,6 +119,7 @@ describe('marks from the request', () => {
       { id: 'not-a-uuid', mark: 'done', version: v },
       { id: ID(3), mark: 'maybe', version: v },
       { id: ID(4), mark: 'done' }, // no version: the wording seen is unknown
+      { id: ID(5), mark: 'partly', version: v, stillLeft: '   ' }, // Partly with nothing left named
       { id: ID(1), mark: 'not_yet', version: v },
     ])).toEqual([
       { id: ID(1), mark: 'not_yet', version: v },
@@ -151,6 +152,18 @@ describe('marks from the request', () => {
     ]);
     expect(line).not.toMatch(/4821|1234/);
     expect(line).toContain('[redacted]');
+  });
+
+  test('a mark that no longer holds is reported as changed', async () => {
+    const stale = await VisitPromises.staleVisitPromiseMarks({}, {
+      customerId: 'cust-1',
+      marks: [
+        { id: ID(1), mark: 'done', version: V(CALL_ROW.description) }, // still open, same wording
+        { id: ID(2), mark: 'done', version: V('the old wording') }, // reworded since
+        { id: ID(9), mark: 'not_yet', version: V('x') }, // closed since
+      ],
+    });
+    expect(stale).toEqual([ID(2), ID(9)]);
   });
 
   test("the writer's PROMISES lines say each promise as marked", () => {
@@ -285,6 +298,17 @@ describe('marks reach the office list after the save', () => {
     expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
   });
 
+  test("Partly never cuts the office's own note to make room", async () => {
+    const full = LEDGER();
+    full.commitments[ID(2)].human_note = 'x'.repeat(1990);
+    const { conn, updates } = ledgerDb(full);
+    const results = await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'seal the left side' }], visitDate: '2026-10-01',
+    });
+    expect(results).toEqual([{ id: ID(2), mark: 'partly', applied: false }]);
+    expect(updates).toEqual([]);
+  });
+
   test('Partly adds no note once the text belongs to another customer', async () => {
     const moved = LEDGER();
     moved.sources['sms_log:sms-1'] = { customer_id: 'cust-2' };
@@ -345,6 +369,18 @@ describe('wiring source contracts', () => {
     expect(catchBody).not.toMatch(/res\.status|throw/);
     // One call site: the completed exit only (an incomplete visit keeps its promises open).
     expect(completionSource.split('applyVisitPromiseMarks(').length - 1).toBe(1);
+  });
+
+  test('completion asks before sending when a marked promise changed (confirmable, pre-save)', () => {
+    const check = completionSource.indexOf("code: 'promise_marks_changed'");
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(completionSource.indexOf('durableCompletionCommitted = true;'));
+    const block = completionSource.slice(completionSource.lastIndexOf('if (!promiseMarksConfirmed', check), check + 200);
+    expect(block).toMatch(/visitOutcome !== 'customer_declined' && !isBackfillCompletion/);
+    expect(block).toMatch(/staleVisitPromiseMarks\(db, \{ customerId: svc\.customer_id, marks: promiseMarks \}\)/);
+    expect(block).toMatch(/hasCommittedCompletionAttempt/);
+    expect(block).toMatch(/confirmable: true/);
+    expect(completionSource).toMatch(/promiseMarksConfirmed = false, \/\/ tech confirmed sending/);
   });
 
   test('the generate route reads marks only with the writer rules on a grounded visit', () => {

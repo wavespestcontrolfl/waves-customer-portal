@@ -41,6 +41,9 @@ export function promiseMarksPayload(marks, promises) {
     const entry = currentMark(marks, promise);
     if (!entry || !PROMISE_MARKS.some((option) => option.value === entry.mark)) return [];
     const stillLeft = entry.mark === "partly" ? String(entry.stillLeft || "").trim().slice(0, STILL_LEFT_MAX) : "";
+    // Partly counts once it says what is still left (the report and the
+    // office note both need it).
+    if (entry.mark === "partly" && !stillLeft) return [];
     return [{ id: promise.id, mark: entry.mark, version: entry.version, ...(stillLeft ? { stillLeft } : {}) }];
   });
 }
@@ -157,6 +160,11 @@ export default function PromiseCheck({ promises, total = null, marks, onChange, 
                     }}
                   />
                 </label>
+              )}
+              {entry?.mark === "partly" && !String(entry.stillLeft || "").trim() && (
+                <span style={{ display: "block", fontSize: 14, color: t.muted, marginTop: 4 }}>
+                  Add what’s still left. The mark counts once you do.
+                </span>
               )}
             </div>
           );

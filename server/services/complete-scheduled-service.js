@@ -2680,6 +2680,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       reportRulesConfirmed = false, // tech confirmed the edit heads-up ("send as is")
       reportDraftBase = null, // the installed generated draft the notes were edited from
       promiseMarks = null, // the promise check: [{ id, mark, stillLeft? }] — OPTIONAL (visit-promises.js)
+      promiseMarksConfirmed = false, // tech confirmed sending though a marked promise changed
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
       // The visit identity the client's form was built against (customer,
@@ -3327,6 +3328,33 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (rulesBlock
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: rulesBlock.status, body: rulesBlock.payload });
+      }
+    }
+    // The promise check: a mark that no longer holds (the office closed,
+    // reworded or moved the promise after the report was written) asks
+    // before the report goes out, since the report may speak to it. Same
+    // confirmable 409 and committed-retry exemption as the heads-up above;
+    // a read failure never blocks (Codex #5516).
+    if (!promiseMarksConfirmed && Array.isArray(promiseMarks) && promiseMarks.length
+      && !isIncompleteVisit && visitOutcome !== 'customer_declined' && !isBackfillCompletion
+      && require('../config/feature-gates').reportWriterRulesLive()) {
+      const stalePromiseIds = await (async () => {
+        try {
+          const VisitPromises = require('../services/service-report/visit-promises');
+          if (!completionProfile || !VisitPromises.promiseCheckInScope(svc.service_type, completionProfile)) return [];
+          return await VisitPromises.staleVisitPromiseMarks(db, { customerId: svc.customer_id, marks: promiseMarks });
+        } catch {
+          return [];
+        }
+      })();
+      if (stalePromiseIds.length
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        return ({ status: 409, body: {
+          error: 'A promise you marked changed after the report was written (the office closed, reworded or moved it). The report may still mention it.',
+          code: 'promise_marks_changed',
+          promiseIds: stalePromiseIds,
+          confirmable: true,
+        } });
       }
     }
     // A committed completion (a saved visit member, a lost-response retry)
