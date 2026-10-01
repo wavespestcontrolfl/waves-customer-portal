@@ -5108,6 +5108,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // Fast Complete sheet instead of ServiceRecapModal. Same "ride the
       // schedule payload, no new endpoint" pattern as inspectionCreditAvailable above.
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
+      // the Fast Complete sheet sends the customer completion text instead
+      // of pinning the send flags off. Only read while the gate above is on.
+      fastCompleteRecapEnabled: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -6228,6 +6232,8 @@ router.get('/', async (req, res, next) => {
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
         // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+        // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
+        fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6817,6 +6823,7 @@ router.get('/week', async (req, res, next) => {
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
           // Same field as the day view above (PR C).
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+          fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,

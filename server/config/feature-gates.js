@@ -3478,6 +3478,21 @@ const gates = {
   // ServiceRecapModal exactly as before. Kill switch: unset
   // GATE_RESERVICE_FAST_COMPLETE.
   reserviceFastComplete: process.env.GATE_RESERVICE_FAST_COMPLETE === 'true',
+  // Fast Complete customer text (dark follow-up to the gate above; scope
+  // decision 5): with it on, the one-screen sheet asks the server for ONE fixed
+  // re-service text (customerRecapMode 'reservice_fixed') instead of pinning
+  // sendCompletionSms / requestReview / includePayLink to false. The server
+  // builds the text from the saved address, areas and product targets/methods
+  // (services/reservice-fixed-recap.js: never AI, never signed, no review ask
+  // or pay link) and sends it through its normal consent-checked path; no
+  // customer wording lives in the client. Rides the schedule payload per
+  // service as `fastCompleteRecapEnabled` (server/routes/admin-schedule.js),
+  // the same pattern as `reserviceFastCompleteEnabled`, and is honored
+  // server-side only while BOTH gates are on and the visit is a pest
+  // re-service. **Ships DARK: off unless exactly `true`.** Off = the sheet's
+  // body is byte-identical to today's (three false flags, no customer text).
+  // Kill switch: unset GATE_FAST_COMPLETE_RECAP.
+  fastCompleteRecap: process.env.GATE_FAST_COMPLETE_RECAP === 'true',
 
   // Inventory agent (server/services/purchase-receipts/inventory-agent.js):
   // an LLM-backed resolver for a purchase-receipt line the deterministic
