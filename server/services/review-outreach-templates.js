@@ -55,13 +55,13 @@ const OUTREACH_TEMPLATES = [
     id: 'day0_ask',
     name: 'Day-0 Ask',
     sentiment: 'happy',
-    body: "Hi {first}! {sender}. If we earned it, a Google review means a lot: {review_url} Reply if anything's off.",
+    body: "Hi {first}! {sender}. A Google review means a lot: {review_url}",
   },
   {
     id: 'friendly_ask',
     name: 'Friendly Ask',
     sentiment: 'happy',
-    body: "Hey {first}, it's Waves. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. A quick Google review would help us a lot:\n\n{review_url}",
   },
   {
     id: 'soft_reminder',
@@ -73,7 +73,7 @@ const OUTREACH_TEMPLATES = [
     id: 'final_nudge',
     name: 'Final Nudge (email)',
     sentiment: 'happy',
-    body: "Hey {first} - last one from us, promise! If you have been happy with Waves, a quick review means a lot:\n\n{review_url}",
+    body: "Hey {first} - last one from us, promise! A quick Google review means a lot:\n\n{review_url}",
   },
   {
     id: 'post_service_hot',
@@ -85,13 +85,13 @@ const OUTREACH_TEMPLATES = [
     id: 'service_specific_pest',
     name: 'Service-Specific: Pest Control',
     sentiment: 'happy',
-    body: "Hi {first}! Hope the bugs are staying away after your Waves treatment. If we earned it:\n\n{review_url}",
+    body: "Hi {first}! Hope the bugs are staying away after your Waves treatment. A Google review helps:\n\n{review_url}",
   },
   {
     id: 'service_specific_lawn',
     name: 'Service-Specific: Lawn Care',
     sentiment: 'happy',
-    body: "Hey {first}, it's Waves. Hope the yard is looking great. If you love the results, a quick review helps:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. Hope the yard is looking great. A quick Google review helps a lot:\n\n{review_url}",
   },
   {
     id: 'resolution_check',
@@ -122,7 +122,7 @@ const OUTREACH_TEMPLATES = [
     id: 'winback_ask',
     name: 'Win-Back Review Ask',
     sentiment: 'neutral',
-    body: "Hi {first}! We never got to ask - if you were happy with your Waves service, a quick review would mean a lot:\n\n{review_url}",
+    body: "Hi {first}! We never got to ask - would you leave a quick Google review of your Waves service?\n\n{review_url}",
   },
   {
     id: 'qr_followup',
@@ -175,8 +175,8 @@ const ASK_TOUCH_SQL =
 // 2026-08-05: one ask after the first treatment, the full cadence after the
 // final one — counting the first ask would cooldown-block the final-visit
 // cadence a week or two later and burn the cap to 4). The `_personalized`
-// variant key must be listed too — sendOutreachTouch records personalized
-// touches under `<template>_personalized` for funnel attribution.
+// and `_tech_voice` variant keys must be listed too — sendOutreachTouch
+// records drafted touches under those suffixes for funnel attribution.
 // ASK_TOUCH_SQL (funnel + queued-ask supersede) intentionally still counts
 // first_treatment_ask — it IS a review ask; it's only the cap that ignores it.
 // The *_email variants cover the channel fallback: an email-only customer's
@@ -188,6 +188,8 @@ const CAP_EXEMPT_TEMPLATE_KEYS = [
   'first_treatment_ask_personalized',
   'first_treatment_ask_email',
   'first_treatment_ask_email_personalized',
+  'first_treatment_ask_tech_voice',
+  'first_treatment_ask_email_tech_voice',
 ];
 const CAP_TOUCH_SQL = `(template_key IS NULL OR template_key NOT IN (${CAP_EXEMPT_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`;
 

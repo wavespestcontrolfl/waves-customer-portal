@@ -382,7 +382,7 @@ async function stampWithRetry(makeQuery, label) {
   }
 }
 
-const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. If your recent service hit the mark, would you take 15 seconds to share a quick review?";
+const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. Would you take 15 seconds to share a quick review of your recent service?";
 
 /**
  * Build the (shortened) review link for an ask. Behind GATE_REVIEW_DIRECT_LINK
@@ -4633,8 +4633,11 @@ const ReviewService = {
     // before the change still name friendly_ask at step 0; they get the same
     // body. Operator-provided copy still wins; first_treatment_ask keeps its
     // own template.
+    // Tech voice (GATE_REVIEW_ASK_TECH_VOICE, owner rulings 2026-09-30/10-01):
+    // no general texts, so the Day-0 touch is drafted like every other touch.
+    const techVoice = sequenceId != null && require("../config/feature-gates").isEnabled("reviewAskTechVoice");
     const day0Controlled = actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null
-      && !canonicalTemplate
+      && !canonicalTemplate && !techVoice
       && OUTREACH.isDay0ControlledAsk({ sequenceStep, channel: actualChannel, templateId });
     const smsTemplateId = canonicalTemplate
       ? null
@@ -4684,14 +4687,18 @@ const ReviewService = {
       }
 
       if (!persistedBody && recipientIsAccountHolder) {
-        const drafted = await require("./review-ask-drafter").draftAskBody({
+        const Drafter = require("./review-ask-drafter");
+        const draftInput = {
           customer,
           recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
           serviceType,
           techName,
           sequenceStep,
           serviceDate,
-        });
+        };
+        const drafted = techVoice
+          ? await Drafter.draftTechVoice({ ...draftInput, serviceRecordId, sequenceId, channel: "sms" })
+          : await Drafter.draftAskBody(draftInput);
         if (drafted) persistedBody = drafted;
       }
       // Analytics provenance (Codex P1, r1): personalized touches must not be
@@ -4700,7 +4707,7 @@ const ReviewService = {
       // variant key. Body resolution is unaffected (custom_body wins first;
       // _sendOutreachSms renders from the real templateId param).
       if (persistedBody) {
-        recordedTemplateKey = `${smsTemplateId || "custom"}_personalized`;
+        recordedTemplateKey = `${smsTemplateId || "custom"}_${techVoice ? "tech_voice" : "personalized"}`;
       }
     }
 
@@ -4733,18 +4740,22 @@ const ReviewService = {
           if (prior?.custom_body) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
-          const drafted = await require("./review-ask-drafter").draftEmailIntro({
+          const Drafter = require("./review-ask-drafter");
+          const draftInput = {
             customer,
             recipientFirstName: firstNameFrom(emailContact.name) || customer.first_name || "",
             serviceType,
             techName,
             sequenceStep,
             serviceDate,
-          });
+          };
+          const drafted = techVoice
+            ? await Drafter.draftTechVoice({ ...draftInput, serviceRecordId, sequenceId, channel: "email" })
+            : await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;
         }
         if (persistedBody) {
-          recordedTemplateKey = "review_request_email_personalized";
+          recordedTemplateKey = techVoice ? "review_request_email_tech_voice" : "review_request_email_personalized";
         }
       }
     }
@@ -4757,7 +4768,7 @@ const ReviewService = {
     // listed in CAP_EXEMPT_TEMPLATE_KEYS; ASK_TOUCH_SQL still counts them
     // as asks for the funnel and supersede guards).
     if (actualChannel === "email" && templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId) && !noLinkSend) {
-      recordedTemplateKey = persistedBody ? `${templateId}_email_personalized` : `${templateId}_email`;
+      recordedTemplateKey = persistedBody ? `${templateId}_email_${techVoice ? "tech_voice" : "personalized"}` : `${templateId}_email`;
     }
 
     // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE

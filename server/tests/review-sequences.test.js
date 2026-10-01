@@ -20,9 +20,11 @@ jest.mock('../config/feature-gates', () => ({
 // null = template path, matching the gate-off production posture.
 const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
+const mockDraftTechVoice = jest.fn(async () => null);
 jest.mock('../services/review-ask-drafter', () => ({
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
+  draftTechVoice: (...a) => mockDraftTechVoice(...a),
 }));
 // Day-0 contextual topic (own suite: review-ask-topic.test.js). Default null
 // = no topic, matching the gate-off production posture; this file only
@@ -188,6 +190,8 @@ beforeEach(() => {
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
+  mockDraftTechVoice.mockReset().mockResolvedValue(null);
+  delete mockGates.reviewAskTechVoice;
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
 });
 
@@ -490,6 +494,31 @@ describe('review sequences — cadence engine', () => {
     const row = mock.__state.rows.review_requests[0];
     expect(row.template_key).toBe('review_request_email_personalized');
     expect(row.custom_body).toBe(intro); // persisted for retry reuse
+  });
+
+  test('tech voice on: a cadence email touch takes the tech-voice intro, recorded review_request_email_tech_voice', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const intro = 'Deb, you asked whether the ants would come back along the lanai. A Google review would help us a lot.';
+    mockDraftTechVoice.mockResolvedValue(intro);
+    const mock = makeMock({
+      email_templates: [{ id: 'tpl-rre', template_key: 'review_request_email', active_version_id: 'ver-rre' }],
+      email_template_versions: [{ id: 'ver-rre', blocks: '[{"type":"paragraph","content":"{{intro_paragraph}}"}]' }],
+      customers: [{ id: 'pe-tv', first_name: 'Deb', last_name: 'D', phone: '+19410000015', email: 'x@y.com', nearest_location_id: 'sarasota' }],
+      notification_prefs: [{ customer_id: 'pe-tv', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'email', templateId: 'final_nudge',
+      sequenceId: 'seq-pe-tv', sequenceStep: 2, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    expect(mockDraftEmailIntro).not.toHaveBeenCalled();
+    expect(mockDraftTechVoice.mock.calls[0][0]).toMatchObject({ channel: 'email', sequenceId: 'seq-pe-tv', sequenceStep: 2 });
+    expect(mockEmailSendTemplate.mock.calls[0][0].payload.intro_paragraph).toBe(intro);
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('review_request_email_tech_voice');
   });
 
   test('a cadence email touch falls back to the generic intro when the drafter declines', async () => {
@@ -4796,11 +4825,49 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(touch.template_key).toBe('day0_ask');
       expect(touch.custom_body == null).toBe(true);
       const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-      expect(sentBody).toBe(`Hi Christopher2! Christopher with Waves. If we earned it, a Google review means a lot: https://portal.test/rate/${touch.token} Reply if anything's off.`);
+      expect(sentBody).toBe(`Hi Christopher2! Christopher with Waves. A Google review means a lot: https://portal.test/rate/${touch.token}`);
       expect(sentBody).not.toMatch(/\btoday\b|\btonight\b|\bthis morning\b/i);
       // As sent: scheme stripped at the Twilio boundary, GSM-normalized.
       const seg = countSegments(normalizeGsmPunctuation(stripSmsUrlScheme(sentBody.replace(`https://portal.test/rate/${touch.token}`, 'https://portal.wavespestcontrol.com/l/abcde'))));
       expect(seg).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
+    });
+
+    test('tech voice on: the Day-0 SMS is drafted in the tech\'s voice, recorded _tech_voice, and the old drafter is not used', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const body = "It's Christopher, thanks for having me out. A Google review would really help: {review_url}";
+      mockDraftTechVoice.mockResolvedValue(body);
+      mockDraftAskBody.mockResolvedValue('OLD DRAFTER {review_url}');
+      const mock = makeMock({
+        customers: [{ id: 'tv-1', first_name: 'Lena', last_name: 'K', phone: '+19410000093', nearest_location_id: 'bradenton' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-1', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      expect(mockDraftAskBody).not.toHaveBeenCalled();
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0]).toMatchObject({ sequenceStep: 0, channel: 'sms', techName: 'Christopher Adams' });
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask_tech_voice');
+      expect(touch.custom_body).toBe(body);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toBe(body.replace('{review_url}', `https://portal.test/rate/${touch.token}`));
+    });
+
+    test('tech voice on but no verified draft: the fixed Day-0 template sends', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-2', first_name: 'Ravi', last_name: 'P', phone: '+19410000094', nearest_location_id: 'venice' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-2', serviceType: 'pest control', techName: 'Adam B', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('A Google review means a lot');
     });
 
     test('no technician on the record → the company signs, never "Your tech with Waves"', async () => {
@@ -4813,7 +4880,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       expect(result.started).toBe(true);
       const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-      expect(sentBody).toContain("Hi Mae! It's Waves. If we earned it");
+      expect(sentBody).toContain("Hi Mae! It's Waves. A Google review means a lot");
       expect(sentBody).not.toContain('Your tech');
     });
 
@@ -6084,7 +6151,7 @@ describe('shared ask history foundation', () => {
     // is a structural template-design limit, not a classifier bug, so they
     // are pinned here as known link-dependent rather than silently ignored.
     const templates = require('../services/review-outreach-templates');
-    const LINK_DEPENDENT_ONLY = new Set(['service_specific_pest', 'recovery_review']);
+    const LINK_DEPENDENT_ONLY = new Set(['recovery_review']);
     for (const t of templates.OUTREACH_TEMPLATES) {
       if (!templates.isAskTemplate(t.id)) continue; // no-link check-ins are not asks
       const linkFreeBody = templates.renderOutreachBody(t.body, {
