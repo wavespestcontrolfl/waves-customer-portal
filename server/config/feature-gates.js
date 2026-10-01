@@ -3362,6 +3362,12 @@ const gates = {
   // off unless exactly 'true'. Read live per call by
   // cancelReseedsRecurringLive(); this entry is for logGateStatus only.
   cancelReseedsRecurring: process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true',
+  // In-term placement for that reseed (owner ruling 2026-09-30): the added
+  // visit goes into the widest gap left in the plan year that lost one,
+  // falling back to the series end only when no gap fits
+  // (recurring-series-cancel-reseed.js#pickInTermReseedDate). Ships DARK;
+  // read live per call by cancelReseedInTermLive(); logGateStatus only here.
+  cancelReseedInTerm: process.env.GATE_CANCEL_RESEED_IN_TERM === 'true',
   // Public estimate-page consultation offer ("Want us to come look first?",
   // consultation-first lane, owner ruling 2026-09-23): the same
   // /inspection/:token self-booking link the recurring-lead email offers,
@@ -3822,6 +3828,12 @@ function recurringSeriesTopUpLive() {
 // kill/enable with no redeploy. Kill = unset GATE_CANCEL_RESEEDS_RECURRING.
 function cancelReseedsRecurringLive() {
   return process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true';
+}
+
+// Same live-read contract. Kill = unset GATE_CANCEL_RESEED_IN_TERM (the
+// reseed then appends at the series end, as before).
+function cancelReseedInTermLive() {
+  return process.env.GATE_CANCEL_RESEED_IN_TERM === 'true';
 }
 
 // GATE_COMMERCIAL_SUITE_SIZING read at CALL time — strict `=== 'true'`,
@@ -4360,7 +4372,7 @@ function zoneRouteDaysLive() {
   return process.env.GATE_ZONE_ROUTE_DAYS === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
