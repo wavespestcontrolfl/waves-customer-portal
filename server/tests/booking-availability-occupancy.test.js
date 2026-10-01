@@ -51,6 +51,7 @@ function wireDayCapCounts(rows = []) {
     // write no self_booked_appointments row) — same thenable, no rows here.
     where: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
+    whereNotExists: jest.fn().mockReturnThis(),
     whereBetween: jest.fn().mockReturnThis(),
     // Effective-date count (SELF_BOOKING_EFFECTIVE_DATE_SQL) rides in via
     // whereRaw / db.raw select / groupByRaw — passthroughs; no linked live
