@@ -1,5 +1,6 @@
 /**
- * /.well-known — universal-link association files for the native app shell.
+ * /.well-known — security.txt (RFC 9116) plus universal-link association
+ * files for the native app shell.
  *
  * Apple (apple-app-site-association) and Android (assetlinks.json) fetch these
  * from https://portal.wavespestcontrol.com to verify that the Waves app is
@@ -32,6 +33,23 @@ const { isEnabled } = require('../config/feature-gates');
 
 const router = express.Router();
 
+const SECURITY_CONTACT = 'mailto:contact@wavespestcontrol.com';
+const SECURITY_CANONICAL = 'https://portal.wavespestcontrol.com/.well-known/security.txt';
+
+// RFC 9116 requires an Expires field no more than a year out. Computed per
+// request (a year ahead of now) so the file can never go stale.
+function securityTxt(now = new Date()) {
+  const expires = new Date(now.getTime());
+  expires.setUTCFullYear(expires.getUTCFullYear() + 1);
+  return [
+    `Contact: ${SECURITY_CONTACT}`,
+    `Expires: ${expires.toISOString()}`,
+    'Preferred-Languages: en',
+    `Canonical: ${SECURITY_CANONICAL}`,
+    '',
+  ].join('\n');
+}
+
 const BUNDLE_ID = (process.env.APNS_BUNDLE_ID || 'com.wavespestcontrol.portal').trim();
 
 function appleAppId() {
@@ -45,6 +63,14 @@ function androidFingerprints() {
     .map((f) => f.trim().toUpperCase())
     .filter(Boolean);
 }
+
+// RFC 9116 vulnerability-disclosure contact. Always on (not gated) — it is
+// static public text and only helps reporters and trust checkers find us.
+router.get('/security.txt', (req, res) => {
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=86400');
+  return res.send(securityTxt());
+});
 
 router.get('/apple-app-site-association', (req, res) => {
   if (!isEnabled('universalLinks')) return res.status(404).json({ error: 'Not found' });
@@ -100,3 +126,4 @@ router.get('/assetlinks.json', (req, res) => {
 });
 
 module.exports = router;
+module.exports.securityTxt = securityTxt;
