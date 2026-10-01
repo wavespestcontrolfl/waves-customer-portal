@@ -155,11 +155,51 @@ function visibleText(html) {
 // styles, templates and comments never render, so an unused error template inside one is not
 // the page's heading. Entities are decoded before whitespace is collapsed (&nbsp;).
 const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
-const NON_RENDERED_RE = /<!--[\s\S]*?-->|<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const HEADING_TAGS = new Set(['title', 'h1']);
+const NON_RENDERED_TAGS = new Set(['script', 'style', 'template']);
+const TAG_NAME_RE = /<\/?([a-z][a-z0-9-]*)/y;
 const headingText = (inner) => decodeHTML(visibleText(inner)).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+// One forward pass (every indexOf resumes past the last), so malformed or unclosed tags in a
+// 600 KB fetched page cannot make this quadratic.
+function headingTexts(html) {
+  const src = String(html || '');
+  const lower = src.toLowerCase();
+  const out = [];
+  let i = 0;
+  let nextGt = -1;
+  let open = null; // { name, start } of the <title>/<h1> being read
+  while (i < lower.length) {
+    const lt = lower.indexOf('<', i);
+    if (lt === -1) break;
+    if (lower.startsWith('<!--', lt)) {
+      const close = lower.indexOf('-->', lt + 4);
+      if (close === -1) break;
+      i = close + 3;
+      continue;
+    }
+    TAG_NAME_RE.lastIndex = lt;
+    const m = TAG_NAME_RE.exec(lower);
+    if (!m) { i = lt + 1; continue; }
+    if (nextGt < lt) nextGt = lower.indexOf('>', lt);
+    if (nextGt === -1) break;
+    const name = m[1];
+    const closing = lower[lt + 1] === '/';
+    i = nextGt + 1;
+    if (!closing && NON_RENDERED_TAGS.has(name)) {
+      const close = lower.indexOf(`</${name}`, i);
+      if (close === -1) break;
+      i = close;
+    } else if (!closing && HEADING_TAGS.has(name) && !open) {
+      open = { name, start: i };
+    } else if (closing && open && name === open.name) {
+      out.push(src.slice(open.start, lt));
+      open = null;
+    }
+  }
+  return out.map(headingText);
+}
 function notFoundHeading(html) {
-  return [...String(html || '').replace(NON_RENDERED_RE, ' ').matchAll(/<(title|h1)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)]
-    .some((m) => NOT_FOUND_HEADING_RE.test(headingText(m[2])));
+  return headingTexts(html).some((t) => NOT_FOUND_HEADING_RE.test(t));
 }
 
 /**

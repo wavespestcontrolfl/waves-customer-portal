@@ -581,6 +581,18 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<h1>Pest control in Bradenton</h1><p>404 reviews</p>')).toBe(false);
     expect(notFoundHeading('<script type="text/template"><h1>Page not found</h1></script><!-- <h1>Not found</h1> -->')).toBe(false);
   });
+  test('stays linear on malformed or unclosed tags (600 KB fetch cap)', () => {
+    for (const junk of ['<template>', '<h1>', '<h1 class="x"', '<a <b <c', '<!-- ', '</h1><title>']) {
+      const started = Date.now();
+      notFoundHeading(junk.repeat(Math.ceil(600000 / junk.length)));
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+  });
+  test('matches tags case-insensitively and only the exact tag name', () => {
+    expect(notFoundHeading('<H1 class="t">Page Not Found</H1>')).toBe(true);
+    expect(notFoundHeading('<h1x>Page not found</h1x>')).toBe(false);
+    expect(notFoundHeading('<h1>Pest <span>control</span></h1><h1>Not found</h1>')).toBe(true); // every h1 is read
+  });
   test('owned-page body signals flag the same headings', () => {
     expect(computeBodySignals('<html><head><title>x</title></head><body><h1>We could not find that page</h1></body></html>', 'text/html').softNotFound).toBe(true);
     expect(computeBodySignals('<html><head><title>Lawn care</title></head><body><h1>Lawn care</h1></body></html>', 'text/html').softNotFound).toBe(false);
