@@ -4291,6 +4291,16 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     const kept = await keepEndAtTermLapseCoverage(term, conn);
     if (kept?.windowEnd) windowEnd = kept.windowEnd;
   }
+  return writeLastServiceSnapshot(term, termStart, windowEnd, conn);
+}
+
+// The term's last-scheduled-visit snapshot (renewal notices key off
+// last_scheduled_service_date). The tail of refreshTermSnapshot, shared with
+// the re-stamp sweep's stamp-only pass, which must leave it as current as a
+// completed activation would have.
+async function writeLastServiceSnapshot(term, termStart, windowEnd, conn) {
+  const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
+  const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
   const coveredRows = coverageServiceType && coverageVisitCount
     ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn)
     : [];
@@ -5862,11 +5872,13 @@ function rowStampedByTerm(term, row) {
 // longer a paid live term, or its customer row is locked by another
 // transaction — retried next run) or 'restamped'.
 // Stamp the term's existing canonical visits without seeding (attach + apply,
-// the stamping half of refreshTermSnapshot).
+// the stamping half of refreshTermSnapshot), then its last-visit snapshot —
+// an activation that threw mid-stamp never reached that write either.
 async function stampTermCoverageOnly(term, t) {
   const window = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
   await attachScheduledServices(window, t);
   await applyPrepaidCoverageForTerm(window, t);
+  await writeLastServiceSnapshot(term, window.term_start, window.term_end, t);
 }
 
 async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), stampOnly = stampTermCoverageOnly) {
@@ -5885,17 +5897,19 @@ async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), st
     && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
     && !rowPrepaidElsewhere(term, row)
     && !rowStampedByTerm(term, row));
-  if (!open.length) {
-    // Nothing unstamped among the canonical rows — but a term whose
-    // activation failed BEFORE seeding has no rows at all, and the prefilter
-    // admits it for that reason. The marker for "activation never seeded" is
-    // the one ensureCoverageRowsForTerm itself uses for "already activated":
-    // NO scheduled_services row, in ANY status, was ever linked to the term.
-    // A term that ever carried a linked visit is never re-seeded here (the
-    // office may have cancelled slots on purpose), nor is one that cannot
-    // seed yet (termite awaiting installation).
-    if (ended || !(await activationNeverSeeded(term, rows, conn))) return 'clean';
+  // Decided on its own, never from `open`: a customer's existing unlinked
+  // visit in the window is not evidence the activation seeded — stamping it
+  // alone would link it, and every later run would then read the term as
+  // seeded and never schedule the rest (#5453 terminal review r1 P1).
+  const neverSeeded = !ended && (await activationNeverSeeded(term, rows, conn));
+  if (neverSeeded) {
     seed = true;
+  } else if (!open.length) {
+    // Nothing unstamped, and the term was seeded once (a visit was linked
+    // to it in some status) or cannot seed yet (termite awaiting
+    // installation). A term that ever carried a linked visit is never
+    // re-seeded here: the office may have cancelled slots on purpose.
+    return 'clean';
   } else {
     const { held, heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
     if (!open.some((row) => !heldIds.has(String(row.id)))) {
@@ -5973,7 +5987,9 @@ async function tryLockCustomerNoWait(t, customerId) {
   }
 }
 
-// "Activation never seeded" — see restampOneTerm. `rows` is the canonical
+// "Activation never seeded" — see restampOneTerm. The marker is the one
+// ensureCoverageRowsForTerm itself uses for "already activated": NO
+// scheduled_services row, in ANY status, was ever linked to the term. `rows` is the canonical
 // coverage set already read.
 async function activationNeverSeeded(term, rows, conn) {
   const sold = normalizeCoverageVisitCount(term.coverage_visit_count);
@@ -10875,6 +10891,7 @@ module.exports = {
   // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
   annualPrepayColumns,
   _private: {
+    stampTermCoverageOnly,
     PARENT_DECISION_LOCK_SESSIONS,
     supersedeRenewWithCustomerCancel,
     declinePaymentPendingWithCustomerCancel,
