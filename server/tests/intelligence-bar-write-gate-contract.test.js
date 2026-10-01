@@ -150,6 +150,7 @@ const WRITE_TWO_STEP = [
   'cancel_plan',
   'merge_customers',
   'repair_closeout',
+  'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -569,6 +570,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     }],
     ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
     ['tools', 'executeTool', 'update_property_access', { customer_id: 'cust-1', pets_secured_plan: 'Keep screen doors closed' }],
+    // The seeded lead's first name differs, so the preview reaches the gate
+    // with a real diff to show (an identical value is refused before it).
+    ['leads-tools', 'executeLeadsTool', 'update_lead_contact', { lead_id: 'lead-1', first_name: 'Roadie' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],
