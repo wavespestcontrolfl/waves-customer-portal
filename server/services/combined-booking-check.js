@@ -291,13 +291,18 @@ function bump(map, families) {
 }
 
 // 1. time + technician on every live row, except a SEASONAL mosquito series
-// whose first visit rolled past the booking's first day: the converter books
-// it unslotted on purpose until the office routes that season
-// (estimate-converter.js, the seasonalMosquito promotion).
+// (catalog mosquito_seasonal, the Feb–Oct program) whose first visit rolled
+// past the booking's first day: the converter books it unslotted on purpose
+// until the office routes that season (estimate-converter.js, the
+// seasonalMosquito promotion). A monthly mosquito series is checked like any
+// other.
 function checkTimeAndTech(dated, programs, { firstDay, byId }) {
   const untimed = new Map();
-  const seasonalUnslotted = (row) => programRowFamilies(row, programs).every((family) => family === 'mosquito')
-    && dateOnly((byId.get(String(row.recurring_parent_id)) || row).scheduled_date) > firstDay;
+  const seasonalUnslotted = (row) => {
+    const root = byId.get(String(row.recurring_parent_id)) || row;
+    return (root.catalog_service_key || root.service_key_snapshot) === 'mosquito_seasonal'
+      && dateOnly(root.scheduled_date) > firstDay;
+  };
   for (const row of dated) {
     if (!(row.window_start && row.technician_id) && !seasonalUnslotted(row)) bump(untimed, programRowFamilies(row, programs));
   }

@@ -266,6 +266,9 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(run([PEST, MOSQ], [...pest, ...mosq]))).not.toContain('missing_time_tech');
     const sameDay = mosq.map((row) => ({ ...row, scheduled_date: DAY0 }));
     expect(codes(run([PEST, MOSQ], [...pest, ...sameDay]))).toContain('missing_time_tech');
+    // A monthly mosquito series starting later is not the seasonal program: still checked.
+    const monthly = mosq.map((row) => ({ ...row, catalog_service_key: 'mosquito_monthly' }));
+    expect(codes(run([PEST, MOSQ], [...pest, ...monthly]))).toContain('missing_time_tech');
   });
 
   test('a primary_line_price with no estimated_price is not a price (completion bills nothing from it), so it is never compared', () => {
