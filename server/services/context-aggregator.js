@@ -1191,6 +1191,19 @@ class ContextAggregator {
     const ownPaymentsAll = payments.filter((p) => !(payerLinkage.isPayerLinked(p) || (paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p)))));
     const ownPayments = ownPaymentsAll.slice(0, 5);
     const inFlightMoney = await inFlightMoneyPromise;
+    const isHistoryRow = (p) => String(p.status || '').toLowerCase() !== 'upcoming';
+    const recentWindow = ownPayments.filter(isHistoryRow).slice(0, 3);
+    const lookahead = (() => {
+      const { paymentDayKey } = require('./payment-status-contract');
+      const visibleDays = new Set(recentWindow.map(paymentDayKey).filter((k) => k != null));
+      const past = ownPaymentsAll.filter((p) => isHistoryRow(p) && !recentWindow.includes(p));
+      const rows = past.filter((p) => visibleDays.has(paymentDayKey(p)));
+      const oldestVisible = visibleDays.size ? Math.min(...visibleDays) : null;
+      const lastFetched = ownPaymentsAll.length ? paymentDayKey(ownPaymentsAll[ownPaymentsAll.length - 1]) : null;
+      // a FULL over-fetch whose last row is still on (or undatable at) the oldest visible day may hide more of that day
+      const complete = !(payments.length >= PAYMENT_OVERFETCH && (lastFetched == null || (oldestVisible != null && lastFetched >= oldestVisible)));
+      return { rows, complete };
+    })();
     // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
     // collectible OWN invoices (net of credit) plus failed standalone
     // attempts — a customer with a sent-but-unpaid invoice and no failed
@@ -1428,7 +1441,12 @@ class ContextAggregator {
         outstandingBalance: balance,
         // completed/attempted history only (Codex r5): 'upcoming' autopay
         // rows are FUTURE charges, not payments the customer made.
-        recentPayments: ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').slice(0, 3),
+        recentPayments: recentWindow,
+        // Codex round-48 P1: own rows PAST the 3-row window that share a visible day (a same-amount twin can only sit there - rows are
+        // newest first), so the payment-status renderer judges ambiguity over them too; complete unless the over-fetch was cut
+        // before that day ended.
+        recentPaymentsLookahead: lookahead.rows,
+        recentPaymentsLookaheadComplete: lookahead.complete,
         // recentPayments is a 3-row DISPLAY window. recentPaymentsTruncated = the window may hide more history (the 5-row read
         // was full, or own rows exceed 3): the payment-status contract then renders no "no payments" sentence.
         recentPaymentsTruncated: ownPaymentsAll.length >= 5 || payments.length >= PAYMENT_OVERFETCH

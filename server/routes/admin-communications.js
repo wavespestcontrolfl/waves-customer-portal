@@ -1103,9 +1103,16 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // BILLING FACTS (amounts / payment status / Zelle) at the same boundary (Codex round-48 P1): a payment landing during those
+      // awaits must not let an approved balance / status sentence reach the customer after it became false.
       ...(verifiedAgentDecision?.id ? {
-        providerPreSendCheck: require('../services/agent-decision-send-checks')
-          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+        providerPreSendCheck: (() => {
+          const checks = require('../services/agent-decision-send-checks');
+          return checks.composeProviderPreSendChecks(
+            checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
+          );
+        })(),
       } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the

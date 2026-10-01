@@ -280,33 +280,33 @@ async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null, b
   if (body && hasUnscopedZelleDenial(body)) return { stale: true, reason: 'zelle_now_available' };
   if (!customerId) return { stale: true, reason: 'zelle_recheck_failed' };
   try {
-    const customerRow = await dbh('customers').where({ id: customerId }).first();
-    const ctx = customerRow ? await require('./context-aggregator').getContextForCustomer(customerRow) : null;
-    if (!ctx) return { stale: true, reason: 'zelle_recheck_failed' };
-    // Codex round-43 P2: an unavailable billing read (invoice / ownership lookup failed) leaves the open-invoice list EMPTY, which would
-    // read as a genuine `no_open_invoice` and let an account-scoped denial stand. Unknown availability is never a denial: fail closed.
-    if (!ctx.billing || ctx.billing.unavailable) return { stale: true, reason: 'zelle_recheck_failed' };
-    // several open invoices: the SAME resolver as the draft (Codex round-19 P1); an unresolvable reference
-    // abstained at draft time, so the denial stands
-    // the denial's own invoice reference wins; the customer's message only when the body names none (round 30)
-    const { resolveZelleTargetInvoice: resolveTarget, explicitInvoiceReference: bodyNames } = require('./zelle-target-invoice');
-    const target = resolveTarget(ctx?.billing, body && bodyNames(body) ? body : inboundMessage);
-    const invoiceId = target.invoiceId;
-    if (!invoiceId) {
-      // Codex round-25 P1: no open invoice at all => nothing to pay by Zelle, the denial stands. An UNRESOLVED
-      // target (several open invoices, none identified) is UNVERIFIABLE — the draft asks which invoice instead of
-      // denying — so a denial is blocked.
-      return target.reason === 'no_open_invoice' ? { stale: false } : { stale: true, reason: 'zelle_target_ambiguous' };
-    }
-    const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
-    if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
-    // an UNVERIFIABLE state (lookup failed, payer or credit state unknown) is not a confirmed "ineligible" —
-    // the denial can't be confirmed, so block (Codex round-21 P2); only confirmed reasons let it stand
-    return ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason) ? { stale: true, reason: eligibility.reason } : { stale: false };
+    return await zelleDenialVerdict({ ctx: await loadCustomerContext(customerId, dbh), customerId, body, inboundMessage, dbh });
   } catch (err) {
     logger.warn(`[sms-amount-recheck] Zelle denial recheck failed for customer ${customerId}: ${err.message}; blocking send`);
     return { stale: true, reason: 'zelle_recheck_failed' };
   }
+}
+// The denial judged against a freshly loaded context (null = failed read).
+async function zelleDenialVerdict({ ctx, customerId, body, inboundMessage, dbh }) {
+  // Codex round-43 P2: an unavailable billing read (invoice / ownership lookup failed) leaves the open-invoice list EMPTY, which would
+  // read as a genuine `no_open_invoice` and let an account-scoped denial stand. Unknown availability is never a denial: fail closed.
+  if (!ctx?.billing || ctx.billing.unavailable) return { stale: true, reason: 'zelle_recheck_failed' };
+  // several open invoices: the SAME resolver as the draft (Codex round-19 P1); an unresolvable reference
+  // abstained at draft time, so the denial stands
+  // the denial's own invoice reference wins; the customer's message only when the body names none (round 30)
+  const { resolveZelleTargetInvoice: resolveTarget, explicitInvoiceReference: bodyNames } = require('./zelle-target-invoice');
+  const target = resolveTarget(ctx.billing, body && bodyNames(body) ? body : inboundMessage);
+  if (!target.invoiceId) {
+    // Codex round-25 P1: no open invoice at all => nothing to pay by Zelle, the denial stands. An UNRESOLVED
+    // target (several open invoices, none identified) is UNVERIFIABLE — the draft asks which invoice instead of
+    // denying — so a denial is blocked.
+    return target.reason === 'no_open_invoice' ? { stale: false } : { stale: true, reason: 'zelle_target_ambiguous' };
+  }
+  const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: target.invoiceId, dbh });
+  if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
+  // an UNVERIFIABLE state (lookup failed, payer or credit state unknown) is not a confirmed "ineligible" —
+  // the denial can't be confirmed, so block (Codex round-21 P2); only confirmed reasons let it stand
+  return ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason) ? { stale: true, reason: eligibility.reason } : { stale: false };
 }
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
@@ -339,7 +339,10 @@ async function paymentStatusSendBlockReason({ customerId, body, snapshot = null,
     const scopeBlock = paymentStatus.autoSendScopeBlock({ reply: text, inboundText, snapshot });
     if (scopeBlock) return scopeBlock;
   }
-  if (!copied.length) return null;
+  return copied.length ? copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh }) : null;
+}
+// Every copied sentence must still be one the records render right now (a fresh read; unreadable => fail closed).
+async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh }) {
   if (!customerId) return 'payment_status_recheck_no_customer';
   if (snapshot.customer_id && String(snapshot.customer_id) !== String(customerId)) return 'payment_status_changed';
   try {
@@ -358,6 +361,79 @@ async function paymentStatusSendBlockReason({ customerId, body, snapshot = null,
 // ruling 2026-07-30). It excuses the OWED-figure half only - never a Zelle
 // offer or a payment-status assertion, both of which can go stale between
 // review and fire regardless of who wrote the words.
+// Codex round-48 P2: outgoingAmountsStale runs in PHASES, each its own function returning a verdict or null ("this phase passes"):
+// Zelle claims -> payment status -> owed amounts. A later change to one phase cannot skip another's fail-closed checks.
+
+// ZELLE OFFER target. Independent-review P1 (round 4, finding 3): a caller with no drafted Zelle fact to re-check against (a
+// human-authored scheduled edit with no agent-decision snapshot, ...) passes no zelleInvoiceId - resolve the customer's CURRENT open
+// invoice through the SAME canonical aggregator every other Zelle/amount fact reads. Codex round-29 P1: the snapshot invoice is the
+// one the DRAFT was written for; a reviewer EDIT that names a different invoice re-targets the offer - resolve what the edited body
+// names with the same resolver and check THAT invoice afresh (unresolvable => unverifiable => blocked). Codex round-30 P1: the
+// OUTGOING body's explicit reference wins; the customer's message decides only when the body names none. Fails CLOSED (via
+// zelleInvoiceStillEligible's own "no id => zelle_invoice_unresolved" rule) when there is none, or the lookup itself errors.
+async function zelleOfferStale({ customerId, offerText, zelleInvoiceId, inboundMessage, dbh }) {
+  const { resolveZelleTargetInvoice, explicitInvoiceReference } = require('./zelle-target-invoice');
+  // the OFFER clauses' own text decides the target (a denial clause in the same reply targets its own check)
+  const editedNamesInvoice = explicitInvoiceReference(offerText);
+  let target = zelleInvoiceId;
+  if (customerId && (!target || editedNamesInvoice)) {
+    try {
+      const ctx = (await loadCustomerContext(customerId, dbh)) || {};
+      // no snapshot: the body's reference, else the customer's message (several open: abstain); a snapshot is re-targeted by an
+      // edited reference (null => unresolved => blocked below)
+      target = resolveZelleTargetInvoice(ctx?.billing, (!target && !editedNamesInvoice) ? inboundMessage : offerText).invoiceId;
+    } catch (err) {
+      logger.warn(`[sms-amount-recheck] open-invoice lookup for Zelle recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+      return { stale: true, reason: 'zelle_recheck_failed' };
+    }
+  }
+  const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: target, dbh });
+  return eligibility.eligible ? null : { stale: true, reason: eligibility.reason };
+}
+
+// ZELLE CLAIMS - checked unconditionally, ahead of everything else and regardless of prompt version (independent-review P1, finding
+// 4): a Zelle contact is real payment instructions whether or not the body carries a dollar figure, and this is the one place every
+// send-time seam shares. The recipient first; then any AFFIRMATIVE offer (contact or not - pre-push audit P1); then, INDEPENDENTLY
+// of the offer (round 32), any denial: a reply with both validates both.
+async function zelleClaimsStale({ customerId, text, zelleInvoiceId, inboundMessage, dbh }) {
+  const recipient = outgoingZelleStale(text);
+  if (recipient.stale) return recipient;
+  const { offerText, denialText } = zelleClauseTexts(text);
+  const offer = offerText ? await zelleOfferStale({ customerId, offerText, zelleInvoiceId, inboundMessage, dbh }) : null;
+  if (offer) return offer;
+  if (!denialText) return null;
+  const denial = await zelleDenialStale({ customerId, dbh, inboundMessage, body: denialText });
+  return denial.stale ? denial : null;
+}
+
+// OWNED AMOUNTS - the figures outside any copied payment-status sentence. Price grammar the numeric extractor cannot verify ("fifty
+// dollars", "45/mo") is unverifiable, not amount-free (audit P1): with real answers on it fails closed, like the drafter's draft-time
+// rule. Real answers: each figure must be an OWED one in an owed clause (drafter.remainderAmountsUngrounded) - a payment's own figure
+// is stated only inside a copied sentence. Otherwise main's pooled rule: what is still owed, plus payment history only when the body
+// reads as an acknowledgement (masked first, audit P1 - the ack grammar stops at a period, and "$95.50" must not end the clause).
+async function ownedAmountsStale({ customerId, text, checked, strict, dbh }) {
+  const amounts = bodyAmountCents(checked);
+  if (!amounts.length) {
+    return strict && require('./sms-suggest-mode').hasPriceQuote(checked) ? { stale: true, reason: 'amount_unverifiable' } : { stale: false };
+  }
+  if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
+  try {
+    // (getContextForCustomer's default skips the LIVE ETA lookup - Codex round-2 P2, PR #5334 - so this send-time read makes no GPS call)
+    const ctx = await loadCustomerContext(customerId, dbh);
+    // A missing customer/context is a failed read, not an empty account — fail closed instead of {}.
+    if (!ctx) return { stale: true, reason: 'amount_recheck_no_customer' };
+    const { owed, paid } = drafter.billingAmountCents(ctx, { planAware: strict });
+    const ack = PAYMENT_ACK_RE.test(text.replace(AMOUNT_FORMS_RE, ' AMT '));
+    const stale = strict
+      ? drafter.remainderAmountsUngrounded(checked, ctx)
+      : amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
+    return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
+  } catch (err) {
+    logger.warn(`[sms-amount-recheck] amount revalidation failed for customer ${customerId}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'amount_recheck_failed' };
+  }
+}
+
 async function outgoingAmountsStale({
   customerId, body, promptVersion = null, zelleInvoiceId = null, dbh = db, trustOwedAmounts = false,
   // the customer's own inbound wording (decision.inbound_message / the sms_log row's body): scopes the payment-status detector
@@ -369,103 +445,18 @@ async function outgoingAmountsStale({
   humanEditedBody = false,
 } = {}) {
   const text = String(body || '');
-  // Independent-review P1 (finding 4): checked unconditionally, ahead of
-  // the amount rules below and regardless of prompt version — a Zelle
-  // contact is real payment instructions whether or not the body also
-  // carries a dollar figure, and this same function is the one place every
-  // send-time seam (the immediate Agent Review send via
-  // agent-decision-send-checks.js, and the scheduler's queued-send fire-time
-  // recheck, human-edited or not — independent-review P1, round 4, finding 3)
-  // shares.
-  const zelle = outgoingZelleStale(text);
-  if (zelle.stale) return zelle;
-  // Pre-push audit P1 (finding 2), widened round 3 (finding 1): checked
-  // right alongside the recipient check above, for any AFFIRMATIVE Zelle
-  // OFFER — contact or not. A body with no affirmative Zelle offer at all has
-  // nothing to recheck.
-  const { offerText, denialText } = zelleClauseTexts(text);
-  if (offerText) {
-    // Independent-review P1 (round 4, finding 3): a caller with no drafted
-    // Zelle fact to re-check against (a human-authored scheduled edit with no
-    // agent-decision snapshot, or any other caller that never resolved one)
-    // passes no zelleInvoiceId — resolve the customer's CURRENT open invoice
-    // through the SAME canonical aggregator every other Zelle/amount fact
-    // reads, rather than re-deriving "open" here. Fails CLOSED (via
-    // zelleInvoiceStillEligible's own "no id ⇒ zelle_invoice_unresolved"
-    // rule) when there is none, or the lookup itself errors.
-    let effectiveZelleInvoiceId = zelleInvoiceId;
-    // Codex round-29 P1: the snapshot invoice is the one the DRAFT was written for. A reviewer EDIT that names a
-    // different invoice (number, or an amount tied to an invoice) re-targets the offer — resolve what the edited body
-    // names with the same resolver and check THAT invoice afresh; if it can't be resolved (not open, ambiguous) the
-    // offer is unverifiable and blocks.
-    const { resolveZelleTargetInvoice, explicitInvoiceReference } = require('./zelle-target-invoice');
-    // the OFFER clauses' own text decides the target (a denial clause in the same reply targets its own check below)
-    const editedNamesInvoice = explicitInvoiceReference(offerText);
-    if (customerId && (!effectiveZelleInvoiceId || editedNamesInvoice)) {
-      try {
-        const ctx = (await loadCustomerContext(customerId, dbh)) || {};
-        if (!effectiveZelleInvoiceId) {
-          // Codex round-30 P1: the OUTGOING body's explicit invoice reference wins (unresolvable => unresolved => blocked);
-          // the customer's message decides only when the body names none. Several open: else abstain.
-          effectiveZelleInvoiceId = resolveZelleTargetInvoice(ctx?.billing, editedNamesInvoice ? offerText : inboundMessage).invoiceId;
-        } else {
-          const edited = resolveZelleTargetInvoice(ctx?.billing, offerText).invoiceId;
-          if (edited !== effectiveZelleInvoiceId) effectiveZelleInvoiceId = edited; // re-targeted (null => unresolved => blocked below)
-        }
-      } catch (err) {
-        logger.warn(`[sms-amount-recheck] open-invoice lookup for Zelle recheck failed for customer ${customerId}: ${err.message}; blocking send`);
-        return { stale: true, reason: 'zelle_recheck_failed' };
-      }
-    }
-    const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: effectiveZelleInvoiceId, dbh });
-    if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
-  }
-  // INDEPENDENT of the offer branch (round 32): a reply with both an offer and a denial validates both
-  if (denialText) {
-    const denial = await zelleDenialStale({ customerId, dbh, inboundMessage, body: denialText });
-    if (denial.stale) return denial;
-  }
+  const zelle = await zelleClaimsStale({ customerId, text, zelleInvoiceId, inboundMessage, dbh });
+  if (zelle) return zelle;
   const strict = strictForVersion(promptVersion);
-  let ctx = null;
-  let checked = text;
-  if (strict) {
-    // PAYMENT STATUS: only a verbatim copy of a snapshotted sentence that is still rendered may state one (owner ruling 2026-10-01).
-    if (humanEditedBody !== true) {
-      const statusReason = await paymentStatusSendBlockReason({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh });
-      if (statusReason) return { stale: true, reason: statusReason };
-    }
-    // ...and the figures judged below are the ones OUTSIDE the copied sentences (those were just re-verified live).
-    checked = paymentStatus.withoutCopies(text, paymentStatus.copiedSentences(text, paymentStatusSnapshot?.sentences));
-  }
+  // PAYMENT STATUS: only a verbatim copy of a snapshotted sentence that is still rendered may state one (owner ruling 2026-10-01).
+  const statusReason = strict && humanEditedBody !== true
+    ? await paymentStatusSendBlockReason({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh })
+    : null;
+  if (statusReason) return { stale: true, reason: statusReason };
   if (trustOwedAmounts) return { stale: false }; // a human reviewed the owed figures; status and Zelle were judged above
-  const amounts = bodyAmountCents(checked);
-  if (!amounts.length) {
-    // Price grammar the numeric extractor cannot verify ("fifty dollars",
-    // "45/mo") is unverifiable, not amount-free (audit P1): with real
-    // answers on it fails closed, mirroring the drafter's draft-time rule.
-    const unverifiable = strict && require('./sms-suggest-mode').hasPriceQuote(checked);
-    return unverifiable ? { stale: true, reason: 'amount_unverifiable' } : { stale: false };
-  }
-  if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
-  try {
-    // (getContextForCustomer's default skips the LIVE ETA lookup - Codex round-2 P2, PR #5334 - so this send-time read makes no GPS call)
-    ctx = await loadCustomerContext(customerId, dbh);
-    // A missing customer/context is a failed read, not an empty account — fail closed instead of {}.
-    if (!ctx) return { stale: true, reason: 'amount_recheck_no_customer' };
-    // Real answers: each remaining figure must be an OWED one in an owed clause (drafter.remainderAmountsUngrounded) - a
-    // payment's own figure is stated only inside a copied sentence. Otherwise main's pooled rule over the same shared figures:
-    // what is still owed, plus payment history only when the body reads as an acknowledgement (masked first, audit P1 - the
-    // ack grammar stops at a period, and "$95.50" must not end the clause).
-    const { owed, paid } = drafter.billingAmountCents(ctx, { planAware: strict });
-    const ack = PAYMENT_ACK_RE.test(text.replace(AMOUNT_FORMS_RE, ' AMT '));
-    const stale = strict
-      ? drafter.remainderAmountsUngrounded(checked, ctx)
-      : amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
-    return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
-  } catch (err) {
-    logger.warn(`[sms-amount-recheck] amount revalidation failed for customer ${customerId}: ${err.message}; blocking send`);
-    return { stale: true, reason: 'amount_recheck_failed' };
-  }
+  // ...and the figures judged are the ones OUTSIDE the copied sentences (those were just re-verified live).
+  const checked = strict ? paymentStatus.withoutCopies(text, paymentStatus.copiedSentences(text, paymentStatusSnapshot?.sentences)) : text;
+  return ownedAmountsStale({ customerId, text, checked, strict, dbh });
 }
 
 module.exports = {

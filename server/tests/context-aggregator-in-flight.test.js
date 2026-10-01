@@ -214,6 +214,17 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
     expect((ctx.flags || []).map((f) => f.type)).not.toContain('overdue_balance');
     expect(ctx.summary).not.toMatch(/overdue/);
   });
+  // Codex round-48 P1: the aggregator ships the same-day rows past the 3-row window
+  test('recentPaymentsLookahead carries own rows past the window that share a visible day', async () => {
+    const pay = (id, amount, date, status = 'paid') => ({ id, amount, status, payment_date: date, payer_id: null, metadata: null });
+    db.__rows = { invoices: [], payments: [pay('a', 120, '2026-09-20'), pay('b', 50, '2026-09-15'), pay('c', 100, '2026-09-12'), pay('d', 100, '2026-09-12', 'failed'), pay('e', 70, '2026-09-01')] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const billing = await build();
+    expect(billing.recentPayments.map((p) => p.id)).toEqual(['a', 'b', 'c']);
+    expect(billing.recentPaymentsLookahead.map((p) => p.id)).toEqual(['d']);
+    expect(billing.recentPaymentsLookaheadComplete).toBe(true);
+    expect(sentenceTexts(billing).some((t) => t.includes('$100.00'))).toBe(false);
+  });
   test('a collectible invoice buried BEHIND the status-list cap is still judged (alwaysJudge): an old AP-owned open invoice never counts', async () => {
     mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));
     const many = Array.from({ length: 11 }, (_, n) => inv(`i${(n % 9) + 1}${n}`, `N-${n}`, 'paid', 10, { scheduled_service_id: `own-${n}` }));

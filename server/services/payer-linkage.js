@@ -81,6 +81,8 @@ async function loadPayerLinkage(customerId, dbh = db) {
 // Codex round-47 P2: lookups are memoized per CANDIDATE PAYER (byCandidatePayer), not per visit, so a long monthly history costs two
 // batched reads plus one lookup per distinct payer - the cap now bounds distinct payers, which no ordinary account approaches.
 const LIVE_SCAN_MAX_INVOICES = 120;
+const LIVE_CANDIDATE_PAYER_SQL = `(EXISTS (SELECT 1 FROM customers c WHERE c.id = invoices.customer_id AND c.payer_id IS NOT NULL)
+  OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = invoices.scheduled_service_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL))`;
 const LIVE_SCAN_MAX_RESOLUTIONS = 30;
 async function loadLivePayerLinkage(customerId, dbh = db) {
   const base = await loadPayerLinkage(customerId, dbh);
@@ -93,6 +95,10 @@ async function loadLivePayerLinkage(customerId, dbh = db) {
     .where(function notWithdrawn() {
       this.whereNull('scheduled_send_error').orWhere('scheduled_send_error', 'not like', 'payer_billed:%');
     })
+    // Codex round-48 P2: only invoices that CAN resolve to a payer count against the bound - the account has a default payer, or the
+    // invoice's own visit names one (payer.resolveForInvoice's only two sources). Every other row is self-pay for certain, so a long
+    // self-pay history never makes the account unverifiable.
+    .whereRaw(LIVE_CANDIDATE_PAYER_SQL)
     .select('id', 'customer_id', 'scheduled_service_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
     .orderBy('created_at', 'desc')
     .limit(LIVE_SCAN_MAX_INVOICES + 1)
@@ -135,6 +141,7 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
 }
 
 module.exports = {
+  LIVE_CANDIDATE_PAYER_SQL,
   LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
   invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
 };

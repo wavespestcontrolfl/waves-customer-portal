@@ -50,6 +50,8 @@ function dateParts(value) {
   return parts.month >= 1 && parts.month <= 12 && parts.day >= 1 && parts.day <= 31 ? parts : null;
 }
 const dayKey = (d) => d.year * 10000 + d.month * 100 + d.day;
+// The ET calendar-day key of a payment row (null = undatable): shared with the aggregator's lookahead.
+const paymentDayKey = (p) => { const d = dateParts(p?.payment_date || p?.date); return d ? dayKey(d) : null; };
 
 // The tender word a sentence may carry: only what the row's own Stripe columns prove. A manual tender (Zelle, check, ...) is
 // never named, so no rendered sentence ever contains "Zelle" (the Zelle recheck treats every Zelle clause as an offer/denial).
@@ -190,43 +192,60 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   const billing = context?.billing;
   if (!billingIsReadable(billing)) return [];
   const todayParts = (typeof today === 'string' ? dateParts(today) : today) || dateParts(require('../utils/datetime-et').etDateString());
-  const out = [];
   const onPlan = onActivePaymentPlan(billing);
-  const owed = finiteCents(billing.outstandingBalance);
-  if (!onPlan) {
-    if (owed > 0 && billing.hasUncountedPartialDue !== true) out.push({ kind: 'balance', text: `Your account balance is ${money(owed)}.` });
-    else if (owed === 0 && !hasOutstandingObligation(billing)) out.push({ kind: 'no_balance', text: 'Your account has no balance due.' });
-  }
-  for (const inv of Array.isArray(billing.invoiceStatuses) ? billing.invoiceStatuses : []) {
-    const s = invoiceSentence(inv, { onPlan });
-    if (s) out.push(s);
-  }
   const allRows = (Array.isArray(billing.recentPayments) ? billing.recentPayments : []).filter(Boolean);
   const rows = allRows.filter(isReceiptRow);
-  const hiddenRows = allRows.length !== rows.length; // money the sentences below do not describe
-  // two rows with the same amount and day but a different status are ONE ambiguous payment: neither is stated
+  const out = [
+    ...balanceSentences(billing, onPlan),
+    ...(Array.isArray(billing.invoiceStatuses) ? billing.invoiceStatuses : []).map((inv) => invoiceSentence(inv, { onPlan })).filter(Boolean),
+    ...paymentRowSentences(billing, rows, todayParts),
+  ];
+  // money the sentences do not describe (a non-receipt row, an own invoice the renderer cannot model) may carry payments this window
+  // does not show: no absence sentence either
+  const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length) ? null : absenceSentence(billing, rows, todayParts);
+  return absence ? [...out, absence] : out;
+}
+
+function balanceSentences(billing, onPlan) {
+  if (onPlan) return [];
+  const owed = finiteCents(billing.outstandingBalance);
+  if (owed > 0 && billing.hasUncountedPartialDue !== true) return [{ kind: 'balance', text: `Your account balance is ${money(owed)}.` }];
+  if (owed === 0 && !hasOutstandingObligation(billing)) return [{ kind: 'no_balance', text: 'Your account has no balance due.' }];
+  return [];
+}
+
+// Two rows with the same amount and day but a different status are ONE ambiguous payment: neither is stated.
+// Codex round-48 P1: the window is cut at 3 rows, so the twin can sit just past it. Rows come newest first, so a twin shares a
+// VISIBLE day: the aggregator ships those same-day rows past the window (recentPaymentsLookahead) and the ambiguity is judged
+// over both. When the window is cut and that lookahead is not known complete, the oldest visible day states nothing.
+function paymentRowSentences(billing, rows, todayParts) {
   const identityOf = (p) => { const d = dateParts(p.payment_date || p.date); return d ? `${finiteCents(p.amount)}|${dayKey(d)}` : null; };
+  const lookahead = (Array.isArray(billing.recentPaymentsLookahead) ? billing.recentPaymentsLookahead : []).filter(Boolean).filter(isReceiptRow);
   const statuses = new Map();
-  for (const p of rows) statuses.set(identityOf(p), new Set([...(statuses.get(identityOf(p)) || []), String(p.status || '').toLowerCase()]));
-  for (const p of rows) {
-    if (statuses.get(identityOf(p)).size > 1) continue;
-    const s = paymentSentence(p, todayParts);
-    if (s) out.push(s);
-  }
-  // The newest row is always inside the window (newest first): nothing is dated after it. No rows at all is only "none" when the
-  // window cannot be hiding more and no money is in flight.
+  for (const p of [...rows, ...lookahead]) statuses.set(identityOf(p), new Set([...(statuses.get(identityOf(p)) || []), String(p.status || '').toLowerCase()]));
+  const days = rows.map(paymentDayKey).filter((k) => k != null);
+  const unknownDay = billing.recentPaymentsTruncated === true && billing.recentPaymentsLookaheadComplete !== true && days.length
+    ? Math.min(...days) : null;
+  return rows
+    .filter((p) => statuses.get(identityOf(p)).size === 1 && (unknownDay == null || paymentDayKey(p) !== unknownDay))
+    .map((p) => paymentSentence(p, todayParts))
+    .filter(Boolean);
+}
+
+// The newest row is always inside the window (newest first): nothing is dated after it. No rows at all is only "none" when the
+// window cannot be hiding more and no money is in flight. Codex round-46 P2: a future-dated row (a scheduled charge) would put the
+// cutoff in the future - no absence sentence at all.
+function absenceSentence(billing, rows, todayParts) {
   const days = rows.map((p) => dateParts(p.payment_date || p.date));
-  // an own invoice the renderer cannot describe may carry payments this window does not show: no absence sentence either
-  if (hasUnmodeledInvoice(billing) || hiddenRows) return out;
-  // Codex round-46 P2: a future-dated row (a scheduled charge) would put the cutoff in the future - no absence sentence at all
-  if (todayParts && days.some((d) => d && dayKey(d) > dayKey(todayParts))) return out;
+  if (todayParts && days.some((d) => d && dayKey(d) > dayKey(todayParts))) return null;
   if (rows.length && days.every(Boolean)) {
     const newest = days.reduce((a, b) => (dayKey(b) > dayKey(a) ? b : a));
-    out.push({ kind: 'no_payment_since', text: `We don't see a payment on your account since ${dateText(newest)}.` });
-  } else if (!rows.length && billing.recentPaymentsTruncated !== true && billing.hasProcessingPayment === false) {
-    out.push({ kind: 'no_payments', text: "We don't see any payments on your account." });
+    return { kind: 'no_payment_since', text: `We don't see a payment on your account since ${dateText(newest)}.` };
   }
-  return out;
+  if (!rows.length && billing.recentPaymentsTruncated !== true && billing.hasProcessingPayment === false) {
+    return { kind: 'no_payments', text: "We don't see any payments on your account." };
+  }
+  return null;
 }
 
 /** The BILLING-section lines for these sentences (always at least one line, so the contract is visible gate-on). */
@@ -471,6 +490,7 @@ function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inbound
 }
 
 module.exports = {
+  paymentDayKey,
   isUnmodeledInvoice: unmodeledStatus,
   SECTION_HEADER,
   SECTION_NONE,

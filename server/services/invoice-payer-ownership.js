@@ -57,11 +57,27 @@ async function candidatePayerKeys(customerId, rows, dbh) {
   };
 }
 
+// One row's verdict, memoized per key (scheduled service, or candidate payer); a stamped row needs no lookup. Past maxResolutions
+// live lookups it answers CAP_HIT (the batch is then unverifiable).
+const CAP_HIT = Symbol('cap_hit');
+function memoizedVerdict({ customerId, dbh, memo, candidateKey, maxResolutions }) {
+  let resolutions = 0;
+  return async (inv) => {
+    const keyed = !(inv.payer_id || inv.payer_statement_id);
+    const key = keyed ? (candidateKey ? candidateKey(inv) : String(inv.scheduled_service_id || '')) : null;
+    if (keyed && memo.has(key)) return memo.get(key);
+    if (resolutions >= maxResolutions) return CAP_HIT;
+    resolutions += 1;
+    const verdict = await invoicePayerOwnership({ ...inv, customer_id: inv.customer_id || customerId }, dbh);
+    if (keyed) memo.set(key, verdict);
+    return verdict;
+  };
+}
+
 async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity, alwaysJudge = null, maxResolutions = Infinity, byCandidatePayer = false } = {}) {
   const ownedIds = new Set();
   let unverifiable = false;
   let own = 0;
-  let resolutions = 0;
   const memo = new Map();
   let candidateKey = null;
   if (byCandidatePayer) {
@@ -73,18 +89,11 @@ async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Inf
     }
     memo.set('self', null); // no candidate payer anywhere => resolveForInvoice returns self-pay without a payer lookup
   }
+  const judge = memoizedVerdict({ customerId, dbh, memo, candidateKey, maxResolutions });
   for (const inv of rows) {
     if (own >= ownLimit && !(typeof alwaysJudge === 'function' && alwaysJudge(inv))) continue;
-    const keyed = !(inv.payer_id || inv.payer_statement_id);
-    const key = keyed ? (candidateKey ? candidateKey(inv) : String(inv.scheduled_service_id || '')) : null;
-    let verdict;
-    if (keyed && memo.has(key)) verdict = memo.get(key);
-    else {
-      if (resolutions >= maxResolutions) { unverifiable = true; break; }
-      resolutions += 1;
-      verdict = await invoicePayerOwnership({ ...inv, customer_id: inv.customer_id || customerId }, dbh);
-      if (keyed) memo.set(key, verdict);
-    }
+    const verdict = await judge(inv);
+    if (verdict === CAP_HIT) { unverifiable = true; break; }
     if (verdict === 'payer_owned') ownedIds.add(String(inv.id));
     else if (verdict) unverifiable = true;
     else own += 1;

@@ -438,3 +438,20 @@ describe('round 45 (older thread): two full references with the same tail are ne
     expect(resolveZelleTargetInvoice({ openInvoices: [both.openInvoices[1]] }, 'Zelle WPC-2025-0123 and WPC-2026-0123?')).toEqual({ invoiceId: null, reason: 'named_invoice_not_open' });
   });
 });
+
+// Codex round-48 P1: the bare "#0002" shorthand is an invoice reference (an edited Zelle reply is retargeted and rechecked)
+describe('"#NNNN" shorthand', () => {
+  const { invoiceNumbersNamed: named, explicitInvoiceReference: explicit, resolveZelleTargetInvoice: resolve } = require('../services/zelle-target-invoice');
+  test.each(['You can Zelle for #0002', 'Zelle works for #0002.', 'pay #0002 by Zelle'])('names invoice 0002: %s', (t) => {
+    expect(named(t).tail).toEqual(['0002']);
+    expect(explicit(t)).toBe(true);
+  });
+  test.each(['Apt #204', 'order #12345', 'Ticket #555', 'account #1234', 'check #1001'])('a non-invoice "#" number is not an invoice: %s', (t) => {
+    expect(explicit(t)).toBe(false);
+  });
+  test('the shorthand retargets: a paid #0002 is not the open invoice', () => {
+    const billing = { openInvoices: [{ id: 'i1', invoiceNumber: 'WPC-2026-0001', amountDue: 95 }] };
+    expect(resolve(billing, 'You can Zelle for #0002').invoiceId).toBeNull();
+    expect(resolve(billing, 'You can Zelle for #0001').invoiceId).toBe('i1');
+  });
+});

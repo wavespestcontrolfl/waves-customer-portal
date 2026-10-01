@@ -79,7 +79,7 @@ describe('loadLivePayerLinkage is bounded', () => {
   const chain = (reads) => {
     const q = {};
     q.calls = [];
-    for (const m of ['where', 'whereNull', 'whereNotNull', 'orWhere', 'select', 'orderBy']) q[m] = jest.fn((...a) => { if (typeof a[0] === 'function') a[0].call(q); return q; });
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'orWhere', 'select', 'orderBy', 'whereRaw']) q[m] = jest.fn((...a) => { if (typeof a[0] === 'function') a[0].call(q); return q; });
     q.limit = jest.fn((n) => { q.limitedTo = n; return q; });
     q.catch = jest.fn(() => Promise.resolve(reads.shift() ?? []));
     return q;
@@ -104,6 +104,17 @@ describe('loadLivePayerLinkage is bounded', () => {
     const out = await loadLivePayerLinkage('c1', dbh);
     expect(liveInvoiceOwnership).toHaveBeenCalledWith('c1', expect.any(Array), dbh, { maxResolutions: 30, byCandidatePayer: true });
     expect(out.failed).toBe(true);
+  });
+
+  // Codex round-48 P2: a long SELF-PAY history never reaches the bound - the scan only reads invoices that can resolve to a payer
+  test('the scan reads only invoices with a candidate payer (account default, or the visit names one)', async () => {
+    const scan = chain([invoices(5)]);
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(scan);
+    await loadLivePayerLinkage('c1', dbh);
+    const { LIVE_CANDIDATE_PAYER_SQL } = require('../services/payer-linkage');
+    expect(scan.whereRaw).toHaveBeenCalledWith(LIVE_CANDIDATE_PAYER_SQL);
+    expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/customers c WHERE c\.id = invoices\.customer_id AND c\.payer_id IS NOT NULL/);
+    expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/ss\.id = invoices\.scheduled_service_id AND ss\.customer_id = invoices\.customer_id AND ss\.payer_id IS NOT NULL/);
   });
 
   test('a scan inside both bounds is judged normally', async () => {

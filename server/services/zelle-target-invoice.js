@@ -23,7 +23,14 @@ function invoiceNumbersNamed(text) {
   // only the first used to be read, so a later number was silently dropped.
   const tail = [...t.matchAll(/\binvoices?\s*(?:numbers?|nos?\.?|#)?\s*#?\s*(\d{2,6}(?:\s*(?:,\s*(?:and\s+|or\s+)?|\band\s+|\bor\s+|&\s*|\/\s*)#?\s*\d{3,6})*)\b/gi)]
     .flatMap((m) => m[1].match(/\d{2,6}/g) || []);
-  return { full, tail };
+  // Codex round-48 P1: the bare shorthand "#0002" ("You can Zelle for #0002") names an invoice too - unless the word before it says
+  // it is something else (an apartment, suite, order, ticket, account...). An unrelated "#" number can only make the target
+  // unresolved (held), never pick a different invoice.
+  const NOT_INVOICE_BEFORE = /\b(?:apt|apartment|suite|ste|unit|lot|bldg|building|room|rm|po|order|ticket|case|account|acct|card|check|cheque|ref|reference|confirmation|conf|claim|policy|job|work\s+order|lic|license|permit)\.?\s*$/i;
+  const shorthand = [...t.matchAll(/(?<![\w#-])#\s?(\d{3,6})\b/g)]
+    .filter((m) => !/\binvoices?\s*(?:numbers?|nos?\.?)?\s*$/i.test(t.slice(0, m.index)) && !NOT_INVOICE_BEFORE.test(t.slice(0, m.index)))
+    .map((m) => m[1]);
+  return { full, tail: [...new Set([...tail, ...shorthand])] };
 }
 const stripZeros = (s) => String(s).replace(/^0+/, '') || '0';
 

@@ -102,7 +102,7 @@ function followupBlock({ decision, outgoingBody }) {
 // seam now matches it. A body with an affirmative Zelle offer but no
 // customer_id on the decision can never be checked against a real invoice —
 // fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
-async function amountsBlock({ decision, outgoingBody }) {
+async function amountsBlock({ decision, outgoingBody, dbh = undefined }) {
   const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
   const { outgoingAmountsStale, hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
   // Codex round-23 P2: a Zelle OFFER or DENIAL is rechecked for every decision (an edited pre-v12 body too); v12 decisions always
@@ -130,6 +130,7 @@ async function amountsBlock({ decision, outgoingBody }) {
     humanEditedBody: staffEdited,
     // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
     trustOwedAmounts: !realAnswers,
+    ...(dbh ? { dbh } : {}),
   });
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
@@ -216,6 +217,40 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
       ok: false,
       code: retryable ? 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY' : 'LIVE_ETA_STALE_AT_BOUNDARY',
       reason: `live ETA unsendable (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
+// BILLING FACTS at the TRUE provider boundary (Codex round-48 P1): the immediate Agent Review send rechecks amounts, payment status
+// and Zelle in verifyAgentDraftDecision, then the route still awaits link / claim / consent / policy steps - a customer paying in that
+// gap could make an approved "Your account balance is $100.00" false before it reaches Twilio. Same recheck, repeated at the boundary
+// (and again after the marker, like the ETA check). Only registered for a body the recheck can judge; a read failure is retryable
+// (nothing is known to be stale), any other refusal is final. `decision` = the verified row the route already holds.
+const BILLING_RECHECK_INFRA_FAILURES = new Set(['amount_recheck_failed', 'zelle_recheck_failed', 'payment_status_recheck_failed']);
+function amountsProviderPreSendCheck({ decision, getBody }) {
+  if (!decision?.id) return undefined;
+  const recheck = require('./sms-amount-recheck');
+  const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
+  const judged = recheck.hasAffirmativeZelleMention(body) || recheck.hasNegativeZelleAvailabilityClaim(body)
+    || recheck.bodyNeedsPaymentRecheck(body, { inboundMessage: resolveInboundMessage(decision), promptVersion: decision.prompt_version });
+  if (!judged) return undefined;
+  const check = async ({ dbi } = {}) => {
+    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
+    let reason;
+    try {
+      reason = await amountsBlock({ decision, outgoingBody, dbh: dbi });
+    } catch {
+      reason = 'amount no longer authorized (amount_recheck_failed)';
+    }
+    if (reason == null) return { ok: true };
+    const code = /\(([a-z_]+)\)/.exec(reason)?.[1] || '';
+    const retryable = BILLING_RECHECK_INFRA_FAILURES.has(code);
+    return {
+      ok: false,
+      code: retryable ? 'BILLING_FACTS_CHECK_FAILED_AT_BOUNDARY' : 'BILLING_FACTS_STALE_AT_BOUNDARY',
+      reason,
       ...(retryable ? { retryable: true } : {}),
     };
   };
@@ -346,4 +381,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };

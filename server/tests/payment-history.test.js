@@ -16,7 +16,7 @@ function invoicesChains({ payerInvoices = [], linkageFails = false, liveInvoices
   return () => {
     const mine = n++;
     const inv = {};
-    ['where', 'select', 'whereNotNull', 'whereNull', 'orWhere', 'orderBy', 'limit'].forEach((m) => { inv[m] = jest.fn(() => inv); });
+    ['where', 'select', 'whereNotNull', 'whereNull', 'orWhere', 'orderBy', 'limit', 'whereRaw'].forEach((m) => { inv[m] = jest.fn(() => inv); });
     inv.catch = (handler) => {
       if (mine === 0) return linkageFails ? Promise.resolve(handler(new Error('linkage down'))) : Promise.resolve(payerInvoices);
       return liveFails ? Promise.resolve(handler(new Error('live down'))) : Promise.resolve(liveInvoices);

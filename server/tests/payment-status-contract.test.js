@@ -88,6 +88,22 @@ describe('the renderer: only fully grounded sentences, in one stable format', ()
     expect(out).toContain('payment_received');
   });
 
+  // Codex round-48 P1: the 3-row window can hide a same-amount, same-day twin with another status
+  test('a twin just past the cut window (lookahead) makes the visible row ambiguous; an unknown boundary day states nothing', () => {
+    const visible = [row({ id: 'a', payment_date: '2026-09-20' }), row({ id: 'b', amount: 50, payment_date: '2026-09-15' }), row({ id: 'c', amount: 100, payment_date: '2026-09-12' })];
+    const twin = row({ id: 'd', amount: 100, status: 'failed', payment_date: '2026-09-12' });
+    const said = (over) => texts(billing({ recentPayments: visible, recentPaymentsTruncated: true, ...over }));
+    expect(said({ recentPaymentsLookahead: [twin], recentPaymentsLookaheadComplete: true }).some((t) => t.includes('$100.00'))).toBe(false);
+    // complete lookahead, no twin: the $100 receipt stands
+    expect(said({ recentPaymentsLookahead: [], recentPaymentsLookaheadComplete: true })).toContain('We received your $100.00 card payment on Sep 12, 2026.');
+    // lookahead NOT known complete: the oldest visible day (Sep 12) says nothing; newer days still do
+    const unknown = said({ recentPaymentsLookahead: [], recentPaymentsLookaheadComplete: false });
+    expect(unknown.some((t) => t.includes('Sep 12'))).toBe(false);
+    expect(unknown).toContain('We received your $120.00 card payment on Sep 20, 2026.');
+    // an old-shaped billing (no lookahead fields) with a cut window is the unknown case too
+    expect(said({}).some((t) => t.includes('Sep 12'))).toBe(false);
+  });
+
   test('rows whose state is unknown or ambiguous render nothing', () => {
     const none = (r) => c.renderPaymentStatusSentences({ billing: billing({ recentPayments: [r] }) }, { today: TODAY }).filter((s) => /^payment_/.test(s.kind));
     expect(none(row({ status: 'disputed' }))).toEqual([]);
