@@ -374,9 +374,11 @@ function resolveServiceLocation(customer = {}) {
   // Same null/blank guard as resolveReviewLocation: Number(null) === 0.
   // Only a geocode near the service area counts — a (0, 0) sentinel or an
   // out-of-range pair would otherwise pick an arbitrary "nearest" office.
+  // Bounds match property-coordinates.js coordinatesOf: haversine wraps angles,
+  // so an invalid longitude like -82.4 + 360 would otherwise measure ~0 mi.
   const lat = customer.latitude == null || customer.latitude === '' ? NaN : Number(customer.latitude);
   const lng = customer.longitude == null || customer.longitude === '' ? NaN : Number(customer.longitude);
-  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+  if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
     const hit = nearestLocation(lat, lng);
     if (hit && haversineMiles({ latitude: lat, longitude: lng }, hit) <= SERVICE_GEOCODE_MAX_MILES) return hit;
   }

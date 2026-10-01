@@ -55,6 +55,9 @@ describe('resolveServiceLocation', () => {
     // Sentinel / out-of-range / far-away geocodes are not usable.
     expect(resolveServiceLocation({ latitude: 0, longitude: 0 }).id).toBe('bradenton');
     expect(resolveServiceLocation({ latitude: 999, longitude: 999 }).id).toBe('bradenton');
+    // Wrapped angles: haversine would put these ~0 mi from an office.
+    expect(resolveServiceLocation({ latitude: 27.09, longitude: -82.41 + 360 }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ latitude: 27.09 + 360, longitude: -82.41 }).id).toBe('bradenton');
     expect(resolveServiceLocation({ city: 'Miami', latitude: 25.76, longitude: -80.19 }).id).toBe('bradenton');
   });
 });
