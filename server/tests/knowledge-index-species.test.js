@@ -41,6 +41,7 @@ describe('species connectors', () => {
       const isolated = require('../services/knowledge-index/connectors');
       docs = await isolated.loadCorpus(isolated.CONNECTORS.find((c) => c.source === 'species'));
     });
+    jest.dontMock('../services/species-catalog-approval');
     expect(docs.some((d) => d.sourceId === target)).toBe(false);
     expect(docs.length).toBe(customer.length - 1);
     // ficus-whitefly's look-alike points at the target: named while the
@@ -98,6 +99,7 @@ describe('catalog-first pin', () => {
       const isolated = require('../services/knowledge-index/hybrid-search');
       expect(isolated.catalogPinKeys('what do I spray for large patch in October')).toEqual([]);
     });
+    jest.dontMock('../services/species-catalog-approval');
   });
 
   test('a group-level or unknown name pins nothing', () => {
