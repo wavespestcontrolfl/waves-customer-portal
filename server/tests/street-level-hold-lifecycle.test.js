@@ -511,7 +511,11 @@ describe('r26: the shared field-advance seam and the recap delivery honor a live
     const t = read('../services/track-transitions.js');
     expect(t.split("isStreetLevelHoldVisit(serviceId)) {").length - 1).toBe(2);
     expect(t).toContain("skipped for ${serviceId}: street_level_hold");
-    expect(t.split("return { ok: false, reason: 'street_level_hold' };").length - 1).toBe(2);
+    // Fast-path skip + the recheck under the flip's row lock, in each of the two flips.
+    expect(t.split("return { ok: false, reason: 'street_level_hold' };").length - 1).toBe(4);
+    expect(t).toContain("trx.raw('SELECT 1 FROM scheduled_services WHERE id = ? FOR UPDATE', [serviceId]);");
+    expect(t).toContain('isStreetLevelHoldVisit(serviceId, trx)) return null;');
+    expect(t.split('await flipUnlessStreetLevelHeld(serviceId,').length - 1).toBe(2);
     // The check sits with the terminal-status guards, ahead of the future-date guard and any write.
     const m = t.indexOf('async function markOnProperty');
     expect(t.indexOf("reason: 'street_level_hold'", m)).toBeLessThan(t.indexOf("reason: 'future_scheduled_date'", m));

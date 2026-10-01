@@ -550,6 +550,19 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
   return { smsSent, smsOutcome, visitClaim, claimToken };
 }
 
+// The tracker flip runs under the visit's row lock with the street-level hold re-read on the
+// same connection: promoteReusedRowToStreetLevelHold locks this row before filing its card, so
+// a hold that commits after the unlocked fast-path check is seen here and the flip is skipped
+// (returns null; otherwise the write's row count). The lock is raw so the CAS stays the only
+// builder call. No caller holds this row's lock when it calls the flips.
+async function flipUnlessStreetLevelHeld(serviceId, write) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT 1 FROM scheduled_services WHERE id = ? FOR UPDATE', [serviceId]);
+    if (await require('./street-level-hold').isStreetLevelHoldVisit(serviceId, trx)) return null;
+    return write(trx);
+  });
+}
+
 async function markEnRouteCore(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
@@ -753,13 +766,17 @@ async function markEnRouteCore(serviceId, opts = {}) {
   // en_route — and the stale-clear variant would additionally erase its
   // lifecycle columns. A tuple change makes the write miss; the race path
   // below re-reads and reports whatever state won, with no side effects.
-  const updated = await db('scheduled_services')
+  const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => trx('scheduled_services')
     .where({ id: serviceId, track_state: 'scheduled' })
     .where('status', svc.status)
     .where('scheduled_date', svc.scheduled_date)
     .update({
       ...staleFlipClears, track_state: 'en_route', en_route_at: now, updated_at: now,
-    });
+    }));
+  if (updated === null) {
+    logger.info(`[track-transitions] markEnRoute skipped for ${serviceId}: street_level_hold`);
+    return { ok: false, reason: 'street_level_hold' };
+  }
 
   if (updated === 0) {
     // Someone else won the race. Re-read and report THEIR state — not a
@@ -1123,8 +1140,8 @@ async function markOnProperty(serviceId, opts = {}) {
     // the re-read below distinguishes a genuine arrival race from a
     // conflicting rewrite.
     const { applyTrackLifecycleCas } = require('./rebooker');
-    const updated = await applyTrackLifecycleCas(
-      db('scheduled_services')
+    const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => applyTrackLifecycleCas(
+      trx('scheduled_services')
         .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null })
         .whereIn('track_state', ['scheduled', 'en_route']),
       svc,
@@ -1133,7 +1150,11 @@ async function markOnProperty(serviceId, opts = {}) {
         track_state: 'on_property',
         ...onSiteUpdates,
         updated_at: now,
-      });
+      }));
+    if (updated === null) {
+      logger.info(`[track-transitions] markOnProperty skipped for ${serviceId}: street_level_hold`);
+      return { ok: false, reason: 'street_level_hold' };
+    }
     if (updated === 0) {
       // Lost the flip to a concurrent signal. We can't assume the winner owned
       // the send — a geofence drive-past wins with suppressArrivalSms and leaves

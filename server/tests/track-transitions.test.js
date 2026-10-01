@@ -59,6 +59,9 @@ describe('track-transitions lifecycle side effects', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // The tracker flip runs in a transaction that locks the visit row (raw) and rechecks the street-level hold.
+    db.raw = jest.fn(async () => ({ rows: [] }));
+    db.transaction = jest.fn(async (fn) => fn(db));
     transitionJobStatus.mockReset().mockResolvedValue({});
     getIo.mockReturnValue(socketStub());
     jest.useRealTimers();
@@ -129,6 +132,28 @@ describe('track-transitions lifecycle side effects', () => {
       status: 'on_site',
       current_job_id: 'job-2',
     });
+  });
+
+  test('a hold that commits after the fast-path check is caught under the flip row lock: no write, no side effects', async () => {
+    const { isStreetLevelHoldVisit } = require('../services/street-level-hold');
+    for (const [fn, svc] of [
+      ['markEnRoute', { id: 'job-h1', technician_id: 'tech-1', status: 'pending', track_state: 'scheduled' }],
+      ['markOnProperty', { id: 'job-h2', technician_id: 'tech-2', status: 'pending', track_state: 'scheduled', arrival_sms_sent_at: new Date() }],
+    ]) {
+      // Unlocked fast path sees no hold; the recheck under the lock sees the promoted one.
+      isStreetLevelHoldVisit.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      const load = query(svc);
+      db.mockClear();
+      db.mockReturnValueOnce(load);
+      expect(await trackTransitions[fn](svc.id)).toEqual({ ok: false, reason: 'street_level_hold' });
+      expect(db.raw).toHaveBeenLastCalledWith('SELECT 1 FROM scheduled_services WHERE id = ? FOR UPDATE', [svc.id]);
+      expect(isStreetLevelHoldVisit).toHaveBeenLastCalledWith(svc.id, db);
+      // Only the load ran: the CAS builder was never reached.
+      expect(db).toHaveBeenCalledTimes(1);
+      expect(load.update).not.toHaveBeenCalled();
+    }
+    expect(setTechJobStatus).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
   });
 
   test('markOnProperty fires the arrival SMS once and claims arrival_sms_sent_at before sending', async () => {
@@ -956,6 +981,9 @@ describe('track-transitions lifecycle side effects', () => {
 describe('future-scheduled-date stale-attempt guard', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // The tracker flip runs in a transaction that locks the visit row (raw) and rechecks the street-level hold.
+    db.raw = jest.fn(async () => ({ rows: [] }));
+    db.transaction = jest.fn(async (fn) => fn(db));
     transitionJobStatus.mockReset().mockResolvedValue({});
     getIo.mockReturnValue(socketStub());
     jest.useRealTimers();

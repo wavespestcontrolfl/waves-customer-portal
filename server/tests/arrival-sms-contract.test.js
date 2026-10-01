@@ -81,6 +81,9 @@ function scheduled(overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // The tracker flip runs in a transaction that locks the visit row (raw) and rechecks the street-level hold.
+  db.raw = jest.fn(async () => ({ rows: [] }));
+  db.transaction = jest.fn(async (fn) => fn(db));
   getIo.mockReturnValue(socketStub());
 });
 
