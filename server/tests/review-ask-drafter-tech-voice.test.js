@@ -128,8 +128,11 @@ describe('draftTechVoice', () => {
 
   test('the email touch returns a paragraph with no link', async () => {
     const email = {
-      body: 'Marta, it has been a week since the first treatment, and the second visit is the one for what hatches after it. Sorry again about the wait that morning when you had to get to work. A Google review would help us a lot.',
-      details: [{ text: 'had to get to work', source_quote: 'I need to go to work' }],
+      body: 'Marta, it has been a week since the first treatment, and the moisture under the kitchen sink is still worth raising with your property group. Sorry again about the wait that morning when you had to get to work. A Google review would help us a lot.',
+      details: [
+        { text: 'had to get to work', source_quote: 'I need to go to work' },
+        { text: 'moisture under the kitchen sink', source_quote: 'Moisture under the kitchen sink' },
+      ],
     };
     mockDispatch.mockResolvedValueOnce(reply(email));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2, channel: 'email' })).toBe(email.body);
@@ -185,6 +188,12 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ body: cared, details }, c)).toBe('result_claim');
     // Reporting the observation itself is fine.
     expect(verify({}, c)).toBeNull();
+  });
+
+  test('no promises or future visits: nothing in the record verifies them (pre-push audit P1)', () => {
+    expect(verify({ body: 'I know you had to get to work. I will be back tomorrow for the next treatment. Google review: {review_url}' })).toBe('commitment');
+    expect(verify({ body: "I know you had to get to work. I'll keep an eye on it. Google review: {review_url}" })).toBe('commitment');
+    expect(verify({ body: 'I know you had to get to work. Your second visit is set. Google review: {review_url}' })).toBe('commitment');
   });
 
   test('stems: plural, -ing/-ed and short words', () => {

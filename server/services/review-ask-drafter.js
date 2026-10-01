@@ -521,8 +521,8 @@ function customerOwnWords(ctx) {
 const TECH_VOICE_STEP = {
   day0: `the same-day text after the visit. Lead with something personal from THIS visit or what the customer said or did (they waited before work, booked a Sunday, mentioned their new puppies), then ONE notable finding from the report. Never list the treated areas. Mention that some activity for a couple of weeks is normal ONLY if the customer asked about results. Then ask for a Google review`,
   day_after: `the text the day after the visit (do NOT say "today" or "just finished"). Lead with something personal from this visit or what the customer said, then ONE notable finding from the report. Never list the treated areas. Then ask for a Google review`,
-  followup: `a follow-up text a few days after the visit. Take a DIFFERENT angle from every message already sent: a tip from the report, something the customer asked or mentioned, or the next visit. Never ask again about the same pest or problem an earlier message raised. Then ask for a Google review`,
-  email: `the opening paragraph of a review email about a week after the visit. Take a DIFFERENT angle from every message already sent: something the customer asked, a tip, or what's next. 2-3 sentences. A button below carries the link, so include NO link, URL or placeholder`,
+  followup: `a follow-up text a few days after the visit. Take a DIFFERENT angle from every message already sent: a tip from the report, or something the customer asked or mentioned. Never ask again about the same pest or problem an earlier message raised. Then ask for a Google review`,
+  email: `the opening paragraph of a review email about a week after the visit. Take a DIFFERENT angle from every message already sent: something the customer asked, or a tip. 2-3 sentences. A button below carries the link, so include NO link, URL or placeholder`,
 };
 
 function buildTechVoiceSystemPrompt(stepKind) {
@@ -541,7 +541,7 @@ ${sms ? `- At most 300 characters including the literal placeholder {review_url}
 - Personal details the customer shared are welcome (briefly, warmly). Never comment on who else was home or who let you in. Nothing about health or money.
 - Never condition the ask on satisfaction ("if we earned it", "if you were happy") and never suggest replying instead of reviewing. Do not write "Questions? Just reply", "Reply if anything's off", "means the world" or "we value your feedback".
 - Never mention termites unless the data says this is a termite service.
-- Never claim results ("they're gone", "should be settling down", "the barrier keeps working") and never invent anything not in the data: no made-up pests, places, appointments or promises. Don't use street names, community names, car names or other names unless you are sure what they refer to.
+- Never claim results or repairs ("they're gone", "I fixed", "should be settling down", "the barrier keeps working"). Never promise anything or mention a future visit, appointment or date ("I'll", "I'll be back", "next time", "tomorrow"). Never invent anything not in the data: no made-up pests or places. Don't use street names, community names, car names or other names unless you are sure what they refer to.
 - No dollar amounts, invoices, payments, products or chemicals. Never offer anything in return for a review and never suggest a star rating.
 - Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours, until, dry, re-entry. No drying times, re-entry times, clock times, or instructions about pets, kids or lawn access.
 - Never mention call recordings, transcripts or "our records".
@@ -599,6 +599,9 @@ const TERM_ALIAS = { roach: "cockroach" };
 // the sink" or "moisture under the sink" from "I fixed the sink", so these
 // are refused outright rather than grounded.
 const RESULT_CLAIM_RE = /\b(?:fix(?:e[sd]|ing)?|repair(?:s|ed|ing)?|replac(?:e|es|ed|ing)|install(?:s|ed|ing)?|seal(?:s|ed|ing)?|caulk(?:s|ed|ing)?|kill(?:s|ed|ing)?|eliminat(?:e|es|ed|ing)|remov(?:e|es|ed|ing|al)|solv(?:e|es|ed|ing)|resolv(?:e|es|ed|ing)|gone|cur(?:e|es|ed)|prevent(?:s|ed|ing)?)\b|\b(?:took|taken|take|takes|taking) care of\b|\bgot rid of\b|\bsorted(?: out)?\b|\bno more (?:ants|roaches|bugs|pests)\b/i;
+// Same for promises and future visits: the writer never sees verified
+// scheduling data, so "I'll be back tomorrow" cannot be checked and is refused.
+const COMMITMENT_RE = /\b(?:i'll|i will|we'll|we will|i'm going to|we're going to|gonna|be back|come back|coming back|stop by|swing by|up next|next (?:visit|time|treatment|service|week|month)|tomorrow|tonight|later this week|scheduled|appointment|second visit|follow[- ]?up visit)\b/i;
 const DETAIL_STOP = new Set(`the and but for from with that this you your yours our its his her him she they them their
   was were are have has had get got just also very really some any all can could would should will about
   into over then than there here what when where which who how not too out off one two`.split(/\s+/));
@@ -682,6 +685,7 @@ function verifyTechVoiceDraft(draft, { channel, firstName, techName, termite, co
   // Uncited claims: a pest, part of the property, problem or repair named
   // anywhere in the body must be in the record, cited or not.
   if (RESULT_CLAIM_RE.test(body)) return "result_claim";
+  if (COMMITMENT_RE.test(body)) return "commitment";
   if (ungroundedTerm(body, corpus)) return "ungrounded_term";
   if (unknownProperNoun(body, { firstName, techName, ownWords })) return "unknown_proper_noun";
   return null;
