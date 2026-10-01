@@ -306,17 +306,24 @@ export function WritingView({ sources }) {
 }
 
 // "Heard from you": the record facts read from the note (where product
-// went down, the pests named). Fixed by talking again and writing again.
+// went down, the pests named), fixed by talking again and writing again.
+// Shown once the note was read; why a read holds the send is the footer's.
 const joinAnd = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items[0] || '');
+const FACTS_READ = new Set(['read', 'empty_note']);
+
+// Why the note's read holds Complete & send, or '': where product went down
+// decides the customer's re-entry wait, so it must have been heard.
+export function factsHold(facts) {
+  if (facts?.status === 'too_long') return 'Your note is too long to read where you treated. Shorten it, then write it again.';
+  if (!FACTS_READ.has(facts?.status)) return 'Couldn’t read where you treated from your note. Write it again to retry.';
+  return facts.areas.length ? '' : 'Say where you treated (inside, outside or garage) in your note, then write it again.';
+}
 
 function HeardLine({ facts }) {
-  if (!facts) return null;
-  if (facts.status !== 'read' && facts.status !== 'empty_note') {
-    return <p className="tech-visit-muted">Couldn’t read where you treated from your note. Write again to retry.</p>;
-  }
+  if (!FACTS_READ.has(facts?.status)) return null;
   const where = facts.areas.length
     ? `treated ${joinAnd(facts.areas.map((area) => area.toLowerCase()))}`
-    : 'where you treated: not heard. Say it, then write again';
+    : 'where you treated: not heard';
   return (
     <p className="tech-visit-muted" data-testid="fast-complete-heard">
       Heard from you: {where}{facts.pests.length ? ` · for ${facts.pests.join(', ')}` : ''}
@@ -331,7 +338,7 @@ function withLine(photoCount, traced) {
 }
 
 export function ReportCard({
-  draft, editing, stale, locked, writing, photoCount, traced, onEdit, onDoneEditing, onChangeText, onWriteAgain,
+  draft, editing, stale, locked, photoCount, traced, onEdit, onDoneEditing, onChangeText, onWriteAgain,
 }) {
   const textId = useId();
   const edited = draft.text.trim() !== draft.base.trim();
@@ -366,8 +373,8 @@ export function ReportCard({
       {extra && <p className="tech-visit-muted">{extra}</p>}
       <HeardLine facts={draft.facts} />
       <div className="tech-visit-tile-grid">
-        <Chip disabled={locked || writing} label={editing ? 'Done editing' : 'Edit'} onClick={editing ? onDoneEditing : onEdit} />
-        <Chip disabled={locked || writing} label="Write again" onClick={onWriteAgain} />
+        <Chip disabled={locked} label={editing ? 'Done editing' : 'Edit'} onClick={editing ? onDoneEditing : onEdit} />
+        <Chip disabled={locked} label="Write again" onClick={onWriteAgain} />
       </div>
     </section>
   );
@@ -408,32 +415,67 @@ export function ConfirmPrompt({ prompt, onConfirm, onBack, busy }) {
 }
 
 const money = (value) => `$${Number(value).toFixed(2)}`;
+// What became of the report text, from the completion's own status and
+// reason: a held, blocked or failed text says so, never silence.
 const SMS_RESULT = {
   sent: () => 'The report went to the customer by text.',
   sending: () => 'The report text is sending.',
   deferred: () => 'The report text is queued and goes out in the customer’s texting hours.',
   no_phone: () => 'No phone on file, so no text went. The report is in the customer’s portal.',
+  skipped_recap_sms_already_sent: () => 'A text already went to the customer for this visit.',
+  suppressed_delivery_mode: () => 'No text went: this visit’s report is not sent to customers.',
+  blocked: (reason) => `No text went: ${reason || 'the customer’s texting settings held it'}.`,
+  failed: (reason) => `The report text did not go out${reason ? ` (${reason})` : ''}. The office can resend it.`,
 };
+function smsLine(result) {
+  const status = result?.completionSmsStatus;
+  if (!status || status === 'not_requested') return null;
+  const reason = String(result.completionSmsError || '').trim();
+  return SMS_RESULT[status]?.(reason) || `No text went to the customer${reason ? `: ${reason}` : ''}.`;
+}
 
-// After Complete & send: what the server says went out and what it billed.
-export function SentSummary({ result, doneMarks = [] }) {
-  if (!result) return null;
-  const smsLine = SMS_RESULT[result.completionSmsStatus]?.()
-    || (result.completionSmsStatus === 'failed' ? 'The report text did not go out. The office can resend it.' : null);
+function billLine(result) {
+  if (!result?.invoiceId) return null;
+  if (result.invoiceStatus === 'paid') return 'Bill: paid.';
+  if (result.invoiceStatus === 'processing') return 'Bill: payment processing.';
   // invoiceTotal is the amount still due, so a paid bill names no amount.
   const due = Number(result.invoiceTotal);
-  let billLine = null;
-  if (result.invoiceId && result.invoiceStatus === 'paid') billLine = 'Bill: paid.';
-  else if (result.invoiceId && result.invoiceStatus === 'processing') billLine = 'Bill: payment processing.';
-  else if (result.invoiceId && result.invoiceTotal != null && Number.isFinite(due) && due > 0) billLine = `Bill: ${money(due)} due.`;
+  return result.invoiceTotal != null && Number.isFinite(due) && due > 0 ? `Bill: ${money(due)} due.` : null;
+}
+
+// Which promises marked Done the completion closed: marks are applied before
+// /complete answers, and a reworded or failed one stays open (the office is
+// told). Read back from the open list, never assumed from the taps.
+function usePromisesStillOpen({ base, request, ids }) {
+  const [open, setOpen] = useState(null);
+  const key = ids.join(',');
+  useEffect(() => {
+    if (!key) return undefined;
+    let cancelled = false;
+    request(`${base}/promises?include=${encodeURIComponent(key)}`)
+      .then((data) => {
+        if (!cancelled && data?.available === true) setOpen(new Set((data.promises || []).map((promise) => String(promise.id))));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [base, request, key]);
+  return open;
+}
+
+// After Complete & send: what the server says went out, what it billed, and
+// which promises it closed.
+export function SentSummary({ result, doneMarks = [], base, request }) {
+  const open = usePromisesStillOpen({ base, request, ids: doneMarks.map((mark) => String(mark.id)) });
+  if (!result) return null;
+  const lines = [smsLine(result), billLine(result)].filter(Boolean);
   return (
     <div data-testid="fast-complete-sent">
-      {smsLine && <p className="tech-visit-muted">{smsLine}</p>}
-      {billLine && <p className="tech-visit-muted">{billLine}</p>}
-      {doneMarks.map((description) => (
-        <p key={description} className="tech-visit-muted">Promise marked done: {description}</p>
+      {lines.map((line) => <p key={line} className="tech-visit-muted">{line}</p>)}
+      {open && doneMarks.map((mark) => (
+        <p key={mark.id} className="tech-visit-muted">
+          {open.has(String(mark.id)) ? `Still open: ${mark.description}. The office will settle it.` : `Promise closed: ${mark.description}`}
+        </p>
       ))}
     </div>
   );
 }
-

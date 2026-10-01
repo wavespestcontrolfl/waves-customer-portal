@@ -158,6 +158,14 @@ describe('readVoiceFacts', () => {
     expect(sent).toContain('Sprayed around the outside.');
   });
 
+  test('a note past the cap is refused as too long, never cut short', async () => {
+    const { MAX_NOTE_CHARS } = require('../services/visit-voice-facts');
+    const long = `${'Sprayed around the outside of the house. '.repeat(Math.ceil(MAX_NOTE_CHARS / 40))}Baited the kitchen counter.`;
+    expect(long.length).toBeGreaterThan(MAX_NOTE_CHARS);
+    expect(await readVoiceFacts(long)).toMatchObject({ status: 'too_long', areas: [], pests: [] });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('an empty note never calls the model', async () => {
     expect(await readVoiceFacts('   ')).toMatchObject({ status: 'empty_note', areas: [], pests: [] });
     expect(dispatchWithFallback).not.toHaveBeenCalled();

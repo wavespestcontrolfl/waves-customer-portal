@@ -55,6 +55,7 @@ const FACTS = { available: true, status: 'read', areas: ['Inside', 'Outside'], p
 function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
   trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
+  promises = { available: false, promises: [] },
 } = {}) {
   const calls = [];
   const completes = [...complete];
@@ -63,7 +64,7 @@ function makeRequest({
     if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service, products: typeof products === 'function' ? products() : products };
     if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/tech-tips')) return { available: false };
-    if (path.endsWith('/promises')) return { available: false, promises: [] };
+    if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
     if (path.endsWith('/photos')) return { photos };
     if (path.endsWith('/treatment-zone')) return trace;
     if (path === '/admin/schedule/generate-report') {
@@ -227,8 +228,9 @@ describe('generate and read', () => {
     const request = makeRequest({ facts: { available: true, status: 'failed', areas: [], pests: [] } });
     await openSheet(request);
     await generate();
-    expect(screen.getByText('Couldn’t read where you treated from your note. Write again to retry.')).toBeTruthy();
-    expect(screen.getByText('Write it again: where you treated wasn’t read yet.')).toBeTruthy();
+    // The footer says why; the report card shows no heard line.
+    expect(screen.getByText('Couldn’t read where you treated from your note. Write it again to retry.')).toBeTruthy();
+    expect(screen.queryByTestId('fast-complete-heard')).toBeNull();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Write again' }));
     await waitFor(() => expect(request.bodies('/voice-facts')).toHaveLength(2));
@@ -237,8 +239,15 @@ describe('generate and read', () => {
   test('a note that never says where holds the send until it does', async () => {
     await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: [], pests: ['ants'] } }));
     await generate();
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: where you treated: not heard. Say it, then write again · for ants');
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: where you treated: not heard · for ants');
     expect(screen.getByText('Say where you treated (inside, outside or garage) in your note, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
+  test('a note too long to read holds the send and says to shorten it', async () => {
+    await openSheet(makeRequest({ facts: { available: true, status: 'too_long', areas: [], pests: [] } }));
+    await generate();
+    expect(screen.getByText('Your note is too long to read where you treated. Shorten it, then write it again.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
@@ -336,6 +345,42 @@ describe('complete and send', () => {
     expect(screen.getByRole('heading', { name: 'Service complete' })).toBeTruthy();
     expect(screen.getByText('The report went to the customer by text.')).toBeTruthy();
     expect(screen.getByText('Bill: $95.00 due.')).toBeTruthy();
+  });
+
+  test('a text the server held back says so, with its reason', async () => {
+    await openSheet(makeRequest({ complete: [{ success: true, completionSmsStatus: 'blocked', completionSmsError: 'customer opted out of texts' }] }));
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(screen.getByText('No text went: customer opted out of texts.')).toBeTruthy();
+  });
+
+  test('a promise marked Done shows as closed only when the server closed it', async () => {
+    const OPEN = [
+      { id: 'p-1', description: 'Check under the dishwasher', source: 'call', madeAt: '2026-09-29T15:00:00.000Z', version: 'v1' },
+      { id: 'p-2', description: 'Look at the garage door seal', source: 'text', madeAt: '2026-09-29T15:00:00.000Z', version: 'v1' },
+    ];
+    let completed = false;
+    // After the completion the open list no longer has p-1 (closed); p-2's
+    // mark did not hold (reworded meanwhile), so it is still open.
+    const promises = () => (completed ? { available: true, promises: [OPEN[1]], total: 1 } : { available: true, promises: OPEN, total: 2 });
+    const request = makeRequest({ promises, complete: [{ success: true, completionSmsStatus: 'sent' }] });
+    const original = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete')) completed = true;
+      return original(path, options);
+    });
+    await openSheet(request);
+    for (const description of ['Check under the dishwasher', 'Look at the garage door seal']) {
+      const group = screen.getByRole('group', { name: `Mark: ${description}` });
+      fireEvent.click(within(group).getByRole('button', { name: 'Done' }));
+    }
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    expect(await screen.findByText('Promise closed: Check under the dishwasher')).toBeTruthy();
+    expect(screen.getByText('Still open: Look at the garage door seal. The office will settle it.')).toBeTruthy();
+    const reread = request.calls.map((call) => call.path).filter((path) => path.includes('/promises?include='));
+    expect(reread).toEqual(['/admin/dispatch/svc-1/promises?include=p-1%2Cp-2']);
   });
 
   test('a re-service sends the report text with no pay link and no review ask', async () => {

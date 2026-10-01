@@ -26,9 +26,11 @@ const { redactAccessCodes } = require('./context-aggregator');
 
 // Bump on any prompt or schema change.
 const VOICE_FACTS_VERSION = 'visit-voice-facts-v1';
-// A dictated visit note runs a few hundred characters; the cap only bounds
-// what a pasted wall of text can cost.
-const MAX_NOTE_CHARS = 4000;
+// A dictated visit note runs a few hundred characters. A longer one is never
+// cut short (a fact said past the cut would go unread while the report
+// writer read the note whole): it is refused as too long, and the sheet asks
+// for a shorter note.
+const MAX_NOTE_CHARS = 8000;
 const MIN_QUOTE_CHARS = 4;
 const MAX_PESTS = 6;
 const MAX_PEST_WORDS = 4;
@@ -145,7 +147,7 @@ function validateVoiceFacts(json, note) {
 /**
  * Reads where product went down and the pests named from the technician's
  * note. Returns { status, areas, pests, heard } where status is 'read',
- * 'empty_note' or 'failed'; areas and pests are what the sheet records
+ * 'empty_note', 'too_long' or 'failed'; areas and pests are what the sheet records
  * (labels and the technician's words), heard carries each fact's quote.
  * Never throws.
  */
@@ -153,8 +155,9 @@ async function readVoiceFacts(note) {
   const empty = (status) => ({ status, areas: [], pests: [], heard: { areas: [], pests: [] }, version: VOICE_FACTS_VERSION });
   // Access codes never reach a provider; quotes are checked against what
   // the model was shown.
-  const text = redactAccessCodes(String(note || '').trim()).slice(0, MAX_NOTE_CHARS);
+  const text = redactAccessCodes(String(note || '').trim());
   if (!text) return empty('empty_note');
+  if (text.length > MAX_NOTE_CHARS) return empty('too_long');
   let result;
   try {
     result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
@@ -186,4 +189,5 @@ module.exports = {
   VOICE_FACTS_VERSION,
   VOICE_FACTS_SCHEMA,
   AREA_LABELS,
+  MAX_NOTE_CHARS,
 };
