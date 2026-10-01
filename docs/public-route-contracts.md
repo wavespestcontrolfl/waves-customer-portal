@@ -641,9 +641,10 @@ attestation is not the server's current version — or is absent — with
 `409 { error, code: 'CONSENT_VERSION_STALE' }` BEFORE any Stripe work, and
 thread the version into the mint, which stamps it on the PaymentIntent
 (`metadata.consent_text_version`, beside `save_card_opt_in`; carried across a
-tender replacement). A `/setup` that would REUSE an open PaymentIntent whose
-stamp differs from the one it would write (an older version, or none — the
-rollout) cancels and replaces it instead of updating in place: the stale tab
+tender replacement). A `/setup` that would REUSE an open PaymentIntent — or
+an `/update-amount` on one — whose stamp differs from the one it would write
+(an older version, or none — the rollout) cancels and replaces it instead of
+updating in place (the `replaced` response re-mounts Elements): the stale tab
 that minted it can confirm straight with Stripe (Express Checkout), and an
 in-place re-stamp would let the webhook record the newer version against
 text that tab never rendered. `/capture-setup` does the same and stamps the

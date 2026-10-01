@@ -1197,6 +1197,46 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
   });
 
+  test('a consent-stamp change on update-amount replaces the PaymentIntent instead of re-stamping it in place', async () => {
+    // Pre-push Codex on #5434: during rollout an older tab's UNSTAMPED PI is
+    // reused by a current tab with saveCard:false ('' = ''), which then
+    // enables saving — an in-place re-stamp would let the older tab confirm
+    // via Express Checkout and the webhook record current consent text it
+    // never displayed. The stamp change must cancel/replace, like /setup.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_invoice', status: 'requires_payment_method', payment_method_types: ['card'], metadata: { save_card_opt_in: 'true' },
+    });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card', { saveCard: true, consentTextVersion: CONSENT_VERSION });
+
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_invoice');
+    const [params] = stripeClient.paymentIntents.create.mock.calls[0];
+    expect(params.metadata).toEqual(expect.objectContaining({ consent_text_version: CONSENT_VERSION, save_card_opt_in: 'true', replaced_from: 'pi_invoice' }));
+    expect(result).toMatchObject({ paymentIntentId: 'pi_replacement', replaced: true, clientSecret: 'cs_replacement' });
+  });
+
+  test('update-amount with an UNCHANGED consent stamp still updates the PaymentIntent in place', async () => {
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_invoice', status: 'requires_payment_method', metadata: { save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION },
+    });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card', { saveCard: true, consentTextVersion: CONSENT_VERSION });
+
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_invoice', expect.objectContaining({
+      metadata: expect.objectContaining({ consent_text_version: CONSENT_VERSION }),
+    }));
+    expect(result.replaced).toBeUndefined();
+  });
+
   test('a stale id that IS the replaced lineage with a matching tender replays onto the CURRENT PI (lost-response retry recovery)', async () => {
     // A prior /update-amount can take the replacement path (fresh PI minted,
     // invoice repointed) with the response lost in transit — the client's

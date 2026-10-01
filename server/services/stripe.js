@@ -4642,6 +4642,44 @@ const StripeService = {
       updateParams.setup_future_usage = '';
     }
 
+    // A consent-stamp CHANGE never updates in place (pre-push Codex on
+    // #5434): a stale tab can still confirm this PI's client secret straight
+    // with Stripe (Express Checkout), and re-stamping the PI would let the
+    // webhook record consent text that tab never displayed — the rollout
+    // case being an UNSTAMPED older PI reused by a current tab with
+    // saveCard:false ('' = '') that then enables saving. Compared under the
+    // invoice lock on the PI's LIVE metadata; a change takes the existing
+    // replacement path (fresh PI, the old secret dead, the `replaced`
+    // response re-mounts Elements) — the same rule /setup's reuse applies.
+    const nextConsentStamp = String(updateParams.metadata[CONSENT_VERSION_METADATA_KEY] || '');
+    // The live read doubles as the replacement path's status inspection
+    // (one retrieve per update, the same fail-closed contract).
+    let liveIntent = null;
+    const refuseInPlaceOnConsentStampChange = async () => {
+      try {
+        liveIntent = await stripe.paymentIntents.retrieve(effectivePaymentIntentId);
+      } catch (retrieveErr) {
+        // Fail closed: a PI whose live stamp cannot be read is never
+        // re-stamped (or replaced) blind — the client retries.
+        throw new Error(`Could not verify the existing payment status for PI ${effectivePaymentIntentId}: ${retrieveErr.message}`);
+      }
+      if (String(liveIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY] || '') !== nextConsentStamp) {
+        const swap = new Error('consent stamp changed — replacing the PaymentIntent');
+        swap.consentStampChanged = true;
+        throw swap;
+      }
+    };
+    const replacementContext = () => ({
+      paymentMethodTypes,
+      metadata: updateParams.metadata,
+      customer: updateParams.customer || null,
+      setupFutureUsage: updateParams.setup_future_usage,
+      base,
+      baseCents,
+      methodCategory: selectedMethodCategory,
+      oldIntent: liveIntent,
+    });
+
     try {
       let paymentIntent;
       if (combinedCtx) {
@@ -4661,6 +4699,7 @@ const StripeService = {
             anchorInvoiceId: invoiceId,
             expectPaymentIntentId: effectivePaymentIntentId,
           });
+          await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       } else {
@@ -4675,6 +4714,7 @@ const StripeService = {
             throw err;
           }
           await require('./estimate-deposits').assertInvoiceDepositSettlementReady(updateTrx, lockedInvoice);
+          await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       }
@@ -4773,6 +4813,10 @@ const StripeService = {
       // combined allocation's staleBalance 409 (the page reloads to live
       // amounts).
       if (err && (err.sessionChanged || err.staleBalance || err.code === 'DEPOSIT_RECONCILIATION_REQUIRED')) throw err;
+      if (err && err.consentStampChanged) {
+        logger.info(`[stripe] PI ${effectivePaymentIntentId} consent stamp changed on update-amount; replacing for method=${selectedMethodCategory}`);
+        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, replacementContext());
+      }
       // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
       // incompatible PaymentMethod attached to the PI, so narrowing
       // payment_method_types to the newly selected tender is rejected. Recover
@@ -4784,15 +4828,7 @@ const StripeService = {
           `[stripe] PI ${effectivePaymentIntentId} tender switch blocked by attached PM; `
           + `recreating for method=${selectedMethodCategory}`,
         );
-        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, {
-          paymentMethodTypes,
-          metadata: updateParams.metadata,
-          customer: updateParams.customer || null,
-          setupFutureUsage: updateParams.setup_future_usage,
-          base,
-          baseCents,
-          methodCategory: selectedMethodCategory,
-        });
+        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, replacementContext());
       }
       logger.error(`[stripe] PI update failed for ${effectivePaymentIntentId}: ${err.message}`);
       throw new Error(`Failed to update payment amount: ${err.message}`);
@@ -4819,12 +4855,16 @@ const StripeService = {
     // state. If its status can't be read, or it's processing/succeeded (money
     // in flight), do NOT detach it — repointing the invoice off an in-flight
     // ACH PI would let the customer pay the replacement while the original
-    // bank debit is still pending.
-    let oldIntent = null;
-    try {
-      oldIntent = await stripe.paymentIntents.retrieve(oldPaymentIntentId);
-    } catch (retrieveErr) {
-      logger.warn(`[stripe] Could not retrieve stale PI ${oldPaymentIntentId} during tender switch: ${retrieveErr.message}`);
+    // bank debit is still pending. update-amount hands over the live read it
+    // just took under the invoice lock (ctx.oldIntent) so the inspection is
+    // one retrieve, not two.
+    let oldIntent = ctx.oldIntent && String(ctx.oldIntent.id) === String(oldPaymentIntentId) ? ctx.oldIntent : null;
+    if (!oldIntent) {
+      try {
+        oldIntent = await stripe.paymentIntents.retrieve(oldPaymentIntentId);
+      } catch (retrieveErr) {
+        logger.warn(`[stripe] Could not retrieve stale PI ${oldPaymentIntentId} during tender switch: ${retrieveErr.message}`);
+      }
     }
     if (!oldIntent) {
       // Status unknown — surface as a hard error (visible to ops) and never
