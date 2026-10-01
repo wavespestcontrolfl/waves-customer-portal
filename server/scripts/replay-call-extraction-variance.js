@@ -1410,7 +1410,10 @@ async function replayCall(call, context) {
   const current = transcriptForExtraction
     ? await CRP._test.extractCallDataV2(transcriptForExtraction, contactPhone, {
         callId: call.id,
-        callStartedAt: call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date(),
+        // The real call start, not the post-call fallback row's insert time, so relative dates resolve
+        // against the day the call began exactly as the routing context below verifies them (codex #5377).
+        callStartedAt: require('../utils/call-timeline').callStartedAt(call)
+          || (call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date()),
       })
     : { status: replayTranscription.status || 'no_transcription', extraction: null, errors: null };
   const durationMs = Date.now() - startedAt;

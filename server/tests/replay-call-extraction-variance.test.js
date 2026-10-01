@@ -931,3 +931,12 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 });
+
+describe('replay extraction grounds relative dates on the real call start (codex #5377)', () => {
+  test('extractCallDataV2 receives callStartedAt(call), not the fallback row insert time', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    const at = src.indexOf('CRP._test.extractCallDataV2(transcriptForExtraction');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 600)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(call\)/);
+  });
+});
