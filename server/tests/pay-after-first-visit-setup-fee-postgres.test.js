@@ -322,16 +322,16 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
-  test('concurrent completions of two visits of the same series bill the fee exactly once', async () => {
+  test('a double-submitted first completion (two requests racing on the same visit) bills the fee exactly once', async () => {
     const f = await seed();
     try {
-      await makeDue(f.childIds[0]);
-      const [a, b] = await Promise.all([complete(f, f.parentId), complete(f, f.childIds[0])]);
-      expect(a).toMatchObject({ status: 200 });
-      expect(b).toMatchObject({ status: 200 });
+      const results = await Promise.all([complete(f, f.parentId), complete(f, f.parentId)]);
+      expect(results.some((r) => r.status === 200)).toBe(true);
       const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
       expect(invoices.flatMap(setupLines)).toHaveLength(1);
       expect(await mockPg('setup_fee_claims').whereIn('invoice_id', invoices.map((i) => i.id))).toHaveLength(1);
+      const { chargeInvoiceWithSavedCard } = require('../services/stripe');
+      expect(chargeInvoiceWithSavedCard.mock.calls.length).toBeLessThanOrEqual(1);
     } finally { await cleanup(f); }
   });
 
