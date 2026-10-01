@@ -7794,9 +7794,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
   // (plain `annual_prepay_terms`), the paid-backing recheck (second
   // `annual_prepay_terms as t` read onward) and the customer row FOR UPDATE.
   // `link` queues the "was any visit ever linked" probe the never-seeded
-  // check makes for a live term with fewer canonical rows than sold; it
-  // defaults to "yes, linked earlier" (an activated term). An ENDED term
-  // (`ended: true`) never makes it.
+  // branch makes when no canonical row is open.
   function queues({ terms, perTerm, extra = {} }) {
     const scheduled = [query({ columnInfo: COLUMNS })];
     const invoices = [];
@@ -7806,7 +7804,6 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     perTerm.forEach((entry) => {
       scheduled.push(query({ rows: entry.rows }));
       if (entry.link !== undefined) scheduled.push(query({ first: entry.link }));
-      else if (!entry.ended && entry.rows.length < 4) scheduled.push(query({ first: { id: 'linked-earlier' } }));
       if (entry.reachesRefresh) {
         invoices.push(shareable(query({ first: { id: 'inv' } })));
         termLocks.push(query({ first: { id: 'lock' } }));
@@ -7825,7 +7822,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     });
   }
 
-  test('an active paid term with an unstamped canonical visit is stamped only (never refreshed), in one transaction', async () => {
+  test('an active paid term with an unstamped canonical visit is re-stamped through the activation path with a today floor on seeding, in one transaction', async () => {
     const term = termRow('term-1');
     queues({
       terms: [term],
@@ -7835,17 +7832,17 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
         rows: [stamped('v1', 'term-1', '2026-10-15'), visit('v2', 'term-1', '2027-01-15'), visit('v3', 'term-1', '2027-04-15'), visit('v4', 'term-1', '2027-07-15')],
       }],
     });
-    const refresh = jest.fn();
+    const refresh = jest.fn(async () => term);
     const stampOnly = jest.fn();
 
     const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh, stampOnly });
 
     expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
-    // An activated term's refresh gap-fills its stored window with no today
-    // floor: it would re-create a cancelled past slot as a pending visit.
-    expect(refresh).not.toHaveBeenCalled();
-    expect(stampOnly).toHaveBeenCalledTimes(1);
-    expect(stampOnly).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-1' }), db);
+    // The floor: an activated term's gap-fill would otherwise re-create a
+    // cancelled past slot as a pending visit.
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-1' }), db, { seedNotBefore: '2026-10-20' });
+    expect(stampOnly).not.toHaveBeenCalled();
     // The outer transaction, plus the savepoint around the NOWAIT customer lock.
     expect(db.transaction).toHaveBeenCalledTimes(2);
     expect(db.raw).toHaveBeenCalledWith('select 1');
@@ -7879,7 +7876,6 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       terms: [term],
       perTerm: [{
         term,
-        ended: true,
         reachesRefresh: true,
         rows: [stamped('v1', 'term-1', '2025-10-15'), visit('v2', 'term-1', '2026-09-20')],
       }],
@@ -7896,7 +7892,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
 
   test('an ENDED term with no linked visit is never seeded', async () => {
     const term = termRow('term-1', { term_start: '2025-10-01', term_end: '2026-09-30' });
-    queues({ terms: [term], perTerm: [{ term, ended: true, rows: [] }] });
+    queues({ terms: [term], perTerm: [{ term, rows: [] }] });
     const refresh = jest.fn();
     const stampOnly = jest.fn();
 
@@ -8007,14 +8003,15 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
         { term: good, reachesRefresh: true, rows: [visit('v1', 'term-good', '2026-10-15')] },
       ],
     });
-    const stampOnly = jest.fn(async (t) => {
+    const refresh = jest.fn(async (t) => {
       if (t.id === 'term-bad') throw new Error('price lookup failed');
+      return t;
     });
 
-    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn(), stampOnly });
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
 
     expect(summary).toEqual({ scanned: 2, restamped: 1, held: 0, skipped: 0, failed: 1 });
-    expect(stampOnly).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenCalledTimes(2);
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(notifyAdmin).toHaveBeenCalledWith(
       'alert',
@@ -8037,9 +8034,9 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       perTerm: [{ term: bad, reachesRefresh: true, rows: [visit('v1', 'term-bad', '2026-10-15')] }],
       extra: { notifications: [alreadyFiled] },
     });
-    const stampOnly = jest.fn(async () => { throw new Error('still failing'); });
+    const refresh = jest.fn(async () => { throw new Error('still failing'); });
 
-    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn(), stampOnly });
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
 
     expect(summary.failed).toBe(1);
     expect(notifyAdmin).not.toHaveBeenCalled();
@@ -8066,7 +8063,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  test('lock order inside the stamp: invoice share -> term row FOR UPDATE -> covered recheck -> customer row FOR UPDATE NOWAIT -> stamp; the billing-mode stamp then runs', async () => {
+  test('lock order inside the refresh: invoice share -> term row FOR UPDATE -> covered recheck -> customer row FOR UPDATE NOWAIT -> refresh; the billing-mode stamp then runs', async () => {
     const term = termRow('term-1', { term_end: '2099-01-01' });
     const customerLock = query({ first: { id: 'cust' } });
     const currentCustomer = query({ first: { billing_mode: 'per_application' } });
@@ -8083,9 +8080,9 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     const order = [];
     const inner = db.getMockImplementation();
     db.mockImplementation((table) => { order.push(table); return inner(table); });
-    const stampOnly = jest.fn(async () => { order.push('REFRESH'); });
+    const refresh = jest.fn(async () => { order.push('REFRESH'); return term; });
 
-    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn(), stampOnly });
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
 
     expect(summary.restamped).toBe(1);
     const at = (name, from = 0) => order.indexOf(name, from);
@@ -8111,13 +8108,13 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     });
     db.schema = { hasTable: jest.fn().mockResolvedValue(true), hasColumn: jest.fn().mockResolvedValue(true) };
 
-    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '1999-12-01', conn: db, refresh: jest.fn(), stampOnly: jest.fn() });
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '1999-12-01', conn: db, refresh: jest.fn(async () => term) });
 
     expect(summary.restamped).toBe(1);
     expect(stampCustomer.update).not.toHaveBeenCalled();
   });
 
-  test('a mixed term (one price-held row, one genuinely open row) is still stamped — the stamp pass itself keeps the hold', async () => {
+  test('a mixed term (one price-held row, one genuinely open row) still refreshes — the refresh itself keeps the hold', async () => {
     const term = termRow('term-h');
     queues({
       terms: [term],
@@ -8128,12 +8125,12 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       }],
       extra: { activity_log: [query({ first: SECURE_MINT_RECORD })] },
     });
-    const stampOnly = jest.fn();
+    const refresh = jest.fn(async () => term);
 
-    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn(), stampOnly });
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
 
     expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
-    expect(stampOnly).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   test('a customer row locked by another transaction (e.g. a credit reversal, customer -> invoice) skips the term without waiting; nothing is stamped or alerted', async () => {
@@ -8145,13 +8142,13 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       perTerm: [{ term, reachesRefresh: true, rows: [visit('v1', 'term-1', '2026-10-15')] }],
       extra: { customers: [busy] },
     });
-    const stampOnly = jest.fn();
+    const refresh = jest.fn();
 
-    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn(), stampOnly });
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
 
     expect(summary).toEqual({ scanned: 1, restamped: 0, held: 0, skipped: 1, failed: 0 });
     expect(busy.noWait).toHaveBeenCalled();
-    expect(stampOnly).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -8165,7 +8162,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       extra: { customers: [broken] },
     });
 
-    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn(), stampOnly: jest.fn() });
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn() });
 
     expect(summary.failed).toBe(1);
     expect(notifyAdmin).toHaveBeenCalledWith('alert', 'Annual prepay: visits not marked as covered', expect.any(String), expect.anything());
@@ -8266,12 +8263,12 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh, stampOnly: jest.fn() });
 
       expect(summary.restamped).toBe(1);
-      expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-r' }), db);
+      expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-r' }), db, { seedNotBefore: '2026-10-20' });
     });
 
     test('an existing UNLINKED visit in the window does not make it look seeded: the leg still refreshes (seeds the rest), never stamps that one visit alone', async () => {
       const term = termRow('term-1');
-      queues({ terms: [term], perTerm: [{ term, reachesRefresh: true, rows: [visit('v1', 'term-1', '2026-10-15')], link: null }] });
+      queues({ terms: [term], perTerm: [{ term, reachesRefresh: true, rows: [visit('v1', 'term-1', '2026-10-15')] }] });
       const refresh = jest.fn(async () => term);
       const stampOnly = jest.fn();
 

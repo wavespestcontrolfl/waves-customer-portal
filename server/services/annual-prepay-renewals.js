@@ -4228,7 +4228,10 @@ async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false,
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
-async function refreshTermSnapshot(termOrId, conn = db) {
+// seedNotBefore (opt-in, the re-stamp sweep): the gap-fill never seeds a
+// visit dated before it — passed through to ensureCoverageRowsForTerm.
+// Unset (every activation / schedule-edit caller), behavior is unchanged.
+async function refreshTermSnapshot(termOrId, conn = db, { seedNotBefore = null } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
     ? termOrId
@@ -4264,7 +4267,7 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   // nightly sweep replaces a skipped visit). A void/refund 'cancelled' row
   // (renewal_decision NULL) or an end_now_refund lapse is never touched.
   if (ACTIVE_STATUSES.includes(term.status)) {
-    const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
+    const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn, { seedNotBefore });
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
     // Attach + prepaid stamping run even on a palm-identity DEFERRAL
     // (codex r18 pre-push P0, superseding the earlier hard-stop): the
@@ -5880,34 +5883,27 @@ async function stampTermCoverageOnly(term, t) {
 }
 
 async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), stampOnly = stampTermCoverageOnly) {
-  // A term that ever had a visit linked is only ever STAMPED, never
-  // refreshed: an activated term's refresh gap-fills the whole stored window
-  // with no today floor, so it would re-create a slot the office cancelled
-  // months ago as a pending visit dated in the past (#5453 terminal review
-  // P2). That holds for an ENDED window too (Codex #5453 r2 P1: its
-  // unfinished in-window visits still owe their stamps). Only a term whose
-  // activation never seeded anything is refreshed, so the seeder runs as a
-  // first activation (today floor).
-  let seed = false;
+  // A live term goes through the full refresh — the same seeding, callback
+  // detach, identity repair, stamping and snapshot an activation runs — but
+  // with a today floor on the gap-fill: an activated term's refresh
+  // otherwise fills its whole stored window, re-creating a slot the office
+  // cancelled months ago as a pending visit dated in the past (#5453
+  // terminal review P2). A term whose window has ENDED still owes its stamps
+  // to unfinished in-window visits (Codex #5453 r2 P1) but is only stamped,
+  // never refreshed: every slot it could seed is in the past.
   const ended = !!term.term_end && term.term_end < todayKey;
   const rows = await coverageRowsForTerm(term, conn);
   const open = rows.filter((row) => row.id
     && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
     && !rowPrepaidElsewhere(term, row)
     && !rowStampedByTerm(term, row));
-  // Decided on its own, never from `open`: a customer's existing unlinked
-  // visit in the window is not evidence the activation seeded — stamping it
-  // alone would link it, and every later run would then read the term as
-  // seeded and never schedule the rest (#5453 terminal review r1 P1).
-  const neverSeeded = !ended && (await activationNeverSeeded(term, rows, conn));
-  if (neverSeeded) {
-    seed = true;
-  } else if (!open.length) {
-    // Nothing unstamped, and the term was seeded once (a visit was linked
-    // to it in some status) or cannot seed yet (termite awaiting
-    // installation). A term that ever carried a linked visit is never
-    // re-seeded here: the office may have cancelled slots on purpose.
-    return 'clean';
+  if (!open.length) {
+    // Nothing unstamped among the canonical rows — but a term whose
+    // activation failed BEFORE seeding has no rows at all, and the prefilter
+    // admits it for that reason. A term that ever carried a linked visit is
+    // never re-seeded here (the office may have cancelled slots on purpose),
+    // nor is one that cannot seed yet (termite awaiting installation).
+    if (ended || !(await activationNeverSeeded(term, rows, conn))) return 'clean';
   } else {
     const { held, heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
     if (!open.some((row) => !heldIds.has(String(row.id)))) {
@@ -5952,10 +5948,10 @@ async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), st
       .first('t.*');
     if (!fresh) return 'skipped';
     if (fresh.customer_id && !(await tryLockCustomerNoWait(t, fresh.customer_id))) return 'skipped';
-    if (seed) {
-      await refresh(fresh, t);
-    } else {
+    if (ended) {
       await stampOnly(fresh, t);
+    } else {
+      await refresh(fresh, t, { seedNotBefore: todayKey });
     }
     // The activation that threw before its stamp also never reached the
     // billing-mode stamp (syncTermForInvoicePayment runs it right after the
