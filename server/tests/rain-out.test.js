@@ -1013,6 +1013,52 @@ describe('rain-out service', () => {
       expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true, notified_at: null });
     });
 
+    test('gate on: a series shift that carried grouped partners texts the STOP\'s landed start (GATE_SERIES_MOVE_CARRIES_VISIT)', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      db.fn = { now: jest.fn(() => 'now()') };
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) })],
+        series_moves: [chain({ update: jest.fn().mockResolvedValue(1) }), chain({ update: jest.fn().mockResolvedValue(1) })],
+      });
+      // The pest partner arrives first: the stop starts at 11:00, not 13:00.
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        seriesMoveId: 'sm-1',
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00', visitId: 'v1', visitWindowStart: '11:00' }],
+        carriedVisitMembers: [{ id: 'pest-1', visitId: 'v1', date: '2026-06-12', windowStart: '11:00', windowEnd: '12:00' }],
+      });
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM123' });
+      await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
+      expect(sendCustomerMessage).toHaveBeenCalled();
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const vars = renderSmsTemplate.mock.calls[renderSmsTemplate.mock.calls.length - 1][1];
+      expect(vars.new_option).toContain('11:00 AM - 1:00 PM');
+    });
+
+    test('route scope: a partner the series shift carried is covered by its visit — never moved or texted again', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) }),
+          chain({ rows: [{
+            id: 'pest-1', status: 'pending', scheduled_date: '2026-06-11', visit_id: 'v1',
+            window_start: '09:00', window_end: '10:00', customer_id: 'cust-1',
+            service_type: 'Quarterly Pest Control', route_order: 2, is_recurring: true,
+          }] }),
+        ],
+      });
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00' }],
+        carriedVisitMembers: [{ id: 'pest-1', visitId: 'v1', date: '2026-06-12', windowStart: '13:00', windowEnd: '14:00' }],
+      });
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, scope: 'route' });
+      expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(result.results).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'pest-1', ok: true, coveredByVisit: 'v1', smsReason: 'covered_by_visit' }),
+      ]));
+    });
+
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();

@@ -2233,6 +2233,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   const coverMoved = (r, job) => {
     const vid = String((r && r.visitMove && r.visitMove.visitId) || (job && job.visit_id) || '') || null;
     for (const id of coveredIdsFrom(r)) { coveredIds.add(id); if (vid) coveredVisitOf.set(id, vid); }
+    // Partners a series shift carried with an occurrence
+    // (GATE_SERIES_MOVE_CARRIES_VISIT) moved with their stop: covered too,
+    // under their own visit.
+    for (const k of (r && Array.isArray(r.carriedVisitMembers) ? r.carriedVisitMembers : [])) {
+      coveredIds.add(String(k.id));
+      if (k.visitId) coveredVisitOf.set(String(k.id), String(k.visitId));
+    }
   };
   for (const job of orderedJobs) {
     // A straggler of a PARTIAL unit move earlier in this batch: skipped
@@ -2342,6 +2349,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // siblings (moveVisitAsUnit) — mark the visit covered HERE too, not
           // only on the single fallback (codex #3609 r3).
           coverMoved(seriesResult);
+          // A grouped anchor whose partners rode the sweep: the moved-SMS
+          // quotes the STOP's landed start, as on the unit path.
+          const anchorOcc = (shiftedOccurrences || []).find((o) => String(o.id) === String(job.id));
+          if (anchorOcc?.visitWindowStart) unitVisitStart = String(anchorOcc.visitWindowStart);
           seriesReplayed = seriesResult?.replayed === true;
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
