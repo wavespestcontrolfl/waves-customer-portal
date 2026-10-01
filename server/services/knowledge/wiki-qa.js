@@ -10,6 +10,7 @@ const { isEnabled, kbSpeciesQaLive } = require('../../config/feature-gates');
 // customer-facing and never sees species tech notes.
 const STAFF_SOURCES = new Set(['tech_field', 'admin_manual']);
 const MAX_SPECIES = 3;
+const CATALOG_FILE_BACK_REASON = 'Answer drew on the species catalog; it is not filed back into the knowledge base';
 
 // Structured-output contract for the routing step (llm/call.js jsonSchema).
 // The path list is still capped to 8 and resolved against knowledge_base.
@@ -155,17 +156,21 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
       const catalog = require('../species-catalog');
       const { isApproved } = require('../species-catalog-approval');
       const { speciesTitle, renderSpeciesCustomer, renderSpeciesTech } = require('../knowledge-index/connectors');
-      const staff = STAFF_SOURCES.has(source || 'admin_manual');
+      // A caller that names no source is treated as customer-facing.
+      const staff = STAFF_SOURCES.has(source);
 
-      let slugs = [];
+      // The entry the question names, if exactly one; always relevant.
+      const resolved = catalog.resolveName(question);
+      const named = resolved?.node?.slug && catalog.getEntry(resolved.node.slug) ? resolved.node.slug : null;
+
+      // Relevance floor: a hybrid hit counts only when at least two ranked
+      // lists agree on it (vector + full text). Most entries share phrases
+      // like "General Pest Control", so a lone full-text match is noise.
+      let slugs = named ? [named] : [];
       if (isEnabled('hybridKnowledge')) {
         const { hybridKnowledgeSearch } = require('../knowledge-index/hybrid-search');
         const hits = await hybridKnowledgeSearch(question, { limit: 8, sources: staff ? ['species', 'species_tech'] : ['species'] });
-        slugs = (hits?.results || []).map((r) => r.sourceId);
-      }
-      if (!slugs.length) {
-        const resolved = catalog.resolveName(question);
-        if (resolved?.node?.slug) slugs = [resolved.node.slug];
+        slugs.push(...(hits?.results || []).filter((r) => r.lists >= 2).map((r) => r.sourceId));
       }
 
       const entries = [...new Set(slugs)]
@@ -252,6 +257,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
 
     const refs = typeof q.articles_referenced === 'string' ? JSON.parse(q.articles_referenced) : (q.articles_referenced || []);
     if (refs.length === 0) return { filed: false, reason: 'No articles referenced' };
+    if (this.drewOnCatalog(refs)) return { filed: false, reason: CATALOG_FILE_BACK_REASON };
 
     // Append Q&A to the first referenced article
     const article = await db('knowledge_base').where('path', refs[0]).first();
@@ -268,6 +274,17 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     await db('knowledge_queries').where('id', queryId).update({ filed_back: true });
 
     return { filed: true, article: article.path };
+  }
+
+  /**
+   * True when an answer drew on species-catalog entries. Such an answer is
+   * never filed back into knowledge_base: a staff answer may quote tech
+   * notes, and knowledge_base is read by customer-facing callers. The
+   * catalog itself stays the source of truth for those facts.
+   */
+  drewOnCatalog(articlesReferenced) {
+    const refs = typeof articlesReferenced === 'string' ? JSON.parse(articlesReferenced) : (articlesReferenced || []);
+    return refs.some((ref) => String(ref).startsWith('species:'));
   }
 
   async logQuery(query, answer, articlesReferenced, askedBy) {
@@ -300,3 +317,4 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
 }
 
 module.exports = new WikiQA();
+module.exports.CATALOG_FILE_BACK_REASON = CATALOG_FILE_BACK_REASON;

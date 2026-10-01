@@ -47,7 +47,7 @@ beforeEach(() => {
   hybridKnowledgeSearch.mockReset();
   process.env = { ...env, ANTHROPIC_API_KEY: 'test', GATE_KB_SPECIES_QA: 'true' };
   gates.hybridKnowledge = true; // read at module load in prod; set directly here
-  hybridKnowledgeSearch.mockResolvedValue({ results: [{ source: 'species', sourceId: SLUG }] });
+  hybridKnowledgeSearch.mockResolvedValue({ results: [{ source: 'species', sourceId: SLUG, lists: 2 }] });
 });
 const hybridAtLoad = gates.hybridKnowledge;
 afterAll(() => { process.env = env; gates.hybridKnowledge = hybridAtLoad; });
@@ -89,13 +89,44 @@ test('hybrid off falls back to the catalog name match', async () => {
   expect(result.articlesUsed).toEqual(['species:ghost-ant']);
 });
 
-test('drafts and unknown slugs are never used', async () => {
-  const draft = catalog.listEntries().find((e) => e.review?.status !== 'owner_approved');
-  hybridKnowledgeSearch.mockResolvedValue({ results: [{ sourceId: draft.slug }, { sourceId: 'not-a-slug' }] });
+test('unapproved and unknown slugs are never used', async () => {
+  const approval = require('../services/species-catalog-approval');
+  const spy = jest.spyOn(approval, 'isApproved').mockImplementation((e) => e.slug !== SLUG);
+  hybridKnowledgeSearch.mockResolvedValue({ results: [{ sourceId: SLUG, lists: 2 }, { sourceId: 'not-a-slug', lists: 2 }] });
   dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { paths: [] } });
   const result = await WikiQA.query('zzz', { source: 'ai_assistant' });
+  spy.mockRestore();
   expect(result.articlesUsed).toEqual([]);
   expect(dispatchWithFallback).toHaveBeenCalledTimes(1); // no answer call on a miss
+});
+
+test('a hit only one ranked list found is dropped (no relevance noise)', async () => {
+  hybridKnowledgeSearch.mockResolvedValue({ results: [{ sourceId: SLUG, lists: 1 }] });
+  dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { paths: [] } });
+  const result = await WikiQA.query('what does general pest control include', { source: 'ai_assistant' });
+  expect(result.articlesUsed).toEqual([]);
+  expect(result.answer).toMatch(/couldn't find relevant articles/);
+});
+
+test('the entry the question names is used even without a hybrid hit', async () => {
+  hybridKnowledgeSearch.mockResolvedValue({ results: [] });
+  routeTo([]);
+  const result = await WikiQA.query('ghost ants in the kitchen', { source: 'ai_assistant' });
+  expect(result.articlesUsed).toEqual(['species:ghost-ant']);
+});
+
+test('a caller with no source gets customer copy only', async () => {
+  routeTo([]);
+  await WikiQA.query('sticky black coating', {});
+  expect(hybridKnowledgeSearch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ sources: ['species'] }));
+  expect(answerCall().text).not.toContain(techNotes);
+});
+
+test('an answer that drew on the catalog is never filed back', () => {
+  expect(WikiQA.drewOnCatalog(['pests/ants.md', `species:${SLUG}`])).toBe(true);
+  expect(WikiQA.drewOnCatalog(JSON.stringify([`species:${SLUG}`]))).toBe(true);
+  expect(WikiQA.drewOnCatalog(['pests/ants.md'])).toBe(false);
+  expect(WikiQA.drewOnCatalog(null)).toBe(false);
 });
 
 test('gate off: no species search and the prompt is unchanged', async () => {
