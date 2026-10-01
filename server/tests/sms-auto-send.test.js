@@ -241,9 +241,10 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
       'house_voice_v12_real_answers', // stamped before the bump
       'house_voice_v12_real_answers+c', // the row from the finding
       'house_voice_v12_real_answers+bclm',
-      drafter.REAL_ANSWERS_PROMPT_VERSION, // 'house_voice_v12_real_answers_cf'
+      drafter.REAL_ANSWERS_PROMPT_VERSION, // 'house_voice_v12_real_answers2_cf'
       `${drafter.REAL_ANSWERS_PROMPT_VERSION}+bc`,
-      'house_voice_v12_real_answers_cf_lbl+c', // a later suffix
+      'house_voice_v12_real_answers_cf', // the company-facts cohort stamped before the re-service token
+      'house_voice_v12_real_answers2_cf_lbl+c', // a later suffix
     ]) expect(likeRe.test(stamped)).toBe(true);
     expect(likeRe.test('house_voice_v13_real_answers')).toBe(false);
     expect(likeRe.test('house_voice_v12X')).toBe(false);

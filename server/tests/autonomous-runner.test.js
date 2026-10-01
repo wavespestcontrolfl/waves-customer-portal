@@ -1507,6 +1507,84 @@ describe('module exports', () => {
   });
 });
 
+describe('runDaily reserved citability backfill slots', () => {
+  const originalEnv = { ...process.env };
+  afterEach(() => { process.env = { ...originalEnv }; });
+  // loadRunnerWith's queue mock (with a row-returning peek) outlives this
+  // block in the module registry; re-mock a queue with no peek so later
+  // batching tests reserve nothing.
+  afterAll(() => { loadRunnerWith({ queue: {} }); });
+
+  function batchRunner(outcomes, reserved) {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner.runNext = jest.fn();
+    for (const o of outcomes) runner.runNext.mockResolvedValueOnce(o);
+    runner.runNext.mockResolvedValue({ outcome: 'skipped_no_opportunity' });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+    runner._claimableBackfillSlots = jest.fn(async () => reserved);
+    return runner;
+  }
+
+  test('the first reserved slots claim backfill rows, then the batch claims by score', async () => {
+    const done = { outcome: 'completed_pending_review', action_type: 'refresh_existing_page' };
+    const runner = batchRunner([done, done, { outcome: 'completed_pending_review', action_type: 'new_supporting_blog' }], 2);
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    expect(runner._claimableBackfillSlots).toHaveBeenCalledWith(5);
+    expect(runner.runNext.mock.calls[0][0]).toMatchObject({ bucket: 'citability_backfill' });
+    expect(runner.runNext.mock.calls[1][0]).toMatchObject({ bucket: 'citability_backfill' });
+    expect(runner.runNext.mock.calls[2][0].bucket).toBeUndefined();
+    // Reserved runs count toward the same batch of 5.
+    expect(result).toMatchObject({ count: 4, limit: 5 });
+  });
+
+  test('a reserved slot whose row was claimed away returns to the general pool', async () => {
+    const blog = { outcome: 'completed_pending_review', action_type: 'new_supporting_blog' };
+    const runner = batchRunner([{ outcome: 'skipped_no_opportunity' }, blog, blog, blog, blog, blog], 2);
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    expect(runner.runNext.mock.calls[0][0]).toMatchObject({ bucket: 'citability_backfill' });
+    // The empty reserved probe is not recorded and uses no slot; the second
+    // reservation is dropped, and all five slots go to scored work.
+    expect(runner.runNext.mock.calls.slice(1).every(([args]) => args.bucket === undefined)).toBe(true);
+    expect(runner._appendToDailyDigest).toHaveBeenCalledTimes(5);
+    expect(result).toMatchObject({ count: 5 });
+  });
+
+  test('a scoped pass (the blog catch-up) reserves nothing', async () => {
+    const runner = batchRunner([{ outcome: 'completed_pending_review', action_type: 'new_supporting_blog' }], 2);
+    await runner.runDaily({ limit: 5, actionType: 'new_supporting_blog' });
+    expect(runner._claimableBackfillSlots).not.toHaveBeenCalled();
+    expect(runner.runNext.mock.calls.every(([args]) => args.bucket === undefined)).toBe(true);
+  });
+
+  test('_claimableBackfillSlots: default 2, never the whole batch, sized by what is claimable, 0 disables', async () => {
+    const peek = jest.fn(async ({ limit }) => Array.from({ length: limit }, (_, i) => ({ id: i })));
+    const recoverStaleClaims = jest.fn(async () => 0);
+    const runner = loadRunnerWith({ queue: { peek, recoverStaleClaims } });
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(2);
+    // Stale claims from a crashed batch are recovered before sizing (Codex r1 P2).
+    expect(recoverStaleClaims.mock.invocationCallOrder[0]).toBeLessThan(peek.mock.invocationCallOrder[0]);
+    expect(peek).toHaveBeenCalledWith(expect.objectContaining({ bucket: 'citability_backfill', limit: 2 }));
+    // A failed recovery still sizes from pending rows.
+    recoverStaleClaims.mockRejectedValueOnce(new Error('lock timeout'));
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(2);
+    await expect(runner._claimableBackfillSlots(1)).resolves.toBe(0);
+    peek.mockResolvedValueOnce([{ id: 1 }]);
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(1);
+    process.env.AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS = '0';
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(0);
+    process.env.AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS = '9';
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(4);
+    peek.mockRejectedValueOnce(new Error('db down'));
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(0);
+  });
+});
+
 describe('runDaily batching', () => {
   test('claims best remaining opportunities until limit or empty queue', async () => {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');

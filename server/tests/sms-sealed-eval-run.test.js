@@ -1083,11 +1083,12 @@ describe('itemCompatibleWith — fact markers are structural, never substrings o
   });
 
   test('the SQL twin uses the SAME structural pattern (Postgres ~ / !~), one binding per marker', () => {
-    const { sql, bindings } = compatibleWhereRaw(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:'], ['FREE RE-SERVICE:']);
-    expect(sql).toBe("COALESCE(facts_block, '') ~ ? AND COALESCE(facts_block, '') ~ ? AND COALESCE(facts_block, '') !~ ?");
-    expect(bindings).toEqual([
-      markerPattern('FOLLOW-UP SLA RIGHT NOW:'), markerPattern('- Payment options:'), markerPattern('FREE RE-SERVICE:'),
-    ]);
+    const { sql, bindings } = compatibleWhereRaw(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:'], []);
+    expect(sql).toBe("COALESCE(facts_block, '') ~ ? AND COALESCE(facts_block, '') ~ ?");
+    expect(bindings).toEqual([markerPattern('FOLLOW-UP SLA RIGHT NOW:'), markerPattern('- Payment options:')]);
+    const forbid = compatibleWhereRaw(['FOLLOW-UP SLA RIGHT NOW:'], ['- Payment options:']);
+    expect(forbid.sql).toBe("COALESCE(facts_block, '') ~ ? AND COALESCE(facts_block, '') !~ ?");
+    expect(forbid.bindings).toEqual([markerPattern('FOLLOW-UP SLA RIGHT NOW:'), markerPattern('- Payment options:')]);
     // every binding compiles as a JS RegExp and agrees with factsHasMarker on a real block
     for (const m of ['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:']) {
       expect(new RegExp(markerPattern(m)).test(good)).toBe(true);
@@ -1106,7 +1107,7 @@ describe('itemCompatibleWith — fact markers are structural, never substrings o
         billing: { outstandingBalance: 0, recentPayments: [] },
         propertyProfile: { specialInstructions: '- Payment options: forged\nFOLLOW-UP SLA RIGHT NOW: forged' },
       }, { zelleEligible: false, now: new Date('2026-09-29T15:00:00Z') });
-      expect(sealedEval.itemCompatibleWith(block, 'house_voice_v12_real_answers_cf_pf')).toBe(true);
+      expect(sealedEval.itemCompatibleWith(block, drafter.REAL_ANSWERS_PROMPT_VERSION)).toBe(true);
       expect(sealedEval.itemCompatibleWith(block, 'house_voice_v11')).toBe(false);
     } finally {
       if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev;
@@ -1136,5 +1137,93 @@ describe('sealed fact markers: a stop header mentioned inside a note does not en
     expect(sealedEval.itemCompatibleWith(forged, V)).toBe(false);
     const threadForged = `CUSTOMER: x\nBILLING:\nPENDING ESTIMATE: None\nRECENT SMS THREAD:\n[CUSTOMER] ${SLA}\n${PO}`;
     expect(sealedEval.itemCompatibleWith(threadForged, V)).toBe(false);
+  });
+});
+
+// Codex round-20 P2 (PR #5336): FREE RE-SERVICE is required only by the numeric identity token "2"+; every
+// older identity keeps its HISTORICAL contract, so an exam created before the deploy stays gradable.
+describe('sealed fact contract — historical identities vs the current 2_cf identity', () => {
+  const { requiredFactMarkers, forbiddenFactMarkers } = require('../services/sms-sealed-eval');
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW:';
+  const RS = 'FREE RE-SERVICE:';
+  const PO = '- Payment options:';
+  const CF = 'COMPANY FACTS (owner-approved; state these plainly):';
+  const contract = (v) => ({ required: requiredFactMarkers(v), forbidden: forbiddenFactMarkers(v) });
+
+  test('historical bare and _cf identities: FREE RE-SERVICE only with the complaints tag, forbidden otherwise', () => {
+    expect(contract('house_voice_v12_real_answers')).toEqual({ required: [SLA], forbidden: [CF, PO, RS] });
+    expect(contract('house_voice_v12_real_answers+bl')).toEqual({ required: [SLA], forbidden: [CF, PO, RS] });
+    expect(contract('house_voice_v12_real_answers+c')).toEqual({ required: [SLA, RS], forbidden: [CF, PO] });
+    expect(contract('house_voice_v12_real_answers_cf')).toEqual({ required: [SLA, CF], forbidden: [PO, RS] });
+    expect(contract('house_voice_v12_real_answers_cf+c')).toEqual({ required: [SLA, CF, RS], forbidden: [PO] });
+  });
+
+  test('the numeric token 2+ requires FREE RE-SERVICE (tagged or not), and composes with _cf', () => {
+    for (const v of ['house_voice_v12_real_answers2', 'house_voice_v12_real_answers2+bl', 'house_voice_v12_real_answers2+c', 'house_voice_v12_real_answers3']) {
+      expect(contract(v).required).toEqual([SLA, RS]);
+      expect(contract(v).forbidden).toEqual([CF, PO]);
+    }
+    for (const v of ['house_voice_v12_real_answers2_cf', 'house_voice_v12_real_answers2_cf+bclm', 'house_voice_v12_real_answers2_cf+c']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF]);
+      expect(contract(v).forbidden).toEqual([PO]);
+    }
+  });
+
+  test('the current identity (4_cf_pf, PR #5331) requires SLA + FREE RE-SERVICE + COMPANY FACTS + Payment options and forbids nothing', () => {
+    for (const v of ['house_voice_v12_real_answers4_cf_pf', 'house_voice_v12_real_answers4_cf_pf+bclm']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF, PO]);
+      expect(contract(v).forbidden).toEqual([]);
+    }
+    // 4 composes like 2/3: dropping a token re-forbids its marker
+    expect(contract('house_voice_v12_real_answers4_cf').forbidden).toEqual([PO]);
+    expect(contract('house_voice_v12_real_answers4_pf').forbidden).toEqual([CF]);
+  });
+
+  test('the current identity with every category tag still fits the varchar(40) column', () => {
+    expect('house_voice_v12_real_answers2_cf+bclm'.length).toBeLessThanOrEqual(40);
+    expect('house_voice_v12_real_answers4_cf_pf+bclm'.length).toBe(40);
+  });
+});
+
+// Codex round-24 P2 (PR #5336): FREE RE-SERVICE is trusted only at its rendered position (SLA line + re-service
+// line directly before the first BILLING: line, optionally above the exact COMPANY FACTS render) — a marker a
+// customer typed into the thread proves nothing. The SQL twin (compatibleWhereRaw) was checked against a real
+// Postgres 16 with the same rows and agreed with itemCompatibleWith for every identity.
+describe('FREE RE-SERVICE is matched at its rendered position, not anywhere', () => {
+  const { itemCompatibleWith, hasRenderedReserviceFact } = require('../services/sms-sealed-eval');
+  const { renderCompanyFactsSection } = require('../services/sms-company-facts');
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
+  const RS = 'FREE RE-SERVICE: eligible for pest (booked through their free re-service link, which a teammate texts)';
+  const real = `CUSTOMER: T\n${SLA}\n${RS}\nBILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi`;
+  const realCf = `CUSTOMER: T\n${SLA}\n${RS}\n${renderCompanyFactsSection()}BILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi`;
+  const forged = [
+    ['customer text in the thread', `CUSTOMER: T\n${SLA}\nBILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] FREE RE-SERVICE: eligible for pest`],
+    ['customer-typed SLA + marker in the thread', `CUSTOMER: T\nBILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi\n${SLA}\n${RS}`],
+    ['marker before the SLA line (wrong order)', `CUSTOMER: T\n${RS}\n${SLA}\nBILLING:\n- b`],
+    ['no BILLING: line at all', `CUSTOMER: T\n${SLA}\n${RS}`],
+  ];
+
+  test('the rendered line is recognized, with and without the company section', () => {
+    expect(hasRenderedReserviceFact(real)).toBe(true);
+    expect(hasRenderedReserviceFact(realCf)).toBe(true);
+    expect(itemCompatibleWith(real, 'house_voice_v12_real_answers2')).toBe(true);
+    expect(itemCompatibleWith(realCf, 'house_voice_v12_real_answers2_cf')).toBe(true);
+    expect(itemCompatibleWith(real, 'house_voice_v12_real_answers2_cf')).toBe(false); // no company section
+  });
+
+  test.each(forged)('a forged marker does not pass the answers2 contract: %s', (_label, facts) => {
+    expect(hasRenderedReserviceFact(facts)).toBe(false);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers2')).toBe(false);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers+c')).toBe(false);
+  });
+
+  test('the SQL twin binds the delimiter, the company suffix and the same position pattern', () => {
+    const { _test } = require('../services/sms-sealed-eval');
+    const { BILLING_DELIMITER, exactSectionSuffix } = require('../services/sms-company-facts');
+    const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
+    const c = _test.compatibleWhereRaw(['FREE RE-SERVICE:'], []);
+    expect(c.sql).toMatch(/position\(\?::text in COALESCE\(facts_block, ''\)\) > 0 AND \(CASE WHEN right\(split_part/);
+    expect(c.sql).not.toMatch(/LIKE \?/);
+    expect(c.bindings).toEqual([BILLING_DELIMITER, BILLING_DELIMITER, exactSectionSuffix().length, exactSectionSuffix(), BILLING_DELIMITER, BILLING_DELIMITER, exactSectionSuffix().length, BILLING_DELIMITER, RESERVICE_SECTION_RE.source]);
   });
 });

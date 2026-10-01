@@ -25,6 +25,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 1),
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
+  reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
   // Independent-review P1 (round 5, finding 1): dispatchClaimedSend's new

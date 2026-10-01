@@ -73,11 +73,14 @@ const {
 } = require('../services/sms-company-facts');
 const EXACT = exactSuffix_();
 const pattern_ = (m) => require('../services/sms-sealed-eval')._test.markerPattern(m);
+// FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
+const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
+const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
 const CONTRACT_BINDINGS = [
   pattern_('FOLLOW-UP SLA RIGHT NOW:'),
   D_, D_, EXACT.length, EXACT,
   pattern_('- Payment options:'),
-  pattern_('FREE RE-SERVICE:'),
+  ...RS_BINDINGS,
 ];
 
 describe('sealEvalItems — selection contract', () => {
@@ -284,7 +287,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     const contract = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /!~ \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
-      expect(String(args[0])).not.toMatch(/(?<!!)~ \?/); // nothing required, both lines forbidden
+      expect(String(args[0])).not.toMatch(/(?<!!)~ \?(?!:)/); // nothing required, both lines forbidden
       expect(args[1]).toEqual(CONTRACT_BINDINGS);
     }
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /!~ \?/.test(String(args[0])))).toBe(true);

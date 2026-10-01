@@ -126,6 +126,14 @@ async function recordLegOutcome(entry, channel, result, results) {
   }
   if (result?.held === true || result?.deliveryHeld === true) return null;
   if (result?.deliveryOutcome === 'uncertain') return null;
+  // A dispute hold that landed after the rail-guard consult refused this leg at the send boundary
+  // (the ONE retryable COLLECTION_HOLD_DEFER outcome): a WAIT. Nothing reached the customer, so
+  // the reservation is released rather than stamped failed or resolved; the episode stays
+  // incomplete and the leg is re-reserved and sent on the first run after the release.
+  if (require('./collections/collection-hold').isHoldSuppression(result)) {
+    await ContactLedger.releaseHeldReservation(entry);
+    return null;
+  }
   const terminal = channel === 'email' && isTerminalEmailRefusal(result);
   const stamped = await ContactLedger.markSendFailed(entry, {
     code: result?.code || result?.reason || 'not_sent',
