@@ -4,8 +4,13 @@
 // renders on its own; gate on swaps in the yard-month card.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const native = vi.hoisted(() => ({ enabled: false }));
+vi.mock('../native/platform', async (importOriginal) => ({
+  ...await importOriginal(), isNativeApp: () => native.enabled,
+}));
 
 vi.mock('../utils/api', () => {
   const target = {};
@@ -44,6 +49,7 @@ const YARD = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  native.enabled = false;
   api.getWeather.mockResolvedValue(WEATHER);
   api.getLawnHealth.mockResolvedValue({ hasLawnCare: false });
 });
@@ -82,6 +88,21 @@ describe('Local Conditions slot', () => {
     expect(screen.getByRole('heading', { name: 'October in Venice' })).toBeInTheDocument();
     expect(screen.queryByText('Mosquito Pressure')).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Lawn' })).toBeInTheDocument();
+  });
+
+  it('native app: the lawn calendar teaser opens in the in-app overlay, not a new window', async () => {
+    native.enabled = true;
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    api.getYardMonth.mockResolvedValue({
+      ...YARD, plan: { lawn: false, pest: true, treeShrub: false, mosquito: false, rodent: false, termite: false },
+    });
+    render(<LocalConditionsSlot customer={customer} nextService={null} onOpenPhotoId={null} />);
+    await settle();
+    fireEvent.click(screen.getByRole('link', { name: /See what to look for/ }));
+    expect(await screen.findByRole('dialog', { name: 'Lawn pest calendar' })).toBeInTheDocument();
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 
   it('shows the widget loading panel while the gate answer is pending', () => {

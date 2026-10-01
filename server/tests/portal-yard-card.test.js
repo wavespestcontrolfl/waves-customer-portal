@@ -43,6 +43,7 @@ const PLACE = { slug: 'venice-fl', label: 'Venice, FL' };
 let ownedKeys;
 let grassContext;
 let forecastPests;
+let weatherAvailable;
 let loaders;
 let service;
 
@@ -51,6 +52,7 @@ beforeEach(() => {
   ownedKeys = LAWN_PLAN;
   grassContext = { grassType: 'st_augustine' };
   forecastPests = [];
+  weatherAvailable = true;
   loaders = {
     loadOwnedRecurringServiceKeys: jest.fn(async () => {
       if (ownedKeys instanceof Error) throw ownedKeys;
@@ -65,7 +67,7 @@ beforeEach(() => {
   jest.doMock('../services/pest-forecast/forecast', () => ({
     getForecast: jest.fn(async () => {
       if (forecastPests instanceof Error) throw forecastPests;
-      return { pests: forecastPests };
+      return { pests: forecastPests, weather: { available: weatherAvailable } };
     }),
   }));
   service = require('../services/portal-yard-card');
@@ -144,6 +146,7 @@ describe('grass mapping and hidden count', () => {
     const card = await build({});
     expect(card.grass.key).toBe(key);
     expect(card.grass.known).toBe(known);
+    expect(card.grass.mixed).toBe(grassType === 'mixed');
   });
 
   test('a grass-specific customer is not shown other grasses lawn items and gets a hidden count', async () => {
@@ -162,7 +165,7 @@ describe('grass mapping and hidden count', () => {
   test('a SECONDARY saved property gets every grass: the turf profile is the primary house\'s', async () => {
     const scope = { enabled: true, scoped: true, closed: false, property: { id: 'prop-b', is_primary: false } };
     const card = await build({ scope });
-    expect(card.grass).toEqual({ key: 'all', known: false, label: null });
+    expect(card.grass).toEqual({ key: 'all', known: false, mixed: false, label: null });
     expect(loaders.loadCustomerGrassContext).not.toHaveBeenCalled();
   });
 
@@ -186,10 +189,15 @@ describe('plan lines', () => {
     expect(card.plan).toMatchObject({ pest: true, lawn: false, treeShrub: false, mosquito: false, rodent: false });
   });
 
-  test('an ownership failure claims nothing', async () => {
+  test('an ownership lookup failure fails the card instead of claiming "not in your plan"', async () => {
     ownedKeys = new Error('catalog join failed');
-    const card = await build({});
-    expect(Object.values(card.plan).every((v) => v === false)).toBe(true);
+    await expect(build({})).rejects.toThrow('catalog join failed');
+  });
+
+  test('a failed property-street read on a scoped session also fails the card', async () => {
+    const property = { id: 'p2', is_primary: false, address_line1: '12 Palm Ave', city: 'Venice', zip: '34285' };
+    const boom = () => { throw new Error('db down'); };
+    await expect(build({ scope: { enabled: true, scoped: true, property }, knex: boom })).rejects.toThrow('db down');
   });
 });
 
@@ -240,7 +248,17 @@ describe('home pests', () => {
     forecastPests = new Error('weather down');
     const card = await build({});
     expect(card.homePests).toEqual([]);
+    expect(card.homePestsLive).toBe(false);
     expect(card.items.length).toBeGreaterThan(0);
+  });
+
+  test('live weather: homePestsLive true; weather down (seasonal baseline): false, pests still listed', async () => {
+    forecastPests = [{ key: 'ants', label: 'Ants', score10: 6, level: 'elevated', note: 'a' }];
+    expect((await build({})).homePestsLive).toBe(true);
+    weatherAvailable = false;
+    const card = await build({});
+    expect(card.homePestsLive).toBe(false);
+    expect(card.homePests).toHaveLength(1);
   });
 });
 
@@ -363,6 +381,12 @@ describe('GET /api/feed/yard', () => {
     expect(args.customerId).toBe('cust-1');
     expect(args.place.slug).toBe('venice-fl');
     expect(args.scope).toEqual({ enabled: true, scoped: true });
+  });
+
+  test('gate on: a card build failure goes to next(err), so the client keeps the old widget', async () => {
+    gateLive = true;
+    buildYardCard.mockRejectedValue(new Error('plan lookup failed'));
+    await expect(get({ customer: { city: 'Venice' } })).rejects.toThrow('plan lookup failed');
   });
 
   test('gate on: a scope lookup failure is an error, never an unscoped card', async () => {

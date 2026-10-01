@@ -98,19 +98,18 @@ async function propertyStreetScope(customerId, scope, knex) {
   return { estimateStreet, customerPrimaryStreet, requireSharedLocality: true };
 }
 
+// A lookup failure THROWS: an all-false plan would tell an enrolled customer
+// "not in your plan", so /feed/yard fails and the client keeps the old widget.
+// Only the deliberate readings above (unreadable street, closed scope) claim
+// nothing.
 async function loadPlan(customerId, knex, scope = null) {
   const plan = emptyPlan();
-  try {
-    const streetScope = await propertyStreetScope(customerId, scope, knex);
-    if (streetScope?.unreadable) return plan;
-    const keys = await loadOwnedRecurringServiceKeys(knex, customerId, { streetScope });
-    for (const key of keys) {
-      const line = PLAN_KEY_TO_LINE[key];
-      if (line) plan[line] = true;
-    }
-  } catch (err) {
-    // Fails closed: no plan lines means no "in your plan" claim anywhere.
-    logger.warn(`[portal-yard-card] plan lookup failed for ${customerId}: ${err.message}`);
+  const streetScope = await propertyStreetScope(customerId, scope, knex);
+  if (streetScope?.unreadable) return plan;
+  const keys = await loadOwnedRecurringServiceKeys(knex, customerId, { streetScope });
+  for (const key of keys) {
+    const line = PLAN_KEY_TO_LINE[key];
+    if (line) plan[line] = true;
   }
   return plan;
 }
@@ -119,15 +118,18 @@ async function loadPlan(customerId, knex, scope = null) {
 // SECONDARY saved property has no grass of its own: show every grass rather
 // than the primary house's (same call photo-id makes for its grass context).
 async function loadGrass(customerId, scope, knex) {
-  if (isSecondarySelection(scope)) return { key: 'all', known: false, label: null };
+  const every = { key: 'all', known: false, mixed: false, label: null };
+  if (isSecondarySelection(scope)) return every;
   try {
     const ctx = await loadCustomerGrassContext(customerId, knex);
     const key = GRASS_KEYS[ctx.grassType];
-    if (key) return { key, known: true, label: GRASS_LABELS[key] };
+    if (key) return { key, known: true, mixed: false, label: GRASS_LABELS[key] };
+    // A mixed lawn is a known answer ("every grass"), not a missing one.
+    return { ...every, mixed: ctx.grassType === 'mixed' };
   } catch (err) {
     logger.warn(`[portal-yard-card] grass lookup failed for ${customerId}: ${err.message}`);
   }
-  return { key: 'all', known: false, label: null };
+  return every;
 }
 
 function cardItem(item) {
@@ -162,7 +164,10 @@ function countInSeasonLawn(calendar) {
 async function loadHomePests(place, plan) {
   try {
     const forecast = await getForecast({ location: place.slug });
-    return (forecast.pests || [])
+    // With live weather down the forecast is the seasonal baseline; the card
+    // words it as a seasonal estimate (homePestsLive false).
+    const live = forecast.weather?.available !== false;
+    const pests = (forecast.pests || [])
       .filter((p) => Number(p.score10) >= HOME_PEST_MIN_SCORE10)
       .map((p) => {
         const line = PEST_LINE[p.key] || 'pest';
@@ -179,9 +184,10 @@ async function loadHomePests(place, plan) {
       // Termite stays off every non-owned surface (owner ruling 2026-09-28:
       // termite is not an upsell line); an owner still sees it.
       .filter((p) => p.line !== 'termite' || p.inPlan);
+    return { pests, live };
   } catch (err) {
     logger.warn(`[portal-yard-card] home pest forecast unavailable for ${place.slug}: ${err.message}`);
-    return [];
+    return { pests: [], live: false };
   }
 }
 
@@ -254,7 +260,7 @@ async function buildYardCard({ customerId, place, scope = null, now = new Date()
   const month = etParts(now).month;
   // The pest list tags each pest with inPlan, so the plan loads first.
   const plan = await loadPlan(customerId, knex, scope);
-  const [grass, homePests, lastLawnVisit] = await Promise.all([
+  const [grass, home, lastLawnVisit] = await Promise.all([
     loadGrass(customerId, scope, knex),
     loadHomePests(place, plan),
     loadLastLawnVisit(customerId, scope, knex),
@@ -272,7 +278,8 @@ async function buildYardCard({ customerId, place, scope = null, now = new Date()
     reviewedAt: calendar.reviewedAt,
     items: inSeasonItems(calendar),
     hiddenCount: Math.max(0, countInSeasonLawn(everyGrass) - countInSeasonLawn(calendar)),
-    homePests,
+    homePests: home.pests,
+    homePestsLive: home.live,
     lastLawnVisit,
   };
 }

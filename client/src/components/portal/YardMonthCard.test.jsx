@@ -193,6 +193,57 @@ describe('pest-only customer', () => {
   });
 });
 
+describe('lawn teaser link', () => {
+  const CAL = 'https://www.wavespestcontrol.com/tools/swfl-lawn-pest-calendar/?cat=lawn';
+  const PEST_ONLY = { ...YARD, plan: PLAN_PEST_ONLY };
+
+  it('in a browser it is a plain new-tab link', async () => {
+    await renderCard(PEST_ONLY);
+    const link = screen.getByRole('link', { name: /See what to look for/ });
+    expect(link).toHaveAttribute('href', CAL);
+    expect(link).toHaveAttribute('target', '_blank');
+  });
+
+  it('in the native app it opens through the in-app handler instead of navigating the webview', async () => {
+    const onOpenLink = vi.fn();
+    render(<YardMonthCard yard={PEST_ONLY} onOpenPhotoId={null} onOpenLink={onOpenLink} />);
+    await act(async () => {});
+    const notPrevented = fireEvent.click(screen.getByRole('link', { name: /See what to look for/ }));
+    expect(notPrevented).toBe(false);
+    expect(onOpenLink).toHaveBeenCalledWith(CAL, 'Lawn pest calendar');
+  });
+});
+
+describe('seasonal wording when live weather is down', () => {
+  it('the home pest headings say seasonal estimate / common this month, never live or active nearby', async () => {
+    await renderCard({ ...YARD, plan: PLAN_PEST_ONLY, homePestsLive: false });
+    expect(screen.getByText('In your pest plan · seasonal estimate')).toBeInTheDocument();
+    expect(screen.getByText('Also common this month · not in your plan')).toBeInTheDocument();
+    expect(screen.queryByText(/live forecast/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/active nearby/)).not.toBeInTheDocument();
+  });
+
+  it('an empty seasonal list does not say "right now"', async () => {
+    await renderCard({ ...YARD, plan: PLAN_PEST_ONLY, homePests: [], homePestsLive: false });
+    expect(screen.getByText('No household pest is above moderate this season.')).toBeInTheDocument();
+  });
+
+  it('live (or the field absent) keeps the live wording', async () => {
+    await renderCard({ ...YARD, plan: PLAN_PEST_ONLY, homePestsLive: true });
+    expect(screen.getByText('In your pest plan · live forecast')).toBeInTheDocument();
+  });
+});
+
+describe('mixed versus unset grass', () => {
+  it('a mixed lawn says mixed, an unset one says not set', async () => {
+    const { rerender } = await renderCard({ ...YARD, grass: { key: 'all', known: false, mixed: true, label: null }, hiddenCount: 0 });
+    expect(screen.getByText('Mixed lawn. Showing every grass.')).toBeInTheDocument();
+    expect(screen.queryByText(/Grass type not set/)).not.toBeInTheDocument();
+    rerender(<YardMonthCard yard={{ ...YARD, grass: { key: 'all', known: false, mixed: false, label: null }, hiddenCount: 0 }} onOpenPhotoId={null} />);
+    expect(screen.getByText('Grass type not set. Showing every grass.')).toBeInTheDocument();
+  });
+});
+
 describe('yardTabsFor', () => {
   it('a yard customer with any household line (mosquito, rodent, termite) also gets Home pests', () => {
     const base = { lawn: false, pest: false, treeShrub: false, mosquito: false, rodent: false, termite: false };

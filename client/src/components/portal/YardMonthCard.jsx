@@ -93,6 +93,21 @@ function PestItem({ pest }) {
   );
 }
 
+// Home pest headings. With live weather down the server sends the seasonal
+// baseline (homePestsLive false), which must not read as current conditions.
+const HOME_COPY = {
+  live: {
+    mine: 'live forecast', nearWithMine: 'Also active nearby · not in your plan',
+    nearAlone: 'Active nearby · not in your plan', empty: 'No household pest is above moderate right now.',
+  },
+  seasonal: {
+    mine: 'seasonal estimate', nearWithMine: 'Also common this month · not in your plan',
+    nearAlone: 'Common this month · not in your plan', empty: 'No household pest is above moderate this season.',
+  },
+};
+
+const LAWN_CALENDAR_URL = 'https://www.wavespestcontrol.com/tools/swfl-lawn-pest-calendar/?cat=lawn';
+
 const listStyle = { listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 8 };
 const subheadStyle = { margin: '2px 0 0', fontSize: 14, fontWeight: 600, color: SHELL.muted, lineHeight: 1.3 };
 const noteStyle = { margin: 0, fontSize: 14, color: SHELL.muted };
@@ -140,6 +155,95 @@ export function yardTabsFor(plan) {
   return tabs;
 }
 
+// Tablist + panels for 2+ tabs (roving tabindex, arrow/Home/End keys); a single
+// tab is just its panel, with no tab roles.
+function YardTabs({ tabs, panels }) {
+  const baseId = useId();
+  const [active, setActive] = useState(tabs[0]?.key);
+  const tabRefs = useRef({});
+  if (tabs.length < 2) return <div style={{ display: 'grid', gap: 8 }}>{tabs[0] && panels[tabs[0].key]()}</div>;
+
+  const tabId = (key) => `${baseId}-tab-${key}`;
+  const panelId = (key) => `${baseId}-panel-${key}`;
+  const onKeyDown = (event, index) => {
+    const last = tabs.length - 1;
+    const target = { ArrowRight: index === last ? 0 : index + 1, ArrowLeft: index === 0 ? last : index - 1, Home: 0, End: last }[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    setActive(tabs[target].key);
+    tabRefs.current[tabs[target].key]?.focus();
+  };
+
+  return (
+    <>
+      <div role="tablist" aria-label="Show" style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
+        {tabs.map((tab, index) => {
+          const selected = tab.key === active;
+          return (
+            <button
+              key={tab.key}
+              ref={(el) => { tabRefs.current[tab.key] = el; }}
+              type="button"
+              role="tab"
+              id={tabId(tab.key)}
+              aria-selected={selected}
+              aria-controls={panelId(tab.key)}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => setActive(tab.key)}
+              onKeyDown={(e) => onKeyDown(e, index)}
+              style={{
+                appearance: 'none', cursor: 'pointer', minHeight: 40, whiteSpace: 'nowrap',
+                padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600, lineHeight: 1,
+                fontFamily: FONTS.ui,
+                border: `1px solid ${selected ? SHELL.text : SHELL.borderStrong}`,
+                background: selected ? SHELL.text : SHELL.surface,
+                color: selected ? '#FFFFFF' : SHELL.text,
+              }}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+      {tabs.map((tab) => (
+        <div
+          key={tab.key}
+          role="tabpanel"
+          id={panelId(tab.key)}
+          aria-labelledby={tabId(tab.key)}
+          tabIndex={0}
+          hidden={tab.key !== active}
+          style={{ display: tab.key === active ? 'grid' : 'none', gap: 8 }}
+        >
+          {panels[tab.key]()}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function LastVisitRow({ date, reportUrl, onOpenReport }) {
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center',
+      borderTop: `1px solid ${SHELL.border}`, paddingTop: 10, fontSize: 14, color: SHELL.body,
+    }}>
+      <span>Last lawn visit: {date}</span>
+      {reportUrl && (
+        <a
+          href={reportUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={onOpenReport ? (e) => { e.preventDefault(); onOpenReport(reportUrl); } : undefined}
+          style={{ color: '#065A8C', fontWeight: 700, textDecoration: 'none', fontSize: 14, whiteSpace: 'nowrap' }}
+        >
+          View service report →
+        </a>
+      )}
+    </div>
+  );
+}
+
 function lawnTeaser(items, monthName) {
   const lawn = items.filter((i) => i.category === 'lawn');
   if (!lawn.length) return null;
@@ -148,12 +252,9 @@ function lawnTeaser(items, monthName) {
   return `Your lawn in ${monthName}: ${top.map((i) => i.name).join(' and ')} ${verb} ${lawn[0].level === 3 ? 'at peak' : 'in season'}.`;
 }
 
-export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null }) {
-  const baseId = useId();
+export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null, onOpenLink = null }) {
   const [weather, setWeather] = useState(null);
   const tabs = yardTabsFor(yard.plan);
-  const [active, setActive] = useState(tabs[0]?.key);
-  const tabRefs = useRef({});
 
   useEffect(() => {
     let cancelled = false;
@@ -169,9 +270,13 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
   const yardPlan = plan.lawn || plan.treeShrub;
   const byCategory = (category) => items.filter((i) => i.category === category);
 
-  const itemsPanel = (category, { withGrassNote }) => {
-    const all = byCategory(category);
-    const shown = all.slice(0, MAX_ROWS);
+  // Known grass: only the hidden-count note. Otherwise say why every grass shows.
+  let grassNote = null;
+  if (grass.known) grassNote = hiddenCount > 0 ? `${hiddenCount} more in season on other grasses, hidden for your ${grass.label} lawn.` : null;
+  else grassNote = grass.mixed ? 'Mixed lawn. Showing every grass.' : 'Grass type not set. Showing every grass.';
+
+  const itemsPanel = (category, note) => {
+    const shown = byCategory(category).slice(0, MAX_ROWS);
     return (
       <>
         {shown.length > 0 ? (
@@ -179,23 +284,19 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
         ) : (
           <p style={noteStyle}>Nothing in this category is in season in {monthName}.</p>
         )}
-        {withGrassNote && grass.known && hiddenCount > 0 && (
-          <p style={noteStyle}>{hiddenCount} more in season on other grasses, hidden for your {grass.label} lawn.</p>
-        )}
-        {withGrassNote && !grass.known && <p style={noteStyle}>Grass type not set. Showing every grass.</p>}
+        {note && <p style={noteStyle}>{note}</p>}
       </>
     );
   };
 
   const homePanel = () => {
+    const copy = HOME_COPY[yard.homePestsLive === false ? 'seasonal' : 'live'];
     const mine = homePests.filter((p) => p.inPlan).slice(0, MAX_ROWS);
     const near = homePests.filter((p) => !p.inPlan).slice(0, MAX_ROWS);
-    const mineHeading = mine.every((p) => p.line === 'pest') ? 'In your pest plan · live forecast' : 'In your plan · live forecast';
-    if (!mine.length && !near.length) {
-      return <p style={noteStyle}>No household pest is above moderate right now.</p>;
-    }
+    const mineHeading = `${mine.every((p) => p.line === 'pest') ? 'In your pest plan' : 'In your plan'} · ${copy.mine}`;
     return (
       <>
+        {!mine.length && !near.length && <p style={noteStyle}>{copy.empty}</p>}
         {mine.length > 0 && (
           <>
             <p style={subheadStyle}>{mineHeading}</p>
@@ -204,7 +305,7 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
         )}
         {near.length > 0 && (
           <>
-            <p style={subheadStyle}>{mine.length ? 'Also active nearby · not in your plan' : 'Active nearby · not in your plan'}</p>
+            <p style={subheadStyle}>{mine.length ? copy.nearWithMine : copy.nearAlone}</p>
             <ul style={listStyle}>{near.map((p) => <PestItem key={p.key} pest={p} />)}</ul>
           </>
         )}
@@ -213,30 +314,15 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
   };
 
   const panels = {
-    lawn: () => itemsPanel('lawn', { withGrassNote: true }),
-    weeds: () => itemsPanel('weed', { withGrassNote: false }),
-    shrubs: () => itemsPanel('shrub', { withGrassNote: false }),
+    lawn: () => itemsPanel('lawn', grassNote),
+    weeds: () => itemsPanel('weed', null),
+    shrubs: () => itemsPanel('shrub', null),
     home: homePanel,
-  };
-
-  const onTabKeyDown = (event, index) => {
-    const last = tabs.length - 1;
-    let next = null;
-    if (event.key === 'ArrowRight') next = index === last ? 0 : index + 1;
-    else if (event.key === 'ArrowLeft') next = index === 0 ? last : index - 1;
-    else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = last;
-    if (next === null) return;
-    event.preventDefault();
-    setActive(tabs[next].key);
-    tabRefs.current[tabs[next].key]?.focus();
   };
 
   const teaser = !plan.lawn ? lawnTeaser(items, monthName) : null;
   const visitDate = plan.lawn ? shortDate(yard.lastLawnVisit?.date) : null;
   const reviewed = shortDate(yard.reviewedAt);
-  const tabId = (key) => `${baseId}-tab-${key}`;
-  const panelId = (key) => `${baseId}-panel-${key}`;
 
   return (
     <section
@@ -257,61 +343,16 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
 
       <WeatherBox weather={weather} city={city} />
 
-      {tabs.length > 1 && (
-        <div role="tablist" aria-label="Show" style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
-          {tabs.map((tab, index) => {
-            const selected = tab.key === active;
-            return (
-              <button
-                key={tab.key}
-                ref={(el) => { tabRefs.current[tab.key] = el; }}
-                type="button"
-                role="tab"
-                id={tabId(tab.key)}
-                aria-selected={selected}
-                aria-controls={panelId(tab.key)}
-                tabIndex={selected ? 0 : -1}
-                onClick={() => setActive(tab.key)}
-                onKeyDown={(e) => onTabKeyDown(e, index)}
-                style={{
-                  appearance: 'none', cursor: 'pointer', minHeight: 40, whiteSpace: 'nowrap',
-                  padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600, lineHeight: 1,
-                  fontFamily: FONTS.ui,
-                  border: `1px solid ${selected ? SHELL.text : SHELL.borderStrong}`,
-                  background: selected ? SHELL.text : SHELL.surface,
-                  color: selected ? '#FFFFFF' : SHELL.text,
-                }}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {tabs.length > 1 ? tabs.map((tab) => (
-        <div
-          key={tab.key}
-          role="tabpanel"
-          id={panelId(tab.key)}
-          aria-labelledby={tabId(tab.key)}
-          tabIndex={0}
-          hidden={tab.key !== active}
-          style={{ display: tab.key === active ? 'grid' : 'none', gap: 8 }}
-        >
-          {panels[tab.key]()}
-        </div>
-      )) : (
-        <div style={{ display: 'grid', gap: 8 }}>{tabs[0] && panels[tabs[0].key]()}</div>
-      )}
+      <YardTabs tabs={tabs} panels={panels} />
 
       {teaser && (
         <div style={{ border: `1px dashed ${SHELL.borderStrong}`, borderRadius: 10, padding: '10px 12px', fontSize: 14, color: SHELL.body, lineHeight: 1.42 }}>
           {teaser}{' '}
           <a
-            href="https://www.wavespestcontrol.com/tools/swfl-lawn-pest-calendar/?cat=lawn"
+            href={LAWN_CALENDAR_URL}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={onOpenLink ? (e) => { e.preventDefault(); onOpenLink(LAWN_CALENDAR_URL, 'Lawn pest calendar'); } : undefined}
             style={{ color: '#065A8C', fontWeight: 700, textDecoration: 'none' }}
           >
             See what to look for →
@@ -319,25 +360,7 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
         </div>
       )}
 
-      {visitDate && (
-        <div style={{
-          display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center',
-          borderTop: `1px solid ${SHELL.border}`, paddingTop: 10, fontSize: 14, color: SHELL.body,
-        }}>
-          <span>Last lawn visit: {visitDate}</span>
-          {yard.lastLawnVisit?.reportUrl && (
-            <a
-              href={yard.lastLawnVisit.reportUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={onOpenReport ? (e) => { e.preventDefault(); onOpenReport(yard.lastLawnVisit.reportUrl); } : undefined}
-              style={{ color: '#065A8C', fontWeight: 700, textDecoration: 'none', fontSize: 14, whiteSpace: 'nowrap' }}
-            >
-              View service report →
-            </a>
-          )}
-        </div>
-      )}
+      {visitDate && <LastVisitRow date={visitDate} reportUrl={yard.lastLawnVisit?.reportUrl} onOpenReport={onOpenReport} />}
 
       {onOpenPhotoId && (
         <button
