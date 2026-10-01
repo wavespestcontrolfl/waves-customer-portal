@@ -139,7 +139,7 @@ function customer(n, overrides = {}) {
 
 // A completed visit: wall minutes via arrived_at → completed_at, the
 // interaction flag, a paid invoice total, or a prepay term's settled share.
-function visit(customerId, line, { minutes, interaction = null, revenue = null, date = '2026-06-15', prepay = null } = {}) {
+function visit(customerId, line, { minutes, interaction = null, revenue = null, date = '2026-06-15', prepay = null, composite = false } = {}) {
   const arrived = new Date(`${date}T14:00:00Z`);
   return {
     id: `${customerId}-${date}-${line}`, customer_id: customerId, scheduled_date: date, line, cadence: 'quarterly',
@@ -150,6 +150,7 @@ function visit(customerId, line, { minutes, interaction = null, revenue = null, 
     time_entry_minutes: null, time_entry_clock_in: null, time_entry_clock_out: null,
     service_record_started_at: null, service_record_ended_at: null, service_record_structured_notes: null,
     customer_interaction: interaction, paid_revenue: revenue,
+    composite_visit: composite, // add-ons performed in the same stop (scheduled_service_addons)
   };
 }
 

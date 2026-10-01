@@ -1180,6 +1180,29 @@ describe('engine replay guards', () => {
     expect(P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', 117, { withheld_visits: 1 }), liveTerms: [], ledgerSlice: null })).toMatchObject({ cents: 11700, source: 'visit_median' });
     expect(P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', null), liveTerms: [], ledgerSlice: null })).toMatchObject({ cents: 9500, source: 'per_application_fee' });
   });
+  test('a composite visit (add-ons in the same stop) is no $/hr or wall-clock evidence for the line — excluded and counted, never the whole stop\'s money over the whole stop\'s clock', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(q).toMatch(/EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) AS composite_visit/);
+    const plain = [40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 117 }));
+    const composite = [75, 80].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 192, composite: true }));
+    const stats = P.lineDurationStats([...plain, ...composite]);
+    expect(stats).toMatchObject({ usableVisits: 3, notHomeVisits: 3, compositeVisits: 2, treatmentMinutesMedian: 42 });
+    expect(stats.revenuePerHourCents).toBe(P.lineDurationStats(plain).revenuePerHourCents);
+    // only composite visits → no evidence at all (no $/hr, so no nudge either — never a biased one)
+    expect(P.lineDurationStats(composite)).toMatchObject({ usableVisits: 0, compositeVisits: 2, revenuePerHourCents: null, treatmentMinutesMedian: null });
+    // the home / not-home allowance medians skip them too
+    const book = [
+      ...[30, 31, 32].map((m) => fixture.visit('h', 'pest_control', { minutes: m, interaction: 'tech_home_spoke_with_them' })),
+      ...[20, 21, 22].map((m) => fixture.visit('n', 'pest_control', { minutes: m, interaction: 'not_home_full_access' })),
+      ...[90, 95, 99].map((m) => fixture.visit('x', 'pest_control', { minutes: m, interaction: 'tech_home_spoke_with_them', composite: true })),
+    ];
+    expect(P.computeLineAllowances(book).pest_control).toMatchObject({ allowance_minutes: 10, home_median: 31, not_home_median: 21, home_n: 3, not_home_n: 3, source: 'line' });
+    // the owner sees why the evidence is thinner
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 11700, rateUnit: 'application', listRateCents: 11700, usableVisits: 3, compositeVisits: 2, facts: fixture.facts() });
+    expect(row.flags).toContain('composite_visits_excluded');
+    expect(row.status).not.toBe('exception');
+  });
   test('a combined completion-packet invoice credits each member its own settled share, never its whole total to the anchor member', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     const revenue = src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));

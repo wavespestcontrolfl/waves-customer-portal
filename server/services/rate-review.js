@@ -431,6 +431,7 @@ function computeLineAllowances(visitRows, { minSample = MIN_ALLOWANCE_SAMPLE } =
   const byLine = new Map();
   const pooled = { home: [], not_home: [] };
   for (const row of visitRows || []) {
+    if (row.composite_visit) continue; // add-on work inside the stop — not this line's wall clock
     const wall = wallMinutesFor(row);
     if (wall == null) continue;
     const interaction = interactionFor(row);
@@ -507,7 +508,14 @@ function revenuePerHour(paired) {
 function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0, duesRevenueCents = null } = {}) {
   const usable = [];
   let duesAttributed = 0;
+  let compositeVisits = 0;
   for (const row of visitRows || []) {
+    // A composite visit (add-ons performed in the same stop) is no evidence
+    // for the line: the invoice's primary and add-on lines could be split,
+    // the minutes cannot — attributing the application's money to the whole
+    // stop's clock would understate $/hr exactly where it decides a band.
+    // Excluded from both, counted for the owner (composite_visits_excluded).
+    if (row.composite_visit) { compositeVisits += 1; continue; }
     const t = treatmentMinutesFor(row, allowanceMinutes);
     if (!t) continue;
     let revenueCents = visitRevenueCents(row);
@@ -536,6 +544,7 @@ function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinute
     allowanceMinutesApplied: usable.some((u) => u.adjustment === 'allowance') ? Math.max(0, finite(allowanceMinutes) || 0) : null,
     capturedConversationVisits: usable.filter((u) => u.adjustment === 'captured').length,
     duesAttributedVisits: revenuePerHourCents != null ? duesAttributed : 0,
+    compositeVisits,
     treatmentMinutesMedian,
     revenuePerHourCents,
     rphFromNotHome,
@@ -668,6 +677,7 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
   if (line.unknownInteractionVisits > 0) flags.push('interaction_unknown');
   if (line.capturedConversationVisits > 0) flags.push('conversation_minutes_captured');
   if (line.duesAttributedVisits > 0) flags.push('rph_from_dues');
+  if (line.compositeVisits > 0) flags.push('composite_visits_excluded');
 
   const current = line.currentRateCents || 0;
   const monthlyUnit = line.rateUnit === 'month';
@@ -1270,6 +1280,9 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       s.service_time_minutes, s.actual_duration_minutes, s.actual_start_time, s.actual_end_time,
       s.check_in_time, s.check_out_time, s.arrived_at, s.completed_at,
       s.annual_prepay_term_id,
+      -- a visit that also performed add-ons (scheduled_service_addons): its minutes and its money
+      -- cover more than one program, with no per-line split of either — no evidence for this line
+      EXISTS (SELECT 1 FROM scheduled_service_addons a WHERE a.scheduled_service_id = s.id) AS composite_visit,
       apt.coverage_visit_count AS term_visit_count,
       -- the term's COVERAGE money (prepay_amount — the invoice total may also carry a setup line), capped by what settled net of refunds
       (SELECT LEAST(apt.prepay_amount, pi.total - COALESCE((
@@ -1939,6 +1952,7 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
       allowanceMinutesApplied: stats.allowanceMinutesApplied,
       capturedConversationVisits: stats.capturedConversationVisits,
       duesAttributedVisits: stats.duesAttributedVisits,
+      compositeVisits: stats.compositeVisits,
       rphFromNotHome: stats.rphFromNotHome,
       treatmentMinutesMedian: stats.treatmentMinutesMedian,
       revenuePerHourCents: stats.revenuePerHourCents,
