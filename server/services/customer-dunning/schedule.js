@@ -25,9 +25,11 @@ const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
 const config = require('../../config/invoice-followups');
 const Followups = require('../invoice-followups');
-const { isTerminalEmailRefusal } = require('../billing-reminder-delivery');
+const { isTerminalEmailRefusal, reminderProgress } = require('../billing-reminder-delivery');
 const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
-const { OPEN_STATUSES, CLAIM_TTL_MS, lockKey } = require('./constants');
+const {
+  OPEN_STATUSES, CLAIM_TTL_MS, SOURCE, lockKey, eventKey,
+} = require('./constants');
 const { promotionSeed, seedRefusal, oldestActive, firstLiveStep } = require('./seed');
 const { resolveDunnableSet } = require('./balance-set');
 
@@ -356,45 +358,164 @@ async function releaseClaim(claimed, { database = db } = {}) {
   }
 }
 
+// ── delivery evidence of a touch (shared with runner.js) ─────────────────
+
+const metadataOf = (entry) => {
+  if (typeof entry?.metadata !== 'string') return entry?.metadata || {};
+  try { return JSON.parse(entry.metadata); } catch { return {}; }
+};
+
+const parseIds = (value) => {
+  if (Array.isArray(value)) return value;
+  try { return JSON.parse(value || '[]'); } catch { return []; }
+};
+
+/**
+ * The invoices a final notice named, leg by leg. A leg delivered in THIS tick named the set this tick quoted
+ * (run.memberIds) - never an entry: when the post-send progress read fails the loaded entries are the
+ * recover-first snapshots, and a failed or pending leg's snapshot may quote other invoices than the notice
+ * that actually went out. A leg delivered EARLIER is read from its delivered reservation (event entries,
+ * including a restored one); a failed or pending snapshot is never evidence. A delivered leg with neither is
+ * unreadable; the caller must not complete anything for it.
+ */
+function namedForFinal(run, facts) {
+  const ids = new Set();
+  const covered = new Set();
+  const sentNow = new Set(run.memberIds?.length ? facts.deliveredNow || [] : []);
+  for (const channel of sentNow) {
+    if (!facts.delivered.has(channel)) continue;
+    run.memberIds.forEach((id) => ids.add(String(id)));
+    covered.add(channel);
+  }
+  for (const entry of facts.event?.entries || []) {
+    if (!facts.delivered.has(entry.channel) || covered.has(entry.channel)) continue;
+    const meta = metadataOf(entry);
+    if (meta.send_failed === true && meta.delivered !== true) continue; // a failed attempt's snapshot, not a delivered notice
+    const named = parseIds(entry.invoice_ids);
+    if (!named.length) continue;
+    named.forEach((id) => ids.add(String(id)));
+    covered.add(entry.channel);
+  }
+  const unreadable = [...facts.delivered].filter((channel) => !covered.has(channel));
+  return { ids: [...ids], unreadable };
+}
+
+const EVERY_CHANNEL = Object.freeze(['email', 'push', 'sms']);
+
+/**
+ * What the schedule's CURRENT step already delivered, read from that touch's own ledger event exactly as
+ * recover-first reads it (reminderProgress by its event key, no time window, read-only: nothing repaired).
+ * null = nothing delivered. Otherwise { final, named }: `named` is the Set of invoices the delivered legs
+ * quoted (namedForFinal), or null when a delivered leg's names cannot be read. Throws when the ledger
+ * cannot be read: the caller must not hand members back blind.
+ */
+async function currentStepDelivery(schedule) {
+  const step = STEPS[Number(schedule.step_index)];
+  if (!step) return null;
+  const key = eventKey(schedule, step.id);
+  const progress = await reminderProgress(schedule.customer_id, SOURCE, EVERY_CHANNEL, { eventKey: key, repair: false });
+  const event = (progress || []).find((e) => e?.metadata?.notificationEventKey === key);
+  if (!event || !event.delivered?.size) return null;
+  const { ids, unreadable } = namedForFinal({}, { event, delivered: event.delivered });
+  return { final: isFinalIndex(schedule.step_index), named: unreadable.length ? null : new Set(ids) };
+}
+
 // ── release of surviving members (§7) ────────────────────────────────────
+
+const nextRunFloor = (now) => Followups.firstEligibleFireAt(Followups.anchorTo10amNY(now, 1, config.sendWindow.hour));
+
+// A step the LIVE ladder does not have (GATE_DUNNING_LADDER_90 off: the schedule reached Day 60/90 on the
+// 90-day cadence): the row keeps that step, dated on the 90-day cadence, exactly like a per-invoice row the
+// ladder advanced past Day 30 before the gate went off. Main's own rule then applies: the legacy cadence
+// never fires it (fireTouch completes a step it does not have) and hasActiveSequence hands the invoice to
+// the legacy late-payment checker, the Day 60/90 sender while the ladder is off. Clamping to the legacy
+// final step instead would send Day 30 again.
+function beyondLiveLadder(anchor, fromIndex, now) {
+  const step = STEPS[fromIndex];
+  if (!step) return null;
+  const dueAt = anchor ? Followups.anchorTo10amNY(new Date(anchor), step.daysAfterSend, config.sendWindow.hour) : null;
+  return { stepIndex: fromIndex, nextAt: dueAt && dueAt.getTime() > now.getTime() ? dueAt : nextRunFloor(now) };
+}
 
 // Where a released member row lands: its first non-stale step at/after the
 // later of its own and the schedule's index, dated no earlier than the next
 // run. null = past even the final step (never stale-completed silently).
 function landingFrom(row, fromIndex, now) {
   const anchor = Followups.sequenceAnchor(row);
+  if (Number(fromIndex) > Followups.followupSteps().length - 1) return beyondLiveLadder(anchor, Number(fromIndex), now);
   const { index, dueAt, pastFinal } = firstLiveStep(anchor, fromIndex, now);
   if (pastFinal) return null;
-  const nextAt = !dueAt || dueAt.getTime() <= now.getTime()
-    ? Followups.firstEligibleFireAt(Followups.anchorTo10amNY(now, 1, config.sendWindow.hour))
-    : dueAt;
+  const nextAt = !dueAt || dueAt.getTime() <= now.getTime() ? nextRunFloor(now) : dueAt;
   return { stepIndex: index, nextAt };
 }
 
-async function releaseOneMember(trx, row, scheduleStep, now) {
-  const landing = landingFrom(row, Math.max(Number(row.step_index) || 0, Number(scheduleStep) || 0), now);
-  const guard = { id: row.id, status: 'active', step_index: row.step_index };
-  if (!landing) {
-    await trx('invoice_followup_sequences').where(guard).update({
-      status: 'paused', paused_reason: 'released_past_final_step', next_touch_at: null, updated_at: trx.fn.now(),
-    });
-    return { rowId: row.id, invoiceId: String(row.invoice_id), pausedPastFinal: true };
+/**
+ * What release does with ONE active member row (pure; shared by releaseMembers and the release script's dry
+ * run). `delivery` = currentStepDelivery of the schedule (null when the caller hands back survivors of a
+ * notice it already settled, e.g. completeFinal). Never repeats a step:
+ *   - the schedule's current step DELIVERED (a TOLD partial delivery, or a crashed sender's delivered leg)
+ *     to this invoice: its own ladder starts AFTER that step; when the names cannot be read, every member
+ *     does (the safe direction is never resending);
+ *   - a delivered FINAL notice that named this invoice: completed as completeFinal completes it (cadence-
+ *     exhausted step); unreadable names: paused for a person (never completed, never sent again);
+ *   - past its final step: paused for a person;
+ *   - a PAUSED schedule (the office's pause, or the engine's): the row keeps that pause on its own ladder,
+ *     at its landing step, so releasing never resumes reminders nobody resumed.
+ * Returns { kind: 'land', stepIndex, nextAt } | { kind: 'paused', stepIndex, pausedReason, pausedBy }
+ *   | { kind: 'complete' } | { kind: 'pause_for_person', reason }.
+ */
+function memberLanding(row, schedule, delivery, now) {
+  const scheduleStep = Number(schedule.step_index) || 0;
+  const named = !delivery?.named || delivery.named.has(String(row.invoice_id));
+  if (delivery?.final) {
+    if (!delivery.named) return { kind: 'pause_for_person', reason: 'released_final_notice_unreadable' };
+    if (named) return { kind: 'complete' };
   }
-  await trx('invoice_followup_sequences').where(guard).update({
-    step_index: landing.stepIndex, next_touch_at: landing.nextAt, updated_at: trx.fn.now(),
-  });
-  return { rowId: row.id, invoiceId: String(row.invoice_id), stepIndex: landing.stepIndex, nextAt: landing.nextAt };
+  const floor = delivery && !delivery.final && named ? scheduleStep + 1 : scheduleStep;
+  const landing = landingFrom(row, Math.max(Number(row.step_index) || 0, floor), now);
+  if (!landing) return { kind: 'pause_for_person', reason: 'released_past_final_step' };
+  if (schedule.status === 'paused') {
+    return {
+      kind: 'paused', stepIndex: landing.stepIndex,
+      pausedReason: schedule.paused_reason || 'customer_schedule_paused', pausedBy: schedule.paused_by_admin_id || null,
+    };
+  }
+  return { kind: 'land', ...landing };
+}
+
+async function releaseOneMember(trx, row, schedule, delivery, now) {
+  const plan = memberLanding(row, schedule, delivery, now);
+  const guard = { id: row.id, status: 'active', step_index: row.step_index };
+  const out = { rowId: row.id, invoiceId: String(row.invoice_id) };
+  const write = (patch) => trx('invoice_followup_sequences').where(guard).update({ ...patch, updated_at: trx.fn.now() });
+  if (plan.kind === 'complete') {
+    // completeFinal's mark: past the last ladder step, so neither revival pass restarts it
+    await write({ status: 'completed', step_index: STEPS.length, next_touch_at: null });
+    return { ...out, completed: true };
+  }
+  if (plan.kind === 'pause_for_person') {
+    await write({ status: 'paused', paused_reason: plan.reason, next_touch_at: null });
+    return { ...out, pausedPastFinal: true, reason: plan.reason };
+  }
+  if (plan.kind === 'paused') {
+    await write({
+      status: 'paused', step_index: plan.stepIndex, paused_reason: plan.pausedReason, paused_by_admin_id: plan.pausedBy, next_touch_at: null,
+    });
+    return { ...out, stepIndex: plan.stepIndex, paused: true };
+  }
+  await write({ step_index: plan.stepIndex, next_touch_at: plan.nextAt });
+  return { ...out, stepIndex: plan.stepIndex, nextAt: plan.nextAt };
 }
 
 /**
- * Every member row still ACTIVE goes back to its own per-invoice ladder. No
- * step is repeated (landing starts at max(row step, schedule step)); a row
- * already past its final step is paused for a person, never completed quietly.
+ * Every member row still ACTIVE goes back to its own per-invoice ladder (memberLanding: no step repeated,
+ * a delivered current step never sent again, a paused schedule's pause kept, a row past its final step
+ * paused for a person, never completed quietly).
  */
-async function releaseMembers(trx, schedule, now) {
+async function releaseMembers(trx, schedule, now, delivery = null) {
   const rows = await activeMemberRows(schedule.customer_id, { database: trx, forUpdate: true });
   const landed = [];
-  for (const row of rows) landed.push(await releaseOneMember(trx, row, schedule.step_index, now));
+  for (const row of rows) landed.push(await releaseOneMember(trx, row, schedule, delivery, now));
   return landed;
 }
 
@@ -408,7 +529,9 @@ async function alertPastFinal(schedule, landed) {
     await alertStaff({
       verb: 'follow up on an overdue invoice',
       generic: 'follow up on an overdue invoice',
-      why: 'An invoice came off the reminder schedule already past its last step; it was paused, not completed.',
+      why: l.reason === 'released_final_notice_unreadable'
+      ? 'An invoice came off the reminder schedule after its final notice, which cannot be read back; it was paused.'
+      : 'An invoice came off the reminder schedule already past its last step; it was paused, not completed.',
       doneWhen: 'invoice_followed_up',
       dedupeKey: `customer-dunning-past-final:${schedule.id}:${l.invoiceId}`,
       customerId: schedule.customer_id,
@@ -417,14 +540,10 @@ async function alertPastFinal(schedule, landed) {
   }
 }
 
-/**
- * Close a schedule (guarded on it still being open) and release surviving
- * members in ONE transaction. Returns { closed, landed }.
- */
-async function close(schedule, reason, now = new Date(), {
-  database = db, extra = {}, claimStamp = null, expectedStepIndex = schedule.step_index,
-} = {}) {
-  const out = await database.transaction(async (trx) => {
+// One attempt at close: the landings use the delivery evidence read for `at` (the step the caller saw). A
+// row found at another step under the lock is returned as `restep` and the caller reads that step's evidence.
+async function closeOnce(schedule, reason, now, at, delivery, { database, extra, claimStamp, expectedStepIndex }) {
+  return database.transaction(async (trx) => {
     await takeLock(trx, schedule.customer_id);
     // Re-read under the lock: the landings below start from the row AS IT IS
     // NOW (a step that advanced since the caller read it), and a FRESH claim
@@ -446,12 +565,48 @@ async function close(schedule, reason, now = new Date(), {
     } else if (claimIsFresh(row, now)) {
       return { closed: false, landed: [], reason: 'in_flight' };
     }
+    if (Number(row.step_index) !== Number(at.step_index) || Number(row.episode) !== Number(at.episode)) {
+      return { closed: false, landed: [], restep: { step_index: row.step_index, episode: row.episode } };
+    }
     await trx(TABLE).where({ id: row.id }).update({
       status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
       next_touch_at: null, updated_at: trx.fn.now(), ...extra,
     });
-    return { closed: true, landed: await releaseMembers(trx, row, now) };
+    return { closed: true, landed: await releaseMembers(trx, row, now, delivery) };
   });
+}
+
+/**
+ * Close a schedule (guarded on it still being open) and release surviving
+ * members in ONE transaction. Returns { closed, landed, reason? }.
+ *
+ * The current step's delivery evidence (currentStepDelivery) is read BEFORE the
+ * transaction (nothing slow runs under the advisory lock or row locks), for the
+ * step the caller saw; when the locked row is at another step, that step's
+ * evidence is read and the close tried once more. Evidence that cannot be read
+ * closes nothing (`evidence_unreadable`): handing members back blind could send
+ * a step that already went out.
+ */
+async function close(schedule, reason, now = new Date(), {
+  database = db, extra = {}, claimStamp = null, expectedStepIndex = schedule.step_index,
+} = {}) {
+  let at = schedule;
+  let out = null;
+  for (let attempt = 0; attempt < 2 && !out; attempt += 1) {
+    let delivery;
+    try {
+      delivery = await currentStepDelivery(at);
+    } catch (err) {
+      logger.error(`[customer-dunning] schedule ${schedule.id} not closed (${reason}): delivery evidence unreadable: ${redactContact(err.message)}`);
+      return { closed: false, landed: [], reason: 'evidence_unreadable' };
+    }
+    const attemptOut = await closeOnce(schedule, reason, now, at, delivery, {
+      database, extra, claimStamp, expectedStepIndex,
+    });
+    if (attemptOut.restep) at = { ...at, ...attemptOut.restep };
+    else out = attemptOut;
+  }
+  if (!out) return { closed: false, landed: [], reason: 'step_changed' };
   // Only a close that happened is reported: a refused one (claim_lost / in_flight / already closed) changed nothing.
   if (out.closed) {
     await alertPastFinal(schedule, out.landed);
@@ -770,6 +925,10 @@ module.exports = {
   claim,
   releaseClaim,
   landingFrom,
+  memberLanding,
+  currentStepDelivery,
+  namedForFinal,
+  parseIds,
   releaseMembers,
   close,
   release,
@@ -786,5 +945,6 @@ module.exports = {
   resumeFromAutopay,
   writeStage,
   alertStaff,
+  reasonText,
   inReadOnlyTransaction,
 };

@@ -75,6 +75,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(async () => false) }));
 jest.mock('../services/customer-dunning/runner', () => ({
   shadowRun: jest.fn(async () => ({})), runCustomerSchedules: jest.fn(async () => ({})), processSchedule: jest.fn(),
+  shadowVerdictBeforeRelease: jest.fn(async () => 'send'),
 }));
 
 const db = require('../models/db');
@@ -100,6 +101,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   Object.assign(mockGates, { live: false, shadow: false, prereqs: true, allow: null });
   Object.assign(mockDb, { results: {}, firsts: {}, log: [], raw: null, throwOn: {}, chains: [] });
+  require('../services/customer-dunning/wiring')._test.resetReadMemory();
 });
 // Only the spies are restored: the db / gate / runner fakes keep their implementations.
 afterEach(() => {
@@ -312,6 +314,27 @@ describe('releaseIfDark (kill switch, §9.4)', () => {
     expect(writes()).toEqual([]);
     expect(mockNotify).not.toHaveBeenCalled();
     expect(logger.info).not.toHaveBeenCalled();
+    expect(Runner.shadowVerdictBeforeRelease).not.toHaveBeenCalled(); // no rows: the shadow output is unchanged
+  });
+
+  test('C1: under the shadow gate (live off) each dark schedule gets its shadow verdict BEFORE it is released', async () => {
+    mockGates.shadow = true;
+    mockDb.results.customer_dunning_schedules = [open('s1', CUST), open('s2', CUST2, { status: 'paused' })];
+    const order = [];
+    Runner.shadowVerdictBeforeRelease.mockImplementation(async (schedule) => { order.push(`verdict:${schedule.id}`); return 'send'; });
+    jest.spyOn(Schedule, 'release').mockImplementation(async (schedule) => { order.push(`release:${schedule.id}`); return { closed: true, landed: [] }; });
+    await expect(Wiring.releaseIfDark(NOW)).resolves.toMatchObject({ released: 2 });
+    expect(order).toEqual(['verdict:s1', 'release:s1', 'verdict:s2', 'release:s2']);
+    expect(Runner.shadowVerdictBeforeRelease.mock.calls.map(([s, now]) => [s.id, now])).toEqual([['s1', NOW], ['s2', NOW]]);
+    // shadow off, or the live gate on (its allowlist releasing the others): no shadow verdict is logged
+    Runner.shadowVerdictBeforeRelease.mockClear();
+    mockGates.shadow = false;
+    await Wiring.releaseIfDark(NOW);
+    mockGates.shadow = true;
+    mockGates.live = true;
+    mockGates.allow = new Set([CUST]);
+    await Wiring.releaseIfDark(NOW);
+    expect(Runner.shadowVerdictBeforeRelease).not.toHaveBeenCalled();
   });
 
   test('gate off: every open schedule is released as released_gate_off; a prerequisite off names released_prereq_off', async () => {
@@ -360,15 +383,49 @@ describe('releaseIfDark (kill switch, §9.4)', () => {
     });
   });
 
-  test('the open-schedule read failing is logged and alerted once a day (subject: the kill-switch check)', async () => {
+  test('F5: the open-schedule read failing with the gate dark and no schedule seen is LOGGED only (zero alerts while off)', async () => {
+    mockGates.shadow = true;
     mockDb.throwOn.customer_dunning_schedules = new Error('relation is busy');
     await expect(Wiring.releaseIfDark(NOW)).resolves.toEqual({ released: 0, inFlight: 0, failed: 1 });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('could not read open schedules: relation is busy'));
+    expect(mockNotify).not.toHaveBeenCalled();
+    // an earlier read that found NO schedule changes nothing
+    mockDb.throwOn = {};
+    await Wiring.releaseIfDark(NOW);
+    mockDb.throwOn.customer_dunning_schedules = new Error('relation is busy');
+    await Wiring.releaseIfDark(NOW);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('F5: the read failing is alerted once a day when the engine is reachable: the live gate on (with an allowlist), or schedules seen before', async () => {
+    mockGates.live = true;
+    mockGates.allow = new Set([CUST]);
+    mockDb.throwOn.customer_dunning_schedules = new Error('relation is busy');
+    await expect(Wiring.releaseIfDark(NOW)).resolves.toEqual({ released: 0, inFlight: 0, failed: 1 });
     expect(mockNotify).toHaveBeenCalledTimes(1);
     expect(mockNotify.mock.calls[0][3]).toMatchObject({
       dedupeKey: 'customer-dunning-release-failed:read:2026-10-07',
       metadata: expect.objectContaining({ severity: 'needs-you', who: 'person', subject: { type: 'check', id: 'customer-dunning-kill-switch' } }),
     });
+    // gate dark (a rollback), but the last read in this process found open schedules: alerted too
+    mockNotify.mockClear();
+    Object.assign(mockGates, { live: false, allow: null });
+    mockDb.throwOn = {};
+    mockDb.results.customer_dunning_schedules = [open('s1', CUST)];
+    jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: false, landed: [], reason: 'in_flight' });
+    await Wiring.releaseIfDark(NOW);
+    mockDb.throwOn.customer_dunning_schedules = new Error('relation is busy');
+    await Wiring.releaseIfDark(NOW);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  test('F1: a release refused because the current step\'s delivery could not be read is a failure the office hears of', async () => {
+    mockDb.results.customer_dunning_schedules = [open('s1', CUST)];
+    mockDb.firsts.customers = { first_name: 'Robin', last_name: 'Testcase' };
+    jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: false, landed: [], reason: 'evidence_unreadable' });
+    await expect(Wiring.releaseIfDark(NOW)).resolves.toEqual({ released: 0, inFlight: 0, failed: 1 });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(mockNotify.mock.calls[0][3]).toMatchObject({ dedupeKey: 'customer-dunning-release-failed:s1' });
   });
 });
 
@@ -426,7 +483,7 @@ describe('send-now and staff controls', () => {
     expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toMatchObject({ status: 409, body: { code: 'SCHEDULE_CHANGED' } });
   });
 
-  test('200 with what happened: pause / resume / release / a send that was held', async () => {
+  test('200 with what happened: pause / resume / release / a send that went out', async () => {
     jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
     mockDb.results.customer_dunning_schedules = 1;
     expect(await Wiring.controlCustomerSchedule(CUST, 'pause', { adminId: 'admin-7', reason: 'customer called', now: NOW }))
@@ -441,8 +498,57 @@ describe('send-now and staff controls', () => {
     expect(await Wiring.controlCustomerSchedule(CUST, 'release', { now: NOW })).toEqual({ status: 200, body: { scheduleId: 'sched-1', ok: true, released: 2 } });
     expect(Schedule.release.mock.calls[0][1]).toBe('released_admin');
     mockGates.live = true;
-    jest.spyOn(Admin, 'sendNow').mockResolvedValue({ routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'held' });
-    expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toMatchObject({ status: 200, body: { outcome: 'held' } });
+    for (const sent of ['advanced', 'completed', 'told']) {
+      jest.spyOn(Admin, 'sendNow').mockResolvedValue({ routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: sent });
+      expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toMatchObject({ status: 200, body: { outcome: sent } });
+    }
+  });
+
+  test('F4: a send-now that sent nothing is a 409 NOT_SENT with a plain-English reason, never a 200', () => {
+    const notSent = (out) => Wiring.httpResult({ routedTo: 'customer_schedule', scheduleId: 'sched-1', ...out });
+    const cases = [
+      [{ outcome: 'held', reason: 'collection_hold' }, 'Not sent: reminders are on hold (a collections hold is active).'],
+      [{ outcome: 'held', reason: 'COLLECTIONS_POLICY' }, 'Not sent: reminders are on hold (the collections contact rules do not allow a reminder now).'],
+      [{ outcome: 'held', reason: 'SOME_PROVIDER_CODE' }, 'Not sent: reminders are on hold (a delivery problem).'],
+      [{ outcome: 'paused', reason: 'no_reachable_channel' }, 'Not sent: reminders were paused (there is no way to reach them).'],
+      [{ outcome: 'autopay_hold' }, 'Not sent: the customer is on autopay, so reminders are on hold.'],
+      [{ outcome: 'closed', reason: 'balance_cleared' }, 'Not sent: the reminder schedule closed (their balance is paid).'],
+      [{ outcome: 'skipped', reason: 'schedule_paused' }, 'Not sent: this customer\'s combined reminders are paused.'],
+    ];
+    for (const [out, copy] of cases) {
+      const res = notSent(out);
+      expect(res).toEqual({ status: 409, body: { error: copy, code: 'NOT_SENT', outcome: out.outcome, scheduleId: 'sched-1' } });
+      expect(copy).not.toMatch(/[a-z]+_[a-z_]+|[A-Z]{3,}_/); // no reason code reaches the office
+    }
+    // a claim that truly lost the race is still "changed"; an unreadable release says so
+    expect(notSent({ outcome: 'stale' })).toMatchObject({ status: 409, body: { code: 'SCHEDULE_CHANGED' } });
+    expect(notSent({ outcome: 'skipped', reason: 'not_claimable' })).toMatchObject({ status: 409, body: { code: 'SCHEDULE_CHANGED' } });
+    expect(notSent({ ok: false, reason: 'evidence_unreadable', message: 'm' })).toEqual({ status: 409, body: { error: 'm', code: 'EVIDENCE_UNREADABLE', scheduleId: 'sched-1' } });
+  });
+
+  test('F4: send-now on an office-PAUSED schedule says it is paused (not "changed"); the claim refusal is read back once', async () => {
+    jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue({ ...openRow, status: 'paused' });
+    mockGates.live = true;
+    Runner.processSchedule.mockResolvedValue({ outcome: 'skipped', reason: 'not_claimable' });
+    mockDb.firsts.customer_dunning_schedules = { ...openRow, status: 'paused', touch_claimed_at: null };
+    mockDb.results['invoice_followup_sequences as s'] = [];
+    expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toEqual({
+      status: 409,
+      body: { error: 'Not sent: this customer\'s combined reminders are paused.', code: 'NOT_SENT', outcome: 'skipped', scheduleId: 'sched-1' },
+    });
+    // an unclaimable ACTIVE schedule (it closed / changed under the click) is still "changed"
+    mockDb.firsts.customer_dunning_schedules = { ...openRow, touch_claimed_at: null };
+    expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toMatchObject({ status: 409, body: { code: 'SCHEDULE_CHANGED' } });
+  });
+
+  test('F1: an admin release whose delivery evidence cannot be read is a 409 that says so (nothing handed back)', async () => {
+    jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
+    mockDb.firsts.customer_dunning_schedules = openRow;
+    jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: false, landed: [], reason: 'evidence_unreadable' });
+    expect(await Wiring.controlCustomerSchedule(CUST, 'release', { now: NOW })).toEqual({
+      status: 409,
+      body: { error: 'Could not check whether the current reminder already went out. Try again in a minute.', code: 'EVIDENCE_UNREADABLE', scheduleId: 'sched-1' },
+    });
   });
 });
 
@@ -461,6 +567,8 @@ describe('cross-rail', () => {
     expect(read.calls).toContainEqual(['where', { customer_id: CUST }]);
     const cutoff = read.calls.find(([m, col]) => m === 'where' && col === 'last_touch_at')[3];
     expect(NOW.getTime() - cutoff.getTime()).toBe(72 * 3600 * 1000);
+    // only a touch the schedule itself made counts (promotion's seeded copy predates the row; PG suite proves it)
+    expect(read.calls).toContainEqual(['whereRaw', 'last_touch_at > created_at']);
   });
 
   test('previsit: no recent schedule touch (or no schedule) leaves the list as it was; nothing fresh reads no schedule', async () => {

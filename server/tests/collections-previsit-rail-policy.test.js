@@ -65,7 +65,7 @@ const { runSweep } = require('../services/previsit-balance-reminder');
 function chain({ result = [], first } = {}) {
   const q = {};
   [
-    'where', 'whereIn', 'whereNull', 'whereNotNull', 'whereBetween',
+    'where', 'whereIn', 'whereNull', 'whereNotNull', 'whereBetween', 'whereRaw',
     'join', 'leftJoin', 'orderBy', 'select', 'count', 'limit',
   ].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);

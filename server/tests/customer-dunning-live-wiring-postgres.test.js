@@ -12,7 +12,11 @@
 //     nothing it should not).
 //   * the batch ownership predicate excludes exactly the owned customers and,
 //     with no schedule rows, nothing.
-//   * the kill switch releases open schedules and lands their members.
+//   * the kill switch releases open schedules and lands their members: a step
+//     that already reached the customer is never sent again (a delivered final
+//     completes what it named), a paused schedule's pause survives, and with the
+//     Day 90 ladder off a member past Day 30 is handed to the legacy checker.
+//   * the pre-visit balance note counts only a touch the schedule itself made.
 // Interleavings are forced by pausing a transaction at its shared-key
 // statement (`pauseAt`), never by timing alone.
 const { randomUUID } = require('node:crypto');
@@ -61,6 +65,9 @@ const FeatureGates = require('../config/feature-gates');
 const Followups = require('../services/invoice-followups');
 const Schedule = require('../services/customer-dunning/schedule');
 const Wiring = require('../services/customer-dunning/wiring');
+const Previsit = require('../services/previsit-balance-reminder');
+const { reminderReservationKey } = require('../services/billing-reminder-delivery');
+const { SOURCE, eventKey } = require('../services/customer-dunning/constants');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -126,8 +133,21 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       t.timestamp('touch_claimed_at');
       t.timestamp('anchor_at');
       t.text('paused_reason');
+      t.uuid('paused_by_admin_id');
       t.timestamp('created_at').defaultTo(app.fn.now());
       t.timestamp('updated_at').defaultTo(app.fn.now());
+    });
+    // the delivery ledger the release reads the current step's evidence from (production columns)
+    await app.schema.createTable('collections_contact_ledger', (t) => {
+      t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()'));
+      t.uuid('customer_id').notNullable();
+      t.string('channel', 20).notNullable();
+      t.string('purpose', 40).notNullable();
+      t.jsonb('invoice_ids').notNullable().defaultTo('[]');
+      t.timestamp('occurred_at', { useTz: true }).notNullable().defaultTo(app.fn.now());
+      t.string('source', 60).notNullable();
+      t.jsonb('metadata');
+      t.string('idempotency_key', 120).unique();
     });
     await migration.up(app);
   });
@@ -432,6 +452,156 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       expect(await app('customer_dunning_schedules').where({ id: busySchedule.id }).first()).toMatchObject({ status: 'active', closed_reason: null });
       expect(mockNotify).not.toHaveBeenCalled();
       await app('customer_dunning_schedules').where({ id: busySchedule.id }).update({ touch_claimed_at: null });
+    });
+  });
+
+  // ── release never repeats a delivered step (F1), keeps a pause (F2), honours the ladder-off handoff (F3) ──
+  describe('what release does with each member', () => {
+    beforeEach(async () => {
+      await app('customer_dunning_schedules').whereIn('status', ['active', 'held', 'paused', 'autopay_hold'])
+        .update({ status: 'released', closed_reason: 'released_admin', closed_at: new Date(), touch_claimed_at: null });
+    });
+    // A delivered leg of the schedule's touch at `stepIndex`, quoting `invoiceIds` (the reservation snapshot).
+    async function delivered(schedule, stepIndex, invoiceIds, { channel = 'sms' } = {}) {
+      const key = eventKey(schedule, Schedule.STEPS[stepIndex].id);
+      await app('collections_contact_ledger').insert({
+        customer_id: schedule.customer_id, channel, purpose: 'late_payment', source: SOURCE,
+        invoice_ids: JSON.stringify(invoiceIds), idempotency_key: reminderReservationKey(schedule.customer_id, key, channel),
+        metadata: JSON.stringify({ notificationEventKey: key, delivered: true, selectedChannels: ['email', 'sms'] }),
+      });
+    }
+
+    test('TOLD at a mid step (one leg delivered, one retrying): the members it named land AFTER it; a member it did not name lands on it', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 40, step: 3, due: false });
+      const b = await member(c, { sentDaysAgo: 20, step: 1, due: false });
+      const unnamed = await member(c, { sentDaysAgo: 15, step: 0, due: false }); // e.g. microdeposit-pending, left out of the touch
+      const schedule = await openSchedule(c, { step_index: 3, last_touch_at: new Date() }); // d30, TOLD: still at the step
+      await delivered(schedule, 3, [a.invoiceId, b.invoiceId]);
+      const out = await Schedule.release(schedule, 'released_gate_off', new Date());
+      expect(out.closed).toBe(true);
+      expect(await seqRow(a.seq.id)).toMatchObject({ status: 'active', step_index: 4 });
+      expect(await seqRow(b.seq.id)).toMatchObject({ status: 'active', step_index: 4 }); // never Day 30 again
+      expect(await seqRow(unnamed.seq.id)).toMatchObject({ status: 'active', step_index: 3 }); // it never got Day 30
+      // a touch of ANOTHER step (or another episode) is not this step's evidence
+      const c2 = await customer();
+      const y = await member(c2, { sentDaysAgo: 20, step: 1, due: false });
+      await member(c2, { sentDaysAgo: 15, step: 0, due: false });
+      const s2 = await openSchedule(c2, { step_index: 3 });
+      await delivered(s2, 2, [y.invoiceId]);
+      await Schedule.release(s2, 'released_gate_off', new Date());
+      expect((await seqRow(y.seq.id)).step_index).toBe(3);
+    });
+
+    test('a delivered FINAL notice completes the members it named (cadence-exhausted), never sends them a second final', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 95, step: 5, due: false });
+      const b = await member(c, { sentDaysAgo: 70, step: 4, due: false });
+      const unnamed = await member(c, { sentDaysAgo: 50, step: 3, due: false });
+      const schedule = await openSchedule(c, { step_index: 5, last_touch_at: new Date() });
+      await delivered(schedule, 5, [a.invoiceId, b.invoiceId]);
+      const out = await Schedule.release(schedule, 'released_gate_off', new Date());
+      expect(out.closed).toBe(true);
+      for (const m of [a, b]) expect(await seqRow(m.seq.id)).toMatchObject({ status: 'completed', step_index: 6, next_touch_at: null });
+      // the invoice the notice did not name still gets its own final
+      expect(await seqRow(unnamed.seq.id)).toMatchObject({ status: 'active', step_index: 5 });
+      expect(mockNotify).not.toHaveBeenCalled();
+      // and the Day 60/90 revival leaves the completed members alone
+      await Followups._test.reviveLegacyFinishedSequences();
+      for (const m of [a, b]) expect(await seqRow(m.seq.id)).toMatchObject({ status: 'completed' });
+    });
+
+    test('a delivered final whose named invoices cannot be read: members paused for a person (never completed, never sent again)', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 92, step: 5, due: false });
+      const b = await member(c, { sentDaysAgo: 70, step: 4, due: false });
+      const schedule = await openSchedule(c, { step_index: 5 });
+      await delivered(schedule, 5, []); // a delivered leg with no snapshot
+      await Schedule.release(schedule, 'released_admin', new Date());
+      for (const m of [a, b]) expect(await seqRow(m.seq.id)).toMatchObject({ status: 'paused', paused_reason: 'released_final_notice_unreadable' });
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+      expect(mockNotify.mock.calls[0][2]).toMatch(/after its final notice/);
+    });
+
+    test('a ledger that cannot be read releases nothing (evidence_unreadable); the kill switch counts it failed and alerts', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 40, step: 3, due: false });
+      await member(c, { sentDaysAgo: 20, step: 1, due: false });
+      const schedule = await openSchedule(c, { step_index: 3 });
+      await app.raw('ALTER TABLE collections_contact_ledger RENAME TO collections_contact_ledger_off');
+      let tally;
+      try {
+        expect(await Schedule.release(schedule, 'released_admin', new Date())).toMatchObject({ closed: false, reason: 'evidence_unreadable' });
+        delete process.env.GATE_DUNNING_CUSTOMER_SCHEDULE;
+        tally = await Wiring.releaseIfDark(new Date());
+      } finally {
+        await app.raw('ALTER TABLE collections_contact_ledger_off RENAME TO collections_contact_ledger');
+      }
+      expect(tally).toMatchObject({ released: 0, failed: 1 });
+      expect(await app('customer_dunning_schedules').where({ id: schedule.id }).first()).toMatchObject({ status: 'active' });
+      expect(await seqRow(a.seq.id)).toMatchObject({ status: 'active', step_index: 3 });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+    });
+
+    test('a PAUSED schedule\'s members stay paused on their own ladder, carrying the office\'s reason and admin', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 40, step: 3, due: false });
+      const b = await member(c, { sentDaysAgo: 20, step: 1, due: false });
+      const adminId = randomUUID();
+      const schedule = await openSchedule(c, {
+        step_index: 3, status: 'paused', paused_reason: 'customer will pay Friday', paused_by_admin_id: adminId, next_touch_at: null,
+      });
+      delete process.env.GATE_DUNNING_CUSTOMER_SCHEDULE;
+      const tally = await Wiring.releaseIfDark(new Date());
+      expect(tally.failed).toBe(0);
+      expect(await app('customer_dunning_schedules').where({ id: schedule.id }).first()).toMatchObject({ status: 'released' });
+      // each at its own landing step (A's Day 30 is past: Day 60; B's Day 30 is still ahead), paused as the office left it
+      for (const [m, step] of [[a, 4], [b, 3]]) {
+        expect(await seqRow(m.seq.id)).toMatchObject({
+          status: 'paused', step_index: step, paused_reason: 'customer will pay Friday', paused_by_admin_id: adminId, next_touch_at: null,
+        });
+      }
+      // a paused per-invoice row still holds its invoice from the legacy checker (the office resumes it)
+      expect(await Followups.hasActiveSequence(a.invoiceId)).toBe(true);
+    });
+
+    test('GATE_DUNNING_LADDER_90 off: a member of a schedule past Day 30 keeps that step (handed to the legacy checker), never re-sent Day 30', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 65, step: 4, due: false });
+      const young = await member(c, { sentDaysAgo: 25, step: 1, due: false }); // its Day 30 is 5 days out
+      const schedule = await openSchedule(c, { step_index: 4 }); // the combined Day 60 named both
+      delete process.env.GATE_DUNNING_LADDER_90;
+      try {
+        expect((await Schedule.release(schedule, 'released_prereq_off', new Date())).closed).toBe(true);
+        const row = await seqRow(young.seq.id);
+        expect(row).toMatchObject({ status: 'active', step_index: 4 }); // not clamped to the legacy Day 30 (index 3)
+        expect(new Date(row.next_touch_at).getTime()).toBeGreaterThan(Date.now());
+        // main's ladder-off rule: an active row past the legacy steps no longer holds the invoice
+        expect(await Followups.hasActiveSequence(young.invoiceId)).toBe(false);
+      } finally {
+        process.env.GATE_DUNNING_LADDER_90 = 'true';
+      }
+    });
+  });
+
+  // ── the pre-visit balance note counts only a SCHEDULE touch (C2) ────────
+  describe('pre-visit suppression after promotion', () => {
+    test('a touch seeded from the members at promotion does not suppress; a real combined touch does', async () => {
+      const c = await customer();
+      const now = new Date();
+      const cutoff = new Date(now.getTime() - 72 * 3600 * 1000);
+      const touched = Previsit._test.customerScheduleTouchedSince;
+      // promoted yesterday; last_touch_at = the newest member touch, two days ago (inside the 72h window)
+      const schedule = await openSchedule(c, {
+        status: 'released', closed_reason: 'released_admin', closed_at: now,
+        created_at: new Date(now.getTime() - 1 * DAY), last_touch_at: new Date(now.getTime() - 2 * DAY),
+      });
+      expect(await touched(c, cutoff, app)).toBe(false);
+      // the schedule's own combined touch, after it was created
+      await app('customer_dunning_schedules').where({ id: schedule.id }).update({ last_touch_at: new Date(now.getTime() - 3600 * 1000) });
+      expect(await touched(c, cutoff, app)).toBe(true);
+      // ...and older than the window it no longer counts
+      expect(await touched(c, new Date(now.getTime() - 60 * 1000), app)).toBe(false);
     });
   });
 });

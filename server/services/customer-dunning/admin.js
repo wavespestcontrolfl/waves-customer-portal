@@ -43,28 +43,37 @@ async function resume(scheduleId, { now = new Date() } = {}) {
   return { ok: Number(changed) === 1 };
 }
 
+const EVIDENCE_UNREADABLE = Object.freeze({
+  ok: false, reason: 'evidence_unreadable', message: 'Could not check whether the current reminder already went out. Try again in a minute.',
+});
+
 async function release(scheduleId, { now = new Date() } = {}) {
   const schedule = await openScheduleQuery(scheduleId).first();
   if (!schedule) return { ok: false, reason: 'not_open' };
   const out = await Schedule.release(schedule, 'released_admin', now);
   if (out.reason === 'in_flight') return { ...IN_FLIGHT };
+  if (out.reason === 'evidence_unreadable') return { ...EVIDENCE_UNREADABLE };
   return { ok: out.closed, released: out.landed.length };
 }
 
-// The claim refuses while the schedule, or one of its active member rows (a per-invoice send), carries a
-// fresh claim: that is a send in flight, and the admin is told so rather than "nothing happened".
-async function claimInFlight(scheduleId, now) {
+// Why the claim refused: the schedule, or one of its active member rows (a per-invoice send), carries a
+// fresh claim (a send in flight), or the schedule is paused (a paused schedule is never claimed). The admin
+// is told which rather than "nothing happened". null = neither (it closed or changed).
+async function whyNotClaimable(scheduleId, now) {
   const row = await openScheduleQuery(scheduleId).first();
-  if (!row) return false;
-  if (Schedule.claimIsFresh(row, now)) return true;
-  return (await Schedule.activeMemberRows(row.customer_id)).some((member) => Schedule.claimIsFresh(member, now));
+  if (!row) return null;
+  if (Schedule.claimIsFresh(row, now)) return 'in_flight';
+  if ((await Schedule.activeMemberRows(row.customer_id)).some((member) => Schedule.claimIsFresh(member, now))) return 'in_flight';
+  return row.status === 'paused' ? 'schedule_paused' : null;
 }
 
 /** Fires the CURRENT stage through the normal send path with operator channels. */
 async function sendNow(scheduleId, { now = new Date() } = {}) {
   const out = await Runner.processSchedule(scheduleId, now, { operatorInitiated: true, force: true });
-  if (out.outcome === 'skipped' && out.reason === 'not_claimable' && await claimInFlight(scheduleId, now)) {
-    return { routedTo: 'customer_schedule', scheduleId, ...IN_FLIGHT };
+  if (out.outcome === 'skipped' && out.reason === 'not_claimable') {
+    const why = await whyNotClaimable(scheduleId, now);
+    if (why === 'in_flight') return { routedTo: 'customer_schedule', scheduleId, ...IN_FLIGHT };
+    if (why === 'schedule_paused') return { routedTo: 'customer_schedule', scheduleId, ...out, reason: 'schedule_paused' };
   }
   return { routedTo: 'customer_schedule', scheduleId, ...out };
 }

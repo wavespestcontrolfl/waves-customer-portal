@@ -766,6 +766,16 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
     });
   });
 
+  describe('F1: a close whose delivery evidence cannot be read hands nothing back', () => {
+    test('the step is held as unreadable progress (retried next run), never reported closed', async () => {
+      Schedule.close.mockResolvedValue({ closed: false, landed: [], reason: 'evidence_unreadable' });
+      Schedule.markHeld.mockResolvedValue(true);
+      live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
+      expect(await run()).toEqual({ outcome: 'held', reason: 'progress_unreadable' });
+      expect(Schedule.markHeld).toHaveBeenCalledWith(expect.anything(), 'progress_unreadable', expect.anything());
+    });
+  });
+
   describe('F3: runner-internal closes carry the run\'s own claim', () => {
     test('a set that empties, and a missing customer, close under OUR claimStamp (so an in-flight guard never refuses the run itself)', async () => {
       live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
@@ -866,6 +876,34 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
       mockAllowlist = null; // empty allowlist = everyone
       await (async () => { emptyTableDb(rowsOpen); return Runner.shadowRun(NOW); })();
       expect(lines()).toMatch(/schedule=s-out/);
+    });
+
+    test('C1: the kill switch\'s pre-release verdict is shadowRun\'s own judge and scope for ONE schedule, and writes nothing', async () => {
+      Schedule.promotionCandidates.mockResolvedValue([]);
+      const database = emptyTableDb();
+      const due = { id: 's-due', customer_id: CUSTOMER_ID, status: 'active', step_index: 4, episode: 1, next_touch_at: new Date(NOW.getTime() - 1000) };
+      const verdict = await Runner.shadowVerdictBeforeRelease(due, NOW);
+      expect(['send', 'hold', 'pause', 'close', 'settle']).toContain(verdict);
+      expect(lines()).toMatch(new RegExp(`SHADOW would ${verdict} customer=${CUSTOMER_ID} schedule=s-due`));
+      // the same line shadowRun logs for the same stored row
+      const before = lines();
+      logger.info.mockClear();
+      emptyTableDb([due]);
+      await Runner.shadowRun(NOW);
+      expect(lines()).toBe(before);
+      // outside shadowRun's scope: no verdict, no line
+      logger.info.mockClear();
+      for (const out of [
+        { ...due, status: 'paused' },
+        { ...due, next_touch_at: new Date(NOW.getTime() + 60 * 1000) },
+        { ...due, next_touch_at: null },
+      ]) expect(await Runner.shadowVerdictBeforeRelease(out, NOW)).toBeNull();
+      mockAllowlist = new Set(['cust-other']);
+      expect(await Runner.shadowVerdictBeforeRelease(due, NOW)).toBeNull();
+      mockAllowlist = null;
+      expect(lines()).toBe('');
+      expect(database.writes).toEqual([]);
+      for (const writer of ['claim', 'markHeld', 'markPaused', 'alertStaff', 'close']) expect(Schedule[writer]).not.toHaveBeenCalled();
     });
 
     test('F6: the set resolve (Stripe I/O) never runs while a shadow transaction is held', async () => {

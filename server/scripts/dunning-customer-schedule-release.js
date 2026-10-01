@@ -9,10 +9,14 @@
 // Schedule.release (advisory lock, refused while a send is in flight, closed
 // as `released_admin`) and every surviving active member re-lands on its own
 // per-invoice ladder at its first step that is not stale, dated no earlier
-// than the next run (no step repeated); a member already past its final step
-// is paused and the office is alerted, never completed quietly.
+// than the next run (no step repeated; a current step that already reached
+// the customer is not sent again, and a delivered final notice completes the
+// invoices it named); a member already past its final step is paused and the
+// office is alerted, never completed quietly; the members of a PAUSED schedule
+// stay paused on their own ladder.
 //
-// The dry run reads inside a READ ONLY transaction and prints, per open
+// The dry run reads inside a READ ONLY transaction (the current step's
+// delivery evidence is a read-only ledger read beside it) and prints, per open
 // schedule, its status / step and where each member would land. Ids only —
 // never a customer name.
 //
@@ -59,30 +63,49 @@ function parseArgs(argv) {
 
 const iso = (d) => (d ? new Date(d).toISOString() : '-');
 
-/** Open schedules (optionally one customer's), each with where its active members would land. Read-only. */
+/**
+ * Open schedules (optionally one customer's), each with where its active members would land: the engine's
+ * own Schedule.memberLanding over the current step's delivery evidence. Read-only. A schedule whose
+ * evidence cannot be read is listed with `evidenceError` and no landings (the release would refuse it).
+ */
 async function planRelease(database, { customerId = null, now, Schedule }) {
   const query = database(Schedule.TABLE).whereIn('status', OPEN_STATUSES).orderBy('created_at', 'asc');
   if (customerId) query.where({ customer_id: customerId });
   const schedules = await query.select('*');
   const plans = [];
   for (const schedule of schedules) {
+    let delivery;
+    try {
+      delivery = await Schedule.currentStepDelivery(schedule);
+    } catch (err) {
+      plans.push({ schedule, landings: [], evidenceError: err.message });
+      continue;
+    }
     const rows = await Schedule.activeMemberRows(schedule.customer_id, { database });
-    const landings = rows.map((row) => {
-      const landing = Schedule.landingFrom(row, Math.max(Number(row.step_index) || 0, Number(schedule.step_index) || 0), now);
-      return { invoice_id: String(row.invoice_id), seq_id: row.id, landing };
-    });
+    const landings = rows.map((row) => ({
+      invoice_id: String(row.invoice_id), seq_id: row.id, landing: Schedule.memberLanding(row, schedule, delivery, now),
+    }));
     plans.push({ schedule, landings });
   }
   return plans;
 }
 
-function printPlan({ schedule, landings }, stepIdAt) {
-  console.log(`schedule ${schedule.id}  customer ${schedule.customer_id}  ${schedule.status}  step ${stepIdAt(schedule.step_index) || schedule.step_index}  next ${iso(schedule.next_touch_at)}  claimed ${iso(schedule.touch_claimed_at)}`);
-  for (const l of landings) {
-    console.log(l.landing
-      ? `  member invoice ${l.invoice_id}  seq ${l.seq_id}  -> step ${stepIdAt(l.landing.stepIndex)}  next ${iso(l.landing.nextAt)}`
-      : `  member invoice ${l.invoice_id}  seq ${l.seq_id}  -> PAUSED (past its final step; the office is alerted)`);
+function landingText(landing, rawStepIdAt) {
+  const stepIdAt = (i) => rawStepIdAt(i) || i;
+  switch (landing.kind) {
+    case 'complete': return 'COMPLETED (the delivered final notice named it)';
+    case 'paused': return `PAUSED at step ${stepIdAt(landing.stepIndex)} (the schedule is paused: ${landing.pausedReason})`;
+    case 'pause_for_person': return landing.reason === 'released_final_notice_unreadable'
+      ? 'PAUSED (its final notice went out but cannot be read back; the office is alerted)'
+      : 'PAUSED (past its final step; the office is alerted)';
+    default: return `step ${stepIdAt(landing.stepIndex)}  next ${iso(landing.nextAt)}`;
   }
+}
+
+function printPlan({ schedule, landings, evidenceError }, stepIdAt) {
+  console.log(`schedule ${schedule.id}  customer ${schedule.customer_id}  ${schedule.status}  step ${stepIdAt(schedule.step_index) || schedule.step_index}  next ${iso(schedule.next_touch_at)}  claimed ${iso(schedule.touch_claimed_at)}`);
+  if (evidenceError) console.log('  NOT RELEASABLE NOW: the current step\'s delivery evidence could not be read');
+  for (const l of landings) console.log(`  member invoice ${l.invoice_id}  seq ${l.seq_id}  -> ${landingText(l.landing, stepIdAt)}`);
 }
 
 /** Release each planned schedule through the engine. Returns a tally; one failure never stops the rest. */
@@ -97,6 +120,9 @@ async function executeRelease(plans, { now, Schedule }) {
       } else if (out.reason === 'in_flight') {
         tally.inFlight += 1;
         console.warn(`NOT released schedule ${schedule.id}: a reminder is sending right now; run again in a few minutes`);
+      } else if (out.reason === 'evidence_unreadable' || out.reason === 'step_changed') {
+        tally.failed += 1;
+        console.error(`NOT released schedule ${schedule.id}: ${out.reason === 'step_changed' ? 'its step kept changing' : 'its current step\'s delivery could not be read'}; run again`);
       } else {
         tally.alreadyClosed += 1;
         console.log(`schedule ${schedule.id} was already closed`);

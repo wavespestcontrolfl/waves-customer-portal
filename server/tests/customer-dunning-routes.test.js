@@ -128,4 +128,21 @@ describe('POST /api/admin/invoices/:id/followup/send-now', () => {
       expect((await dark.json()).code).toBe('SCHEDULE_NOT_LIVE');
     });
   });
+
+  test('F4: a schedule send-now that sent nothing is never a 200 (the client would toast "Done"): held / paused are 409 NOT_SENT with the reason', async () => {
+    await withServer(async (base) => {
+      mockSendNextTouchNow.mockResolvedValueOnce({ routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'held', reason: 'collection_hold' });
+      const held = await post(base, '/api/admin/invoices/inv-1/followup/send-now');
+      expect(held.status).toBe(409);
+      expect(await held.json()).toEqual({
+        error: 'Not sent: reminders are on hold (a collections hold is active).', code: 'NOT_SENT', outcome: 'held', scheduleId: 'sched-1',
+      });
+      mockSendNextTouchNow.mockResolvedValueOnce({ routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'skipped', reason: 'schedule_paused' });
+      const paused = await post(base, '/api/admin/invoices/inv-1/followup/send-now');
+      expect(paused.status).toBe(409);
+      expect((await paused.json()).error).toBe('Not sent: this customer\'s combined reminders are paused.');
+      mockSendNextTouchNow.mockResolvedValueOnce({ routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'autopay_hold' });
+      expect((await post(base, '/api/admin/invoices/inv-1/followup/send-now')).status).toBe(409);
+    });
+  });
 });

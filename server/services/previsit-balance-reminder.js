@@ -218,10 +218,18 @@ async function freshOverdueRecurringInvoices(customerId, now = new Date(), datab
   return fresh;
 }
 
+// Only a touch the SCHEDULE made counts: last_touch_at after the row was
+// created. Promotion seeds last_touch_at from the members' own per-invoice
+// touches (seed.js), which the followup_last_touch_at check above already
+// judges invoice by invoice; counting the seeded copy would suppress every
+// invoice right after promotion, before any combined reminder went out. Every
+// engine write of last_touch_at (advance, completeFinal, markTold) is a delivery
+// under a claim taken after the row existed.
 async function customerScheduleTouchedSince(customerId, cutoff, database) {
   const row = await database('customer_dunning_schedules')
     .where({ customer_id: customerId })
     .where('last_touch_at', '>=', cutoff)
+    .whereRaw('last_touch_at > created_at')
     .first('id');
   return !!row;
 }
@@ -803,5 +811,5 @@ module.exports = {
   // GATE_BALANCE_REMINDER_LEGACY_OFF (dunning unification round-2 review).
   gateEnabled,
   smsTemplateActive,
-  _test: { previsitQuoteAuthority, freshOverdueRecurringInvoices },
+  _test: { previsitQuoteAuthority, freshOverdueRecurringInvoices, customerScheduleTouchedSince },
 };

@@ -15,7 +15,8 @@ const mockSchedule = {
   TABLE: 'customer_dunning_schedules',
   inReadOnlyTransaction: jest.fn(async (database, fn) => fn(database)),
   activeMemberRows: jest.fn(),
-  landingFrom: jest.fn(),
+  currentStepDelivery: jest.fn(async () => null),
+  memberLanding: jest.fn(),
   release: jest.fn(),
 };
 jest.mock('../services/customer-dunning/schedule', () => mockSchedule);
@@ -78,24 +79,46 @@ describe('parseArgs', () => {
 });
 
 describe('planRelease / executeRelease', () => {
-  test('plans every OPEN schedule (or one customer\'s) with where each active member would land', async () => {
+  test('plans every OPEN schedule (or one customer\'s) with where each active member would land (the engine\'s own memberLanding)', async () => {
     const database = fakeDatabase([schedule('s1')]);
-    mockSchedule.activeMemberRows.mockResolvedValue([{ id: 'q1', invoice_id: 'i1', step_index: 2 }, { id: 'q2', invoice_id: 'i2', step_index: 5 }]);
-    mockSchedule.landingFrom.mockReturnValueOnce({ stepIndex: 3, nextAt: NOW }).mockReturnValueOnce(null);
+    const rows = [
+      { id: 'q1', invoice_id: 'i1', step_index: 2 }, { id: 'q2', invoice_id: 'i2', step_index: 5 },
+      { id: 'q3', invoice_id: 'i3', step_index: 3 }, { id: 'q4', invoice_id: 'i4', step_index: 1 },
+    ];
+    mockSchedule.activeMemberRows.mockResolvedValue(rows);
+    const delivery = { final: false, named: new Set(['i1']) };
+    mockSchedule.currentStepDelivery.mockResolvedValueOnce(delivery);
+    mockSchedule.memberLanding
+      .mockReturnValueOnce({ kind: 'land', stepIndex: 4, nextAt: NOW })
+      .mockReturnValueOnce({ kind: 'pause_for_person', reason: 'released_past_final_step' })
+      .mockReturnValueOnce({ kind: 'paused', stepIndex: 3, pausedReason: 'customer called', pausedBy: null })
+      .mockReturnValueOnce({ kind: 'complete' });
     const plans = await script.planRelease(database, { customerId: CUST, now: NOW, Schedule: mockSchedule });
     expect(database).toHaveBeenCalledWith('customer_dunning_schedules');
     expect(database.calls).toContainEqual(['whereIn', 'status', ['active', 'held', 'paused', 'autopay_hold']]);
     expect(database.calls).toContainEqual(['where', { customer_id: CUST }]);
     expect(mockSchedule.activeMemberRows).toHaveBeenCalledWith(CUST, { database });
-    // no step repeated: landing starts at max(member step, schedule step)
-    expect(mockSchedule.landingFrom.mock.calls.map((c) => c[1])).toEqual([3, 5]);
-    expect(plans[0].landings).toEqual([
-      { invoice_id: 'i1', seq_id: 'q1', landing: { stepIndex: 3, nextAt: NOW } },
-      { invoice_id: 'i2', seq_id: 'q2', landing: null },
-    ]);
+    // the same plan the release writes: each row, the schedule as read, the current step's delivery evidence
+    expect(mockSchedule.currentStepDelivery).toHaveBeenCalledWith(schedule('s1'));
+    expect(mockSchedule.memberLanding.mock.calls).toEqual(rows.map((row) => [row, schedule('s1'), delivery, NOW]));
+    expect(plans[0].landings.map((l) => l.landing.kind)).toEqual(['land', 'pause_for_person', 'paused', 'complete']);
     script.printPlan(plans[0], (i) => ['a', 'b', 'c', 'd30_final', 'e', 'f'][i]);
-    expect(logs.join('\n')).toMatch(/schedule s1 {2}customer [0-9a-f-]{36} {2}active {2}step d30_final/);
-    expect(logs.join('\n')).toMatch(/member invoice i2 {2}seq q2 {2}-> PAUSED/);
+    const out = logs.join('\n');
+    expect(out).toMatch(/schedule s1 {2}customer [0-9a-f-]{36} {2}active {2}step d30_final/);
+    expect(out).toMatch(/member invoice i1 {2}seq q1 {2}-> step e {2}next 2026-10-07T14:16:00\.000Z/);
+    expect(out).toMatch(/member invoice i2 {2}seq q2 {2}-> PAUSED \(past its final step/);
+    expect(out).toMatch(/member invoice i3 {2}seq q3 {2}-> PAUSED at step d30_final \(the schedule is paused: customer called\)/);
+    expect(out).toMatch(/member invoice i4 {2}seq q4 {2}-> COMPLETED/);
+  });
+
+  test('a schedule whose delivery evidence cannot be read is listed as not releasable, with no landings', async () => {
+    const database = fakeDatabase([schedule('s1')]);
+    mockSchedule.currentStepDelivery.mockRejectedValueOnce(new Error('ledger unreadable'));
+    const plans = await script.planRelease(database, { now: NOW, Schedule: mockSchedule });
+    expect(plans[0]).toMatchObject({ landings: [], evidenceError: 'ledger unreadable' });
+    expect(mockSchedule.memberLanding).not.toHaveBeenCalled();
+    script.printPlan(plans[0], () => null);
+    expect(logs.join('\n')).toMatch(/NOT RELEASABLE NOW/);
   });
 
   test('releases through Schedule.release as released_admin; tallies in-flight / already closed / failures without stopping', async () => {
@@ -103,12 +126,14 @@ describe('planRelease / executeRelease', () => {
       .mockResolvedValueOnce({ closed: true, landed: [{}, {}] })
       .mockResolvedValueOnce({ closed: false, landed: [], reason: 'in_flight' })
       .mockResolvedValueOnce({ closed: false, landed: [] })
-      .mockRejectedValueOnce(new Error('deadlock detected'));
-    const tally = await script.executeRelease(['s1', 's2', 's3', 's4'].map((id) => ({ schedule: schedule(id) })), { now: NOW, Schedule: mockSchedule });
-    expect(tally).toEqual({ released: 1, inFlight: 1, alreadyClosed: 1, failed: 1 });
+      .mockRejectedValueOnce(new Error('deadlock detected'))
+      .mockResolvedValueOnce({ closed: false, landed: [], reason: 'evidence_unreadable' });
+    const tally = await script.executeRelease(['s1', 's2', 's3', 's4', 's5'].map((id) => ({ schedule: schedule(id) })), { now: NOW, Schedule: mockSchedule });
+    expect(tally).toEqual({ released: 1, inFlight: 1, alreadyClosed: 1, failed: 2 });
     expect(mockSchedule.release.mock.calls.map((c) => [c[0].id, c[1], c[2]])).toEqual(
-      ['s1', 's2', 's3', 's4'].map((id) => [id, 'released_admin', NOW]),
+      ['s1', 's2', 's3', 's4', 's5'].map((id) => [id, 'released_admin', NOW]),
     );
+    expect(logs.join('\n')).toMatch(/NOT released schedule s5: its current step's delivery could not be read/);
   });
 });
 

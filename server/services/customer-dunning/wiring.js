@@ -23,6 +23,7 @@ const FeatureGates = require('../../config/feature-gates');
 const { OPEN_STATUSES } = require('./constants');
 const Schedule = require('./schedule');
 const Admin = require('./admin');
+const Runner = require('./runner');
 
 /** The live engine covers this customer: the gate and its prerequisites are on, and the allowlist (if any) names them. */
 function liveForCustomer(customerId) {
@@ -57,12 +58,23 @@ function alertReleaseFailed({ customerId = null, dedupeKey }) {
   });
 }
 
+// Whether the last successful kill-switch read in this process found open schedules. With the live gate
+// dark, schedules exist only if it was on before (promotion runs under the live gate alone), so a failed
+// read alerts the office only when the engine is reachable (the live gate on, here always with an
+// allowlist) or this process has seen schedules to release; otherwise it is only logged. That keeps the
+// switch at zero office alerts while the gate is dark and the table empty (production today). A failure
+// that persists is not hidden by it: the per-invoice batch reads the same table in its ownership predicate
+// and fails loudly on its own.
+let lastReadSawOpen = false;
+
 /**
  * KILL SWITCH (§9.4), run by runPending BEFORE its per-invoice batch: every open schedule that is dark is
  * released (closed_reason released_gate_off / released_prereq_off; members re-land through
  * releaseMembers, dated no earlier than the next run, so none sends today). Gate on with no allowlist
- * reads nothing. Never throws: a read or release failure is logged and raised to the office, and the
- * per-invoice run goes on. A schedule with a send in flight (a fresh claim) is left for the next run.
+ * reads nothing. Never throws: a read or release failure is logged (and raised to the office when the
+ * engine is reachable, see lastReadSawOpen), and the per-invoice run goes on. A schedule with a send in
+ * flight (a fresh claim) is left for the next run. Under the shadow gate (live gate off), a dark schedule
+ * shadowRun would judge gets its full shadow verdict logged first: released, it never reaches that scan.
  */
 async function releaseIfDark(now = new Date()) {
   const tally = { released: 0, inFlight: 0, failed: 0 };
@@ -73,12 +85,18 @@ async function releaseIfDark(now = new Date()) {
   } catch (err) {
     tally.failed += 1;
     logger.error(`[customer-dunning] kill switch could not read open schedules: ${redactContact(err.message)}`);
-    await alertReleaseFailed({ dedupeKey: `customer-dunning-release-failed:read:${etDateString(now)}` });
+    if (FeatureGates.dunningCustomerScheduleLive() || lastReadSawOpen) {
+      await alertReleaseFailed({ dedupeKey: `customer-dunning-release-failed:read:${etDateString(now)}` });
+    }
     return tally;
   }
+  lastReadSawOpen = open.length > 0;
+  const shadowFirst = FeatureGates.dunningCustomerScheduleShadowLive() && !FeatureGates.dunningCustomerScheduleLive();
   for (const schedule of open) {
     const reason = darkReason(schedule.customer_id);
-    if (reason) await releaseOne(schedule, reason, now, tally);
+    if (!reason) continue;
+    if (shadowFirst) await Runner.shadowVerdictBeforeRelease(schedule, now);
+    await releaseOne(schedule, reason, now, tally);
   }
   if (tally.released || tally.inFlight || tally.failed) {
     logger.info(`[customer-dunning] kill switch: released=${tally.released} in_flight=${tally.inFlight} failed=${tally.failed}`);
@@ -95,6 +113,10 @@ async function releaseOne(schedule, reason, now, tally) {
     } else if (out.reason === 'in_flight') {
       tally.inFlight += 1;
       logger.warn(`[customer-dunning] schedule ${schedule.id} not released (${reason}): a send is in flight; the next run releases it`);
+    } else if (out.reason === 'evidence_unreadable') {
+      // Nothing was handed back (the current step's delivery could not be read): the office hears of it.
+      tally.failed += 1;
+      await alertReleaseFailed({ customerId: schedule.customer_id, dedupeKey: `customer-dunning-release-failed:${schedule.id}` });
     }
   } catch (err) {
     tally.failed += 1;
@@ -130,16 +152,51 @@ const SCHEDULE_CHANGED = 'The reminder schedule changed. Reload and try again.';
 const NO_OPEN_SCHEDULE = Object.freeze({ status: 404, body: { error: 'This customer has no open reminder schedule.', code: 'NO_OPEN_SCHEDULE' } });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// A send-now that reached the customer: the step went out (advanced / completed), or one leg did and the
+// other retries (told). A settle of a step delivered earlier (`recovered`) also lands here: that step
+// did reach the customer. Every other outcome sent nothing.
+const SENT_OUTCOMES = new Set(['advanced', 'completed', 'told']);
+
+// Reason codes a send-now can stop on that the alert copy (Schedule.reasonText) does not name.
+const NOT_SENT_REASON_TEXT = Object.freeze({
+  COLLECTIONS_POLICY: 'the collections contact rules do not allow a reminder now',
+  REMINDER_OUTCOME_UNCONFIRMED: 'an earlier attempt is still unconfirmed',
+  prefs_unreadable: 'their contact preferences could not be read',
+  progress_unreadable: 'earlier reminders could not be read back',
+  autopay_unreadable: 'their autopay status could not be read',
+  balance_cleared: 'their balance is paid',
+  no_active_member: 'no invoice is left to remind',
+});
+const notSentReason = (reason) => NOT_SENT_REASON_TEXT[reason] || Schedule.reasonText(reason);
+
+// Plain-English "Not sent" copy per outcome (the reason code never reaches the office).
+function notSentMessage(out) {
+  if (out.reason === 'schedule_paused') return 'Not sent: this customer\'s combined reminders are paused.';
+  switch (out.outcome) {
+    case 'held': return `Not sent: reminders are on hold (${notSentReason(out.reason)}).`;
+    case 'paused': return `Not sent: reminders were paused (${notSentReason(out.reason)}).`;
+    case 'autopay_hold': return 'Not sent: the customer is on autopay, so reminders are on hold.';
+    case 'closed': return `Not sent: the reminder schedule closed (${notSentReason(out.reason)}).`;
+    default: return 'Not sent.';
+  }
+}
+
 /**
  * HTTP shape of a control's result, shared by the customer routes and the invoice send-now route. A send
- * in flight (Admin's IN_FLIGHT, whose message is the copy the office reads) and a dark schedule are 409s
- * with that message; a control whose guarded write matched nothing (`ok: false`), a send-now that could
- * not claim (`skipped`) or lost its claim mid-run (`stale`) is a 409 "changed"; anything else — sent,
- * held, paused, closed — is what happened, 200.
+ * in flight (Admin's IN_FLIGHT, whose message is the copy the office reads), a dark schedule and a release
+ * whose delivery evidence could not be read are 409s with that message; a paused schedule's send-now and
+ * any send-now outcome that sent nothing (held, paused, autopay hold, closed) are a 409 NOT_SENT with a
+ * plain-English reason; a control whose guarded write matched nothing (`ok: false`), a send-now that could
+ * not claim (`skipped`) or lost its claim mid-run (`stale`) is a 409 "changed". Only a send that reached
+ * the customer, and a control that did what it said (pause, resume, release), is a 200.
  */
 function httpResult(out) {
-  if (out?.reason === 'in_flight' || out?.reason === 'schedule_not_live') {
-    return { status: 409, body: { error: out.message, code: out.reason === 'in_flight' ? 'IN_FLIGHT' : 'SCHEDULE_NOT_LIVE', scheduleId: out.scheduleId } };
+  if (out?.reason === 'in_flight' || out?.reason === 'schedule_not_live' || out?.reason === 'evidence_unreadable') {
+    const code = { in_flight: 'IN_FLIGHT', schedule_not_live: 'SCHEDULE_NOT_LIVE', evidence_unreadable: 'EVIDENCE_UNREADABLE' }[out.reason];
+    return { status: 409, body: { error: out.message, code, scheduleId: out.scheduleId } };
+  }
+  if (out?.reason === 'schedule_paused' || (out?.outcome && !SENT_OUTCOMES.has(out.outcome) && out.outcome !== 'skipped' && out.outcome !== 'stale')) {
+    return { status: 409, body: { error: notSentMessage(out), code: 'NOT_SENT', outcome: out.outcome, scheduleId: out.scheduleId } };
   }
   if (out?.ok === false || out?.outcome === 'skipped' || out?.outcome === 'stale') {
     return { status: 409, body: { error: SCHEDULE_CHANGED, code: 'SCHEDULE_CHANGED', scheduleId: out.scheduleId } };
@@ -166,4 +223,5 @@ module.exports = {
   sendNowForSchedule,
   controlCustomerSchedule,
   httpResult,
+  _test: { resetReadMemory: () => { lastReadSawOpen = false; } },
 };
