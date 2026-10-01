@@ -11,10 +11,10 @@
 // field Q&A, admin Q&A, content agents) and the Intelligence Bar logs a
 // knowledge search that found nothing at all.
 //
-// Cron: Monday 8:41am ET in scheduler.js, inside runExclusive, then hourly
-// at :41 through Tuesday as catch-up ticks — the once-per-week stamp makes
+// Cron: Monday 8:43am ET in scheduler.js, inside runExclusive, then hourly
+// at :43 through Tuesday as catch-up ticks — the once-per-week stamp makes
 // them no-ops after a successful send, and a failed send or a deploy over
-// 8:41 is retried the same week.
+// 8:43 is retried the same week.
 // Kill: KNOWLEDGE_GAPS_WEEKLY=off. Recipient: KNOWLEDGE_GAPS_EMAIL
 // (internal inboxes only, default contact@).
 
@@ -46,10 +46,10 @@ const SOURCE_LABELS = {
 };
 const sourceLabel = (s) => SOURCE_LABELS[s] || String(s || 'unknown').replace(/_/g, ' ');
 
-// One fixed week ending at the most recent Monday 8:41 ET tick at or before
+// One fixed week ending at the most recent Monday 8:43 ET tick at or before
 // `now`, so consecutive reports meet exactly whenever a run starts.
 function reportWindow(now) {
-  let end = parseETDateTime(`${etWeekStart(now)}T08:41:00`);
+  let end = parseETDateTime(`${etWeekStart(now)}T08:43:00`);
   if (end.getTime() > now.getTime()) end = addETDaysAtWallClock(end, -WINDOW_DAYS);
   return { start: addETDaysAtWallClock(end, -WINDOW_DAYS), end };
 }
@@ -64,17 +64,21 @@ function clip(text, max) {
   return t.length <= max ? t : `${t.slice(0, max - 1).replace(/\s+\S*$/, '')}…`;
 }
 
+// The week's gaps, plus how many answers carry no coverage rating (the model
+// left the tag off, or the row predates the column) — those are unknown,
+// never counted as answered.
 async function loadWeek(now = new Date()) {
   const { start, end } = reportWindow(now);
-  return db('knowledge_queries')
-    .where('created_at', '>=', start)
-    .where('created_at', '<', end)
+  const inWeek = (q) => q.where('created_at', '>=', start).where('created_at', '<', end);
+  const rows = await inWeek(db('knowledge_queries'))
     .whereIn('coverage', ['none', 'partial'])
     .select('query', 'asked_by', 'coverage', 'created_at');
+  const unrated = await inWeek(db('knowledge_queries')).whereNull('coverage').count('* as n').first();
+  return { rows, unrated: Number(unrated?.n || 0) };
 }
 
-// Pure: the week's gap rows → subject + plain-text body.
-function composeGapsEmail(allRows = [], now = new Date()) {
+// Pure: the week's gap rows (+ unrated count) → subject + plain-text body.
+function composeGapsEmail({ rows: allRows = [], unrated = 0 } = {}, now = new Date()) {
   // A question with no words (punctuation only) is not a gap anyone can fill.
   const rows = allRows.filter((r) => questionKey(r.query));
   const groups = new Map();
@@ -91,10 +95,14 @@ function composeGapsEmail(allRows = [], now = new Date()) {
   const ranked = [...groups.values()].sort((a, b) => b.count - a.count || b.none - a.none || b.last - a.last);
   const total = ranked.reduce((n, g) => n + g.count, 0);
 
+  const unratedLine = unrated
+    ? `${unrated} answer${unrated === 1 ? '' : 's'} had no coverage rating, so whether ${unrated === 1 ? 'it' : 'they'} fully answered is unknown.`
+    : null;
+
   if (!ranked.length) {
     return {
-      subject: 'Knowledge gaps: none this week',
-      text: 'Every question asked of the knowledge base last week was fully answered.',
+      subject: 'Knowledge gaps: none recorded this week',
+      text: ['No knowledge gaps were recorded last week.', ...(unratedLine ? [unratedLine] : [])].join('\n'),
       gaps: 0,
     };
   }
@@ -119,6 +127,7 @@ function composeGapsEmail(allRows = [], now = new Date()) {
     ...(ranked.length > TOP_N ? [`…and ${ranked.length - TOP_N} more.`] : []),
     '',
     `Asked by: ${sourceLine}.`,
+    ...(unratedLine ? [unratedLine] : []),
     'Each one is a candidate knowledge entry, written from UF/IFAS fact sheets, product labels or our protocols.',
   ].join('\n');
 
@@ -163,14 +172,14 @@ async function runKnowledgeGapsWeekly(opts = {}) {
   if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) return { skipped: 'unconfigured' };
   if (await (opts.sentThisWeek || sentThisWeek)(now)) return { skipped: 'recent_send' };
 
-  let rows;
+  let week;
   try {
-    rows = await (opts.loadWeek || loadWeek)(now);
+    week = await (opts.loadWeek || loadWeek)(now);
   } catch (err) {
     logger.error(`[knowledge-gaps-weekly] query failed: ${err.message}`);
     return { skipped: 'query_failed' };
   }
-  const composed = composeGapsEmail(rows, now);
+  const composed = composeGapsEmail(week, now);
 
   let result;
   try {

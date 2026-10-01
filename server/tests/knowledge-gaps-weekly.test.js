@@ -9,17 +9,17 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { runKnowledgeGapsWeekly, _private } = require('../services/knowledge/knowledge-gaps-weekly');
 
 const { composeGapsEmail, reportWindow, questionKey } = _private;
-const NOW = new Date('2026-10-05T13:00:00Z'); // Monday 9:00 ET, after the 8:41 tick
+const NOW = new Date('2026-10-05T13:00:00Z'); // Monday 9:00 ET, after the 8:43 tick
 const row = (query, askedBy = 'lead_agent', coverage = 'none', at = '2026-10-01T15:00:00Z') => ({ query, asked_by: askedBy, coverage, created_at: at });
 
 describe('composeGapsEmail', () => {
   test('groups repeats (case and punctuation ignored) and ranks most asked first', () => {
-    const { subject, text, gaps } = composeGapsEmail([
+    const { subject, text, gaps } = composeGapsEmail({ rows: [
       row('One-Time Pest Control'),
       row('one time pest control?', 'lead_agent', 'partial'),
       row('dollar spot on St. Augustine', 'brief_driven_agent'),
       row('One-time pest control', 'tech_field'),
-    ], NOW);
+    ] }, NOW);
     expect(gaps).toBe(4);
     expect(subject).toBe('Knowledge gaps: 4 questions this week');
     const first = text.indexOf('1. "One-Time Pest Control" — asked 3×');
@@ -32,22 +32,30 @@ describe('composeGapsEmail', () => {
 
   test('caps the list at 10 and says how many more', () => {
     const rows = Array.from({ length: 13 }, (_, i) => row(`question ${i}`));
-    const { text } = composeGapsEmail(rows, NOW);
+    const { text } = composeGapsEmail({ rows }, NOW);
     expect(text).toContain('10. "');
     expect(text).not.toContain('11. "');
     expect(text).toContain('…and 3 more.');
   });
 
   test('a quiet week still sends a one-line email', () => {
-    expect(composeGapsEmail([], NOW)).toEqual({
-      subject: 'Knowledge gaps: none this week',
-      text: 'Every question asked of the knowledge base last week was fully answered.',
+    expect(composeGapsEmail({ rows: [] }, NOW)).toEqual({
+      subject: 'Knowledge gaps: none recorded this week',
+      text: 'No knowledge gaps were recorded last week.',
       gaps: 0,
     });
   });
 
+  test('unrated answers are reported as unknown, never as answered', () => {
+    const quiet = composeGapsEmail({ rows: [], unrated: 3 }, NOW);
+    expect(quiet.text).toContain('3 answers had no coverage rating, so whether they fully answered is unknown.');
+    expect(quiet.text).not.toMatch(/fully answered\./);
+    const busy = composeGapsEmail({ rows: [row('door sweeps')], unrated: 1 }, NOW);
+    expect(busy.text).toContain('1 answer had no coverage rating, so whether it fully answered is unknown.');
+  });
+
   test('a punctuation-only question is left out of every count', () => {
-    const { text, gaps } = composeGapsEmail([row('door sweeps'), row('???', 'tech_field')], NOW);
+    const { text, gaps } = composeGapsEmail({ rows: [row('door sweeps'), row('???', 'tech_field')] }, NOW);
     expect(gaps).toBe(1);
     expect(text).toMatch(/Asked by: lead agent 1\./);
   });
@@ -57,12 +65,12 @@ describe('composeGapsEmail', () => {
   });
 });
 
-test('report week ends at the latest Monday 8:41 ET tick and spans 7 days', () => {
+test('report week ends at the latest Monday 8:43 ET tick and spans 7 days', () => {
   const { start, end } = reportWindow(NOW);
-  expect(end.toISOString()).toBe('2026-10-05T12:41:00.000Z');
-  expect(start.toISOString()).toBe('2026-09-28T12:41:00.000Z');
+  expect(end.toISOString()).toBe('2026-10-05T12:43:00.000Z');
+  expect(start.toISOString()).toBe('2026-09-28T12:43:00.000Z');
   // Before Monday's tick, the report is the previous week's.
-  expect(reportWindow(new Date('2026-10-05T12:00:00Z')).end.toISOString()).toBe('2026-09-28T12:41:00.000Z');
+  expect(reportWindow(new Date('2026-10-05T12:00:00Z')).end.toISOString()).toBe('2026-09-28T12:43:00.000Z');
 });
 
 describe('runKnowledgeGapsWeekly', () => {
@@ -72,7 +80,7 @@ describe('runKnowledgeGapsWeekly', () => {
   const run = (extra = {}) => runKnowledgeGapsWeekly({
     now: NOW,
     sendgrid: mailer,
-    loadWeek: async () => [row('door sweeps')],
+    loadWeek: async () => ({ rows: [row('door sweeps')], unrated: 0 }),
     sentThisWeek: async () => false,
     stampSent,
     ...extra,

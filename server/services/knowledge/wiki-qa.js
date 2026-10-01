@@ -306,6 +306,22 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     return refs.some((ref) => String(ref).startsWith('species:'));
   }
 
+  /**
+   * The Intelligence Bar route calls this after every tool result: a
+   * search_field_intelligence call that found nothing anywhere is a knowledge
+   * gap, logged for the weekly knowledge-gaps email. Logged by the route, not
+   * the tool, so the tool stays a pure read. Never awaited; logQuery never
+   * throws. Returns whether a gap was logged.
+   */
+  recordSearchMiss(toolName, input, result, failed) {
+    if (toolName !== 'search_field_intelligence' || failed || !result || result.error) return false;
+    const query = String(input?.query || '').trim();
+    const empty = (list) => !Array.isArray(list) || list.length === 0;
+    if (!query || !empty(result.fieldIntelligence) || !empty(result.knowledgeBase) || !empty(result.operationalKnowledge)) return false;
+    this.logQuery(query, null, [], 'intelligence_bar', 'none');
+    return true;
+  }
+
   async logQuery(query, answer, articlesReferenced, askedBy, coverage = null) {
     try {
       await db('knowledge_queries').insert({

@@ -2937,6 +2937,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             : errorMessage,
         });
         gapCollector?.toolResult(toolUse.name, result, failed);
+        if (toolUse.name === 'search_field_intelligence') {
+          require('../services/knowledge/wiki-qa').recordSearchMiss(toolUse.name, toolUse.input, result, failed);
+        }
 
         results.push({
           type: 'tool_result',

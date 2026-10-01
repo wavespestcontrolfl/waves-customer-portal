@@ -1622,15 +1622,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:41am ET (owner 2026-10-01: "send
+  // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:43am ET (owner 2026-10-01: "send
   // me a weekly email" of the questions the knowledge base could not fully
-  // answer), then hourly at :41 until Tuesday 8:41pm as catch-up ticks: the
+  // answer), then hourly at :43 until Tuesday 8:43pm as catch-up ticks: the
   // once-per-week send stamp makes them no-ops after a successful send, so a
-  // failed send or a deploy over 8:41 still reports that week. Minute 41 is
-  // free in every schedule here, step patterns included.
-  // Kill: KNOWLEDGE_GAPS_WEEKLY=off.
+  // failed send or a deploy over 8:43 still reports that week. Minute 43 on
+  // Mon/Tue 8am-8pm is shared only with the every-minute jobs — no other
+  // scheduled digest or sweep lands on it (#5490 r1: :41 met the autopay
+  // SMS digest at 9:41:30). Kill: KNOWLEDGE_GAPS_WEEKLY=off.
   // =========================================================================
-  cron.schedule('41 8-20 * * 1,2', async () => {
+  cron.schedule('43 8-20 * * 1,2', async () => {
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('knowledge-gaps-weekly', async () => {
