@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import PropertyServiceAreas from "../tech/PropertyServiceAreas";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import { Input, inputStyles, useUiDensity, Select, Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
 import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
@@ -59,6 +60,8 @@ export default function CustomerPropertiesPanelV2({
 }) {
   const density = useUiDensity();
   const [properties, setProperties] = useState([]);
+  // Resolved once from the list response: a dark feature mounts no row editors.
+  const [serviceAreasEnabled, setServiceAreasEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
   const [adding, setAdding] = useState(false);
@@ -96,6 +99,7 @@ export default function CustomerPropertiesPanelV2({
     setLoading(true);
     setLoadErr("");
     setCanChangePrimary(false);
+    setServiceAreasEnabled(false);
     setPrimaryPreview(null);
     // A refreshed preview is obsolete; an in-flight write still owns its lock.
     setPreviewBusy(false);
@@ -104,6 +108,7 @@ export default function CustomerPropertiesPanelV2({
         if (!cancelled) {
           setProperties(Array.isArray(d.properties) ? d.properties : []);
           setCanChangePrimary(d.canChangePrimary === true);
+          setServiceAreasEnabled(d.propertyServiceAreas === true);
         }
       })
       .catch((e) => {
@@ -269,9 +274,10 @@ export default function CustomerPropertiesPanelV2({
             {properties.map((p) => (
               <div
                 key={p.id}
-                className="py-2 flex flex-col sm:flex-row sm:items-center gap-2"
+                className="py-2"
                 data-testid="customer-property-row"
               >
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                 <div className="flex-1 min-w-0">
                   <div className="text-ui-body text-zinc-900 break-words">
                     {p.is_primary && (
@@ -361,6 +367,8 @@ export default function CustomerPropertiesPanelV2({
                     {p.primary_change_unavailable && <p className="mt-1 text-14 text-ink-secondary">{p.primary_change_unavailable}</p>}
                   </div>
                 )}
+                </div>
+                {canEdit && serviceAreasEnabled && <PropertyServiceAreas customerId={customerId} propertyId={p.id} refreshToken={refreshToken} disabled={writeBusy} />}
               </div>
             ))}
             {properties.length === 0 && (

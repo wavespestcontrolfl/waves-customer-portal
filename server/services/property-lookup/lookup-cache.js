@@ -459,6 +459,31 @@ async function markLookupAttempt(address, status, reason = null) {
   }
 }
 
+// Shared cooldown for caller-forced live refreshes (a paid upstream call).
+// One conditional upsert on the address row claims the refresh only when no
+// forced refresh was claimed inside the window, so the limit holds across
+// replicas and deploys. The claim has its own column: attempt stamps move on
+// every lookup outcome (cache hits included) and never hold or release it.
+// Fails closed (including before its migration): when the claim cannot be
+// written, callers serve the cache instead of going upstream.
+async function claimLiveRefresh(address, cooldownSeconds) {
+  try {
+    const { hash, normalizedAddress } = addressKey(address);
+    const { rows } = await db.raw(`
+      INSERT INTO property_lookups (address_hash, normalized_address, live_refresh_claimed_at)
+      VALUES (?, ?, now())
+      ON CONFLICT (address_hash) DO UPDATE SET live_refresh_claimed_at = now()
+      WHERE property_lookups.live_refresh_claimed_at IS NULL
+         OR property_lookups.live_refresh_claimed_at < now() - make_interval(secs => ?)
+      RETURNING address_hash`, [hash, normalizedAddress, cooldownSeconds]);
+    return rows.length > 0;
+  } catch (err) {
+    // Driver text can echo bound values (the normalized address): code only.
+    logger.warn('[lookup-cache] live refresh claim failed', { code: err?.code || err?.name || 'error' });
+    return false;
+  }
+}
+
 // A 'pending' stamp with no terminal follow-up means the PROCESS exited
 // mid-lookup — the performPropertyLookup throw-wrapper stamps 'error' on any
 // throw, but nothing can stamp across a process boundary, so a deploy landing
@@ -659,6 +684,7 @@ module.exports = {
   attachCommercialSuiteSizeToCachedLookup,
   saveLookup,
   markLookupAttempt,
+  claimLiveRefresh,
   sweepStalePendingAttempts,
   saveVerifiedOverride,
   sanitizeVerifiedValue,

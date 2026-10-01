@@ -71,7 +71,7 @@ function resolveLawnAftercare(aftercare, weekPlan) {
   const verdict = aftercareVerdict(aftercare);
   const customerTask = {
     review: LEGACY_NOTE_CONFIRMATION,
-    hold: HOLD_TASK,
+    hold: aftercare?.holdTask || HOLD_TASK,
     credit: recordedInstruction(aftercare),
   }[verdict] || null;
   return {
@@ -102,8 +102,16 @@ function wateringRestrictionAction(aftercare, weekPlan) {
 }
 
 // Any customer task the aftercare creates, including a credited water-in.
+// A required water-in that earns no plan credit resolves to verdict none,
+// which states no task: its own line (waterInTask) is still the customer's
+// task, for every consumer (hero, follow-up, assistant), and only for this
+// visit's plan week.
 function aftercareCustomerTask(aftercare, weekPlan) {
-  return resolveLawnAftercare(aftercare, weekPlan).customerTask;
+  const { verdict, customerTask } = resolveLawnAftercare(aftercare, weekPlan);
+  if (customerTask) return customerTask;
+  if (verdict !== 'none' || weekPlan?.visitInPlanWeek === false) return null;
+  const waterInTask = typeof aftercare?.waterInTask === 'string' ? aftercare.waterInTask.trim() : '';
+  return waterInTask || null;
 }
 
 // A visit outside the plan's week cannot qualify that week's plan with its
@@ -133,7 +141,9 @@ function renderedWeekPlan(aftercare, weekPlan) {
   if (!weekPlan?.title) return null;
   const reduced = hasCreditableWaterIn(aftercare, weekPlan) && weekPlan.visitInPlanWeek === true
     && weekPlan.prescribesRun === true && weekPlan.afterTreatment?.title;
-  return reduced ? weekPlan.afterTreatment : weekPlan;
+  if (reduced) return weekPlan.afterTreatment;
+  return resolveLawnAftercare(aftercare, weekPlan).verdict === 'hold' && weekPlan.afterHold?.title
+    ? weekPlan.afterHold : weekPlan;
 }
 
 function normalizeLawnAftercare(aftercare, { recordedWateringNotes = [] } = {}) {

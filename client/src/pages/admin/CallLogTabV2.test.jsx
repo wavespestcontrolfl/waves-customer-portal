@@ -62,6 +62,34 @@ describe("CallLogTabV2 standalone navigation", () => {
   });
 });
 
+// Call alerts (missed call, voicemail, repeat caller, ...) link
+// /admin/communications#tab=calls&call=<call_log id>. An older call is outside
+// the loaded window; the tab must fetch it by id and show it, not open empty.
+describe("CallLogTabV2 call deep link from an alert", () => {
+  const call = (id, phone) => ({ id, direction: "inbound", from_phone: phone, answered_by: "missed", created_at: new Date().toISOString() });
+  beforeEach(() => {
+    window.location.hash = "#tab=calls&call=call-old";
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes("route-calibration") || String(url).includes("/admin/call-recordings/stats")
+        ? {}
+        : { calls: [String(url).includes("id=call-old") ? call("call-old", "+19415550199") : call("call-new", "+19415550123")] },
+    })));
+  });
+  afterEach(() => {
+    cleanup();
+    window.location.hash = "";
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches a linked call that is not in the loaded page and lists it", async () => {
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes("/ai/admin/calls?id=call-old"))).toBe(true));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Create Lead" })).toHaveLength(2));
+  });
+});
+
 describe("CallLogTabV2 synced transcript", () => {
   const SEGMENTS = {
     segments: [

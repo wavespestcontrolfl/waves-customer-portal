@@ -1,6 +1,6 @@
 'use strict';
 
-const { stripQuotedAndSignature, decodeEntities } = require('../services/email/email-strip');
+const { ownReplySubject, stripQuotedAndSignature, decodeEntities } = require('../services/email/email-strip');
 
 describe('stripQuotedAndSignature', () => {
   test('cuts a Gmail-style "On ... wrote:" quote header and everything after it', () => {
@@ -73,5 +73,56 @@ describe('stripQuotedAndSignature', () => {
     expect(stripQuotedAndSignature('On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: please send a quote by Friday')).toBe('');
     expect(stripQuotedAndSignature('---------- Forwarded message ---------\nFrom: Jane\nCan you come out Monday?')).toBe('');
     expect(stripQuotedAndSignature('> can you call me back today')).toBe('');
+  });
+
+  describe('"On ... wrote:" needs a real quote header', () => {
+    test('ordinary prose that happens to say "on ... wrote:" is not cut', () => {
+      const body = 'Please note on Tuesday the tech wrote: we are coming Friday morning.';
+      expect(stripQuotedAndSignature(body)).toBe(body);
+      expect(stripQuotedAndSignature('On Tuesday the tech wrote: we are coming')).toBe('On Tuesday the tech wrote: we are coming');
+    });
+
+    test('a dated / addressed quote header still cuts', () => {
+      expect(stripQuotedAndSignature('Sounds good. On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: see you then')).toBe('Sounds good.');
+      expect(stripQuotedAndSignature('Sounds good. On 09/09/2026 8:29 AM, Jane wrote: see you then')).toBe('Sounds good.');
+      // Any case: some clients write the header lower-case (Codex #5422 r3).
+      expect(stripQuotedAndSignature('Sounds good. on Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: see you then')).toBe('Sounds good.');
+    });
+
+    test('a bare number is no header shape: prose with a ticket number before "wrote:" is kept (Codex #5422 r4)', () => {
+      const body = 'On ticket 123 the technician wrote: please reschedule Friday';
+      expect(stripQuotedAndSignature(body)).toBe(body);
+    });
+
+    test('the digit or address must sit inside the header, before the first "wrote:"', () => {
+      const body = 'On Tuesday the tech wrote: come at 3 and On Friday he wrote: no';
+      expect(stripQuotedAndSignature(body)).toBe(body);
+    });
+  });
+});
+
+describe('ownReplySubject', () => {
+  test('the thread subject behind Re:/Fwd: prefixes is not new text', () => {
+    expect(ownReplySubject('Re: Please reschedule Friday', ['Please reschedule Friday'])).toBe('');
+    expect(ownReplySubject('RE: re: Fwd: please reschedule  friday', ['Please reschedule Friday'])).toBe('');
+    expect(ownReplySubject('Re:', [])).toBe('');
+  });
+
+  test('a subject that says something new is the reply\'s own words, without its prefixes', () => {
+    expect(ownReplySubject('Re: Booked you for Friday 9am', ['Please reschedule Friday'])).toBe('Booked you for Friday 9am');
+    expect(ownReplySubject('Estimate attached', [])).toBe('Estimate attached');
+  });
+
+  test('a forwarded subject is never the sender\'s own words, even the first in its thread', () => {
+    expect(ownReplySubject('Fwd: Please cancel service', [])).toBe('');
+    expect(ownReplySubject('FW: Please cancel service', [])).toBe('');
+    expect(ownReplySubject('Re: Fwd: Please cancel service', [])).toBe('');
+    expect(ownReplySubject('Forward this to Adam please', [])).toBe('Forward this to Adam please');
+    // Localized clients' forward prefixes (Codex #5422 r3).
+    for (const prefix of ['WG', 'RV', 'TR', 'ENC', 'Doorst', 'VB', 'VL', 'AW: WG', 'I', 'R: I']) {
+      expect(ownReplySubject(`${prefix}: Please cancel service`, [])).toBe('');
+    }
+    expect(ownReplySubject('AW: Please cancel service', ['Please cancel service'])).toBe('');
+    expect(ownReplySubject('R: Please cancel service', ['Please cancel service'])).toBe('');
   });
 });

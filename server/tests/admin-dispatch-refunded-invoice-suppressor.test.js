@@ -369,7 +369,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // never named as collectible (codex r12).
     expect(block).toContain('!terminalResolvedAway.includes(terminalNow.status)');
     expect(block).toContain('RESOLVED — no action needed');
-    expect(block).toContain('body: alertBody,');
+    expect(block).toContain("adminBodyColumns('billing', alertBody)");
     expect(block).toContain('const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;');
     expect(block).toContain("the invoice was reinstated to '");
     // Skip = success (nothing durable owed), not the fail-closed 503 leg.

@@ -11,7 +11,7 @@ process.env.ESTIMATE_HANDOFF_SECRET = process.env.ESTIMATE_HANDOFF_SECRET || 'bo
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), bookPreferredTimeLive: jest.fn(() => false) }));
 
 // Recording db mock: every chain call is logged per table; .first()/.update()
 // resolve from per-table configuration.

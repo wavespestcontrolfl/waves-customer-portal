@@ -2342,6 +2342,29 @@ describe('plant-engine — real catalog', () => {
     }
   });
 
+  test.each(['ground-pearls', 'bermudagrass-mite', 'cuban-laurel-thrips', 'citrus-rust-mite', 'shot-hole-borers-ambrosia-beetles'])('%s is technician-confirmed and keeps the pest hard cap (Codex #5433 r1, r2)', (slug) => {
+    const entry = catalog.getEntry(slug);
+    const sig = engine.signatureFor(entry);
+    expect(sig.confirmableBy).toBe('technician');
+    expect(sig.isPestPossibility).toBe(true);
+    expect(engine.isHardCapped(entry, sig)).toBe(true);
+  });
+
+  test('shot-hole borers keep their arborist referral in a plant workup (Codex #5433 r2)', () => {
+    const entry = catalog.getEntry('shot-hole-borers-ambrosia-beetles');
+    const { referral } = engine.nextStepHintFor([{ entry, sig: engine.signatureFor(entry), confidence: 0.9 }]);
+    expect(referral && referral.kind).toBe('arborist');
+  });
+
+  test.each(['thielaviopsis-trunk-rot', 'shot-hole-borers-ambrosia-beetles'])('%s settle step names the arborist, not a routine visit (Codex #5433 r3)', (slug) => {
+    const entry = catalog.getEntry(slug);
+    expect(engine.settleItFor([{ entry, sig: engine.signatureFor(entry), confidence: 0.9 }], 'plant').text).toMatch(/arborist/);
+  });
+
+  test('sting nematode is not a pest possibility', () => {
+    expect(engine.signatureFor(catalog.getEntry('sting-nematode')).isPestPossibility).toBe(false);
+  });
+
   test('a real-catalog lawn workup never shows or names a draft condition, however confident the read', () => {
     const built = engine.buildWorkup({
       subject: 'lawn',

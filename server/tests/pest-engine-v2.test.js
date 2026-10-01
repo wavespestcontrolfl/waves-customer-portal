@@ -1438,10 +1438,12 @@ describe('L1: pest engine reads only the pest section', () => {
     const real = jest.requireActual('../services/species-catalog');
     const all = real.listEntries();
     const pestOnly = real.listEntries({ section: 'pest' });
-    expect(all.length).toBe(358);
-    expect(pestOnly.length).toBe(239);
+    // 358 approved + the 19 draft entries of the 2026-09-30 yard-rotation
+    // set (7 pest, 4 plant, 8 condition).
+    expect(all.length).toBe(377);
+    expect(pestOnly.length).toBe(246);
     expect(pestOnly.every((e) => real.sectionOf(e) === 'pest')).toBe(true);
-    expect(all.filter((e) => real.sectionOf(e) !== 'pest')).toHaveLength(119);
+    expect(all.filter((e) => real.sectionOf(e) !== 'pest')).toHaveLength(131);
   });
 
   // Codex #5143 r1 P2: filtering the PROMPT to pest-section entries doesn't
