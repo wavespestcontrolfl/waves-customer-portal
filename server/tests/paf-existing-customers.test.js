@@ -81,10 +81,15 @@ describe('accept route wiring (source pins)', () => {
     expect(src).not.toMatch(/recurringCardAfterVisitVariant/);
   });
 
+  test('r7 audit: a dropped capture is retired AFTER the transaction rolls back (no Stripe I/O under row locks), fail-closed 503', () => {
+    expect(src).not.toMatch(/await retireOrDenyDroppedCapture\(estimate, recurringCardVerification\.setupIntentId\)/);
+    expect(src).toMatch(/if \(droppedCaptureToRetire && err && err\.status === 409\) \{\s*try \{\s*await retireOrDenyDroppedCapture\(droppedCaptureToRetire\.estimate, droppedCaptureToRetire\.setupIntentId\);\s*\} catch \(retireErr\) \{\s*return res\.status\(503\)/);
+  });
+
   test('the promise is recomputed IN the accept transaction from the verified tender and the real invoice outcome, 409s on any attestation difference, and is what gets stamped', () => {
     expect(src).toMatch(/const delivery = RecurringCards\.standardInvoiceDelivery\(\{\s*laneActive: recurringCardLaneActive,\s*minted: standardInvoiceMinted,\s*attached: standardInvoiceAttached,\s*\}\);/);
     expect(src).toMatch(/tender: recurringCardVerification\.methodType,\s*collectsAtAccept: delivery\.collectsAtAccept,/);
-    expect(src).toMatch(/!RecurringCards\.collectionPromiseMatches\(expectedPromise, \{\s*variant: attestedConsentVariant,\s*version: attestedConsentVersion,\s*tender: attestedConsentTender,\s*\}\)\) \{\s*await retireOrDenyDroppedCapture\(estimate, recurringCardVerification\.setupIntentId\);[\s\S]{0,300}err\.code = 'CONSENT_VARIANT_STALE';/);
+    expect(src).toMatch(/!RecurringCards\.collectionPromiseMatches\(expectedPromise, \{\s*variant: attestedConsentVariant,\s*version: attestedConsentVersion,\s*tender: attestedConsentTender,\s*\}\)\) \{\s*droppedCaptureToRetire = \{ estimate, setupIntentId: recurringCardVerification\.setupIntentId \};[\s\S]{0,300}err\.code = 'CONSENT_VARIANT_STALE';/);
     expect(src).toMatch(/acceptedCollectionPromise = \{\s*\.\.\.expectedPromise,/);
     expect(src).toMatch(/'\{acceptedRecurringCardConsentVariant\}', to_jsonb\(\?::text\)\)",\s*\[expectedPromise\.variant\]/);
   });

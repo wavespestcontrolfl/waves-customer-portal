@@ -9247,6 +9247,10 @@ async function retireOrDenyDroppedCapture(estimate, setupIntentId) {
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
 router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
+  // A captured SetupIntent a reloadable in-transaction refusal drops: retired
+  // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
+  // never retired by a refusal that did not end the accept).
+  let droppedCaptureToRetire = null;
   // The customer's authorization moment = SERVER RECEIPT of the submit
   // (Codex r17/r24): captured before ANY preflight await, so an Auto Pay
   // opt-out committed in another tab after the click — even during the
@@ -11550,7 +11554,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // be exempt and write no marker, can never have it recovered as a
         // legacy capture (r3 pre-push P0). Fail closed if Stripe cannot confirm.
         if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
-          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
         }
         const err = new Error('Your account just changed. Please reload the page and confirm again.');
         err.status = 409;
@@ -12847,7 +12851,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           laneActive: recurringCardLaneActive, minted: standardInvoiceMinted, attached: standardInvoiceAttached,
         }).collectsAtAccept)) {
         if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
-          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
         }
         const err = new Error('Your payment terms were just updated. Please review them and confirm again.');
         err.status = 409;
@@ -12867,7 +12871,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           laneActive: recurringCardLaneActive, minted: standardInvoiceMinted, attached: standardInvoiceAttached,
         }).suppressed) {
         if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
-          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
         }
         const err = new Error('Your payment terms were just updated. Please review them and confirm again.');
         err.status = 409;
@@ -12892,7 +12896,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           version: attestedConsentVersion,
           tender: attestedConsentTender,
         })) {
-          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
           const err = new Error('Your payment terms were just updated. Please reload the page and review the card authorization before confirming.');
           err.status = 409;
           err.code = 'CONSENT_VARIANT_STALE';
@@ -15007,6 +15011,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
+    // The transaction has rolled back: retire the capture an in-transaction
+    // refusal dropped, now that no row lock is held (fail closed: when Stripe
+    // cannot confirm, 503 and the tab keeps its intent).
+    if (droppedCaptureToRetire && err && err.status === 409) {
+      try {
+        await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId);
+      } catch (retireErr) {
+        return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+      }
+    }
     if (err && err.code === 'RECURRING_CARD_RETIRE_FAILED' && err.status === 503) {
       return res.status(503).json({ error: err.message, code: err.code });
     }
