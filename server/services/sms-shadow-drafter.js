@@ -4214,7 +4214,7 @@ COMPANY FACTS:
   const visitLoopsRules = realAnswersOn
     ? `
 VISIT STATUS & OPEN LOOPS:
-- When the VISIT STATUS & OPEN LOOPS section lists anything, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when that section is "- none".
+- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
 - Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on today's visit."). From a fresh Tech position you may say how many stops come before theirs. When Tech position says the location is stale, do not promise an arrival time.
 - With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
@@ -4491,6 +4491,15 @@ function visitLoopCommitmentIds(context) {
   const ids = [...(Array.isArray(v.weOwe) ? v.weOwe.slice(0, 5) : []), ...(Array.isArray(v.customerWaiting) ? v.customerWaiting.slice(0, 5) : [])]
     .map((i) => (i && i.id != null ? String(i.id) : '')).filter(Boolean);
   return [...new Set(ids)];
+}
+// The lines a reply must address even when the customer only said thanks (the
+// VISIT STATUS & OPEN LOOPS rule): a tech position alone is information, not a
+// loop. false gate-off.
+function visitLoopsNeedAnswer(context) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return false;
+  const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
+  const listed = (list) => Array.isArray(list) && list.some((i) => i && typeof i === 'object');
+  return Boolean(v.lateAlert || v.pastWindow || v.missedVisit) || listed(v.weOwe) || listed(v.customerWaiting);
 }
 // Marks a draft whose section showed time-sensitive VISIT STATUS (tech position, a
 // flagged delay, a passed window, a missed visit): the send boundary holds it to the
@@ -5626,7 +5635,8 @@ function parseShadowResponse(text) {
 async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false, source = null, hasMedia = false }) {
   const startedAt = Date.now();
   try {
-    const gratitudeCandidate = source === 'live_webhook' && !hasMedia && !schedulingIntent
+    const classifiedIntent = intent;
+    let gratitudeCandidate = source === 'live_webhook' && !hasMedia && !schedulingIntent
       && customer?.id && smsLogId && isGratitudeOnly(inboundMessage);
     if (gratitudeCandidate) {
       intent = { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: buildGratitudeReply(customer.first_name) };
@@ -5650,6 +5660,16 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const context = customer
       ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta })
       : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });
+    // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
+    // window, a missed visit, a promise we owe, an ask they are waiting on) is not a
+    // pure thank-you — the gate-on rules require the reply to address it, which the
+    // gratitude lane's fixed reply cannot. It takes the ordinary operational path
+    // under its classified intent (context stays without LIVE ETA, so the reply
+    // cannot make a live-status claim).
+    if (gratitudeCandidate && visitLoopsNeedAnswer(context)) {
+      gratitudeCandidate = false;
+      intent = classifiedIntent;
+    }
     // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
     const liveEtaSnapshot = buildLiveEtaSnapshot(context);
     // The technician first name(s) this draft may have used as a status subject ("Sam is on
@@ -6025,6 +6045,7 @@ module.exports = {
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
   visitLoopStatus,
+  visitLoopsNeedAnswer,
   VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,

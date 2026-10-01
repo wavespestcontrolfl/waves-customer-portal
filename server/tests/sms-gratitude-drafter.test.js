@@ -2,6 +2,7 @@
 
 const ENV_KEYS = [
   'ANTHROPIC_API_KEY',
+  'GATE_SMS_REAL_ANSWERS',
   'SHADOW_DRAFT_VERIFY',
   'SHADOW_FEWSHOT',
   'SHADOW_VOICE_PROFILE',
@@ -28,7 +29,7 @@ describe('live-webhook gratitude drafter boundary', () => {
   });
 
   async function runDraft(draftPayload, overrides = {}) {
-    const { deliveryMode = 'auto_send', ...requestOverrides } = overrides;
+    const { deliveryMode = 'auto_send', contextExtra = {}, ...requestOverrides } = overrides;
     const insertedRows = [];
     const mockDb = jest.fn((table) => {
       if (table !== 'message_drafts') throw new Error(`unexpected table: ${table}`);
@@ -68,6 +69,7 @@ describe('live-webhook gratitude drafter boundary', () => {
         smsHistory: [],
         customer: { billingLane: null },
         billing: { outstandingBalance: 0, recentPayments: [] },
+        ...contextExtra,
       })),
       getFullCustomerContext: jest.fn(() => {
         throw new Error('phone lookup must not run for a matched webhook customer');
@@ -212,6 +214,38 @@ describe('live-webhook gratitude drafter boundary', () => {
     expect(metadata.verify).toEqual({ passes: 1, converged: true });
     expect(metadata.gratitude.actions_verified_safe).toBe(true);
     expect(result.createDeepMessage).not.toHaveBeenCalled();
+    expectNoWebhookDelivery(result);
+  });
+
+  // PR #5499: gate-on, a "thanks" while something is still owed must be answered,
+  // which the fixed gratitude reply cannot do — it leaves the gratitude lane.
+  test('gate on + an open loop: the thanks takes the operational path under its classified intent', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const visitLoops = { techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the quote' }], customerWaiting: [] };
+    const result = await runDraft({
+      reply: 'Glad to help, Casey. We still owe you that callback about the quote.',
+      intended_actions: [{ type: 'none' }],
+      missing_info: null,
+    }, { deliveryMode: 'suggest', contextExtra: { visitLoops } });
+    const stored = result.insertedRows[0];
+    expect(stored.intent).toBe('general_customer_sms_needs_review');
+    expect(JSON.parse(stored.intended_actions)).not.toHaveProperty('gratitude');
+    // routed as an operational suggestion, carrying the commitment it was grounded on
+    expect(result.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ intent: 'general_customer_sms_needs_review' }));
+    expect(result.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({ visitLoopCommitmentIds: ['cc-1'] }));
+  });
+
+  test('gate on + only a tech position (no loop): still a gratitude candidate', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const visitLoops = { techPosition: { techName: 'Sam', status: 'en_route', stopsAhead: 1 }, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] };
+    const result = await runDraft({
+      reply: 'Our pleasure, Casey!',
+      intended_actions: [{ type: 'none' }],
+      missing_info: null,
+    }, { contextExtra: { visitLoops } });
+    const stored = result.insertedRows[0];
+    expect(stored.intent).toBe(result.GRATITUDE_INTENT);
+    expect(JSON.parse(stored.intended_actions)).toHaveProperty('gratitude');
     expectNoWebhookDelivery(result);
   });
 

@@ -176,8 +176,8 @@ describe('system prompt', () => {
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
     expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, VISIT STATUS & OPEN LOOPS, the thread');
-    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists anything, address it in the reply even if the customer only said thanks or ok`);
-    expect(on).toContain('A reply of "" is allowed ONLY when that section is "- none".');
+    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
+    expect(on).toContain('A reply of "" is allowed ONLY when none of those lines is listed.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
     expect(on).toContain('With MISSED VISIT, apologize in one plain sentence');
     for (const banned of ['"Good question"', '"Great question"', '"I hear you"', '"Totally fine"', '"Good news"']) expect(on).toContain(banned);
