@@ -370,6 +370,50 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
   });
 
   // ── claim ──────────────────────────────────────────────────────────────
+  describe('follow-up 1: the claim locks the member invoice rows in the invoice edit path\'s order', () => {
+    const settles = (promise, ms = 400) => Promise.race([promise.then(() => true), new Promise((resolve) => { setTimeout(() => resolve(false), ms); })]);
+
+    test('an invoice edit that holds the invoice row makes the claim WAIT; the claim then proceeds once the edit commits', async () => {
+      const c = await customer();
+      const m = await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      let claiming;
+      await app.transaction(async (trx) => {
+        await trx('invoices').where({ id: m.invoiceId }).forUpdate().first(); // InvoiceService.update locks the invoice FIRST
+        claiming = Schedule.claim(s.id, NOW, { database: app });
+        expect(await settles(claiming)).toBe(false); // the claim cannot stamp under the edit
+      });
+      const claimed = await claiming;
+      expect(claimed).not.toBeNull();
+      expect((await seqRow(m.seq.id)).touch_claimed_at).not.toBeNull();
+    });
+
+    test('lock order: an edit that writes the member SEQUENCE row after locking the invoice never deadlocks with a claim waiting on the invoice', async () => {
+      const c = await customer();
+      const m = await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      let claiming;
+      await app.transaction(async (trx) => {
+        await trx('invoices').where({ id: m.invoiceId }).forUpdate().first();
+        claiming = Schedule.claim(s.id, NOW, { database: app });
+        await new Promise((resolve) => { setTimeout(resolve, 250); }); // the claim is now queued on the invoice lock
+        // a retotal / stop write to the sequence row: with the claim holding NO sequence lock this proceeds (invoice first, then sequence)
+        await trx('invoice_followup_sequences').where({ id: m.seq.id }).update({ updated_at: trx.fn.now() });
+      });
+      expect(await claiming).not.toBeNull();
+    });
+
+    test('control: no concurrent edit, the claim stamps the schedule and every member row', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 60, step: 4 });
+      const b = await member(c, { sentDaysAgo: 40, step: 4 });
+      const s = await openSchedule(c);
+      const claimed = await Schedule.claim(s.id, NOW, { database: app });
+      expect(claimed.memberSeqIds).toHaveLength(2);
+      for (const m of [a, b]) expect((await seqRow(m.seq.id)).touch_claimed_at).not.toBeNull();
+    });
+  });
+
   describe('claim / releaseClaim', () => {
     test('stamps the schedule AND the free active member rows; a second claim is refused while fresh', async () => {
       const c = await customer();
@@ -902,6 +946,16 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(await Admin.pause(s.id, { now: later })).toEqual({ ok: true });
       expect(await fresh(s.id)).toMatchObject({ status: 'paused' });
       expect(await Admin.release(s.id, { now: later })).toMatchObject({ ok: true });
+    });
+
+    test('follow-up 8: "closed" is logged (and past-final alerts raised) only when the close happened; a refused close is silent', async () => {
+      const logger = require('../services/logger');
+      const { s, claim } = await inFlight();
+      logger.info.mockClear();
+      expect((await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: new Date(NOW.getTime() - 1) })).reason).toBe('claim_lost');
+      expect(logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('closed'))).toEqual([]);
+      expect((await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: claim.claimStamp })).closed).toBe(true);
+      expect(logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes(`schedule ${s.id} closed`))).toHaveLength(1);
     });
 
     test('the run\'s OWN claim never blocks its own close; another run\'s stamp does', async () => {
