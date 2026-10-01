@@ -297,6 +297,7 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('The ants were back the next day, you said.')).toBeNull();
     expect(writerRulesRejection("The customer's kitchen had ghost ants along the counter.")).toBeNull();
     expect(writerRulesRejection('You told us about the ants by the sink.')).toBeNull();
+    expect(writerRulesRejection('We found a mud tube on the house foundation.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
