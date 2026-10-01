@@ -176,6 +176,40 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
     const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
     expect(replyQuotesUngroundedAmount('Invoice #0456 is still unpaid.', { billing }, { byMeaning: true })).toBe(true);
   });
+  // Codex round-40 P1: the SAME live verdict feeds the owed BALANCE, the open invoice, the Zelle-target list and the flags - not just the status list
+  test('a live-resolved payer invoice is excluded from the balance, open invoice, open-invoice list and flagged payer-billed (not just the status list)', async () => {
+    mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));
+    const billing = await billingFor([inv('i2', 'WPC-2026-0123', 'sent', 250, { scheduled_service_id: 'ss-ap' }), inv('i1', 'WPC-2026-0456', 'sent', 95, { scheduled_service_id: 'ss-own' })]);
+    expect(billing.outstandingBalance).toBe(95);
+    expect(billing.openInvoice.id).toBe('i1');
+    expect(billing.openInvoices.map((x) => x.id)).toEqual(['i1']);
+    expect(billing.payerBilledInvoice).toBe(true);
+    expect(billing.unavailable).toBe(false);
+  });
+  test('an AP-owned partially_paid invoice does not raise the uncounted-partial-due flag', async () => {
+    mockResolveForInvoice.mockImplementation(async () => ({ payerId: 'payer-9' }));
+    const billing = await billingFor([inv('i3', 'WPC-2026-0003', 'partially_paid', 100, { scheduled_service_id: 'ss-ap' })]);
+    expect(billing.hasUncountedPartialDue).toBe(false);
+    expect(billing.payerBilledInvoice).toBe(true);
+  });
+  test('UNVERIFIABLE ownership makes the whole money picture unavailable: no balance, no open invoice, no statuses', async () => {
+    mockResolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
+    const billing = await billingFor([inv('i1', 'WPC-2026-0456', 'sent', 95)]);
+    expect(billing.unavailable).toBe(true);
+    expect(billing.outstandingBalance).toBe(0);
+    expect(billing.openInvoice).toBeNull();
+    expect(billing.openInvoices).toEqual([]);
+    expect(billing.invoiceStatuses).toBeNull();
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    expect(replyQuotesUngroundedAmount('You owe $95.', { billing }, { byMeaning: true })).toBe(true);
+  });
+  test('a collectible invoice buried BEHIND the status-list cap is still judged (alwaysJudge): an old AP-owned open invoice never counts', async () => {
+    mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));
+    const many = Array.from({ length: 11 }, (_, n) => inv(`i${(n % 9) + 1}${n}`, `N-${n}`, 'paid', 10, { scheduled_service_id: `own-${n}` }));
+    const billing = await billingFor([...many, inv('i0', 'WPC-OLD', 'sent', 400, { scheduled_service_id: 'ss-ap' })]);
+    expect(billing.outstandingBalance).toBe(0);
+    expect(billing.openInvoice).toBeNull();
+  });
   test('a stamped payer_statement_id is payer-owned without a lookup; resolution is memoized per scheduled service', async () => {
     const billing = await billingFor([
       inv('i4', 'A-4', 'sent', 10, { payer_statement_id: 'st-1' }),

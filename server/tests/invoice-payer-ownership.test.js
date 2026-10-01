@@ -40,6 +40,14 @@ describe('liveInvoiceOwnership', () => {
     const limited = await liveInvoiceOwnership('c1', rows, undefined, { ownLimit: 1 });
     expect([...limited.ownedIds].sort()).toEqual(['a', 'b']); // stopped after the first self-pay row (c); d / e left unjudged
   });
+  // Codex round-40 P1: rows that can feed the owed balance are judged however far down they sit; ownLimit only bounds the status LIST
+  test('alwaysJudge rows are judged even after ownLimit is reached (the cap is for the display list, never the balance)', async () => {
+    mockResolve.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ap' ? 'p' : null }));
+    const rows = [{ id: 'c', scheduled_service_id: 'own' }, { id: 'd', scheduled_service_id: 'own2' }, { id: 'e', scheduled_service_id: 'ap' }, { id: 'f', scheduled_service_id: 'ap2' }];
+    const out = await liveInvoiceOwnership('c1', rows, undefined, { ownLimit: 1, alwaysJudge: (r) => r.id === 'e' || r.id === 'f' });
+    expect([...out.ownedIds]).toEqual(['e']); // e resolves to the payer; f ('ap2') resolves to self-pay; d is skipped (unjudged)
+    expect(mockResolve).toHaveBeenCalledTimes(3); // c, e, f - d skipped
+  });
   test('any unverifiable row marks the batch unverifiable', async () => {
     mockResolve.mockRejectedValue(new Error('down'));
     expect((await liveInvoiceOwnership('c1', [{ id: 'a' }])).unverifiable).toBe(true);

@@ -535,11 +535,33 @@ describe('round-17: the customer\'s named tender decides the row, including bare
     expect(rq(REPLY, ctx([card]), ask(how))).toBe(true);
     expect(rq(REPLY, ctx([bank]), ask(how))).toBe(true);
   });
-  test('card brands and kinds still read as a card', () => {
+  test('card brands and kinds still read as a card (a named brand binds a card row of THAT brand)', () => {
+    const brandOf = { 'with my Visa': 'visa', 'with my Mastercard': 'mastercard', 'with Amex': 'amex' };
     for (const how of ['with my Visa', 'on my debit card', 'with a credit card', 'with my Mastercard', 'with Amex']) {
-      expect({ how, card: rq(REPLY, ctx([card]), ask(how)) }).toEqual({ how, card: false });
+      const row = brandOf[how] ? { ...card, card_brand: brandOf[how] } : card;
+      expect({ how, card: rq(REPLY, ctx([row]), ask(how)) }).toEqual({ how, card: false });
       expect({ how, bank: rq(REPLY, ctx([bank]), ask(how)) }).toEqual({ how, bank: true });
     }
+  });
+  // Codex round-40 P1: a NAMED card brand is part of the tender identity — a Mastercard row never grounds a Visa claim
+  test('a named card brand never binds a card row of another (or unknown) brand', () => {
+    const visa = { ...card, card_brand: 'visa' };
+    const mc = { ...card, card_brand: 'mastercard' };
+    expect(rq('Your Visa payment of $120 from Sep 12 cleared.', ctx([mc]))).toBe(true);
+    expect(rq('Your Visa payment of $120 from Sep 12 cleared.', ctx([visa]))).toBe(false);
+    expect(rq('Your Visa payment of $120 from Sep 12 cleared.', ctx([card]))).toBe(true); // a row with no brand cannot verify a brand claim
+    expect(rq(REPLY, ctx([mc]), ask('with my Visa'))).toBe(true); // the customer's brand constrains a generic reply too
+    expect(rq(REPLY, ctx([visa]), ask('with my Visa'))).toBe(false);
+    expect(rq('Your card payment of $120 from Sep 12 cleared.', ctx([mc]))).toBe(false); // a generic "card" still matches any card row
+    expect(rq('Your Visa payment of $120 from Sep 12 cleared.', ctx([{ ...card, card_brand: 'Visa' }]))).toBe(false); // brand case is normalized
+    // "Visa card" names ONE tender (the brand refines the word "card"), not two
+    expect(rq('Your Visa card payment of $120 from Sep 12 cleared.', ctx([visa]))).toBe(false);
+    expect(rq('Your Visa card payment of $120 from Sep 12 cleared.', ctx([mc]))).toBe(true);
+    // the reply says only "card" but the customer named a brand: the brand still decides which row it is about
+    expect(rq('We received your $120 card payment from Sep 12.', ctx([mc]), ask('with my Visa'))).toBe(true);
+    expect(rq('We received your $120 card payment from Sep 12.', ctx([visa]), ask('with my Visa'))).toBe(false);
+    // two different brands in one text stay ambiguous (fail closed)
+    expect(rq('Your Visa payment of $120 from Sep 12 cleared.', ctx([visa]), ask('with my Mastercard'))).toBe(true);
   });
   test('an absence claim about the named tender is not contradicted by a row of another tender', () => {
     expect(rq("We don't see a $120 payment from Sep 12 through your bank.", ctx([card]), ask('through my bank'))).toBe(false);
@@ -1638,5 +1660,43 @@ describe('round-36: a partially_paid invoice with an amount due makes settlement
       delete process.env.GATE_SMS_REAL_ANSWERS;
       expect(buildFactsBlock(context)).not.toMatch(/PARTIALLY PAID/);
     } finally { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; }
+  });
+});
+
+// Codex round-40 P1: "funds" / "money" are payment SUBJECTS — one shared noun alternation (PAYMENT_NOUN_ALT) feeds every
+// subject / status-noun / prescreen / anaphor list, so a receipt about "the funds" is judged exactly like one about "the payment".
+describe('round-40: funds and money are payment subjects', () => {
+  const { mayAssertPaymentStatus, PAYMENT_SUBJECT, PAYMENT_EVENT_SUBJECT } = require('../services/payment-receipt-vocabulary');
+  const paid = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (reply, rows, inboundMessage = 'Did my payment go through?') => replyQuotesUngroundedAmount(reply, ctx(rows), { byMeaning: true, inboundMessage });
+  // amount-free receipts are never grounded by design (a receipt names its amount); the bug was that these were not even RECOGNIZED
+  test.each(['The funds arrived.', 'Your money cleared.', 'Your funds posted.', 'The money came through.', 'We received your funds.', 'Your funds were received.'])('"%s" is recognized as a receipt claim and is not waved through', (reply) => {
+    expect(mayAssertPaymentStatus(reply)).toBe(true);
+    expect(rq(reply, [])).toBe(true);
+    expect(rq(reply, [paid])).toBe(true);
+  });
+  test('with the amount and date a receipt about funds / money binds to a paid row (and only a paid row)', () => {
+    expect(rq('We received your $120 funds from Sep 12.', [paid])).toBe(false);
+    expect(rq('We received your $120 funds from Sep 12.', [])).toBe(true);
+    expect(rq('We received your $120 funds from Sep 12.', [{ ...paid, status: 'failed' }])).toBe(true);
+    expect(rq('Your $120 money cleared on Sep 12.', [paid])).toBe(false);
+    expect(rq('Your $120 money cleared on Sep 12.', [])).toBe(true);
+  });
+  test('status words about funds / money bind to the matching row status', () => {
+    expect(rq('Your funds are still processing.', [{ ...paid, status: 'processing' }])).toBe(false);
+    expect(rq('Your funds are still processing.', [paid])).toBe(true);
+    expect(rq('Your funds were declined.', [{ ...paid, status: 'failed' }])).toBe(false);
+    expect(rq('Your funds were declined.', [paid])).toBe(true);
+  });
+  test('the shared subject alternations carry both nouns (one list, no drift)', () => {
+    for (const re of [PAYMENT_SUBJECT, PAYMENT_EVENT_SUBJECT]) {
+      expect(new RegExp(`^${re}$`, 'i').test('funds')).toBe(true);
+      expect(new RegExp(`^${re}$`, 'i').test('money')).toBe(true);
+    }
+  });
+  test('a customer message about funds / money opens the payment context for an anaphoric reply', () => {
+    expect(rq('It cleared.', [], 'Did my money go through?')).toBe(true);
+    expect(rq('The money is still pending.', [], 'Any update?')).toBe(true); // recognized with no payment inbound at all
   });
 });

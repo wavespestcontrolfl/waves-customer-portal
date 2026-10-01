@@ -146,7 +146,7 @@ function classifyZelleClause(clause) {
   // PAYMENT — a receipt verb PLUS a payment noun / an amount / "your" / a date.
   // A bare verb ("Yes, we've got Zelle", "we have Zelle") is an OFFER and gets
   // the recipient + invoice recheck.
-  const namesPastPayment = /\b(?:payments?|transfers?|deposits?|your)\b/i.test(text)
+  const namesPastPayment = /\b(?:payments?|transfers?|deposits?|funds|money|your)\b/i.test(text)
     || bodyAmountCents(text).length > 0
     || /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\b\d{1,2}\/\d{1,2}\b/i.test(text);
   // Codex round-8 P1 (PR #5331): a payment-STATUS report about a past payment

@@ -57,8 +57,12 @@ const RECEIPT_VERB_RE = new RegExp(`\\b(?:${receiptVerbPattern})\\b`, 'i');
 // shared alternation used by the status classifier (PAYMENT_NOUN_RE), the customer-message test
 // (INBOUND_PAYMENT_RE), the unrecognized-assertion fallback and the prescreen, so the lists cannot drift.
 const TENDER_SUBJECT_ALT = '(?:cards?|apple\\s+pay|google\\s+pay|samsung\\s+pay|zelle|ach|venmo|paypal|bank\\s+account)';
-const PAYMENT_SUBJECT = '(?:payments?|transfers?|deposits?|charges?|(?:your|the|our)\\s+check)';
-const PAYMENT_EVENT_SUBJECT = '(?:payments?|transfers?|deposits?|charges?|(?:your|the|our)\\s+(?:zelle|ach|check))';
+// Codex round-40 P1: "funds" / "money" are unambiguous payment subjects ("The funds arrived", "Your money cleared").
+// ONE noun alternation — every list below (subjects, status nouns, prescreen, inbound context, anaphor subjects)
+// is built from it, so a noun can never be a payment subject in one classifier and invisible in another.
+const PAYMENT_NOUN_ALT = 'payments?|transfers?|deposits?|charges?|funds|money';
+const PAYMENT_SUBJECT = `(?:${PAYMENT_NOUN_ALT}|(?:your|the|our)\\s+check)`;
+const PAYMENT_EVENT_SUBJECT = `(?:${PAYMENT_NOUN_ALT}|(?:your|the|our)\\s+(?:zelle|ach|check))`;
 const THANKS_FOR_PAYMENT_RE = new RegExp(`\\bthank(?:s|\\s+you)\\b[^.\\n]{0,25}\\b${PAYMENT_SUBJECT}\\b`, 'i');
 
 // The full "payment acknowledgement" pattern SOURCE (a string, not a
@@ -206,7 +210,7 @@ const phrasePattern = (list) => list.map((v) => v.replace(/\s+/g, '\\s+').replac
 // noun (or an amount, or the customer's own message is about a payment, both
 // handled by the caller) — "your invoice is pending" or "we're processing your
 // request" are not.
-const PAYMENT_NOUN_RE = new RegExp(`\\b(?:payments?|transfers?|deposits?|charges?|${TENDER_SUBJECT_ALT}|paid|unpaid|refund(?:ed|s)?|disputed?|chargeback|(?:your|the|our|a)\\s+check)\\b`, 'i');
+const PAYMENT_NOUN_RE = new RegExp(`\\b(?:${PAYMENT_NOUN_ALT}|${TENDER_SUBJECT_ALT}|paid|unpaid|refund(?:ed|s)?|disputed?|chargeback|(?:your|the|our|a)\\s+check)\\b`, 'i');
 const familyRe = (family) => new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY[family].phrases)})\\b`, 'i');
 // Codex round-20 P1: subject-aware REFUND completion ("Your refund was processed / posted / went through /
 // was issued / completed"). Derived from the SAME event-status stems as the payment event grammar
@@ -224,7 +228,7 @@ const REFUND_COMPLETION_RE = new RegExp(
 // failed" ("Your $120 invoice is ...", "invoice WPC-2026-0101 is ...") — so "we're processing your invoice
 // request" and "invoice processing takes two days" assert nothing.
 const INVOICE_SUBJECT_RE = /\b(?:invoices?|bills?)\b(?:\s+[#\w-]+){0,2}?\s+(?:is|was|has|have|are|were|got|still|isn['\u2019]t|wasn['\u2019]t|hasn['\u2019]t|failed|declined)\b|\b(?:invoices?|bills?)['\u2019]s\s+(?:been\s+)?(?:paid|failed)\b/i;
-const PAYMENT_OBJECT_RE = /\b(?:payments?|transfers?|deposits?|charges?|checks?|refunds?|zelle|ach)\b/i;
+const PAYMENT_OBJECT_RE = new RegExp(`\\b(?:${PAYMENT_NOUN_ALT}|checks?|refunds?|zelle|ach)\\b`, 'i');
 // Codex round-34 P1 (structural): a tender word introduced by a TENDER PREPOSITION ("via ACH", "by check", "with your card",
 // "through Zelle", "using your bank account", "paid by Zelle") names HOW, never a payment SUBJECT. It is stripped before the
 // subject test and judged as a tender claim bound to the invoice's own rows (sms-shadow-drafter invoiceTenderUngrounded) —
@@ -252,7 +256,7 @@ const ABSENCE_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern([...PAYMENT_STATUS_V
 const containsAbsencePhrase = (text) => ABSENCE_PHRASE_RE.test(String(text || ''));
 // The customer's own message is about a payment (used to relax the noun
 // requirement for a bare "it isn't showing on our end yet" reply).
-const INBOUND_PAYMENT_RE = new RegExp(`\\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?|charges?|charged|zelle[d']*|check|${TENDER_SUBJECT_ALT})\\b`, 'i');
+const INBOUND_PAYMENT_RE = new RegExp(`\\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?|charges?|charged|funds|money|zelle[d']*|check|${TENDER_SUBJECT_ALT})\\b`, 'i');
 const inboundNamesPayment = (text) => INBOUND_PAYMENT_RE.test(String(text || ''));
 // null | 'not_found' | 'reversed' | 'failed' | 'pending' for a clause that
 // asserts a payment's status. `namesPayment` = the caller already knows the
@@ -395,7 +399,7 @@ function paymentStatusPromptLine() {
 // payment words, so it is a guaranteed superset of paymentStatusPhraseClaim —
 // a phrase added to the table is automatically screened in (Codex round-9 P1).
 const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
-  `\\b(?:payments?|paid|unpaid|invoices?|bills?|account|${TENDER_SUBJECT_ALT}|transfers?|deposits?|charges?|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
+  `\\b(?:${PAYMENT_NOUN_ALT}|paid|unpaid|invoices?|bills?|account|${TENDER_SUBJECT_ALT}|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
     phrasePattern([...Object.values(PAYMENT_STATUS_VOCABULARY).flatMap((f) => [...f.phrases]), ...SETTLEMENT_PHRASES])
   })\\b`,
   'i',
@@ -439,7 +443,7 @@ const isNonAssertivePaymentClause = (text) => NON_ASSERTIVE_PAYMENT_RE.test(Stri
 // paid / unpaid, a settlement phrase or a zero balance. (Narrower than mayAssertPaymentStatus on purpose:
 // a bare "processing" / "pending" with no payment noun ("we're processing your request"), or "Zelle" /
 // "account" alone (offers and availability are rechecked by their own seams), are not status assertions.)
-const PAYMENT_STATUS_NOUN_RE = /\b(?:payments?|paid|unpaid|charges?|transfers?|deposits?|refund(?:ed|s)?|disputed?|chargeback)\b/i;
+const PAYMENT_STATUS_NOUN_RE = new RegExp(`\\b(?:${PAYMENT_NOUN_ALT}|paid|unpaid|refund(?:ed|s)?|disputed?|chargeback)\\b`, 'i');
 // Codex round-25 P1: an INVOICE / BILL is a payment-status subject too ("Your invoice is settled", "The bill
 // finalized") — the same noun family as the invoice-status tagger (invoiceSubjectClause). "bill" only as a
 // noun ("the/your/a bill"), never the verb ("we bill monthly"). Benign delivery predicates ("your invoice is
@@ -469,7 +473,7 @@ const PURPOSE_CONNECTOR_RE = /^\s*so(?:\s+that)?\s*$/i;
 const INTERROGATIVE_START_RE = /^\s*(?:did|do|does|is|are|was|were|has|have|had|can|could|will|would|should|may|what|when|why|how|where|which|who)\b/i;
 // A clause whose subject is a bare pronoun ("It settled.", "That cleared out.", "They're sorted.") — payment-scoped only
 // when the surrounding environment is about a payment (Codex round-30 P1).
-const PRONOUN_SUBJECT_CLAUSE_RE = /^\s*(?:and\s+|but\s+|so\s+|well,?\s+|yes,?\s+)?(?:it|that|they|this(?:\s+one)?|the\s+(?:payment|charge|transfer|deposit))(?:['\u2019](?:s|re|ll|d))?\s+\w+/i;
+const PRONOUN_SUBJECT_CLAUSE_RE = /^\s*(?:and\s+|but\s+|so\s+|well,?\s+|yes,?\s+)?(?:it|that|they|this(?:\s+one)?|the\s+(?:payment|charge|transfer|deposit|funds|money))(?:['\u2019](?:s|re|ll|d))?\s+\w+/i;
 function unrecognizedPaymentAssertion(text, { paymentContext = false } = {}) {
   const t = String(text || '');
   if (/\?\s*$/.test(t) && INTERROGATIVE_START_RE.test(t)) return false; // the whole clause is a question

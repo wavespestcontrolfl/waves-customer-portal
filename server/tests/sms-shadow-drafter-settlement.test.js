@@ -577,3 +577,51 @@ describe('round-39: identities that could match rows omitted by the history cap'
     expect(rq('No refund is showing.', c(false))).toBe(true);
   });
 });
+
+// Codex round-40 P1: ONE "every named figure resolves" chokepoint (resolveEveryFigure) for payments, refunds AND invoices - a clause
+// naming several figures is about EACH of them; a figure with no row (or an ambiguous one) fails the whole claim.
+describe('round-40: resolveEveryFigure - every named figure resolves on its own (payments, refunds, invoices)', () => {
+  const { resolveEveryFigure } = require('../services/sms-shadow-drafter');
+  test('unit: none => null; several => null unless sameOutcome; distinct rows returned in figure order', () => {
+    const rows = [{ k: 'a', v: 30 }, { k: 'b', v: 40 }, { k: 'c', v: 40 }];
+    const rowsFor = (f) => rows.filter((r) => r.v === f);
+    expect(resolveEveryFigure([30], rowsFor)).toEqual([rows[0]]);
+    expect(resolveEveryFigure([30, 99], rowsFor)).toBeNull(); // 99 resolves to nothing
+    expect(resolveEveryFigure([30, 40], rowsFor)).toBeNull(); // 40 is ambiguous
+    expect(resolveEveryFigure([30, 40], rowsFor, { sameOutcome: () => true })).toEqual([rows[0], rows[1], rows[2]]);
+    expect(resolveEveryFigure([30, 30], rowsFor)).toEqual([rows[0]]); // a repeated figure does not duplicate its row
+    expect(resolveEveryFigure([], rowsFor)).toEqual([]);
+  });
+
+  describe('refunds', () => {
+    const base = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+    const refund = (id, cents, refundStatus) => ({ ...base, id, refund_status: refundStatus, refund_amount: cents / 100 });
+    const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } });
+    const ung = (reply, rows, inboundMessage = 'Where are my refunds?') => replyQuotesUngroundedAmount(reply, ctx(rows), { byMeaning: true, inboundMessage });
+    test('"The $30/$40 refunds are pending" needs BOTH a pending $30 and a pending $40 refund', () => {
+      const p30 = refund('r30', 3000, 'pending');
+      const p40 = refund('r40', 4000, 'pending');
+      expect(ung('The $30/$40 refunds are pending.', [p30])).toBe(true); // the $40 refund does not exist
+      expect(ung('The $30/$40 refunds are pending.', [p30, p40])).toBe(false);
+      expect(ung('The $30/$40 refunds are pending.', [p30, refund('r40b', 4000, 'succeeded')])).toBe(true); // the $40 one is not pending
+      expect(ung('Your $30 refund is pending.', [p30])).toBe(false); // the single-figure case is unchanged
+    });
+    test('the same figure on two refunds in DIFFERENT states is ambiguous; in the SAME state it is fine', () => {
+      expect(ung('Your $30 refund is pending.', [refund('a', 3000, 'pending'), refund('b', 3000, 'succeeded')])).toBe(true);
+      expect(ung('Your $30 refund is pending.', [refund('a', 3000, 'pending'), refund('b', 3000, 'pending')])).toBe(false);
+    });
+    test('"no $30 or $40 refund" is contradicted by a refund matching ANY named figure', () => {
+      expect(ung('No $30/$40 refund is showing.', [refund('r40', 4000, 'pending')])).toBe(true);
+    });
+  });
+
+  describe('payments (the same helper binds every named payment figure)', () => {
+    const paid = (id, amount, day) => ({ id, amount, status: 'paid', payment_date: day, payment_method_type: 'card' });
+    const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+    test('"We received your $100/$200 payments" needs a paid row for each figure', () => {
+      const reply = 'We received your $100/$200 payments from Sep 1.';
+      expect(check(reply, ctx([paid('a', 100, '2026-09-01')]))).toBe(true); // no $200 payment
+      expect(check(reply, ctx([paid('a', 100, '2026-09-01'), paid('b', 200, '2026-09-01')]))).toBe(false);
+    });
+  });
+});

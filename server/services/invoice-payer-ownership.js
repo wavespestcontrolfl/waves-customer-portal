@@ -33,14 +33,16 @@ async function invoicePayerOwnership(inv, dbh = db) {
 // Batch form for a list of one customer's invoice rows (must carry scheduled_service_id / payer_statement_id when they
 // exist). Resolution depends only on (customer, scheduled service), so it is memoized per service. Returns
 // { ownedIds: Set<string> (payer-owned), unverifiable: boolean }. `ownLimit` (optional) stops resolving once that many
-// rows are verified self-pay (rows after that point are left unjudged — the caller only ever shows its first `ownLimit - 1`).
-async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity } = {}) {
+// rows are verified self-pay (rows after that point are left unjudged — the caller only ever shows its first `ownLimit - 1`),
+// EXCEPT rows `alwaysJudge(row)` names (Codex round-40 P1: every row that can feed the owed balance must carry a live verdict
+// however far down the list it sits — the display cap is for the status LIST only).
+async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity, alwaysJudge = null } = {}) {
   const ownedIds = new Set();
   let unverifiable = false;
   let own = 0;
   const memo = new Map();
   for (const inv of rows) {
-    if (own >= ownLimit) break;
+    if (own >= ownLimit && !(typeof alwaysJudge === 'function' && alwaysJudge(inv))) continue;
     const keyed = !(inv.payer_id || inv.payer_statement_id);
     const key = keyed ? String(inv.scheduled_service_id || '') : null;
     let verdict;

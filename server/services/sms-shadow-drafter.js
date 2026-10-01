@@ -2822,11 +2822,14 @@ const TENDER_VOCABULARY = [
   // card brands / card kinds all read as a card
   { word: 'credit card', label: 'card', manual: false },
   { word: 'debit card', label: 'card', manual: false },
-  { word: 'american express', label: 'card', manual: false },
-  { word: 'mastercard', label: 'card', manual: false },
-  { word: 'master card', label: 'card', manual: false },
-  { word: 'visa', label: 'card', manual: false },
-  { word: 'amex', label: 'card', manual: false },
+  // Codex round-40 P1: a NAMED card brand is part of the claimed tender identity ('card:visa'), never flattened to 'card' — a
+  // Mastercard row must not ground "Your Visa payment cleared". A generic "card" claim still matches any card row;
+  // tenderMatches (below) is the ONE comparator every binder uses.
+  { word: 'american express', label: 'card:amex', manual: false },
+  { word: 'mastercard', label: 'card:mastercard', manual: false },
+  { word: 'master card', label: 'card:mastercard', manual: false },
+  { word: 'visa', label: 'card:visa', manual: false },
+  { word: 'amex', label: 'card:amex', manual: false },
   { word: 'card', label: 'card', manual: false },
   { word: 'ach', label: 'bank/ACH', manual: false },
   { word: 'bank transfer', label: 'bank/ACH', manual: false },
@@ -2901,7 +2904,32 @@ function tenderLabelsIn(text) {
   const labels = new Set();
   for (const m of str.matchAll(NON_CHECK_TENDER_RE)) labels.add(tenderLabelForWord(tenderWordFor(m[1])));
   if (CHECK_TENDER_CONTEXT_RE.test(str)) labels.add('Check');
+  // "Visa card" names ONE tender: the brand refines the generic word, it is not a second tender
+  if ([...labels].some((l) => l.startsWith('card:'))) labels.delete('card');
   return labels;
+}
+// A card ROW's brand, canonicalized to the same names the vocabulary uses (Stripe: visa / mastercard / amex / discover / …).
+// null = the row carries no readable brand (a brand-specific claim then cannot be verified against it).
+function cardBrandOfRow(p) {
+  const raw = String(p?.card_brand || '').toLowerCase().replace(/[^a-z]/g, '');
+  if (!raw || raw === 'unknown') return null;
+  return raw === 'americanexpress' ? 'amex' : (raw === 'master' ? 'mastercard' : raw);
+}
+// ONE tender comparator (Codex round-40 P1 class: tender identity must be compared the same way everywhere): does this payment
+// ROW satisfy the claimed tender label? A brand-specific claim ('card:visa') needs a card row whose card_brand IS that brand
+// (a row with no brand fails closed); every other label compares by equality as before.
+function tenderMatches(claimed, row) {
+  if (!claimed) return true;
+  const label = paymentTenderLabel(row);
+  if (String(claimed).startsWith('card:')) return label === 'card' && cardBrandOfRow(row) === String(claimed).slice(5);
+  return label === claimed;
+}
+// Do a reply's tender and a tender the customer's message named describe the same payment? Equal, or the generic 'card' on
+// one side and a branded card on the other (the brand refines it).
+function tendersCompatible(a, b) {
+  if (a === b) return true;
+  const isCard = (l) => l === 'card' || String(l).startsWith('card:');
+  return isCard(a) && isCard(b) && (a === 'card' || b === 'card');
 }
 function replyClaimedTender(text) {
   const labels = tenderLabelsIn(text);
@@ -3098,7 +3126,7 @@ function identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows 
     const amountOk = amountCents == null || rowAmountMatches(p, amountCents) || partialRefundCents(p) === amountCents;
     if (!amountOk) continue;
     if (claimedDate && !paymentDateMatchesClaim(p, claimedDate)) continue;
-    if (claimedTender && paymentTenderLabel(p) !== claimedTender) continue;
+    if (claimedTender && !tenderMatches(claimedTender, p)) continue;
     families.add(statusFamilyOfRow(p));
   }
   return families;
@@ -3178,7 +3206,7 @@ function bindPaymentRow({
   // one it is about, so fail closed rather than bind to any of them.
   if (!claimedTender && inboundNamedPayment
       && new Set(candidates.map((p) => paymentTenderLabel(p) || 'unknown')).size > 1) return onAmbiguous;
-  const matched = claimedTender ? candidates.filter((p) => paymentTenderLabel(p) === claimedTender) : candidates;
+  const matched = claimedTender ? candidates.filter((p) => tenderMatches(claimedTender, p)) : candidates;
   return matched[0] || null;
 }
 const bindPaidPaymentRow = (args) => bindPaymentRow({ ...args, family: 'paid' });
@@ -3213,7 +3241,9 @@ function paymentClaimBinding(clauseText, inboundText) {
   // reply date that differs from the inbound's, is a different payment: reject.
   if (claimedTender && claimedTender !== TENDER_AMBIGUOUS && inboundText) {
     const asked = tenderLabelsIn(inboundText);
-    if (asked.size && !asked.has(claimedTender)) return null;
+    if (asked.size && ![...asked].some((a) => tendersCompatible(claimedTender, a))) return null;
+    // the customer named a card BRAND and the reply says only "card": the brand still constrains the payment
+    if (claimedTender === 'card') claimedTender = [...asked].find((a) => a.startsWith('card:')) || claimedTender;
   }
   const replyDate = parseClaimedPaymentDate(clauseText);
   // Codex round-35 P1: SEVERAL distinct dates in the customer's message ("Sep 1 or Sep 2") are several payments. The reply
@@ -3255,7 +3285,7 @@ function paymentRowMatchesIdentity(row, identity) {
   }
   const dates = identity.dates?.length ? identity.dates : (identity.date ? [identity.date] : []);
   if (dates.length && !dates.some((d) => paymentDateMatchesClaim(row, d))) return false;
-  if (identity.tender && paymentTenderLabel(row) !== identity.tender) return false;
+  if (identity.tender && !tenderMatches(identity.tender, row)) return false;
   return true;
 }
 
@@ -3297,7 +3327,7 @@ function partialRefundDisclosures(text, context, inboundText) {
     if (!binding) continue;
     for (const a of (amounts.length ? amounts : [null])) {
       for (const p of paymentRowCandidates({ family: 'refunded', amountCents: a, claimedDate: binding.claimedDate, rows, partialWording, refundSubject })) {
-        if (!binding.claimedTender || paymentTenderLabel(p) === binding.claimedTender) rowsOut.add(p);
+        if (tenderMatches(binding.claimedTender, p)) rowsOut.add(p);
       }
     }
   }
@@ -3527,16 +3557,28 @@ function validateAck(c, env) {
     allowPartialPaid: env.partialPaidAllowedFor,
   }));
 }
-// Every target must bind; the FIRST bound row becomes the clause's payment identity for a later
-// anaphoric clause ("...but it was refunded") — Codex round-17 P1. true = ungrounded.
-function bindAllTargets(targets, env, bind) {
-  let first = null;
-  for (const a of targets) {
-    const row = bind(a);
-    if (!row) return true;
-    first = first || row;
+// THE "every named figure must resolve" chokepoint (Codex round-35/39/40 P1 — ONE class that kept resurfacing per row kind:
+// payments, refunds, invoices). A clause that names several figures asserts about EACH of them, so each figure must resolve on
+// its OWN to a row of the account: `rowsFor(figure)` -> the candidate rows. No row for a figure, or several rows for it (unless
+// `sameOutcome(rows)` says every one of them would give the SAME verdict, e.g. two pending refunds of one amount), makes the
+// whole claim unresolved — a figure is never dropped because a sibling figure matched. Returns the distinct resolved rows in
+// figure order, or null when ANY figure fails to resolve. Callers then check their claim against EVERY resolved row.
+function resolveEveryFigure(figures, rowsFor, { sameOutcome = null } = {}) {
+  const resolved = [];
+  for (const f of figures) {
+    const hit = rowsFor(f) || [];
+    if (!hit.length) return null;
+    if (hit.length > 1 && !(typeof sameOutcome === 'function' && sameOutcome(hit))) return null;
+    for (const r of hit) if (!resolved.includes(r)) resolved.push(r);
   }
-  env.antecedent = first;
+  return resolved;
+}
+// Every target must bind (resolveEveryFigure, one row per target); the FIRST bound row becomes the clause's payment identity for a
+// later anaphoric clause ("...but it was refunded") — Codex round-17 P1. true = ungrounded.
+function bindAllTargets(targets, env, bind) {
+  const rows = resolveEveryFigure(targets, (a) => { const row = bind(a); return row ? [row] : []; });
+  if (!rows) return true;
+  env.antecedent = rows[0] || null;
   return false;
 }
 // Processing / failed / refunded / disputed / reversed: each needs a CURRENT
@@ -3630,20 +3672,28 @@ function validateRefundClaim(claim, env) {
   const { claimedDate, claimedTender } = binding;
   // the loaded history is CUT: an identity an omitted older refund could also match - and any "no refund" denial - is unjudgeable (round 39)
   if (historyMayOmitIdentity(ctx, { hasIdentity: claim.state === 'absent' || figures.length > 0 || !!claimedTender, claimedDate })) return true;
-  let candidates = paymentRowsForBinding(ctx).filter((p) => {
-    if (refundStateOfRow(p) === null) return false;
-    if (claimedTender && paymentTenderLabel(p) !== claimedTender) return false;
+  // the rows a refund claim can be about, before the per-figure test: a refund exists, the claimed tender / date agree
+  const refundRows = paymentRowsForBinding(ctx).filter((p) => (
+    refundStateOfRow(p) !== null
+    && tenderMatches(claimedTender, p)
+    && (!claimedDate || paymentDateMatchesClaim(p, claimedDate))
+  ));
+  // the figure is the REFUNDED amount: a partial refund matches its refund amount only, a full one its total too
+  const rowsForFigure = (f) => refundRows.filter((p) => {
     const partial = partialRefundCents(p) !== 0; // a paid row with only part of it refunded
-    if (figures.length) {
-      const cents = refundedCentsOfRow(p);
-      const total = Math.round(Number(p.amount) * 100);
-      // the figure is the REFUNDED amount: a partial refund matches its refund amount only, a full one its total too
-      if (!figures.some((f) => f === cents || (!partial && f === total))) return false;
-    } else if (partial && claim.state === 'completed' && !partialRefundWording(claim.text)) {
-      return false; // an unqualified "your refund was issued" is a FULL refund; a partial one needs partial wording or its amount
-    }
-    return !claimedDate || paymentDateMatchesClaim(p, claimedDate);
+    return f === refundedCentsOfRow(p) || (!partial && f === Math.round(Number(p.amount) * 100));
   });
+  let candidates;
+  if (!figures.length) {
+    candidates = refundRows.filter((p) => !(partialRefundCents(p) !== 0 && claim.state === 'completed' && !partialRefundWording(claim.text))); // an unqualified "your refund was issued" is a FULL refund; a partial one needs partial wording or its amount
+  } else if (claim.state === 'absent') {
+    candidates = refundRows.filter((p) => figures.some((f) => rowsForFigure(f).includes(p))); // a refund matching ANY named figure contradicts "no refund"
+  } else {
+    // Codex round-40 P1: EVERY named refund amount resolves on its own (resolveEveryFigure) — "The $30/$40 refunds are pending" is
+    // never grounded by a pending $30 alone; several rows for one amount are fine only when they share one refund state
+    candidates = resolveEveryFigure(figures, rowsForFigure, { sameOutcome: (rows) => new Set(rows.map(refundStateOfRow)).size === 1 });
+    if (!candidates) return true;
+  }
   if (claim.state === 'absent') return candidates.length > 0;
   if (!figures.length && !claimedDate && !claimedTender) candidates = mostRecentPaymentRows(candidates); // identity-free: the newest refund
   if (!candidates.length) return true;
@@ -3678,8 +3728,8 @@ const KIND_VALIDATORS = {
 // or possessive payment noun. It INHERITS the row the previous payment clause of the reply bound to, and
 // must be true of THAT row; with no antecedent it is ungrounded. (So "We received your $120 payment from
 // Sep 12, but it was refunded" needs ONE row that is both — never any unrelated refunded row.)
-const ANAPHOR_SUBJECT_RE = /\b(?:it|they)\b|\b(?:that|this)(?:\s+one)?\s+(?:was|is|has|had|failed|went|got|did|still|isn't|wasn't|hasn't|didn't)\b|\bthe\s+(?:payment|charge|transfer|deposit)\b/i;
-const OWN_PAYMENT_NOUN_RE = /\b(?:your|our|my)\s+(?:[\w$.,']+\s+){0,2}(?:payments?|charges?|transfers?|deposits?|checks?|refunds?)\b/i;
+const ANAPHOR_SUBJECT_RE = /\b(?:it|they)\b|\b(?:that|this)(?:\s+one)?\s+(?:was|is|has|had|failed|went|got|did|still|isn't|wasn't|hasn't|didn't)\b|\bthe\s+(?:payment|charge|transfer|deposit|funds|money)\b/i;
+const OWN_PAYMENT_NOUN_RE = /\b(?:your|our|my)\s+(?:[\w$.,']+\s+){0,2}(?:payments?|charges?|transfers?|deposits?|funds|money|checks?|refunds?)\b/i;
 const ANAPHORIC_KINDS = new Set(['status', 'ack', 'absence', 'unpaid', 'negated_ack']);
 function isAnaphoricPaymentClause(text, amounts) {
   if (amounts.length) return false;
@@ -3772,12 +3822,8 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
     if (figures.length) {
       // Codex round-39 P1: EVERY named figure resolves on its own to exactly ONE invoice (total or amount due) - a figure with no
       // matching row, or matching several, makes the claim ungrounded; it is never dropped because a sibling figure matched.
-      invoices = [];
-      for (const f of figures) {
-        const hit = list.filter((inv) => f === Math.round(Number(inv.total) * 100) || f === Math.round(Number(inv.amountDue) * 100));
-        if (hit.length !== 1) return true; // none / ambiguous
-        if (!invoices.includes(hit[0])) invoices.push(hit[0]);
-      }
+      invoices = resolveEveryFigure(figures, (f) => list.filter((inv) => f === Math.round(Number(inv.total) * 100) || f === Math.round(Number(inv.amountDue) * 100)));
+      if (!invoices) return true; // a figure with no matching invoice, or several: ungrounded
     } else {
       if (list.length !== 1) return true; // no figure and not the only recent invoice
       invoices = [list[0]];
@@ -3824,7 +3870,7 @@ function invoiceTenderUngrounded(claim, text, env) {
       return !!(num && dn && String(dn).toUpperCase() === num);
     });
     if (!settling.length) return true; // no row on record backs the status => the tender is unverifiable
-    return settling.some((p) => paymentTenderLabel(p) !== claimed);
+    return settling.some((p) => !tenderMatches(claimed, p));
   });
 }
 // Does this clause need the payment validation at all? EXACTLY the two ways clauseUngrounded can reject it:
@@ -5863,6 +5909,9 @@ module.exports = {
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
   replyClaimedTender,
+  tenderMatches,
+  cardBrandOfRow,
+  resolveEveryFigure,
   TENDER_AMBIGUOUS,
   bindPaidPaymentRow,
   bindPaymentRow,
