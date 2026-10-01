@@ -239,7 +239,11 @@ async function courtesyEvidence(conn, sms, at, now) {
     const outboundCalls = () => conn('call_log').where('customer_id', sms.customer_id)
       .whereRaw("COALESCE(direction, '') LIKE 'outbound%'").whereNotNull('bridged_at')
       .where('created_at', '>', at).where('created_at', '<=', until);
-    found = await seen(outboundCalls()
+    // The customer calling in shows the conversation went on, answered or not
+    // (they reached out again; the text was not the end of it).
+    found = await seen(conn('call_log').where('customer_id', sms.customer_id)
+      .where('direction', 'inbound').where('created_at', '>', at).where('created_at', '<=', until));
+    if (!found) found = await seen(outboundCalls()
       .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
       .whereRaw("COALESCE((metadata->'customer_leg'->>'duration_seconds')::numeric, 0) > 0"));
     if (!found && await seen(outboundCalls().whereRaw("metadata->'customer_leg' IS NULL"))) return unknown(source, window, now);

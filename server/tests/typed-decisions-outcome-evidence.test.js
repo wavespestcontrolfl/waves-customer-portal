@@ -189,6 +189,11 @@ describe('smsEvidence', () => {
     expect(out.is_courtesy_only.value).toBeNull();
   });
 
+  test('courtesy: the customer calling in afterwards is false at once', async () => {
+    const out = await smsEvidence(sms({ created_at: ago(2) }), { now: NOW, conn: fakeConn({ first: { sms_log: [undefined, undefined], call_log: [{ id: 'in1' }] } }) });
+    expect(out.is_courtesy_only.value).toBe(false);
+  });
+
   test('courtesy: a later Waves text, a further inbound or an outbound call is false at once', async () => {
     for (const first of [{ sms_log: [{ id: 'o1' }] }, { sms_log: [undefined, { id: 'i1' }] }, { sms_log: [undefined, undefined], call_log: [{ id: 'c1' }] }]) {
       const out = await smsEvidence(sms({ created_at: ago(2) }), { now: NOW, conn: fakeConn({ first }) });
@@ -207,12 +212,13 @@ describe('smsEvidence', () => {
   test('courtesy: a call counts only when the customer leg completed with talk time; an unproven bridged call is unknown', async () => {
     const conn = fakeConn();
     await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn });
-    const [reached, ambiguous] = conn.log.filter((q) => q.table === 'call_log');
+    const [inbound, reached, ambiguous] = conn.log.filter((q) => q.table === 'call_log');
+    expect(inbound.calls).toContainEqual(['where', ['direction', 'inbound']]);
     expect(reached.calls).toContainEqual(['whereRaw', ["metadata->'customer_leg'->>'status' = 'completed'"]]);
     expect(reached.calls).toContainEqual(['whereNotNull', ['bridged_at']]);
     expect(ambiguous.calls).toContainEqual(['whereRaw', ["metadata->'customer_leg' IS NULL"]]);
     // a bridged call with no customer-leg record keeps it unknown, even after the window
-    const out = await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn: fakeConn({ first: { call_log: [undefined, { id: 'c-unproven' }] } }) });
+    const out = await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn: fakeConn({ first: { call_log: [undefined, undefined, { id: 'c-unproven' }] } }) });
     expect(out.is_courtesy_only.value).toBeNull();
   });
 
