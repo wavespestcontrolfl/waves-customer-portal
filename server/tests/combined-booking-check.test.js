@@ -85,11 +85,9 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.problems[0].text).toBe('1 lawn visits missing time/tech');
   });
 
-  test('later visits priced $0 or NULL are reported by service', () => {
-    const lawn = lawnRows({ price: 0 });
-    const verdict = run([PEST, LAWN], [...pestRows(), ...lawn]);
-    expect(codes(verdict)).toEqual(['price_missing']);
-    expect(verdict.problems[0].text).toBe('lawn priced $0 on 5 visits');
+  test('later visits priced $0 or NULL are the unpriced-series alert\'s, never a second bell here', () => {
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: 0 })]))).toEqual([]);
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: null })]))).toEqual([]);
   });
 
   test('a later visit priced off the accepted per-visit amount is reported', () => {
@@ -119,10 +117,8 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.ok).toBe(true);
   });
 
-  test('first-day services with no price and no invoice are reported', () => {
-    const verdict = run([PEST, LAWN], [...pestRows({ invoiceId: null }), ...lawnRows({ invoiceId: null })]);
-    expect(codes(verdict)).toEqual(['first_day_uncovered']);
-    expect(verdict.problems[0].text).toBe('pest + lawn first visit has no price or invoice');
+  test('first-day services with no price and no invoice are the unpriced-series alert\'s', () => {
+    expect(codes(run([PEST, LAWN], [...pestRows({ invoiceId: null }), ...lawnRows({ invoiceId: null })]))).toEqual([]);
   });
 
   test('first-day rows priced individually need no invoice', () => {
@@ -146,10 +142,9 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(verdict)).toEqual(['first_invoice_split']);
   });
 
-  test.each(['void', 'refunded'])('a %s first invoice is reported', (status) => {
+  test.each(['void', 'refunded'])('a %s first invoice leaves its members to the unpriced-series alert (nothing to compare)', (status) => {
     const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: invoice([firstApp(150), firstApp(100)], status) });
-    expect(codes(verdict)).toEqual(['first_invoice_missing']);
-    expect(verdict.ok).toBe(false);
+    expect(codes(verdict)).toEqual([]);
   });
 
   test('a family the classifier skipped (plan hold, stopped series) is left out, never certified', () => {
@@ -158,7 +153,14 @@ describe('evaluateCombinedBooking', () => {
       { scheduleSkippedFamilies: new Set(['tree_shrub']) });
     expect(verdict.ok).toBe(true);
     expect(verdict.labels).toEqual(['Pest', 'Lawn']);
-    expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
+    // A hold that leaves one family still checks it (and keeps a standing bell alive).
+    const pestOnly = run([PEST, LAWN], [...pestRows({ childOverrides: { technician_id: null } }), ...lawnRows()],
+      { scheduleSkippedFamilies: new Set(['lawn_care']) });
+    expect(pestOnly.labels).toEqual(['Pest']);
+    expect(codes(pestOnly)).toEqual(['missing_time_tech']);
+    // Every family on hold: nothing to judge, a standing bell is left frozen.
+    const all = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['pest_control', 'lawn_care']) });
+    expect(all).toMatchObject({ frozen: true, problems: [] });
   });
 
   test('a pest + legacy rodent accept is a multi-service booking (the rodent rides as a supplement)', () => {
@@ -246,9 +248,9 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.problems[0].detail).toBe('lawn $50.00 vs $100.00; pest $200.00 vs $150.00');
   });
 
-  test('a primary_line_price with no estimated_price is not a price: completion bills nothing from it', () => {
-    const lawn = lawnRows({ childOverrides: { estimated_price: null, primary_line_price: 100 } });
-    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual(['price_missing']);
+  test('a primary_line_price with no estimated_price is not a price (completion bills nothing from it), so it is never compared', () => {
+    const lawn = lawnRows({ childOverrides: { estimated_price: null, primary_line_price: 150 } });
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual([]);
   });
 
   test('a member the office split onto its own invoice is judged off the combined total', () => {
@@ -272,11 +274,11 @@ describe('evaluateCombinedBooking', () => {
 
   test('children on the earliest live date are price-checked when the first visits were cancelled', () => {
     const rows = [...pestRows(), ...lawnRows()].map((row) => (row.recurring_parent_id ? row : { ...row, status: 'cancelled' }));
-    const zeroChild = rows.map((row) => (row.id === 'parent-lawn_care_recurring-c1' ? { ...row, estimated_price: 0 } : row));
+    const zeroChild = rows.map((row) => (row.id === 'parent-lawn_care_recurring-c1' ? { ...row, estimated_price: 90 } : row));
     const earliest = zeroChild.filter((row) => row.status !== 'cancelled')
       .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))[0];
     expect(earliest.id).toBe('parent-lawn_care_recurring-c1');
-    expect(codes(run([PEST, LAWN], zeroChild))).toEqual(['price_missing']);
+    expect(codes(run([PEST, LAWN], zeroChild))).toEqual(['price_mismatch']);
   });
 
   test('an estimate the classifier did not judge is never OK, but its own problems still report', () => {
@@ -284,7 +286,7 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.ok).toBe(false);
     expect(verdict.deferred).toBe(true);
     expect(verdict.problems).toEqual([]);
-    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: 0 })], { scheduleUnjudged: true }))).toEqual(['price_missing']);
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: 90 })], { scheduleUnjudged: true }))).toEqual(['price_mismatch']);
   });
 
   test('the visit count is the shared accepted-plan classifier\'s call: a gap defers, never OK and never a second bell', () => {
@@ -299,8 +301,8 @@ describe('evaluateCombinedBooking', () => {
 
   test('a gap does not hide this check\'s own problems', () => {
     const gap = { estimateId: 'estimate-1', serviceFamily: 'lawn_care', issues: ['missing_applications'] };
-    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: 0 })], { scheduleGaps: [gap] });
-    expect(codes(verdict)).toEqual(['price_missing']);
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: 90 })], { scheduleGaps: [gap] });
+    expect(codes(verdict)).toEqual(['price_mismatch']);
   });
 
   test('a plan whose every visit was cancelled is not judged (customer churned)', () => {
@@ -320,10 +322,9 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], rows).problems.map((p) => p.code)).not.toContain('first_invoice_mismatch');
   });
 
-  test('a void first invoice with live first-day rows is still reported', () => {
+  test('a void first invoice with live first-day rows is the unpriced-series alert\'s', () => {
     const rows = [...pestRows(), ...lawnRows()].map((row) => (row.recurring_parent_id || /lawn/.test(row.id) ? row : { ...row, status: 'cancelled' }));
-    const verdict = run([PEST, LAWN], rows, { invoice: invoice([firstApp(250)], 'void') });
-    expect(codes(verdict)).toEqual(['first_invoice_missing']);
+    expect(codes(run([PEST, LAWN], rows, { invoice: invoice([firstApp(250)], 'void') }))).toEqual([]);
   });
 
   test('nothing live (parked) or no rows at all is left to the accepted-plan alert', () => {
@@ -337,11 +338,11 @@ describe('evaluateCombinedBooking', () => {
   });
 
   test('several problems fold into one short summary', () => {
-    const lawn = lawnRows({ price: 0, childOverrides: { window_start: null, technician_id: null, estimated_price: 0 } });
+    const lawn = lawnRows({ price: 90, childOverrides: { window_start: null, technician_id: null } });
     const verdict = run([PEST, LAWN], [...pestRows(), ...lawn]);
-    expect(codes(verdict)).toEqual(['missing_time_tech', 'price_missing']);
+    expect(codes(verdict)).toEqual(['missing_time_tech', 'price_mismatch']);
     const spec = composeAlert(verdict, ALERT_IDS);
-    expect(composeAdminAlert(spec).why).toBe('5 lawn visits missing time/tech; lawn priced $0 on 5 visits.');
+    expect(composeAdminAlert(spec).why).toBe('5 lawn visits missing time/tech; lawn $90.00 vs $100.00 on 5 visits.');
     expect(spec.detail).toContain('- 5 lawn visits missing time/tech');
   });
 
@@ -354,12 +355,13 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict).toBeNull();
   });
 
-  test('a family the duplicate-series guard kept on an older series is not judged', () => {
-    const verdict = run([PEST, LAWN], pestRows(), { excludedFamilies: new Set(['lawn_care']) });
-    expect(verdict).toBeNull();
+  test('a family the duplicate-series guard kept on an older series is not judged; the rest still are', () => {
+    const verdict = run([PEST, LAWN], pestRows(), { excludedFamilies: new Set(['lawn_care']), invoice: invoice([firstApp(150)]) });
+    expect(verdict.labels).toEqual(['Pest']);
+    expect(verdict.ok).toBe(true);
   });
 
-  test('when the lines do not add up to the accepted total, nothing is certified but $0 still reports', () => {
+  test('when the lines do not add up to the accepted total, nothing is certified but missing time/tech still reports', () => {
     const lines = [PEST, LAWN];
     const off = evaluateCombinedBooking({
       estimate: estimate(lines, { annual_total: 1000 }),
@@ -369,36 +371,28 @@ describe('evaluateCombinedBooking', () => {
     expect(off.ok).toBe(false);
     expect(off.deferred).toBe(true);
     expect(off.problems).toEqual([]);
-    const zero = evaluateCombinedBooking({
+    const untimed = evaluateCombinedBooking({
       estimate: estimate(lines, { annual_total: 1000 }),
-      rows: [...pestRows(), ...lawnRows({ price: 0 })],
+      rows: [...pestRows(), ...lawnRows({ childOverrides: { technician_id: null } })],
       invoices: new Map([['inv-1', invoice([firstApp(999)])]]),
     });
-    expect(codes(zero)).toEqual(['price_missing']);
+    expect(codes(untimed)).toEqual(['missing_time_tech']);
   });
 
-  test('an out-of-band payment covers only an unpriced visit, and only at the accepted price', () => {
+  test('an out-of-band payment never stands in for a visit price', () => {
     const lawn = (child) => lawnRows({ childOverrides: child });
-    // Priced wrongly at $10 with $10 paid: still a mismatch.
-    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: 10, prepaid_out_of_band: 10 })]))).toEqual(['price_mismatch']);
-    // Unpriced, paid in full at the accepted $100: covered.
-    expect(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 100 })]).ok).toBe(true);
-    // Unpriced, only $10 paid: completion would bill nothing, so it is unpriced.
-    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 10 })]))).toEqual(['price_missing']);
-    // No accepted price to compare (lines do not reconcile): the payment proves nothing, still unpriced.
-    const unreconciled = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN], { annual_total: 1000 }),
-      rows: [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 1 })], invoices: new Map([['inv-1', goodInvoice()]]) });
-    expect(codes(unreconciled)).toEqual(['price_missing']);
+    // Priced wrongly at $10 with $10 paid by cash: still a mismatch.
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: 10, prepaid_amount: 10, prepaid_method: 'cash' })]))).toEqual(['price_mismatch']);
   });
 
-  test('prepaid visits are not judged on price', () => {
-    const lawn = lawnRows({ price: 0, childOverrides: { prepaid_covered: true, estimated_price: null } });
+  test('annual-prepaid visits are not judged on price', () => {
+    const lawn = lawnRows({ price: 90, childOverrides: { prepaid_covered: true } });
     expect(run([PEST, LAWN], [...pestRows(), ...lawn]).ok).toBe(true);
   });
 
   test('a prepay term id or unverified stamp alone is not prepaid coverage', () => {
-    const lawn = lawnRows({ price: 0, childOverrides: { prepaid_amount: 100, annual_prepay_term_id: 'term-1', estimated_price: null } });
-    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual(['price_missing']);
+    const lawn = lawnRows({ price: 90, childOverrides: { prepaid_amount: 100, annual_prepay_term_id: 'term-1' } });
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual(['price_mismatch']);
   });
 
   test('a deposit credit line is a payment allocation, not service dollars', () => {
@@ -485,28 +479,30 @@ describe('postAlert', () => {
 
 describe('outcomeOf', () => {
   const { outcomeOf } = check;
-  test('a deferred verdict closes a standing bell, unless its prices were unverifiable and the bell carries a price comparison', () => {
-    const deferred = { ok: false, deferred: true, pricesHidden: true, problems: [] };
-    // A schedule-gap deferral looks at every price: nothing is held.
-    expect(outcomeOf({ ...deferred, pricesHidden: false }, ['first_invoice_mismatch'])).toBe('deferred');
-    expect(outcomeOf(null)).toBe('skipped');
-    expect(outcomeOf({ ok: true, deferred: false, problems: [] }, ['price_mismatch'])).toBe('ok');
-    expect(outcomeOf({ ok: false, deferred: false, problems: [{ code: 'price_missing' }] })).toBe('problems');
-    expect(outcomeOf(deferred, ['missing_time_tech'])).toBe('deferred');
-    expect(outcomeOf(deferred, ['first_invoice_mismatch'])).toBe('held');
-    expect(outcomeOf(deferred)).toBe('deferred');
+  const mismatch = { code: 'first_invoice_mismatch', text: 'first invoice $250.00 \u2260 $150.00' };
+  test('a price finding a verdict could not re-judge stays on the bell, visibly; any other closes as fixed', () => {
+    const hidden = { ok: false, deferred: true, pricesHidden: true, problems: [] };
+    expect(outcomeOf(null).outcome).toBe('skipped');
+    expect(outcomeOf({ ...hidden, frozen: true }, [mismatch]).outcome).toBe('frozen');
+    expect(outcomeOf({ ok: true, deferred: false, pricesHidden: false, problems: [] }, [mismatch]).outcome).toBe('ok');
+    // A schedule-gap deferral looks at every price: a standing price finding it no longer sees is fixed.
+    expect(outcomeOf({ ...hidden, pricesHidden: false }, [mismatch]).outcome).toBe('deferred');
+    expect(outcomeOf(hidden, [{ code: 'missing_time_tech', text: 'x' }]).outcome).toBe('deferred');
+    expect(outcomeOf(hidden, [mismatch])).toEqual({ outcome: 'problems', problems: [{ ...mismatch, held: true }] });
   });
-});
 
-describe('postAlert held codes', () => {
-  test('a price finding the verdict could not re-judge stays on the bell while another problem refreshes it', async () => {
-    const raise = jest.fn(async () => ({ id: 'n1' }));
+  test('a held finding is carried, visibly, while another problem refreshes the bell', async () => {
     const verdict = { ok: false, deferred: true, pricesHidden: true, labels: ['Pest', 'Lawn'],
       problems: [{ code: 'missing_time_tech', text: '3 lawn visits missing time/tech' }] };
-    expect(check.outcomeOf(verdict, ['first_invoice_mismatch'])).toBe('problems');
-    await postAlert({ id: 'estimate-1', customer_id: 'customer-1' }, verdict, { customerName: 'J. Sample' },
-      { raise, held: ['first_invoice_mismatch'] });
-    expect(raise.mock.calls[0][2].metadata.problemCodes).toEqual(['missing_time_tech', 'first_invoice_mismatch']);
+    const { outcome, problems } = outcomeOf(verdict, [mismatch]);
+    expect(outcome).toBe('problems');
+    const raise = jest.fn(async () => ({ id: 'n1' }));
+    await postAlert({ id: 'estimate-1', customer_id: 'customer-1' }, { ...verdict, problems }, { customerName: 'J. Sample' }, { raise });
+    const [, spec, opts] = raise.mock.calls[0];
+    expect(opts.metadata.problemCodes).toEqual(['missing_time_tech', 'first_invoice_mismatch']);
+    expect(opts.metadata.problems).toEqual([{ code: 'missing_time_tech', text: '3 lawn visits missing time/tech' }, mismatch]);
+    expect(spec.why).toBe('3 lawn visits missing time/tech; first invoice $250.00 \u2260 $150.00 (not yet re-checked).');
+    expect(opts.detail).toContain('not yet re-checked');
   });
 });
 
@@ -514,7 +510,7 @@ describe('markPrepaidCoverage', () => {
   const renewals = require('../services/annual-prepay-renewals');
   afterEach(() => jest.restoreAllMocks());
 
-  test('an out-of-band stamp is recorded for the price-aware check; an annual stamp counts only when the coverage validator says so; a bare term id never does', async () => {
+  test('an out-of-band stamp covers nothing; an annual stamp counts only when the coverage validator says so; a bare term id never does', async () => {
     const validator = jest.spyOn(renewals, 'annualPrepayCoversVisit').mockImplementation(async (row) => row.id === 'valid');
     const rows = [
       { id: 'cash', prepaid_amount: 100, prepaid_method: 'cash' },
@@ -527,7 +523,6 @@ describe('markPrepaidCoverage', () => {
     expect(Object.fromEntries(rows.map((row) => [row.id, row.prepaid_covered]))).toEqual({
       cash: false, valid: true, stale: false, termonly: false, none: false,
     });
-    expect(rows[0].prepaid_out_of_band).toBe(100);
     expect(validator).toHaveBeenCalledTimes(3);
   });
 

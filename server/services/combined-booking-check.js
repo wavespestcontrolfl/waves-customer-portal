@@ -27,21 +27,25 @@
  * WHAT IT CHECKS (each live scheduled_services row from the estimate, its
  * series children included):
  *   1. time + technician: window_start AND technician_id on every row.
- *   2. price: every row after the first day carries an estimated_price > 0
- *      equal to that service's accepted per-visit price (+/- $0.02).
- *   3. first day: each first-day service is covered, either priced itself or
- *      stamped with ONE shared first_application_invoice_id whose
- *      first-application lines total the first-day per-visit prices.
+ *   2. price: every PRICED row after the first day (and every priced series
+ *      child) carries that service's accepted per-visit price (+/- $0.02).
+ *   3. first day: a combined first-application invoice (ONE shared
+ *      first_application_invoice_id, or the governing replacement on its
+ *      anchor) bills the first-day per-visit prices; a member split onto its
+ *      own invoice bills its own; a priced first-day row bills its own.
+ * An UNPRICED visit, and a first invoice that is missing / void / refunded,
+ * are not this check's: the watchdog's unpriced-series alert owns that $0
+ * defect, and a second bell would only conflict with it.
  * The accepted per-visit price comes from the same lines and rule the
  * converter's own split uses (acceptedRecurringBillingLines +
  * lineAnnualPerVisitAmount). When the lines do not reconcile to the accepted
  * annual total (manual discount, plan credit, cadence change) there is no
  * price to compare against (the converter itself declines to split such a
- * plan), so the estimate is never declared OK: "priced $0", "no invoice" and
- * missing time/tech are still reported, and otherwise the check says nothing.
- * A family the shared classifier did not judge (an active plan hold, a
- * stopped series) is left out the same way the duplicate-series guard's
- * retained family is, and an estimate it did not judge at all is never OK.
+ * plan), so the estimate is never declared OK, and a standing price finding
+ * it cannot re-judge stays on the bell. A family the shared classifier did
+ * not judge (an active plan hold, a stopped series) is left out the same way
+ * the duplicate-series guard's retained family is, the rest are still
+ * checked, and an estimate it did not judge at all is never OK.
  *
  * ALERTS follow docs/admin-notifications.md through raiseAdminAlert: a problem
  * is one needs-you Schedule bell per estimate ("Schedule — fix <name>'s
@@ -122,21 +126,11 @@ function rowPrice(row) {
   const est = Number(row.estimated_price);
   return est > 0 ? est : 0;
 }
-// A visit needs no price of its own when it is prepaid (markPrepaidCoverage):
-//  - an annual-prepay stamp annualPrepayCoversVisit validated against a live
-//    paid term (prepaid_covered; a term id alone proves nothing);
-//  - an out-of-band payment (prepaid_out_of_band) only when the visit carries
-//    no price of its own AND the payment meets the ACCEPTED price; a visit
-//    that is priced keeps its price check (completion bills the rest of a
-//    partial payment, and the visit price is what this check verifies).
-//    With no accepted price to compare, the payment proves nothing and the
-//    visit stays visible as unpriced.
-function isPrepaid(row, programs) {
-  if (row.prepaid_covered === true) return true;
-  const paid = Number(row.prepaid_out_of_band);
-  if (!(paid > 0) || rowPrice(row) > 0) return false;
-  const expected = expectedFor(row, programs);
-  return expected != null && paid + 0.005 >= expected;
+// An annual-prepay stamp that annualPrepayCoversVisit validated against a
+// live paid term (markPrepaidCoverage): the term, not the visit price, is what
+// bills it. A term id alone proves nothing.
+function isPrepaid(row) {
+  return row.prepaid_covered === true;
 }
 
 /**
@@ -305,44 +299,32 @@ function checkTimeAndTech(dated, programs) {
   return untimed.size ? [{ code: 'missing_time_tech', text: `${listFamilies(untimed, programs)} visits missing time/tech` }] : [];
 }
 
-// 2. price on every series child (whatever its date: with the first visits
-// cancelled, a child can be the earliest live row) and every top-level row
-// after the first day.
+// 2. price on every priced series child (whatever its date: with the first
+// visits cancelled, a child can be the earliest live row) and every priced
+// top-level row after the first day. An UNPRICED visit is not this check's:
+// the schedule-integrity watchdog's unpriced-series alert owns it, and a
+// second bell for the same $0 defect would only conflict with that one.
 function checkLaterPrices(dated, programs, firstDay) {
-  const zero = new Map();
   const off = new Map();
   const offDetail = [];
   for (const row of dated.filter((r) => r.recurring_parent_id || r.day > firstDay)) {
-    if (isPrepaid(row, programs) || duesOnly(row, programs)) continue;
+    const price = rowPrice(row);
+    if (!(price > 0) || isPrepaid(row) || duesOnly(row, programs)) continue;
     // A parent stamped into a combined first-application invoice is covered
     // by it (the converter leaves such companions unpriced on purpose).
     if (row.first_application_invoice_id && !row.recurring_parent_id) continue;
-    const price = rowPrice(row);
     const families = programRowFamilies(row, programs);
-    if (!(price > 0)) { bump(zero, families); continue; }
     const expected = expectedFor(row, programs);
     if (expected != null && Math.abs(price - expected) > toleranceFor(row, programs)) {
       bump(off, families);
       offDetail.push(`${lowerLabel(families[0])} ${money(price)} vs ${money(expected)}`);
     }
   }
-  const problems = [];
-  if (zero.size) {
-    problems.push({
-      code: 'price_missing',
-      text: zero.size === 1
-        ? `${lowerLabel([...zero.keys()][0])} priced $0 on ${[...zero.values()][0]} visits`
-        : `visits priced $0: ${listFamilies(zero, programs)}`,
-    });
-  }
-  if (off.size) {
-    problems.push({
-      code: 'price_mismatch',
-      text: off.size === 1 ? `${offDetail[0]} on ${[...off.values()][0]} visits` : `visit prices off the quote: ${listFamilies(off, programs)}`,
-      detail: offDetail.slice(0, 6).join('; '),
-    });
-  }
-  return problems;
+  return off.size ? [{
+    code: 'price_mismatch',
+    text: off.size === 1 ? `${offDetail[0]} on ${[...off.values()][0]} visits` : `visit prices off the quote: ${listFamilies(off, programs)}`,
+    detail: offDetail.slice(0, 6).join('; '),
+  }] : [];
 }
 
 // 3a. first-day rows stamped into a combined first-application invoice.
@@ -352,10 +334,10 @@ function checkStampedFirstDay(stamped, programs, invoices) {
     return [{ code: 'first_invoice_split', text: `covered services are on ${invoiceIds.size} different invoices` }];
   }
   const invoice = invoices.get([...invoiceIds][0]);
-  // A refunded invoice no longer collects the first applications either.
-  if (!invoice || ['void', 'voided', 'cancelled', 'canceled', 'refunded'].includes(String(invoice.status || '').toLowerCase())) {
-    return [{ code: 'first_invoice_missing', text: 'first invoice is missing, void or refunded' }];
-  }
+  // A missing, void or refunded invoice leaves its members unpriced and
+  // uncovered: the unpriced-series alert's (coveredByFirstApplicationInvoice),
+  // not this check's. Nothing is left to compare.
+  if (!invoice || ['void', 'voided', 'cancelled', 'canceled', 'refunded'].includes(String(invoice.status || '').toLowerCase())) return [];
   if (invoice.unbacked_discount) return [];
   const billed = firstApplicationAmount(invoice);
   if (billed == null) {
@@ -383,28 +365,19 @@ function checkSplitInvoices(split, programs) {
   return off.length ? [{ code: 'split_invoice_mismatch', text: `split first invoice ${off[0]}`, detail: off.join('; ') }] : [];
 }
 
-// 3b. first-day rows with no invoice stamp: priced themselves, or one row
-// carrying the combined same-day total.
+// 3b. first-day rows with no invoice stamp. An unpriced one is the
+// unpriced-series alert's. Each priced one bills its own accepted price
+// (completion bills each row's own price, so a matching sum must not hide
+// offsetting errors), except the one shape the reserved accept writes: a
+// single priced row carrying the combined same-day total beside unpriced
+// siblings.
 function checkUnstampedFirstDay(unstamped, programs) {
   const priced = unstamped.filter((row) => rowPrice(row) > 0);
-  const expected = expectedTotal(unstamped, programs);
-  const paid = Math.round(unstamped.reduce((sum, row) => sum + rowPrice(row), 0) * 100) / 100;
-  const sumTolerance = PRICE_TOLERANCE + 0.005 * 12;
-  const sumMatches = expected != null && paid > 0 && Math.abs(paid - expected) <= sumTolerance;
-  if (priced.length < unstamped.length && !sumMatches) {
-    const bare = new Set();
-    for (const row of unstamped.filter((r) => !(rowPrice(r) > 0))) {
-      programRowFamilies(row, programs).forEach((family) => bare.add(family));
-    }
-    const named = [...programs.keys()].filter((family) => bare.has(family)).map(lowerLabel);
-    return [{ code: 'first_day_uncovered', text: `${named.join(' + ') || 'first-day'} first visit has no price or invoice` }];
-  }
-  // Every row priced itself: completion bills each row's own price, so each is
-  // judged on its own (offsetting errors must not pass on a matching sum).
-  if (priced.length < unstamped.length) return [];
-  const off = unstamped.filter((row) => {
+  const carriesTotal = (row) => priced.length === 1 && priced.length < unstamped.length
+    && Math.abs(rowPrice(row) - (expectedTotal(unstamped, programs) ?? -1)) <= PRICE_TOLERANCE + 0.005 * 12;
+  const off = priced.filter((row) => {
     const rowExpected = expectedFor(row, programs);
-    return rowExpected != null && Math.abs(rowPrice(row) - rowExpected) > toleranceFor(row, programs);
+    return rowExpected != null && Math.abs(rowPrice(row) - rowExpected) > toleranceFor(row, programs) && !carriesTotal(row);
   }).map((row) => `${lowerLabel(programRowFamilies(row, programs)[0])} ${money(rowPrice(row))} vs ${money(expectedFor(row, programs))}`);
   return off.length ? [{ code: 'first_day_price_mismatch', text: `first visit ${off[0]}`, detail: off.join('; ') }] : [];
 }
@@ -423,12 +396,16 @@ function evaluateCombinedBooking(ctx) {
     scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleUnjudged = false,
   } = ctx;
   const accepted = acceptedPrograms(estimate);
-  if (!accepted) return null;
+  // Whether this is a combined booking at all is what the customer ACCEPTED.
+  if (!accepted || accepted.programs.size < 2) return null;
   // Families the shared classifier skipped (active plan hold, stopped series)
-  // have no schedule evidence behind them: they leave the check entirely.
+  // and the duplicate-series guard's retained family have no schedule
+  // evidence of this estimate behind them: they leave the check, and the
+  // remaining families are still checked. With none left there is nothing to
+  // judge, and a standing bell is left as it is (frozen) rather than closed.
   const programs = new Map([...accepted.programs]
     .filter(([family]) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
-  if (programs.size < 2) return null;
+  if (!programs.size) return { ok: false, deferred: true, frozen: true, pricesHidden: false, problems: [], labels: [] };
 
   const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
@@ -479,7 +456,7 @@ function evaluateCombinedBooking(ctx) {
   // so the invoice is judged against all live top-level rows carrying a stamp
   // (`stamped`, above).
   const unstamped = dated.filter((row) => row.day === firstDay && !row.recurring_parent_id
-    && !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row, priced) && !duesOnly(row, priced));
+    && !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row) && !duesOnly(row, priced));
   const problems = [
     ...checkTimeAndTech(dated, programs),
     ...checkLaterPrices(dated, priced, firstDay),
@@ -504,7 +481,7 @@ function shortName(customer) {
  */
 function composeAlert(verdict, { customerName, customerId, estimateId }) {
   const { cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
-  const texts = verdict.problems.map((problem) => problem.text);
+  const texts = verdict.problems.map((problem) => `${problem.text}${problem.held ? ' (not yet re-checked)' : ''}`);
   const why = `${texts.slice(0, 2).join('; ')}${texts.length > 2 ? ` (+${texts.length - 2} more)` : ''}`;
   return {
     area: AREA,
@@ -516,23 +493,24 @@ function composeAlert(verdict, { customerName, customerId, estimateId }) {
     doneWhen: DONE_WHEN,
     who: 'person',
     detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a look.`,
-      ...verdict.problems.map((problem) => `- ${problem.text}${problem.detail ? ` (${problem.detail})` : ''}`)].join('\n'),
+      ...verdict.problems.map((problem) => `- ${problem.text}${problem.held ? ' (not yet re-checked: its price cannot be verified right now)' : ''}${problem.detail ? ` (${problem.detail})` : ''}`)].join('\n'),
   };
 }
 
 // --- database side ---------------------------------------------------------
 
-// Sets row.prepaid_covered from the same authorities the completion path
-// trusts: a positive out-of-band stamp (cash/check/Zelle) or an annual-prepay
-// stamp that annualPrepayCoversVisit validates against a live, paid term
-// (fail-closed: an unverifiable stamp reads as not covered).
+// Sets row.prepaid_covered for an annual-prepay stamp annualPrepayCoversVisit
+// validates against a live, paid term (fail-closed: an unverifiable stamp
+// reads as not covered). An out-of-band payment (cash/check/Zelle) covers
+// nothing here: a priced visit keeps its price check (completion bills the
+// rest of a partial payment), and an unpriced one is the unpriced-series
+// alert's.
 async function markPrepaidCoverage(conn, rows) {
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
   const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
   for (const row of rows) {
     row.prepaid_covered = false;
-    // An out-of-band payment is judged against the accepted price (isPrepaid).
-    if (hasOutOfBandPrepaidStamp(row)) { row.prepaid_out_of_band = Number(row.prepaid_amount); continue; }
+    if (hasOutOfBandPrepaidStamp(row)) continue;
     if (!row.annual_prepay_term_id && !(Number(row.prepaid_amount) > 0)) continue;
     try {
       row.prepaid_covered = await annualPrepayCoversVisit(row, conn) === true;
@@ -665,13 +643,12 @@ async function retireStanding(conn, estimateIds, resolution) {
   });
 }
 
-async function postAlert(estimate, verdict, ctx, { raise, held = [] } = {}) {
+async function postAlert(estimate, verdict, ctx, { raise } = {}) {
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const { detail, ...spec } = composeAlert(verdict, {
     customerName: ctx.customerName, customerId: estimate.customer_id, estimateId: estimate.id,
   });
-  // A held price finding stays on the bell's codes (see heldCodes).
-  const codes = [...new Set([...verdict.problems.map((problem) => problem.code), ...held])];
+  const codes = verdict.problems.map((problem) => problem.code);
   return raiseAdminAlert(CATEGORY, spec, {
     // Under GATE_ADMIN_BELL_POLICY the 'alert' category is denied unless the
     // call site tags it (the schedule-integrity watchdog's own bells do too).
@@ -686,6 +663,9 @@ async function postAlert(estimate, verdict, ctx, { raise, held = [] } = {}) {
       estimateId: estimate.id,
       customerId: estimate.customer_id,
       problemCodes: codes,
+      // The findings themselves, so a later run that cannot re-judge a price
+      // finding can keep it on the bell (heldProblems).
+      problems: verdict.problems.map(({ code, text }) => ({ code, text })),
       // count + itemKeys are the ring-stamps notifyAdmin compares on a
       // refresh, so a changed problem set is treated as a real change.
       count: codes.length,
@@ -712,28 +692,29 @@ async function retireAbandoned(conn) {
   return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
 }
 
-// What a sweep does with one verdict:
-//   skipped  — not a combined booking any more (the plan was cancelled): close
-//   problems — post / refresh the bell
-//   ok       — verified: close a standing bell as fixed
-//   deferred — nothing of this check's own to say (the schedule shape is the
-//              accepted-schedule alert's, or a price cannot be verified): close
-//   held     — prices could not be verified, and the standing bell carries a
-//              price comparison that was therefore not looked for: leave it
-function outcomeOf(verdict, standingCodes = []) {
-  if (!verdict) return 'skipped';
-  if (verdict.problems.length) return 'problems';
-  if (verdict.ok) return 'ok';
-  return heldCodes(verdict, standingCodes).length ? 'held' : 'deferred';
-}
-
-// The standing bell's price comparisons this verdict could not re-judge (its
-// prices were not verifiable): they stay on the bell until a verdict that
-// can see them says otherwise.
-function heldCodes(verdict, standingCodes = []) {
+// The standing bell's price findings this verdict could not re-judge (its
+// prices were not verifiable): they stay on the bell, visibly, until a
+// verdict that can see them says otherwise.
+function heldProblems(verdict, standingProblems = []) {
   if (!verdict.pricesHidden) return [];
   const now = new Set(verdict.problems.map((problem) => problem.code));
-  return standingCodes.filter((code) => COMPARISON_CODES.has(code) && !now.has(code));
+  return standingProblems.filter((problem) => COMPARISON_CODES.has(problem?.code) && !now.has(problem.code))
+    .map((problem) => ({ code: problem.code, text: problem.text, held: true }));
+}
+
+// What a sweep does with one verdict, given the standing bell's problems:
+//   skipped  — not a combined booking any more (the plan was cancelled): close
+//   frozen   — every accepted family is on hold / stopped: nothing to judge,
+//              leave a standing bell as it is
+//   problems — post / refresh the bell (current problems plus held ones)
+//   ok       — verified: close a standing bell as fixed
+//   deferred — nothing of this check's own to say: close
+function outcomeOf(verdict, standingProblems = []) {
+  if (!verdict) return { outcome: 'skipped', problems: [] };
+  if (verdict.frozen) return { outcome: 'frozen', problems: [] };
+  const problems = [...verdict.problems, ...heldProblems(verdict, standingProblems)];
+  if (problems.length) return { outcome: 'problems', problems };
+  return { outcome: verdict.ok ? 'ok' : 'deferred', problems };
 }
 
 /**
@@ -765,8 +746,8 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise } = 
   const standing = new Map((await conn('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [candidates.map((estimate) => dedupeKeyFor(estimate.id))])
-    .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'problemCodes' as problem_codes")))
-    .map((row) => [String(row.estimate_id), Array.isArray(row.problem_codes) ? row.problem_codes : []]));
+    .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'problems' as problems")))
+    .map((row) => [String(row.estimate_id), Array.isArray(row.problems) ? row.problems : []]));
   const work = candidates.filter((estimate) => {
     try {
       if ((acceptedPrograms(estimate)?.programs.size || 0) >= 2) return true;
@@ -796,16 +777,16 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise } = 
         scheduleSkippedFamilies: judged || new Set(),
         scheduleUnjudged: !judged,
       });
-      const outcome = outcomeOf(checked?.verdict, standing.get(id));
+      const { outcome, problems } = outcomeOf(checked?.verdict, standing.get(id));
       if (outcome !== 'problems') {
-        result[outcome === 'held' ? 'deferred' : outcome] += 1;
-        if (!isNew && outcome !== 'held') {
+        result[outcome === 'frozen' ? 'deferred' : outcome] += 1;
+        if (!isNew && outcome !== 'frozen') {
           result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
         }
         continue;
       }
       result.checked += 1;
-      const row = await postAlert(estimate, checked.verdict, checked.ctx, { raise, held: heldCodes(checked.verdict, standing.get(id)) });
+      const row = await postAlert(estimate, { ...checked.verdict, problems }, checked.ctx, { raise });
       if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
       result.problems += 1;
     } catch (err) {
@@ -825,6 +806,7 @@ module.exports = {
   markPrepaidCoverage,
   ringOnNewProblem,
   outcomeOf,
+  heldProblems,
   acceptedPrograms,
   firstApplicationAmount,
   shortName,
