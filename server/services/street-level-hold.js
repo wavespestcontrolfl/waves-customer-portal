@@ -205,7 +205,8 @@ function visitServiceAddressLine(row) {
   return [row?.service_address_line1, row?.service_address_line2, row?.service_address_city, row?.service_address_state, row?.service_address_zip]
     .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
 }
-const normAddress = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// Word boundaries survive ("1 23rd Ave" is not "12 3rd Ave"): punctuation becomes one space.
+const normAddress = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 // The office confirmed the address it was SHOWN: when a confirm of a live street-level hold names
 // that address (expected_service_address), it must still be the visit's address under the row lock,

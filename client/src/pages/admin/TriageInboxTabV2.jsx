@@ -1135,12 +1135,14 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // when the card was filed: corrections after booking change it.
                 const captured = parsePayload(confirmHoldFor.payload)?.address_on_file || "";
                 const live = confirmHoldFor.visit_address || "";
-                const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+                // Word boundaries survive ("1 23rd Ave" is not "12 3rd Ave").
+                const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
                 const differs = !!live && norm(live) !== norm(captured);
+                // Always show the LIVE address when there is one: it is the address the confirm submits.
                 return (
                   <div className="text-14 font-medium text-zinc-900 mb-1">
                     {differs && <span className="block text-11 font-medium text-ink-tertiary">Current visit address</span>}
-                    {differs ? live : (captured || live || "Address on the visit")}
+                    {live || captured || "Address on the visit"}
                   </div>
                 );
               })()}

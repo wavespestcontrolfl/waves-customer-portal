@@ -379,6 +379,11 @@ describe('r20: the confirm is bound to the address the office was shown', () => 
     await expect(assertExpectedServiceAddress(moved.t, 'v1', '1234 Sample Newbuild Trl, Parrish, FL, 34219')).rejects.toMatchObject({ status: 409, code: 'address_changed' });
   });
 
+  test('house-number / street boundaries are preserved: 1 23rd Ave is not 12 3rd Ave', async () => {
+    const t = trxFor({ held: true, live: { ...row, service_address_line1: '12 3rd Ave' } });
+    await expect(assertExpectedServiceAddress(t.t, 'v1', '1 23rd Ave, Parrish, FL, 34219')).rejects.toMatchObject({ code: 'address_changed' });
+  });
+
   test('an absent expectation, or a visit that is not a hold, is today\'s behavior (no lookup / no refusal)', async () => {
     const none = trxFor({ held: true, live: row });
     await expect(assertExpectedServiceAddress(none.t, 'v1', '')).resolves.toBeUndefined();

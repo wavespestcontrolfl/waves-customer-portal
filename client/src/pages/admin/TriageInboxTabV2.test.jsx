@@ -552,7 +552,7 @@ describe('street-level address hold: office confirm', () => {
     render(<TriageInboxTabV2 isAdmin />);
     const card = (await screen.findByText('Hold Card')).closest('.py-4');
     fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
-    expect(await screen.findByText('1234 Sample Newbuild Trl, Parrish, FL, 34219', { selector: 'div' })).toBeInTheDocument();
+    expect(await screen.findByText('1234 sample newbuild trl, parrish, fl 34219', { selector: 'div' })).toBeInTheDocument();
     expect(screen.queryByText('Current visit address')).not.toBeInTheDocument();
   });
 
@@ -581,5 +581,17 @@ describe('street-level address hold: office confirm', () => {
     fireEvent.click(await screen.findByLabelText(/read this address back to the customer/i));
     expect(screen.getByText(/current address did not load/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^confirm & book$/i })).toBeDisabled();
+  });
+
+  it('addresses that differ only by where the spaces fall are different (1 23rd Ave is not 12 3rd Ave) and the LIVE one is shown', async () => {
+    const tricky = { ...hold, payload: JSON.stringify({ ...holdPayload, address_on_file: '1 23rd Ave, Parrish, FL, 34219' }), visit_address: '12 3rd Ave, Parrish, FL, 34219' };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [tricky], counts: { open: 1, resolved: 0, dismissed: 0 } } : { success: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('Current visit address')).toBeInTheDocument();
+    expect(screen.getByText('12 3rd Ave, Parrish, FL, 34219')).toBeInTheDocument();
+    expect(screen.queryByText('1 23rd Ave, Parrish, FL, 34219')).not.toBeInTheDocument();
   });
 });
