@@ -4491,14 +4491,39 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
-            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+            // Re-service promise revalidation (Codex round-3 P2): the same
+            // "reviewed wording can go stale before it fires" gap as the
+            // checks above, for a free re-service promise — the customer's
+            // eligibility (their plan, an already-used re-service) can
+            // change between review/scheduling and this fire. Reuses the
+            // SAME live lane check + promised-lane snapshot the immediate
+            // send path's agentDecisionSendBlockReason runs
+            // (reservicePromiseStillEligible, sms-shadow-drafter.js) — no
+            // separate mechanism. Fail-closed on any lookup error.
+            let reserviceStale = false;
+            let reserviceReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              // Shared with the immediate send path (agent-decision-send-checks): a plain
+              // non-promise message is never blocked by this recheck's own plumbing.
+              const { scheduledReserviceBlockReason } = require('./agent-decision-send-checks');
+              const reason = await scheduledReserviceBlockReason({
+                agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, fallbackCustomerId: msg.customer_id || null, dbh: db,
+              });
+              if (reason) {
+                reserviceStale = true;
+                reserviceReason = reason;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
-                    : 'stale_sla_agent_decision';
+                    : slaStale
+                      ? 'stale_sla_agent_decision'
+                      : 'stale_reservice_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4528,7 +4553,9 @@ function initScheduledJobs() {
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
-                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
+                        : slaStale
+                          ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
+                          : `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
