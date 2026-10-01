@@ -210,6 +210,8 @@ describe('GET /:token/data — proposal line projection', () => {
     dbRows.estimates = {
       ...estimateRow(),
       id: 'est-rate-review-gate-off',
+      sent_at: '2026-09-20T12:00:00.000Z',
+      viewed_at: '2026-09-21T12:00:00.000Z',
       monthly_total: 85,
       annual_total: 1020,
       onetime_total: 0,
@@ -243,6 +245,10 @@ describe('GET /:token/data — proposal line projection', () => {
     dbRows.estimates = {
       ...estimateRow(),
       id: 'est-rate-review-pinned',
+      // A customer-reachable row (sent, already opened): the counter's
+      // definition of a customer view gates the evidence write.
+      sent_at: '2026-09-20T12:00:00.000Z',
+      viewed_at: '2026-09-21T12:00:00.000Z',
       monthly_total: 85,
       annual_total: 1020,
       onetime_total: 0,
@@ -270,6 +276,11 @@ describe('GET /:token/data — proposal line projection', () => {
         const bare = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
         expect(bare.status).toBe(200);
         expect(writes).toBe(1);
+        // A non-customer request (bot / unfurler UA — the view the counter
+        // ignores) never records evidence (local max-effort review on #5434).
+        const bot = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`, { headers: { 'User-Agent': 'Twitterbot/1.0' } });
+        expect(bot.status).toBe(200);
+        expect(writes).toBe(1);
       });
     } finally {
       dbRows.__update = null;
@@ -280,6 +291,8 @@ describe('GET /:token/data — proposal line projection', () => {
     dbRows.estimates = {
       ...estimateRow(),
       id: 'est-rate-review-race',
+      sent_at: '2026-09-20T12:00:00.000Z',
+      viewed_at: '2026-09-21T12:00:00.000Z',
       monthly_total: 85,
       annual_total: 1020,
       onetime_total: 0,
@@ -354,6 +367,8 @@ describe('GET /:token/data — proposal line projection', () => {
     dbRows.estimates = {
       ...estimateRow(),
       id: 'est-rate-review-one-time',
+      sent_at: '2026-09-20T12:00:00.000Z',
+      viewed_at: '2026-09-21T12:00:00.000Z',
       monthly_total: 0,
       annual_total: 0,
       onetime_total: 150,

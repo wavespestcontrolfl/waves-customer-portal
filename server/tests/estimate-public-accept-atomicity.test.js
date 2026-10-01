@@ -1805,7 +1805,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
       result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
     });
-    seed({ id: 'est-pdf-1', token: 'tok-pdf-1-x0123456789', estimate_data: documentData });
+    seed({ id: 'est-pdf-1', token: 'tok-pdf-1-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData });
     const renderDoc = require('../services/pdf/estimate-doc-pdf').renderEstimateDocumentPdf;
     renderDoc.mockClear();
     const open = await fetch(`${base}/api/estimates/tok-pdf-1-x0123456789/pdf`);
@@ -1815,7 +1815,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(renderDoc).toHaveBeenCalledTimes(1);
     expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
     // Frozen: still downloadable, but the marker is never written.
-    seed({ id: 'est-pdf-2', token: 'tok-pdf-2-x0123456789', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData });
+    seed({ id: 'est-pdf-2', token: 'tok-pdf-2-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData });
     expect((await fetch(`${base}/api/estimates/tok-pdf-2-x0123456789/pdf`)).status).toBe(200);
     expect(servedOps()).toHaveLength(0);
     // A stored (disabled) proposal with operator terms: both renderers
@@ -1824,6 +1824,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     seed({
       id: 'est-pdf-3',
       token: 'tok-pdf-3-x0123456789',
+sent_at: '2026-09-20T12:00:00.000Z',
       estimate_data: JSON.stringify({
         ...JSON.parse(documentData),
         proposal: {
@@ -1837,6 +1838,29 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(servedOps()).toHaveLength(0);
   });
 
+  test('GET /:token/pdf: a non-customer download (bot / unfurler UA) records no served evidence (local max-effort review on #5434)', async () => {
+    const servedOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'));
+    seed({
+      id: 'est-pdf-bot',
+      token: 'tok-pdf-bot-x0123456789',
+      sent_at: '2026-09-20T12:00:00.000Z',
+      estimate_data: JSON.stringify({
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+        result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      }),
+    });
+    const res = await fetch(`${base}/api/estimates/tok-pdf-bot-x0123456789/pdf`, { headers: { 'User-Agent': 'Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)' } });
+    expect(res.status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+  });
+
+  test('the legacy page records served evidence only on a counted customer view (source pattern; local max-effort review on #5434)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    expect(src).toMatch(/if \(rateReviewTermsRendered && countThisView\) \{/);
+    expect(src).toMatch(/const countThisView = shouldCountView\(req, requestIp, estimate\);/);
+  });
+
   test('GET /:token/pdf: when the row freezes between the read and the evidence write, the document is rendered from the frozen row (no line, no marker)', async () => {
     // GH Codex r7 P1: the marker must be durable BEFORE a document carrying
     // the line exists. An accept that lands first turns the write into a
@@ -1848,7 +1872,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
       result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
     });
-    seed({ id: 'est-pdf-race', token: 'tok-pdf-race-x0123456789', estimate_data: documentData });
+    seed({ id: 'est-pdf-race', token: 'tok-pdf-race-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData });
     let estimateTouches = 0;
     db.__state.onTable = (table) => {
       if (table !== 'estimates') return;
@@ -1882,6 +1906,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     seed({
       id: 'est-pdf-fail',
       token: 'tok-pdf-fail-x0123456789',
+sent_at: '2026-09-20T12:00:00.000Z',
       estimate_data: JSON.stringify({
         lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
         result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },

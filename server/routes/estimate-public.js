@@ -9176,7 +9176,12 @@ async function handleEstimateView(req, res, next) {
       ...renderOpts,
     });
     let pageHtml = renderLegacyPage();
-    if (rateReviewTermsRendered) {
+    // Evidence is a CUSTOMER being served the line (local max-effort review
+    // on #5434): a bot, link unfurler, admin-marked or admin-IP request is
+    // the same non-customer view the counter ignores (shouldCountView), and
+    // must never establish a marker a later acceptance would promote onto
+    // the frozen document. Such a view gets the page as rendered, unrecorded.
+    if (rateReviewTermsRendered && countThisView) {
       // Served-disclosure evidence (pre-push Codex on #5434's merge head):
       // the page about to be sent shows the customer the annual rate review
       // item, so persist it BEFORE the response (GH Codex r5 P1) —
@@ -27236,7 +27241,14 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // persisted snapshot flags freeze at send time and would let this document
     // contradict the estimate the customer is looking at.
     const billing = await resolveProposalBillingContext(estimate);
-    const { estimate: documentEstimate, withholdRateReviewTerms } = await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing });
+    // Only a CUSTOMER download is evidence (local max-effort review on
+    // #5434): a bot / unfurler / admin-marked / admin-IP request — the same
+    // non-customer view the counter ignores — gets the document as it
+    // stands, with nothing recorded for a later acceptance to promote.
+    const customerDownload = shouldCountView(req, clientIp(req), estimate);
+    const { estimate: documentEstimate, withholdRateReviewTerms } = customerDownload
+      ? await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })
+      : { estimate, withholdRateReviewTerms: false };
     // The pdfkit fallback prints by its billing context (livePricing picks
     // OUTSTANDING vs FROZEN pricing): resolve it for the row it renders when
     // that row moved under us (Sonnet fallback audit on #5434).
@@ -28032,6 +28044,11 @@ async function composeEstimateDataPayload(estimate, {
   verifiedStaffPreview = false,
   currentViewRecorded = false,
   isInternalRefresh = false,
+  // True only for a request the view counter treats as the customer's own
+  // (never a staff preview, internal refresh, pinned render pass, bot,
+  // admin-marked or admin-IP request): the sole render that may record
+  // served-disclosure evidence (local max-effort review on #5434).
+  customerView = false,
   // The consultation offer runs an availability probe, so only the page's
   // own first /data load asks for it (Codex #4853 r2 P2): never an internal
   // ?refresh=1 re-fetch (the client keeps the first load's offer) and never
@@ -28061,12 +28078,12 @@ async function composeEstimateDataPayload(estimate, {
     // evidence before its capture, and an operator's download is not a
     // disclosure to the customer.
     if (isPdfRenderPass && !documentEvidence && featureGates.isEnabled('estimateDocPdf')
-      && !docRenderPin && !verifiedStaffPreview && !adminDraftPreview) {
+      && !docRenderPin && !verifiedStaffPreview && !adminDraftPreview && customerView) {
       const evidence = await require('../services/estimate-proposal-billing').ensureRateReviewTermsEvidenceBeforeRender(estimate);
       if (evidence.estimate !== estimate) {
         return composeEstimateDataPayload(evidence.estimate, {
           adminDraftPreview, isPdfRenderPass, docRenderPin, verifiedStaffPreview, currentViewRecorded, isInternalRefresh, includeConsultationOffer,
-          documentEvidence: evidence,
+          customerView, documentEvidence: evidence,
         });
       }
       documentEvidence = evidence;
@@ -29140,7 +29157,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // stored session as current and report a visit number one too low (GH
     // codex P2 on #3708).
     let currentViewRecorded = isInternalRefresh;
-    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
+    // The customer's own view, as the counter defines it — also the only
+    // render that may record served-disclosure evidence (see customerView).
+    const customerViewEligible = !verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate);
+    if (customerViewEligible) {
       // ONE transaction for the aggregate counter + the per-open row: written
       // separately, a failure of either half leaves view_count permanently
       // diverged from COUNT(estimate_views) — the dashboard count and the
@@ -29218,6 +29238,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       verifiedStaffPreview,
       currentViewRecorded,
       isInternalRefresh,
+      customerView: customerViewEligible,
       includeConsultationOffer: true,
     })));
   } catch (err) { next(err); }

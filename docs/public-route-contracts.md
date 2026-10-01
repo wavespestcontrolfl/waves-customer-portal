@@ -3325,7 +3325,12 @@ persisted evidence that the customer was served the line while the estimate
 was open: that same recorded 'plan' drawer snapshot, or
 `estimate_data.rateReviewTermsServed` at the current shared
 `RATE_REVIEW_TERMS_VERSION`, which the `/pdf` download (either renderer) and
-the legacy page's plan-terms card write when they print the disclosure
+the legacy page's plan-terms card write when they print the disclosure to the
+CUSTOMER — only a request the view counter treats as the customer's own
+(`shouldCountView`: never a bot or link unfurler, an admin-marked or admin-IP
+request, a staff or draft preview, an internal refresh or the pinned headless
+pass) records it; any other request gets the page or document as it stands,
+unrecorded
 (idempotent; never on a frozen estimate; never fatal to the download or the
 page; made durable BEFORE either renderer runs, and before the legacy page
 is sent). The marker never moves `updated_at`, so an accept racing from
