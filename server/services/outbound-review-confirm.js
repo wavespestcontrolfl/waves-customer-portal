@@ -1124,7 +1124,9 @@ async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
     .whereIn(dbh.raw("ti.payload->>'activation_pending'"), ['office', 'lazy'])
     .where('ss.customer_confirmed', true)
     .limit(limit)
-    .select(dbh.raw("ti.payload->>'activation_pending' as pending_mode"), 'ss.id', 'ss.status', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.source_call_log_id', 'ss.source_action');
+    .select(dbh.raw("ti.payload->>'activation_pending' as pending_mode"), 'ss.id', 'ss.status', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.source_call_log_id', 'ss.source_action',
+      // The same row shape the lazy activation hands the hook (callback / pricing / field-confirm fields).
+      'ss.customer_confirmed', 'ss.is_callback', 'ss.estimated_price', 'ss.field_confirmed_at');
   let resumed = 0;
   for (const row of rows) {
     try {

@@ -220,6 +220,9 @@ describe('finding 6: the office approval is bound to the address it was given fo
       const stampFn = s.slice(s.indexOf('async function stampCustomerConfirmed'), s.indexOf('async function activateHoldFencedByAddress'));
       expect(stampFn.indexOf(".forUpdate().first('id', 'source_call_log_id')")).toBeGreaterThan(0);
       expect(stampFn.indexOf('approvedAddressStillCurrent(trx')).toBeGreaterThan(stampFn.indexOf('.forUpdate()'));
+      // A resumed activation hands the hook the same row shape the lazy rail does (callback / pricing / field-confirm).
+      const resume = s.slice(s.indexOf('async function resumePendingHoldActivations'), s.indexOf('async function runOfficeConfirmActivation'));
+      for (const col of ['ss.is_callback', 'ss.estimated_price', 'ss.field_confirmed_at', 'ss.customer_confirmed']) expect(resume).toContain(`'${col}'`);
       // The completed-and-field-confirmed visit (the tech stood at the property) is not bound.
       expect(s).toContain('officeApprovedHold = officeApproved;');
     });
