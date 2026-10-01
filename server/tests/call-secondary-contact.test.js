@@ -27,6 +27,8 @@ const {
   normalizeCallExtraction,
   resolveCallSecondaryContact,
   persistCallSecondaryContact,
+  onSiteNotifyConsent,
+  resolveSecondaryConsent,
   validatePhoneCallAppointmentCustomer,
 } = _test;
 const { flatView, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
@@ -676,5 +678,124 @@ describe('persistCallSecondaryContact', () => {
     const writes = makeDb({ customer: { ...bareCustomer, email: 'JOSEPH.HAUGHT89431@gmail.com' } });
     expect(await persistCallSecondaryContact('cust-1', { ...buyer, phone: null })).toBe('skipped_email_on_record');
     expect(writes.updates).toHaveLength(0);
+  });
+});
+
+// ─── on-site contact consent (owner ruling 2026-09-30) ─────────────────────
+
+describe('on-site contact is the appointment contact point', () => {
+  const spouse = {
+    first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123',
+    email: 'sample@example.com', role: 'spouse_partner',
+    wants_notifications: true, notes: null,
+  };
+
+  describe('onSiteNotifyConsent', () => {
+    test.each(['spouse_partner', 'home_buyer', 'tenant', 'family_member'])('%s with intent + phone qualifies', (role) => {
+      expect(onSiteNotifyConsent({ ...spouse, role })).toBe(true);
+    });
+    test.each(['home_seller', 'landlord', 'lender', 'real_estate_agent', 'property_manager', 'other', 'unknown', null])('%s never qualifies', (role) => {
+      expect(onSiteNotifyConsent({ ...spouse, role })).toBe(false);
+    });
+    test('requires wants_notifications === true and a phone', () => {
+      expect(onSiteNotifyConsent({ ...spouse, wants_notifications: false })).toBe(false);
+      expect(onSiteNotifyConsent({ ...spouse, wants_notifications: undefined })).toBe(false);
+      expect(onSiteNotifyConsent({ ...spouse, phone: null })).toBe(false);
+      expect(onSiteNotifyConsent({ ...spouse, phone: '  ' })).toBe(false);
+      expect(onSiteNotifyConsent(null)).toBe(false);
+    });
+    test('role match is case-insensitive', () => {
+      expect(onSiteNotifyConsent({ ...spouse, role: ' Spouse_Partner ' })).toBe(true);
+    });
+  });
+
+  const bare = {
+    id: 'cust-1', phone: '+15550100999', email: null,
+    service_contact_name: null, service_contact_phone: null, service_contact_email: null,
+    service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+    service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null,
+  };
+
+  // Same db stub shape as the persistence suite above, trimmed to what the
+  // slot write touches.
+  function stubDb(customer) {
+    const updates = [];
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        let isCollisionQuery = false;
+        const b = {
+          where: jest.fn((arg) => {
+            if (typeof arg === 'function') {
+              const sub = { whereNull: jest.fn(() => sub), orWhere: jest.fn(() => sub) };
+              arg(sub);
+            }
+            return b;
+          }),
+          whereNull: jest.fn(() => b),
+          whereNot: jest.fn(() => b),
+          whereRaw: jest.fn(() => { isCollisionQuery = true; return b; }),
+          first: jest.fn(async () => (isCollisionQuery ? null : customer)),
+          update: jest.fn(async (payload) => { updates.push(payload); return 1; }),
+        };
+        return b;
+      }
+      if (table === 'notification_prefs') {
+        const b = {
+          where: jest.fn(() => b),
+          first: jest.fn(async () => undefined),
+          insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ merge: jest.fn(async () => 1) })) })),
+        };
+        return b;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    return updates;
+  }
+
+  // Mirrors the processor's persistence loop: resolve the per-contact consent,
+  // then hand it to the writer.
+  async function persistLikeLoop(contact, v2SmsConsentExplicit) {
+    const { smsConsentExplicit, smsConsentSource } = resolveSecondaryConsent(contact, v2SmsConsentExplicit);
+    return persistCallSecondaryContact('cust-1', contact, { smsConsentExplicit, smsConsentSource });
+  }
+
+  test('(a) spouse + intent + phone stamps source call_pipeline_onsite_contact even with V2 consent false', async () => {
+    const updates = stubDb(bare);
+    expect(await persistLikeLoop(spouse, false)).toBe('written');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      service_contacts_consent_at: expect.any(Date),
+      service_contacts_consent_source: 'call_pipeline_onsite_contact',
+      service_contacts_consent_text_version: 'call-2026-07-23',
+      service_contact_role: 'spouse_partner',
+    });
+  });
+
+  test.each(['lender', 'real_estate_agent'])('(b) role %s with intent and V2 consent false writes NO stamp', async (role) => {
+    const updates = stubDb(bare);
+    expect(await persistLikeLoop({ ...spouse, role }, false)).toBe('written');
+    expect(updates[0]).not.toHaveProperty('service_contacts_consent_at');
+    expect(updates[0]).not.toHaveProperty('service_contacts_consent_source');
+  });
+
+  test('(c) spouse WITHOUT notification intent is not slotted and not stamped', async () => {
+    const updates = stubDb(bare);
+    expect(await persistLikeLoop({ ...spouse, wants_notifications: false }, false)).toBe('skipped_no_intent');
+    expect(updates).toHaveLength(0);
+  });
+
+  test('(d) explicit V2 consent keeps source call_pipeline_request, even for an on-site role', async () => {
+    const updates = stubDb(bare);
+    expect(await persistLikeLoop(spouse, true)).toBe('written');
+    expect(updates[0].service_contacts_consent_source).toBe('call_pipeline_request');
+    const updates2 = stubDb(bare);
+    expect(await persistLikeLoop({ ...spouse, role: 'real_estate_agent' }, true)).toBe('written');
+    expect(updates2[0].service_contacts_consent_source).toBe('call_pipeline_request');
+  });
+
+  test('persistCallSecondaryContact defaults the stamp source to call_pipeline_request', async () => {
+    const updates = stubDb(bare);
+    await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: true });
+    expect(updates[0].service_contacts_consent_source).toBe('call_pipeline_request');
   });
 });

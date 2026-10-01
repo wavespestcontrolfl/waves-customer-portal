@@ -2853,7 +2853,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request' } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
@@ -3009,7 +3009,9 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       && (!SERVICE_CONTACT_SLOTS.some((s) => String(customer[s.phone] || '').trim())
         || customer.service_contacts_consent_at)) ? {
       service_contacts_consent_at: new Date(),
-      service_contacts_consent_source: 'call_pipeline_request',
+      // 'call_pipeline_onsite_contact' when the on-site rule (not V2 explicit
+      // consent) authorized the stamp, so the two are distinguishable in audit.
+      service_contacts_consent_source: smsConsentSource,
       service_contacts_consent_text_version: 'call-2026-07-23',
     } : {}),
     ...((contact.phone && !smsConsentExplicit && customer.service_contacts_consent_at) ? {
@@ -3229,6 +3231,35 @@ const AV_COUNTY_ENUM = { manatee: 'Manatee', sarasota: 'Sarasota', charlotte: 'C
 // customer, so a slot-phone hit alone must go to review, not auto-link.
 const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
 const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 'lender']);
+// Roles for a person who will be AT the property on the visit day. Narrower
+// than HOUSEHOLD_SLOT_ROLES on purpose: home_seller and landlord are not
+// on-site for the appointment, and agent-type roles serve many accounts.
+const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'tenant', 'family_member']);
+// Owner ruling 2026-09-30 "on-site person is the contact point": when the
+// caller books for someone who will be at the property, gives their phone, and
+// agrees they should get the appointment texts (wants_notifications), that
+// person IS the appointment contact even though the caller never said the
+// words "you can text me" (V2 consent.sms_consent_given stays false). Without
+// this the slot was written unstamped and every text went to the out-of-state
+// caller. Pure: callers decide what to stamp; the recipient opt-in confirmation
+// ask still runs for the phone.
+function onSiteNotifyConsent(contact) {
+  if (!contact || contact.wants_notifications !== true) return false;
+  if (!String(contact.phone || '').trim()) return false;
+  return ON_SITE_NOTIFY_ROLES.has(String(contact.role || '').trim().toLowerCase());
+}
+// Per-contact consent decision for the persistence loop: explicit V2 consent
+// wins (and keeps the original stamp source); otherwise the on-site rule may
+// authorize the stamp under its own source so audits can tell them apart.
+function resolveSecondaryConsent(contact, v2SmsConsentExplicit) {
+  if (v2SmsConsentExplicit) {
+    return { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' };
+  }
+  return {
+    smsConsentExplicit: onSiteNotifyConsent(contact),
+    smsConsentSource: 'call_pipeline_onsite_contact',
+  };
+}
 // Slot-only match gating: the number belongs to a person STORED ON this
 // account (tenant/spouse/buyer/agent). Household-type roles identify the
 // account; agent-type people (realtor, property manager) serve MANY accounts
@@ -13030,7 +13061,15 @@ const CallRecordingProcessor = {
       // dedup, cross-customer, empty slot). Stop early when slots run out.
       for (const secondaryEntry of callSecondaryContacts) {
       try {
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
+        // On-site rule (owner 2026-09-30): consent for THIS contact is explicit
+        // V2 consent OR the on-site-contact rule above; the stamp source records
+        // which one authorized it.
+        const { smsConsentExplicit: entryConsent, smsConsentSource } =
+          resolveSecondaryConsent(secondaryEntry, v2SmsConsentExplicit);
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
+          smsConsentExplicit: entryConsent,
+          smsConsentSource,
+        });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
@@ -13038,7 +13077,7 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {
+        if (result === 'written' && secondaryEntry?.phone && entryConsent) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -18835,7 +18874,10 @@ const CallRecordingProcessor = {
                   // The SMS legs require EXPLICIT sms_consent_given: implied
                   // inbound consent is personal to the caller and never
                   // authorizes texting a separate service-contact recipient
-                  // (buyer/tenant/realtor). The email-only leg below sends no
+                  // (buyer/tenant/realtor) — except the on-site-contact rule (owner
+                  // 2026-09-30), which stamps the slot's consent artifact for a
+                  // spouse/buyer/tenant/family member the caller asked to notify.
+                  // The email-only leg below sends no
                   // SMS, so it is NOT gated on SMS consent — only on the
                   // confirmation opt-out and the do-not-contact email block.
                   if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true') {
@@ -18852,7 +18894,12 @@ const CallRecordingProcessor = {
                       }
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
-                      const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
+                      // Outer gate only: getAppointmentContacts still requires the row's
+                      // consent artifact and filterRecipientsByOptin the opt-in state,
+                      // so widening for an on-site contact (owner 2026-09-30) cannot
+                      // text anyone whose slot was not stamped.
+                      const anyOnSiteConsent = callSecondaryContacts.some(onSiteNotifyConsent);
+                      const extraContacts = (!v2SmsConsentExplicit && !anyOnSiteConsent) ? [] : (await filterRecipientsByOptin(
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
                       )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
@@ -21510,6 +21557,8 @@ CallRecordingProcessor._test = {
   resolveCallSecondaryContacts,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
+  onSiteNotifyConsent,
+  resolveSecondaryConsent,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
