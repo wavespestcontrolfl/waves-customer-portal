@@ -5785,6 +5785,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // selection so the next capture renders the base text instead of looping.
   const [afterVisitDeniedKey, setAfterVisitDeniedKey] = useState(null);
   const afterVisitSelectionKeyRef = useRef('');
+  // Whether THIS render shows "billed after your first visit" payment timing;
+  // attested on /accept, which refuses (PAYMENT_TIMING_REFRESH) when the
+  // standard invoice would actually go out payable at accept.
+  const afterVisitTimingShownRef = useRef(false);
   const noteRenderedRecurringConsent = useCallback((tender) => {
     const t = tender === 'us_bank_account' ? 'us_bank_account' : 'card';
     const cur = afterVisitRenderedRef.current;
@@ -7247,6 +7251,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               recurringCardConsentTender: recurringCardSetupIntentIdRef.current ? tender : undefined,
             };
           })(),
+          afterVisitTimingShown: (paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef.current) ? true : undefined,
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -7342,6 +7347,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'PAYMENT_TIMING_REFRESH') {
+            // The server bills this selection now, not after the visit: show
+            // today's wording for it, drop the captured intent (its checkbox
+            // was for the after-visit terms) and refetch.
+            setAfterVisitDeniedKey(afterVisitSelectionKeyRef.current);
+            recurringCardSetupIntentIdRef.current = null;
+            setInlineCardIntent(null);
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'Your payment terms were updated — please review them and confirm again.');
+          }
           if (body.code === 'CONSENT_VARIANT_STALE' || body.code === 'ACCEPT_BILLING_CHANGED') {
             // The base card / ACH copy lives in this bundle: when the server
             // would record a newer version of it, only a full reload shows
@@ -8396,6 +8411,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     && data?.recurringCardPolicy?.afterVisitConsent === true
     && !afterVisitInvoiceShape.setupOnly
     && afterVisitDeniedKey !== afterVisitSelectionKey;
+  // The payment-timing copy reads the SAME server answer as the capture text.
+  const payAfterFirstVisitEffective = data?.recurringCardPolicy?.afterVisitExisting === true
+    && afterVisitDeniedKey !== afterVisitSelectionKey;
+  afterVisitTimingShownRef.current = payAfterFirstVisitEffective && afterVisitInvoiceShape.hasFirstVisitInvoice;
   afterVisitRenderedRef.current = {
     afterVisit: afterVisitRendered,
     version: data?.recurringCardPolicy?.afterVisitConsentVersion || AFTER_VISIT_CONSENT_VERSION,
@@ -9141,7 +9160,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
-                payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
+                payAfterFirstVisit={payAfterFirstVisitEffective}
                 autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
                 autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />
@@ -9493,7 +9512,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
-                payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
+                payAfterFirstVisit={payAfterFirstVisitEffective}
                 autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
                 autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />

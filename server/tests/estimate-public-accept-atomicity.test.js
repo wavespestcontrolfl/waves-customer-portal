@@ -2685,6 +2685,22 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       expect(enrollSpy.mock.calls[0][0].renderedConsent).toEqual({ text: ConsentText.getConsentText('us_bank_account'), version: BASE_VERSION });
     });
 
+    test('r5 audit: a tab that showed "billed after your first visit" timing is refused when the first invoice goes out payable at accept (unattached)', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(false);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    });
+
+    test('r5 audit: the same timing attestation is honored when the invoice really is deferred (attached)', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { ...AFTER_VISIT, afterVisitTimingShown: true });
+      expect(res.status).toBe(200);
+    });
+
     test('r5: a bank capture whose tab attests an OLDER base ACH version is refused (the newer wording is never recorded)', async () => {
       verification('us_bank_account');
       conversion('ss-first');

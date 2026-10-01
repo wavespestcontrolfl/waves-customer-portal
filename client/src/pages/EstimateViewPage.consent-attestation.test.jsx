@@ -49,6 +49,14 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src.match(/onSuccess\([^)]*, bank \? 'us_bank_account' : 'card'\);/g).length).toBe(3);
   });
 
+  it('r5 audit: the payment-timing copy reads the same server answer as the capture text, is attested, and a PAYMENT_TIMING_REFRESH 409 records the answer for this selection', () => {
+    expect(src).toMatch(/const payAfterFirstVisitEffective = data\?\.recurringCardPolicy\?\.afterVisitExisting === true\s*&& afterVisitDeniedKey !== afterVisitSelectionKey;/);
+    expect(src.match(/payAfterFirstVisit=\{payAfterFirstVisitEffective\}/g)).toHaveLength(2);
+    expect(src).toMatch(/afterVisitTimingShownRef\.current = payAfterFirstVisitEffective && afterVisitInvoiceShape\.hasFirstVisitInvoice;/);
+    expect(src).toMatch(/afterVisitTimingShown: \(paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef\.current\) \? true : undefined,/);
+    expect(src).toMatch(/if \(body\.code === 'PAYMENT_TIMING_REFRESH'\) \{\s*(?:\/\/[^\n]*\n\s*)*setAfterVisitDeniedKey\(afterVisitSelectionKeyRef\.current\);/);
+  });
+
   it('r3 P2: the held cohorts (Auto Pay paused / explicitly off) get a save-only modal title, not "Set up Auto Pay"', () => {
     expect(src).toMatch(/\(paused \|\| autopayOff\) \? 'Save a payment method' : 'Set up Auto Pay'/);
   });

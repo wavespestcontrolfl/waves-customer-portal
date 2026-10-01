@@ -9984,6 +9984,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // Tender family the capture UI actually RENDERED its consent for.
     const attestedConsentTender = typeof req.body?.recurringCardConsentTender === 'string'
       ? req.body.recurringCardConsentTender.trim().slice(0, 40) : '';
+    // The tab showed "billed after your first visit" timing for this selection
+    // (GitHub Codex #5481 r5 audit): verified against the accept's real
+    // invoice outcome in the transaction.
+    const afterVisitTimingAttested = req.body?.afterVisitTimingShown === true;
     const requestCarriesCapture = recurringCardSetupIntentId !== '' || attestedConsentVariant !== '';
     let consentMismatch = false;
     if (recurringCardPolicy.required !== true) {
@@ -12824,6 +12828,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // is not the "billed after your first visit" promise the after-visit text
       // makes, so a tab that rendered it is refused (reloadable 409) and the
       // intent it dropped is retired; nothing is recorded on a mismatch.
+      // The payment-timing promise, for every after-visit cohort (capture,
+      // saved method, held): a tab that showed "billed after your first visit"
+      // never commits an accept whose standard invoice goes out payable now
+      // (an existing customer whose series already exists gets an UNATTACHED
+      // first invoice). Refused retryably with the real answer, which the page
+      // then renders for this selection.
+      if (afterVisitTimingAttested && recurringCardPolicy.afterVisitCard === true && !annualPrepaySelected
+        && RecurringCards.standardInvoiceDelivery({
+          laneActive: recurringCardLaneActive, minted: standardInvoiceMinted, attached: standardInvoiceAttached,
+        }).collectsAtAccept) {
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
+        }
+        const err = new Error('Your payment terms were just updated. Please review them and confirm again.');
+        err.status = 409;
+        err.code = 'PAYMENT_TIMING_REFRESH';
+        err.afterVisitDeferred = false;
+        throw err;
+      }
+
       if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && !annualPrepaySelected) {
         const delivery = RecurringCards.standardInvoiceDelivery({
           laneActive: recurringCardLaneActive,
@@ -14967,6 +14991,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         error: err.message,
         ...(err.code ? { code: err.code } : {}),
         ...(err.collectionPromise ? { collectionPromise: err.collectionPromise } : {}),
+        ...(typeof err.afterVisitDeferred === 'boolean' ? { afterVisitDeferred: err.afterVisitDeferred } : {}),
       });
     }
     next(err);
