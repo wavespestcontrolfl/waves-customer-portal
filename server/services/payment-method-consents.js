@@ -269,7 +269,20 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
 async function deferredCaptureConsentVersionCurrent(intent, { context = 'capture', customerId = null } = {}) {
   const stamped = intent?.metadata?.[CONSENT_VERSION_METADATA_KEY];
   if (renderedConsentVersionIsCurrent(stamped)) return true;
-  const intentId = intent?.id || 'unknown';
+  await refuseDeferredConsentRecording({ intentId: intent?.id, stampedVersion: stamped, context, customerId });
+  return false;
+}
+
+/**
+ * The refusal half of the rule above, for deferred recorders whose
+ * attested version lives somewhere other than the intent's metadata (the
+ * estimate accept stamps it on the estimate row): logs, and parks ONE
+ * deduped Billing bell per intent so the office re-collects the
+ * authorization. Never throws.
+ */
+async function refuseDeferredConsentRecording({ intentId = null, stampedVersion = null, context = 'capture', customerId = null } = {}) {
+  const stamped = stampedVersion;
+  intentId = intentId || 'unknown';
   logger.warn(`[consent] ${context}: consent text version ${stamped ? `'${stamped}'` : 'absent'} on intent ${intentId} is not the current ${CONSENT_VERSION} — authorization NOT recorded (customer ${customerId || 'unknown'})`);
   if (customerId) {
     try {
@@ -292,12 +305,12 @@ async function deferredCaptureConsentVersionCurrent(intent, { context = 'capture
       logger.warn(`[consent] stale-version bell failed for intent ${intentId}: ${bellErr.message}`);
     }
   }
-  return false;
 }
 
 module.exports = {
   recordConsent,
   deferredCaptureConsentVersionCurrent,
+  refuseDeferredConsentRecording,
   hasConsentSnapshotForVariant,
   hasConsentFor,
   hasEnrollmentScopedConsent,

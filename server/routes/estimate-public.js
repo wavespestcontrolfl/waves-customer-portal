@@ -11070,11 +11070,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // superseded capture (e.g. a bank intent refused by the kill switch,
       // then replaced by a card-only one) must never enroll later. Atomic
       // JSON-path write, same discipline as the prepay job stamp.
+      // …and the saved-payment-method consent text version this accept
+      // attested for that capture (codex #5434 r1 P1): the backstop records
+      // the consent only while that is still the current text, and
+      // otherwise proceeds only on the customer's own row recorded under it.
       if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
         await trx('estimates').where({ id: estimate.id }).update({
           estimate_data: trx.raw(
-            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSetupIntentId}', to_jsonb(?::text))",
-            [recurringCardVerification.setupIntentId],
+            "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSetupIntentId}', to_jsonb(?::text)), '{acceptedRecurringCardConsentVersion}', to_jsonb(?::text))",
+            [recurringCardVerification.setupIntentId, String(req.body?.consentTextVersion || '')],
           ),
         });
       }

@@ -5133,6 +5133,34 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     const stripePmId = typeof setupIntent.payment_method === 'string'
       ? setupIntent.payment_method
       : setupIntent.payment_method.id;
+    // The authorization the customer actually gave (codex #5434 r1 P1): the
+    // accept stamped the consent text version it attested beside the bound
+    // intent. While that is still the current text the enrollment routine
+    // may record the consent from the current copy (the accept's own
+    // idempotent path). Otherwise — a deploy landed between the accept and
+    // this recovery, or a legacy accept carries no stamp — recovery never
+    // records current-version consent the customer never read: it proceeds
+    // only on the customer's own authorization row (recorded by the accept
+    // under that version; any enrollment-scoped row for a legacy accept),
+    // and otherwise skips with one Billing bell for the office to
+    // re-collect — the plan stays accepted, Auto Pay simply is not enrolled.
+    {
+      const ConsentService = require('../services/payment-method-consents');
+      const { renderedConsentVersionIsCurrent } = require('../services/payment-method-consent-text');
+      const acceptedConsentVersion = typeof estimateData?.acceptedRecurringCardConsentVersion === 'string' && estimateData.acceptedRecurringCardConsentVersion
+        ? estimateData.acceptedRecurringCardConsentVersion : null;
+      if (!renderedConsentVersionIsCurrent(acceptedConsentVersion)) {
+        const onRecord = acceptedConsentVersion
+          ? await ConsentService.hasConsentSnapshotForVariant(estimate.customer_id, stripePmId, { version: acceptedConsentVersion, source: 'estimate_accept' })
+          : await ConsentService.hasEnrollmentScopedConsent(estimate.customer_id, stripePmId);
+        if (!onRecord) {
+          await ConsentService.refuseDeferredConsentRecording({
+            intentId: setupIntent.id, stampedVersion: acceptedConsentVersion, context: 'recurring card accept backstop', customerId: estimate.customer_id,
+          });
+          return;
+        }
+      }
+    }
     const enrollment = await RecurringCards.completeRecurringCardEnrollment({
       customerId: estimate.customer_id,
       stripePaymentMethodId: stripePmId,

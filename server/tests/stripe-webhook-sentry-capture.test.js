@@ -88,6 +88,8 @@ jest.mock('../routes/estimate-public', () => ({
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
 jest.mock('../services/payment-method-consents', () => ({
   hasEnrollmentScopedConsent: jest.fn(async () => true),
+  hasConsentSnapshotForVariant: jest.fn(async () => false),
+  refuseDeferredConsentRecording: jest.fn(async () => {}),
   linkPaymentMethodId: jest.fn(async () => {}),
 }));
 jest.mock('../services/autopay-enrollment', () => ({ enrollConsentedMethod: jest.fn() }));
@@ -575,6 +577,63 @@ describe('unstamped recurring-card backstop re-reads the intent live', () => {
     event();
     expect((await postWebhook()).status).toBe(200);
     expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(1);
+  });
+
+  // codex #5434 r1 P1 (pre-push hook r4): the backstop records consent from
+  // the current copy only while the version the accept attested
+  // (acceptedRecurringCardConsentVersion) is still current. Otherwise it
+  // proceeds only on the customer's own authorization row, else skips with
+  // one Billing bell — the plan stays accepted, Auto Pay is not enrolled.
+  const acceptedWithVersionDb = (version) => {
+    const update = jest.fn().mockResolvedValue(1);
+    const ledger = ledgerBuilder({ update });
+    db.schema = { hasTable: jest.fn(async () => false) };
+    db.mockImplementation((table) => {
+      if (table === 'stripe_webhook_events') return ledger;
+      const row = table === 'estimates'
+        ? { id: 'estimate_test', customer_id: 'customer_test', status: 'accepted', estimate_data: { acceptedRecurringCardSetupIntentId: 'seti_old', ...(version ? { acceptedRecurringCardConsentVersion: version } : {}) } }
+        : { billing_mode: 'per_application' };
+      return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => row) };
+    });
+    return update;
+  };
+
+  test('an accept that attested the CURRENT version enrolls (the routine may record from the current copy)', async () => {
+    acceptedWithVersionDb(require('../services/payment-method-consent-text').CONSENT_VERSION);
+    RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({ enrolled: true });
+    event();
+    expect((await postWebhook()).status).toBe(200);
+    expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(1);
+    expect(ConsentService.refuseDeferredConsentRecording).not.toHaveBeenCalled();
+  });
+
+  test("an accept that attested an OLDER version proceeds only on the customer's own row under that version", async () => {
+    acceptedWithVersionDb('v11_2026-08-25');
+    ConsentService.hasConsentSnapshotForVariant.mockResolvedValueOnce(true);
+    RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({ enrolled: true });
+    event();
+    expect((await postWebhook()).status).toBe(200);
+    expect(ConsentService.hasConsentSnapshotForVariant).toHaveBeenCalledWith('customer_test', 'pm_old', { version: 'v11_2026-08-25', source: 'estimate_accept' });
+    expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(1);
+  });
+
+  test('an OLDER version with no authorization row is acked WITHOUT enrolling — one bell, nothing recorded', async () => {
+    const update = acceptedWithVersionDb('v11_2026-08-25');
+    ConsentService.hasConsentSnapshotForVariant.mockResolvedValueOnce(false);
+    event();
+    expect((await postWebhook()).status).toBe(200);
+    expect(RecurringCards.completeRecurringCardEnrollment).not.toHaveBeenCalled();
+    expect(ConsentService.refuseDeferredConsentRecording).toHaveBeenCalledWith(expect.objectContaining({ intentId: 'seti_old', stampedVersion: 'v11_2026-08-25', customerId: 'customer_test' }));
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+  });
+
+  test('a legacy accept (no stamp) proceeds on an enrollment-scoped row, else skips with a bell', async () => {
+    acceptedWithVersionDb(null);
+    ConsentService.hasEnrollmentScopedConsent.mockResolvedValueOnce(false);
+    event();
+    expect((await postWebhook()).status).toBe(200);
+    expect(RecurringCards.completeRecurringCardEnrollment).not.toHaveBeenCalled();
+    expect(ConsentService.refuseDeferredConsentRecording).toHaveBeenCalledWith(expect.objectContaining({ intentId: 'seti_old', stampedVersion: null }));
   });
 
   test('an unreadable intent rethrows for Stripe retry with a safe reason code', async () => {
