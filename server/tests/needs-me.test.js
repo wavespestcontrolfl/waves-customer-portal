@@ -7,7 +7,6 @@ jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn() }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   scopeAdminFeedToRole: jest.fn((q) => q),
-  _private: { excludeActivityOnlyFromBell: jest.fn((q) => q) },
 }));
 
 let mockRows;
@@ -81,6 +80,18 @@ test('a FIX digest is broken, and an engineering ops_digest row is Claude\'s to 
     .toMatchObject({ severity: 'needs-you', who: 'person' });
 });
 
+test('an engineering digest that is Activity-only appears under who=claude, flagged, sorted with the broken rows', async () => {
+  mockRows = [
+    row({ id: 'person-new', created_at: '2026-09-30T20:00:00Z' }),
+    row({ id: 'eng', category: 'ops_digest', created_at: '2026-08-01T00:00:00Z', metadata: { kind: 'FIX', audience: 'engineering', feed: 'activity', quiet: true } }),
+  ];
+  const claude = await listNeedsMe({ who: 'claude' });
+  expect(claude.items).toHaveLength(1);
+  expect(claude.items[0]).toMatchObject({ id: 'eng', severity: 'broken', who: 'claude', activityOnly: true });
+  const all = await listNeedsMe();
+  expect(all.items.map((i) => [i.id, i.activityOnly])).toEqual([['eng', true], ['person-new', false]]);
+});
+
 test('a standing condition is a needs-you count that clears at zero, filed by the page it opens', async () => {
   computeDashboardAlerts.mockResolvedValue({ alerts: [
     { id: 'ar_overdue_60', severity: 'critical', count: 4, label: '4 invoices over 60 days', href: '/admin/invoices?tab=overdue' },
@@ -114,11 +125,11 @@ test('who=claude returns claude and either; who=person only person; broken sorts
   expect(capped.items).toHaveLength(2);
 });
 
-test('the open-rows query excludes done rows, Activity-only rows and the cron\'s dashboard_alert echoes, scoped to the role', async () => {
+test('the open-rows query excludes done rows and the cron\'s dashboard_alert echoes, never filters Activity-only rows, and is scoped to the role', async () => {
   await listNeedsMe({ role: 'technician' });
   expect(mockCalls).toEqual(expect.arrayContaining([['whereNull', 'done_at']]));
   expect(mockCalls.find(([name, sql]) => name === 'whereRaw' && /triggerKey.*dashboard_alert/.test(sql))).toBeTruthy();
-  expect(NotificationService._private.excludeActivityOnlyFromBell).toHaveBeenCalled();
+  expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /feed/.test(sql))).toBe(false);
   expect(NotificationService.scopeAdminFeedToRole.mock.calls.map((c) => c[1])).toEqual(['technician']);
   // Standing conditions carry owner-only finance totals: not for a technician.
   expect(computeDashboardAlerts).not.toHaveBeenCalled();

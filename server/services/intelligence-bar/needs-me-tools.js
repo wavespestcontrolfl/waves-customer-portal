@@ -48,6 +48,7 @@ function toBarItem(item) {
     done_when: item.doneWhen,
     ...(item.count != null ? { count: item.count } : {}),
     derived: item.derived,
+    ...(item.activityOnly ? { activity_only: true } : {}),
     created_at: item.createdAt,
   };
 }

@@ -1,6 +1,6 @@
 // The one reader for "what is open". Owner and Claude sessions read the same list, each
 // item in the shape of docs/admin-notifications.md section 2: what it is about, what would
-// clear it, and who may act. Read-only, no LLM. Two sources: open admin notification rows
+// clear it, and who may act. Read-only, no LLM. Two sources: open admin notification rows (the bell's and the Activity feed's)
 // and the dashboard's standing conditions. A source that fails reports a warning; the
 // other still answers (CLAUDE.md rule 6).
 const db = require('../models/db');
@@ -79,6 +79,7 @@ function mapAlertRow(row) {
     doneWhen: composed ? meta.doneWhen : null,
     who: composed ? meta.who : (row.category === 'ops_digest' && meta.audience === 'engineering' ? 'claude' : 'person'),
     derived: !composed,
+    activityOnly: meta.feed === 'activity',
     createdAt: row.created_at,
     readAt: row.read_at || null,
     metadata: { dedupeKey: meta.dedupeKey || null, triggerKey: meta.triggerKey || null },
@@ -105,10 +106,10 @@ function mapStanding(alert) {
 }
 
 async function openAlertRows(role) {
-  const query = NotificationService._private.excludeActivityOnlyFromBell(NotificationService.scopeAdminFeedToRole(
-    db('notifications').where({ recipient_type: 'admin' }),
-    role,
-  ));
+  // Activity-only rows (feed 'activity': engineering findings, quiet standing digests) are
+  // included on purpose: the bell never shows them, but they are open work, and the
+  // engineering ones are the Claude work. Each carries activityOnly: true.
+  const query = NotificationService.scopeAdminFeedToRole(db('notifications').where({ recipient_type: 'admin' }), role);
   // The cron's persisted dashboard_alert rows echo the standing conditions below.
   return query.whereNull('done_at')
     .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
