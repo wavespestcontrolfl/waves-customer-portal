@@ -178,13 +178,15 @@ describe('wiring', () => {
     const { updateUnreviewedRouteDecisions } = require('../services/call-routing-gates');
     const { c, sqls } = conn((q) => (/for update/i.test(q.sql) ? [{ id: 'a' }] : 1));
     await updateUnreviewedRouteDecisions(c, { call_log_id: 'c1', decision_version: ['v2-1.50.0', 'v2-1.50.0+r1'], mode: 'enforce' }, { final_action_taken: 'auto_route' });
-    expect(sqls[0].sql).toMatch(/"decision_version" in \(\?, \?\)/i);
-    expect(sqls[0].bindings).toEqual(['c1', 'v2-1.50.0', 'v2-1.50.0+r1', 'enforce']);
+    // sqls[0] is the call row lock (every writer takes it first); sqls[1] the scoped decision lock
+    expect(sqls[0].sql).toMatch(/from "call_log"/i);
+    expect(sqls[1].sql).toMatch(/"decision_version" in \(\?, \?\)/i);
+    expect(sqls[1].bindings).toEqual(['c1', 'v2-1.50.0', 'v2-1.50.0+r1', 'enforce']);
   });
 
   test('the auto-routed queue lists every revision version and joins a verdict through the ONE shared join', () => {
     const src = read('../routes/admin-triage.js');
-    expect(src).toMatch(/whereIn\('decision_version', V2_DECISION_VERSIONS_WITH_REVISIONS\)/);
+    expect(src).toMatch(/routeDecisionsListedScope\(db\('route_decisions'\)/); // the listed scope spans base + revision versions
     expect(src).toMatch(/leftJoinRouteFeedback\(db\('route_decisions'\)/);
     expect(src).not.toMatch(/route_feedback\.route_decision_id', 'route_decisions\.id'/);
   });

@@ -7,7 +7,7 @@
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, withLockedRouteDecisions, V2_DECISION_VERSION, routeDecisionFamilyVersions, leftJoinRouteFeedback, innerJoinRouteFeedback } = require('../services/call-routing-gates');
+const { buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, withLockedRouteDecisions, insertRouteDecisionLocked, resolveDisplayedRouteDecision, V2_DECISION_VERSION, routeDecisionFamilyVersions, leftJoinRouteFeedback, innerJoinRouteFeedback } = require('../services/call-routing-gates');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('upsertRouteDecision on PostgreSQL', () => {
@@ -160,6 +160,87 @@ jest.setTimeout(30000);
     expect(all.map((x) => x.decision_version)).toEqual([`${V2_DECISION_VERSION}+r1`, V2_DECISION_VERSION]);
     const [fb] = await db('route_feedback').where({ call_log_id: callId });
     expect(fb.route_decision_id).toBe(row.id);
+  });
+
+  // codex #5446 r1 P1: FOR UPDATE on the decision rows that exist when the verdict
+  // reads cannot stop a reprocess INSERTING a new decision row (a new recording key)
+  // after that snapshot. The verdict writer therefore locks the CALL row first, the
+  // same order the fenced upsertRouteDecision takes, so such an insert waits for the
+  // verdict to finish.
+  test('a verdict holding its locks BLOCKS a reprocess that would INSERT a new decision row (new recording key); the verdict saw one consistent snapshot', async () => {
+    await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let locked;
+    const lockedP = new Promise((r) => { locked = r; });
+    let seen;
+    const verdict = withLockedRouteDecisions(db, { callLogId: callId, mode: 'enforce' }, async (trx, decisionRows) => {
+      seen = decisionRows.map((r) => r.recording_sid);
+      locked();
+      await gate;
+      await trx('route_feedback').insert({ call_log_id: callId, route_decision_id: decisionRows[0].id, verdict: 'accept' });
+    });
+    await lockedP;
+    let inserted = false;
+    const reprocess = upsertRouteDecision(db, { ...decision(true, 'auto_route'), recording_sid: 'RE2' }, { callLogId: callId, processingToken: 'tok-new' }).then((n) => { inserted = true; return n; });
+    await sleep(400);
+    expect(inserted).toBe(false); // the new row cannot appear mid-verdict
+    release();
+    await Promise.all([verdict, reprocess]);
+    expect(seen).toEqual(['RE1']);
+    expect(await rows()).toHaveLength(2);
+  });
+
+  // codex #5446 r2 P1: the displayed-revision token is the row's xmin (as text): it
+  // changes on EVERY update of the row, with nobody bumping a column.
+  const revisionOf = async (id) => (await db('route_decisions').where({ id }).select(db.raw('route_decisions.xmin::text AS revision')).first()).revision;
+
+  test('the revision (xmin::text through knex) changes on the same-run OUTCOME update and on a refresh, but not on a plain row lock', async () => {
+    await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
+    const [row] = await rows();
+    const r0 = await revisionOf(row.id);
+    expect(r0).toMatch(/^\d+$/);
+    // a verdict-style FOR UPDATE does not write the tuple's xmin
+    await withLockedRouteDecisions(db, { callLogId: callId, mode: 'enforce' }, async (trx, locked) => { expect(locked[0].revision).toBe(r0); });
+    expect(await revisionOf(row.id)).toBe(r0);
+    // the outcome update: final_action_taken / created_scheduled_service_id, NO created_at bump
+    await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
+      { call_log_id: callId, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: 'RE1' },
+      { final_action_taken: 'auto_route_skipped' }));
+    const r1 = await revisionOf(row.id);
+    expect(r1).not.toBe(r0);
+    // the displayed-decision check under the lock: the revision the reviewer saw (r0) is now stale
+    const newestOf = (list) => list[0];
+    const verdictCheck = (shown) => withLockedRouteDecisions(db, { callLogId: callId, mode: 'enforce' }, async (trx, locked) => resolveDisplayedRouteDecision(locked, row.id, newestOf, shown));
+    expect(await verdictCheck(r0)).toMatchObject({ stale: true });
+    expect(await verdictCheck(r1)).toMatchObject({ decision: { id: row.id } });
+    expect(new Date((await rows())[0].created_at).getTime()).toBe(new Date(row.created_at).getTime());
+    // a reprocess refresh moves it again
+    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
+    expect(await revisionOf(row.id)).not.toBe(r1);
+  });
+
+  test('a verdict holding the call lock BLOCKS a legacy shadow decision INSERT (insertRouteDecisionLocked) until it finishes', async () => {
+    await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let locked;
+    const lockedP = new Promise((r) => { locked = r; });
+    const verdict = withLockedRouteDecisions(db, { callLogId: callId, mode: 'enforce' }, async (trx, decisionRows) => {
+      locked();
+      await gate;
+      await trx('route_feedback').insert({ call_log_id: callId, route_decision_id: decisionRows[0].id, verdict: 'accept' });
+    });
+    await lockedP;
+    let inserted = false;
+    const legacy = insertRouteDecisionLocked(db, { ...decision(true, 'auto_route'), decision_version: 'legacy-call-v1', mode: 'shadow', recording_sid: '' }, { returning: ['id'] })
+      .then((r) => { inserted = true; return r; });
+    await sleep(400);
+    expect(inserted).toBe(false); // the decision row cannot appear under the verdict's snapshot
+    release();
+    const [out] = await Promise.all([legacy, verdict]);
+    expect(out[0].id).toBeTruthy();
+    expect(await rows()).toHaveLength(2);
   });
 
   test('a refresh holding the row lock BLOCKS a concurrent verdict, which then attaches to the REFRESHED row it reads', async () => {
