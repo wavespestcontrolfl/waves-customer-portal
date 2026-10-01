@@ -3634,9 +3634,8 @@ function readFrozenWateringInstruction(structured) {
   if (!frozen || typeof frozen !== 'object' || Array.isArray(frozen)) return null;
   const stateOk = frozen.state === null || FROZEN_INSTRUCTION_STATES.includes(frozen.state);
   const linesOk = Array.isArray(frozen.lines) && frozen.lines.every((line) => typeof line === 'string');
-  // A state-null instruction with no mow hold is a no-claim, never a snapshot:
-  // it is regenerated.
-  return (frozen.state !== null || isValidMowHold(frozen.mowHold)) && stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
+  // A state-null instruction is a no-claim, never a snapshot: it is regenerated.
+  return frozen.state !== null && stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
 }
 
 // Fill the {holdUntil} token in the plan's afterHold overlay with the hold's

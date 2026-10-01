@@ -127,7 +127,7 @@ test('a no-claim (state null) instruction, or one built while the products could
   expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
 });
 
-test('a state-null instruction that carries a label mow hold IS frozen (the mow line is independent of the watering state)', async () => {
+test('a state-null instruction is never frozen, even with a label mow hold (regenerated from the frozen product facts)', async () => {
   const mowHold = { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' };
   const instruction = { ...INSTRUCTION(40), state: null, lines: [], mowHold };
   buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
@@ -136,19 +136,8 @@ test('a state-null instruction that carries a label mow hold IS frozen (the mow 
     return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' }, banner: { state: null, lines: [], mowHold } } };
   });
   const { knex, state } = fakeKnex({});
-  const result = await run(knex);
-  expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(instruction);
-  expect(state.notes.lawnWateringFreeze.banner).toMatchObject({ state: null, lines: [], mowHold });
-  expect(result.wateringFreeze).toEqual(state.notes.lawnWateringFreeze);
-  // ...but never when the products could not be read.
-  buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
-    opts.wateringInstructionOut.instruction = instruction;
-    opts.wateringInstructionOut.productsLoadFailed = true;
-    return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' } } };
-  });
-  const failed = fakeKnex({});
-  await run(failed.knex);
-  expect(failed.state.notes).not.toHaveProperty('lawnWateringFreeze');
+  await run(knex);
+  expect(state.notes).not.toHaveProperty('lawnWateringFreeze');
 });
 
 test('gate back on after a rollback: the original instruction is what persists', async () => {

@@ -95,12 +95,12 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     let wateringFreeze = null;
     // The frozen banner keeps only the treatment-specific lines: plan-dependent
     // sentences are composed at each render, never frozen.
-    // Only a real claim is a snapshot: a state-null instruction (unless it
-    // carries a label mow hold, which is a claim of its own and freezes with the
-    // record), or one built while the visit's products could not be read, is
-    // never frozen (the next render regenerates it from what the products
-    // really are).
-    if (instructionOut.instruction && (instructionOut.instruction.state || instructionOut.instruction.mowHold) && !instructionOut.productsLoadFailed) {
+    // Only a real claim is a snapshot: a state-null instruction, or one built
+    // while the visit's products could not be read, is never frozen (the next
+    // render regenerates it from what the products really are). A mow hold on
+    // a state-null visit is regenerated too, from the frozen product facts, so
+    // it reads the same at every render.
+    if (instructionOut.instruction && instructionOut.instruction.state && !instructionOut.productsLoadFailed) {
       await knex('service_records')
         .where({ id: service.id })
         .whereRaw("(structured_notes::jsonb -> 'lawnWateringFreeze') IS NULL")

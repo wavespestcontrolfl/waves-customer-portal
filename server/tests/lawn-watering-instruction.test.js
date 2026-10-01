@@ -631,6 +631,8 @@ describe('mow hold', () => {
   test('month, year and leap-day ends', () => {
     expect(mow([entry(HOLD(24), 3)])).toMatchObject({ untilDate: '2026-10-03', untilLabel: 'Sat' });
     expect(mow([entry(HOLD(24), 3)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-02', untilLabel: 'Sat' });
+    // A week or more out, the label carries the date too.
+    expect(mow([entry(HOLD(24), 7)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-06', untilLabel: 'Wed, Jan 6', line: 'Mowing: hold off until Wed, Jan 6, 7 days after today\'s treatment.' });
     expect(mow([entry(HOLD(24), 3)], '2028-02-27T17:00:00Z')).toMatchObject({ untilDate: '2028-03-01', untilLabel: 'Wed' });
     expect(mow([entry(HOLD(24), 14)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-13' });
   });

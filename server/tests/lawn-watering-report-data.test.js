@@ -556,15 +556,11 @@ describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () =>
       expect(replay.reportV2.banner).not.toHaveProperty('mowHold');
     });
 
-    test('a state-null frozen instruction replays only when it carries a valid mow hold', async () => {
+    test('a state-null frozen instruction is never replayed: the mow line is regenerated from the frozen facts', async () => {
       const mowOnly = { state: null, lines: [], minutes: {}, mowHold: { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: MOW_LINE } };
       const service = serviceFacts({ [PRODUCT_ID]: withMow(null, 7) });
       const replay = await buildReportV1Data(frozenWith(service, mowOnly), 'token-w1', makeKnex(fixtures()));
-      // The frozen 2-day value, not the facts' 7.
-      expect(replay.reportV2.banner).toMatchObject({ state: null, lines: [], mowHold: { days: 2, line: MOW_LINE } });
-      // A malformed mow hold is not a snapshot: regenerated from the facts.
-      const bad = await buildReportV1Data(frozenWith(service, { ...mowOnly, mowHold: { days: 99, line: 'x' } }), 'token-w1', makeKnex(fixtures()));
-      expect(bad.reportV2.banner.mowHold).toMatchObject({ days: 7 });
+      expect(replay.reportV2.banner).toMatchObject({ state: null, lines: [], mowHold: { days: 7 } });
     });
 
     test('a frozen banner with a malformed mow hold prints no mow line', async () => {

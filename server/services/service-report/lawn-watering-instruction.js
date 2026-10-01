@@ -148,6 +148,8 @@ function mowHoldLine(untilLabel, days) {
 // The longest valid label hold across the applied products, as an ET calendar
 // date: completion's ET date plus whole calendar days (pure date arithmetic, so
 // a DST change in between cannot move it by a day).
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 function buildMowHold(entries, completedAt) {
   const at = toDate(completedAt);
   if (!at) return null;
@@ -158,7 +160,10 @@ function buildMowHold(entries, completedAt) {
   const longest = Math.max(...days);
   const start = etParts(at);
   const until = new Date(Date.UTC(start.year, start.month - 1, start.day + longest));
-  const untilLabel = WEEKDAYS[until.getUTCDay()];
+  // A week or more out, the weekday alone is ambiguous: add the date.
+  const untilLabel = longest >= 7
+    ? `${WEEKDAYS[until.getUTCDay()]}, ${MONTHS_SHORT[until.getUTCMonth()]} ${until.getUTCDate()}`
+    : WEEKDAYS[until.getUTCDay()];
   return {
     days: longest,
     untilDate: until.toISOString().slice(0, 10),
