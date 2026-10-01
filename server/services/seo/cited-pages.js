@@ -24,7 +24,8 @@
  */
 
 const { classifyUrl, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
-const { MEASUREMENT_VERSION, cleanUrls } = require('./aeo-measurement');
+const { cleanUrls, isMeasuredAnswer } = require('./aeo-measurement');
+const { LIVE_STATUSES } = require('./link-authority-selection');
 const { isNeverTargetHost } = require('./link-registry');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 const appScraper = require('./llm-app-scraper');
@@ -173,9 +174,12 @@ function comparePages(a, b) {
 
 /**
  * rankCitedPages(rows, queryRows, { currentSurfaces, limit }) → ranked pages.
- * Pure. `rows` are measured seo_llm_mentions rows, NEWEST FIRST (id, query,
- * query_id, llm_platform, model_version, check_date, cited_urls,
- * waves_mentioned). Each page:
+ * Pure. `rows` are seo_llm_mentions rows, NEWEST FIRST (id, query, query_id,
+ * llm_platform, model_version, check_date, cited_urls, waves_mentioned and
+ * the measurement columns). Every row takes part in choosing the current
+ * observation; only measured ones (isMeasuredAnswer) count as citations, so
+ * a current answer that failed or could not resolve its sources is neither a
+ * miss nor a citation. Each page:
  *   { key, url, host, category, subtype, tier, rank,
  *     citations, currentCitations, currentMisses, namedIn,
  *     engines, missEngines, priorityCity,
@@ -190,6 +194,7 @@ function rankCitedPages(rows, queryRows, { currentSurfaces = null, limit = DEFAU
   const current = currentRowIds(rows || [], currentSurfaces);
   const pages = new Map();
   for (const row of rows || []) {
+    if (!isMeasuredAnswer(row)) continue; // still decides what is current, never a citation
     const question = questionOf(row, queryById, benchmarkByQuery);
     const provider = isProviderIntentQuestion(question);
     const answer = { question, provider, isCurrent: current.has(row.id), named: row.waves_mentioned === true, engine: row.llm_platform || 'unknown' };
@@ -211,19 +216,21 @@ function rankCitedPages(rows, queryRows, { currentSurfaces = null, limit = DEFAU
 }
 
 /**
- * readCitedPageRows(db, { since }) → measured mention rows newest first, from
- * active managed queries (or unmanaged legacy rows), since the ET date.
+ * readCitedPageRows(db, { since }) → EVERY mention row newest first (measured
+ * or not), from active managed queries (or unmanaged legacy rows), since the
+ * ET date. Unmeasured rows are kept so a failed newest probe stays the
+ * current observation (as on the dashboard) instead of promoting an older
+ * answer; only measured rows ever count as citations.
  */
 async function readCitedPageRows(db, { since }) {
   return db('seo_llm_mentions as m')
     .leftJoin('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
-    .where({ 'm.measurement_version': MEASUREMENT_VERSION, 'm.answer_available': true, 'm.citations_complete': true })
     .where('m.check_date', '>=', since)
-    .whereNotNull('m.cited_urls')
     .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
     .orderBy('m.check_date', 'desc')
     .orderBy('m.created_at', 'desc')
-    .select('m.id', 'm.query', 'm.query_id', 'm.llm_platform', 'm.model_version', 'm.check_date', 'm.cited_urls', 'm.waves_mentioned');
+    .select('m.id', 'm.query', 'm.query_id', 'm.llm_platform', 'm.model_version', 'm.check_date', 'm.cited_urls', 'm.waves_mentioned',
+      'm.measurement_version', 'm.answer_available', 'm.citations_complete');
 }
 
 /**
@@ -265,8 +272,8 @@ function daysBetween(fromDate, toDate) {
  * recheckPlacements(placements, rows, { now }) → [{ prospectId, host, liveOn,
  *   daysLive, pages, questions, before, after, verdict }]
  * Pure. `placements` are seo_link_prospects rows with first_live_at
- * (id, target_domain, live_url, first_live_at); `rows` are measured mention
- * rows (any order) covering RECHECK_BEFORE_DAYS before the oldest placement.
+ * (id, target_domain, live_url, first_live_at); `rows` are mention rows (any
+ * order; only measured ones are read) covering RECHECK_BEFORE_DAYS before the oldest placement.
  * The page is the live_url when engines cited it before the link went live,
  * else every page on the host they cited; the questions are those whose
  * answers cited it before that day. before = those questions' answers in the
@@ -278,7 +285,7 @@ function daysBetween(fromDate, toDate) {
  */
 function recheckPlacements(placements, rows, { now = new Date() } = {}) {
   const today = etDateString(now);
-  const dated = (rows || []).map((r) => ({ ...r, date: String(r.check_date instanceof Date ? r.check_date.toISOString() : r.check_date).slice(0, 10), keys: new Set(cleanUrls(r.cited_urls).map(pageKey).filter(Boolean)) }));
+  const dated = (rows || []).filter(isMeasuredAnswer).map((r) => ({ ...r, date: String(r.check_date instanceof Date ? r.check_date.toISOString() : r.check_date).slice(0, 10), keys: new Set(cleanUrls(r.cited_urls).map(pageKey).filter(Boolean)) }));
   const out = [];
   for (const pl of placements || []) {
     const host = canonicalProspectDomain(pl.target_domain);
@@ -317,11 +324,13 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
 
 /**
  * loadPlacementRechecks(db, { now }) → recheckPlacements over every placement
- * first seen live in the last RECHECK_MAX_PLACEMENT_AGE_DAYS.
+ * still live (live / indexed) and first seen live in the last
+ * RECHECK_MAX_PLACEMENT_AGE_DAYS.
  */
 async function loadPlacementRechecks(db, { now = new Date() } = {}) {
   const oldest = addETDays(now, -RECHECK_MAX_PLACEMENT_AGE_DAYS);
   const placements = await db('seo_link_prospects')
+    .whereIn('status', LIVE_STATUSES) // a lost placement keeps first_live_at; it is no longer live
     .whereNotNull('first_live_at').where('first_live_at', '>=', oldest)
     .select('id', 'target_domain', 'live_url', 'first_live_at');
   if (!placements.length) return [];

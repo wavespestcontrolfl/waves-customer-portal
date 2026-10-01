@@ -11,9 +11,12 @@ const Q5 = 'Best no-contract pest control near Lakewood Ranch FL?'; // provider,
 const Q3 = 'How much does quarterly pest control cost in the Bradenton / Sarasota area?'; // cost
 
 let seq = 0;
-function row({ query, platform = 'perplexity', date = '2026-09-30', urls = [], named = false, model = 'sonar' }) {
+function row({ query, platform = 'perplexity', date = '2026-09-30', urls = [], named = false, model = 'sonar', answered = true }) {
   seq += 1;
-  return { id: `m${seq}`, query, query_id: null, llm_platform: platform, model_version: model, check_date: date, cited_urls: urls, waves_mentioned: named };
+  return {
+    id: `m${seq}`, query, query_id: null, llm_platform: platform, model_version: model, check_date: date, cited_urls: answered ? urls : null, waves_mentioned: named,
+    measurement_version: 2, answer_available: answered, citations_complete: answered,
+  };
 }
 
 describe('pageKey', () => {
@@ -108,6 +111,14 @@ describe('rankCitedPages', () => {
       row({ query: Q5, platform: 'gemini', model: 'gemini', urls: ['https://www.yelp.com/lwr'] }),
     ];
     expect(rankCitedPages(rows, []).map((p) => p.host)).toEqual(['floridist.com', 'smarfle.com', 'yelp.com']);
+  });
+
+  test('a failed newest probe stays the current observation — the older answer is history, not a current miss', () => {
+    const rows = [
+      row({ query: Q1, date: '2026-09-30', answered: false }),
+      row({ query: Q1, date: '2026-09-20', urls: ['https://floridist.com/best'], named: false }),
+    ];
+    expect(rankCitedPages(rows, [])[0]).toMatchObject({ tier: 3, currentMisses: 0, currentCitations: 0, citations: 1 });
   });
 
   test('one answer citing the same page twice counts once', () => {
