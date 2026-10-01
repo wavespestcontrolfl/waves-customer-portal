@@ -303,6 +303,32 @@ router.get('/', async (req, res) => {
       if (counts[r.status] !== undefined) counts[r.status] = parseInt(r.n, 10);
     }
 
+    // A street-level address hold's read-back dialog must show the visit's LIVE service address
+    // (corrections after booking change it), not only the address captured on the card. One batched
+    // read for the hold cards on this page, admin-only like the card's confirm action.
+    if (req.techRole === 'admin') {
+      const parse = (v) => { if (v && typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
+      const holds = items.filter((i) => i.reason_code === 'outbound_booking_review')
+        .map((i) => ({ item: i, payload: parse(i.payload) }))
+        .filter((h) => h.payload?.street_level_address && h.payload.scheduled_service_id);
+      if (holds.length) {
+        try {
+          const rows = await db('scheduled_services')
+            .whereIn('id', [...new Set(holds.map((h) => String(h.payload.scheduled_service_id)))])
+            .select('id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+          const byId = new Map(rows.map((r) => [String(r.id), r]));
+          for (const { item, payload } of holds) {
+            const r = byId.get(String(payload.scheduled_service_id));
+            if (!r) continue;
+            const line = require('../services/street-level-hold').visitServiceAddressLine(r);
+            if (line) item.visit_address = line;
+          }
+        } catch (addrErr) {
+          logger.warn(`[admin-triage] hold visit address read failed: ${addrErr.code || addrErr.name || 'error'}`);
+        }
+      }
+    }
+
     res.json({ items, counts });
   } catch (err) {
     logger.error(`[admin-triage] list failed: ${err.message}`);
@@ -374,6 +400,34 @@ async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTa
   return new Date(lead.email_confirmed_at).getTime() > new Date(cardCreatedAt).getTime();
 }
 
+// A street-level address hold (call-recording-processor): the office-review
+// card whose payload.street_level_address is set. It is settled by the linked
+// visit — confirmed (runOutboundReviewConfirmHook resolves it), corrected, or
+// cancelled — never by a generic call verdict / Resolve / Dismiss, which would
+// hide the work while the visit stays pending. Protected until the activation
+// finishes: office confirm commits status 'confirmed' BEFORE the hook stamps
+// customer_confirmed (and a transient hook failure leaves it unstamped), and
+// the hook is what files the owed follow-up, so the key is customer_confirmed
+// = false — not status = 'pending'. A cancelled / skipped / rescheduled visit
+// releases the card.
+// COALESCE keeps the predicate two-valued: a card with no such key must read
+// FALSE here, never NULL (NOT NULL would drop it from the bulk resolve).
+const STREET_LEVEL_HOLD_OPEN_SQL = `(triage_items.reason_code = 'outbound_booking_review'
+  AND COALESCE(triage_items.payload->>'street_level_address', '') = 'true'
+  AND COALESCE(triage_items.payload->>'closed_out', '') = ''
+  AND EXISTS (SELECT 1 FROM scheduled_services hold_ss
+    WHERE hold_ss.id::text = triage_items.payload->>'scheduled_service_id'
+      AND hold_ss.customer_confirmed = false
+      AND hold_ss.status NOT IN ('cancelled', 'skipped', 'rescheduled')))`;
+async function streetLevelHoldStillPending(conn, item) {
+  if (!item || item.reason_code !== 'outbound_booking_review') return false;
+  const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+  if (!payload?.street_level_address || !payload.scheduled_service_id || payload.closed_out) return false;
+  const svc = await conn('scheduled_services').where({ id: payload.scheduled_service_id }).first('status', 'customer_confirmed');
+  return !!svc && !svc.customer_confirmed && !['cancelled', 'skipped', 'rescheduled'].includes(String(svc.status || ''));
+}
+const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending visit: confirm the address with the customer, then confirm (or correct or cancel) the visit itself. It resolves when the visit does.';
+
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
@@ -416,6 +470,19 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // r33 guarantee against the email-correction fanout, which pre-locks
     // the same way.
     await lockTriageCall(trx, item.call_log_id);
+    // A street-level address hold settles with its visit, never by Resolve /
+    // Dismiss. Checked HERE, under the per-call lock and inside the
+    // transaction, so the decision and the write cannot straddle a concurrent
+    // office confirm.
+    // The card is re-read UNDER the lock and the guard judges its LIVE payload: a promotion
+    // (call reprocess) can turn a plain outbound_booking_review card into a street-level hold while
+    // this action waited for the lock, and the route's pre-lock snapshot would miss it.
+    const liveCard = ['resolved', 'dismissed'].includes(nextStatus)
+      ? await trx('triage_items').where({ id }).first('reason_code', 'payload')
+      : null;
+    if (['resolved', 'dismissed'].includes(nextStatus) && await streetLevelHoldStillPending(trx, liveCard ? { ...item, ...liveCard } : item)) {
+      throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    }
     if (holdsTable) {
       await trx('first_touch_holds')
         .where({ call_log_id: item.call_log_id })
@@ -1758,6 +1825,10 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
+    // A street-level address hold is settled by its visit, not by a verdict.
+    if (await streetLevelHoldStillPending(db, item)) {
+      return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
+    }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
     // one update. The affected-row count is the win check — the first verdict
@@ -2004,6 +2075,9 @@ router.post('/:id/verdict', async (req, res) => {
         // open, and they must be reviewed on their own (codex r33 P1).
         .modify((q) => { if (item.reason_code === 'auto_booking_skipped_after_approval') q.where({ id: item.id }); })
         .whereRaw("payload->'reschedule_proposal' IS NULL")
+        // …and a street-level address hold whose visit is still pending: the
+        // verdict is a call judgment, the hold is settled by its visit.
+        .whereRaw(`NOT ${STREET_LEVEL_HOLD_OPEN_SQL}`)
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',
@@ -2318,4 +2392,4 @@ module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
-  clearCallbackNumberHold, emailDisagreementConfirmed };
+  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL };

@@ -31,7 +31,7 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // routes/appointment-public.js's .ics route applies the same predicate, so the
 // portal can never advertise a link that 404s or hide one the route serves
 // (codex r3 P1).
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const {
   accountPropertyIds,
@@ -149,7 +149,7 @@ router.get('/', async (req, res, next) => {
       .where((qb) => qb
         .whereNull('scheduled_services.source_action')
         .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
@@ -397,9 +397,7 @@ router.post('/:id/confirm', async (req, res, next) => {
     // A call-created follow-up (visit 2) is dispatch-owned until the office
     // confirms the exact time — the row is hidden from the customer list
     // above; refuse a direct confirm too (same 404 shape, no info leak).
-    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(service.source_action)
-      && service.status === 'pending'
-      && !service.customer_confirmed) {
+    if (isUnreviewedDispatchOwned(service)) {
       return res.status(404).json({ error: 'Appointment not found or already confirmed' });
     }
 
@@ -503,9 +501,7 @@ router.post('/:id/reschedule', async (req, res, next) => {
       // dispatch hasn't confirmed yet is hidden from the customer, so a
       // direct reschedule against its id must refuse too (same 404 shape,
       // no info leak).
-      if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(service.source_action)
-        && service.status === 'pending'
-        && !service.customer_confirmed) {
+      if (isUnreviewedDispatchOwned(service)) {
         return { statusCode: 404, error: 'Appointment not found' };
       }
 
@@ -700,7 +696,7 @@ router.get('/account-next', async (req, res, next) => {
       .where((qb) => qb
         .whereNull('scheduled_services.source_action')
         .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
@@ -758,7 +754,7 @@ router.get('/properties-next', async (req, res, next) => {
       .where((qb) => qb
         .whereNull('scheduled_services.source_action')
         .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
@@ -840,7 +836,7 @@ router.get('/next', async (req, res, next) => {
       .where((qb) => qb
         .whereNull('scheduled_services.source_action')
         .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
