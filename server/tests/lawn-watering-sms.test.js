@@ -26,7 +26,8 @@ function planArgs(over = {}) {
     alreadySent: false,
     gateOn: true,
     ruleGateOn: true,
-    frozenAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    completionTextRequested: true,
     nowMs: Date.now(),
     ...over,
   };
@@ -73,8 +74,8 @@ describe('lawnWateringSmsPlan', () => {
     expect(lawnWateringSmsPlan(planArgs(over))).toEqual({ send: false, reason });
   });
 
-  test('does not look at whether the completion text went out (no such input)', () => {
-    // The plan has no completion-text input at all: a withheld, failed or
+  test('does not look at whether the completion text went out', () => {
+    // Only whether it was REQUESTED matters: a withheld, failed or
     // already-handled completion text cannot suppress the watering text.
     expect(lawnWateringSmsPlan(planArgs())).toMatchObject({ send: true });
   });
@@ -118,10 +119,11 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     const state = {
       record: { id: 'rec-1', structured_notes: {} },
       svc: { id: 'svc-1', customer_id: 'cust-1', cust_phone: '+19415550100' },
-      notes: { lawnWateringFreeze: { wateringInstruction: HOLD, frozenAt: new Date().toISOString() }, ...notes },
+      notes: { lawnWateringFreeze: { wateringInstruction: { ...HOLD, completedAt: new Date().toISOString() } }, ...notes },
       isBackfill: false,
       deliveryMode: 'auto_send',
       internalOnly: false,
+      completionTextRequested: true,
     };
     const deps = { db: {}, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified: (r) => r };
     return { state, deps, sendCustomerMessage, getTemplate, mergeNotes, merged };
@@ -302,6 +304,19 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(h.state.notes.lawnWateringSmsStatus).toBe('sent');
   });
 
+  test('a throw that carries a definite not_sent outcome lifts the fence, so a resumed completion retries', async () => {
+    const h = harness();
+    h.sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed after reject'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }));
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'failed', lawnWateringSmsDeliveryUnverifiedAt: null });
+    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(false);
+    // ...whereas an uncertain throw keeps the fence.
+    const u = harness();
+    u.sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('timeout'), { providerOutcome: { sent: false, deliveryOutcome: 'uncertain' } }));
+    expect(await sendLawnWateringSms(u.state, u.deps)).toEqual({ status: 'unverified' });
+    expect(lawnWateringSmsAlreadyHandled(u.state.notes)).toBe(true);
+  });
+
   test('never throws, even when the notes writer and sender both blow up', async () => {
     const h = harness();
     h.deps.throwIfDeliveryUnverified = () => { throw new Error('boom'); };
@@ -348,19 +363,35 @@ describe('freshness: never yesterday\'s instruction', () => {
   const FROZEN = '2026-09-30T18:40:00Z';
   const at = (iso) => Date.parse(iso);
   test('same ET day before the deadline sends', () => {
-    expect(lawnWateringSmsPlan(planArgs({ frozenAt: FROZEN, nowMs: at('2026-09-30T19:00:00Z') })).send).toBe(true);
+    expect(lawnWateringSmsPlan(planArgs({ completedAt: FROZEN, nowMs: at('2026-09-30T19:00:00Z') })).send).toBe(true);
   });
   test('a completion resumed the next ET day is stale', () => {
     // 12:30 AM ET Oct 1.
-    expect(lawnWateringSmsPlan(planArgs({ frozenAt: FROZEN, nowMs: at('2026-10-01T04:30:00Z') }))).toEqual({ send: false, reason: 'stale' });
+    expect(lawnWateringSmsPlan(planArgs({ completedAt: FROZEN, nowMs: at('2026-10-01T04:30:00Z') }))).toEqual({ send: false, reason: 'stale' });
   });
   test('past the instruction deadline is stale, even the same day', () => {
     const instruction = { ...HOLD, expiresAt: '2026-09-30T22:00:00.000Z' };
-    expect(lawnWateringSmsPlan(planArgs({ instruction, frozenAt: FROZEN, nowMs: at('2026-09-30T22:00:00Z') }))).toEqual({ send: false, reason: 'stale' });
-    expect(lawnWateringSmsPlan(planArgs({ instruction, frozenAt: FROZEN, nowMs: at('2026-09-30T21:59:00Z') })).send).toBe(true);
+    expect(lawnWateringSmsPlan(planArgs({ instruction, completedAt: FROZEN, nowMs: at('2026-09-30T22:00:00Z') }))).toEqual({ send: false, reason: 'stale' });
+    expect(lawnWateringSmsPlan(planArgs({ instruction, completedAt: FROZEN, nowMs: at('2026-09-30T21:59:00Z') })).send).toBe(true);
   });
-  test('an unknown freeze time fails closed', () => {
-    expect(lawnWateringSmsPlan(planArgs({ frozenAt: null }))).toEqual({ send: false, reason: 'stale' });
+  test('an unknown completion time fails closed', () => {
+    expect(lawnWateringSmsPlan(planArgs({ completedAt: null }))).toEqual({ send: false, reason: 'stale' });
+  });
+});
+
+describe('round 1 fixes', () => {
+  test('a flow that requested no completion text (operator toggle, Fast Complete, a grouped stop) sends no watering text', () => {
+    expect(lawnWateringSmsPlan(planArgs({ completionTextRequested: false }))).toEqual({ send: false, reason: 'completion_text_not_requested' });
+  });
+  test('the text uses the ASCII apostrophe so it stays GSM-7', () => {
+    const instruction = { ...HOLD, lines: ['Hold off watering until after today\u2019s treatment dries.'] };
+    const plan = lawnWateringSmsPlan(planArgs({ instruction }));
+    expect(plan.vars.watering_lines).toBe("Hold off watering until after today's treatment dries.");
+  });
+  test('freshness is judged against the completion instant, not a later freeze', () => {
+    // Completed yesterday 2:40 PM ET; resumed (and frozen) today 10 AM ET.
+    expect(lawnWateringSmsPlan(planArgs({ completedAt: '2026-09-30T18:40:00Z', nowMs: Date.parse('2026-10-01T14:00:00Z') })))
+      .toEqual({ send: false, reason: 'stale' });
   });
 });
 

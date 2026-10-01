@@ -47,7 +47,12 @@ function parseNotes(value) {
 
 function wateringLinesOf(instruction) {
   if (!instruction || !Array.isArray(instruction.lines)) return [];
-  return instruction.lines.filter((line) => typeof line === 'string' && line.trim() !== '');
+  // Same sentences as the report, with the typographic apostrophe the report
+  // uses (U+2019) swapped for ASCII: one curly quote forces the whole text
+  // into UCS-2 and roughly doubles its segments.
+  return instruction.lines
+    .filter((line) => typeof line === 'string' && line.trim() !== '')
+    .map((line) => line.replace(/\u2019/g, "'"));
 }
 
 // Has this visit's watering text already been handled (sent, queued, blocked,
@@ -70,7 +75,8 @@ function lawnWateringSmsPlan({
   alreadySent = false,
   gateOn = false,
   ruleGateOn = false,
-  frozenAt = null,
+  completedAt = null,
+  completionTextRequested = true,
   nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
@@ -79,6 +85,11 @@ function lawnWateringSmsPlan({
   if (internalOnly) return { send: false, reason: 'internal_only' };
   if (deliveryMode !== 'auto_send') return { send: false, reason: 'not_auto_send' };
   if (!phone) return { send: false, reason: 'no_phone' };
+  // A flow that deliberately sends no completion text (operator toggle,
+  // Fast Complete, a grouped stop whose combined summary owns the customer
+  // message) gets no watering text either. Only an attempted completion text
+  // that failed or was withheld still gets it (owner 2026-09-30).
+  if (!completionTextRequested) return { send: false, reason: 'completion_text_not_requested' };
   if (alreadySent) return { send: false, reason: 'already_sent' };
   if (!instruction || !SENDABLE_STATES.includes(instruction.state)) {
     return { send: false, reason: 'no_instruction' };
@@ -87,10 +98,12 @@ function lawnWateringSmsPlan({
   if (!lines.length) return { send: false, reason: 'no_lines' };
   // Fresh only: the lines say "today" / "tonight" and name clock times on the
   // visit's own day, so a completion resumed on a later ET day, or after the
-  // instruction's deadline, never sends them. An unknown freeze time fails closed.
-  const frozenMs = frozenAt ? Date.parse(frozenAt) : NaN;
-  if (!Number.isFinite(frozenMs)) return { send: false, reason: 'stale' };
-  if (etDateString(new Date(nowMs)) !== etDateString(new Date(frozenMs))) return { send: false, reason: 'stale' };
+  // instruction's deadline, never sends them. Judged against the completion
+  // instant the lines were built from (never the freeze time, which a later
+  // resume can mint); an instruction without it fails closed.
+  const completedMs = completedAt ? Date.parse(completedAt) : NaN;
+  if (!Number.isFinite(completedMs)) return { send: false, reason: 'stale' };
+  if (etDateString(new Date(nowMs)) !== etDateString(new Date(completedMs))) return { send: false, reason: 'stale' };
   const expiresMs = instruction.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
   if (Number.isFinite(expiresMs) && nowMs >= expiresMs) return { send: false, reason: 'stale' };
   return { send: true, vars: { watering_lines: lines.join(' ') } };
@@ -126,7 +139,8 @@ async function sendLawnWateringSms(args, deps) {
       alreadySent: lawnWateringSmsAlreadyHandled(notes),
       gateOn,
       ruleGateOn,
-      frozenAt: notes?.lawnWateringFreeze?.frozenAt || null,
+      completedAt: notes?.lawnWateringFreeze?.wateringInstruction?.completedAt || null,
+      completionTextRequested: args.completionTextRequested === true,
       nowMs: Date.now(),
     });
     if (!plan.send) return { status: `skip_${plan.reason}` };
@@ -190,15 +204,24 @@ async function sendLawnWateringSms(args, deps) {
       // throws after provider acceptance when its own audit write fails), so
       // the uncertainty fence stays and blocks any resend.
       const accepted = sendErr?.providerOutcome?.sent === true;
+      // A throw that carries a definite provider rejection (deliveryOutcome
+      // 'not_sent', e.g. the audit write failed after Twilio refused) is known
+      // not delivered: lift the fence so a resumed completion retries.
+      const notSent = !accepted && sendErr?.providerOutcome?.deliveryOutcome === 'not_sent';
       try {
         await stamp(accepted
           ? { lawnWateringSmsStatus: 'sent', lawnWateringSmsAt: new Date().toISOString(), lawnWateringSmsDeliveryUnverifiedAt: null }
-          : { lawnWateringSmsStatus: 'failed', lawnWateringSmsError: String(sendErr?.code || sendErr?.name || 'exception').slice(0, 64), lawnWateringSmsFailedAt: new Date().toISOString() });
+          : {
+            lawnWateringSmsStatus: 'failed',
+            lawnWateringSmsError: String(sendErr?.code || sendErr?.name || 'exception').slice(0, 64),
+            lawnWateringSmsFailedAt: new Date().toISOString(),
+            ...(notSent ? { lawnWateringSmsDeliveryUnverifiedAt: null } : {}),
+          });
       } catch (stampErr) {
         logger.warn(`[lawn-watering-sms] post-send status write failed for service_record ${record.id}: ${stampErr.message}`);
       }
       logger.warn(`[lawn-watering-sms] send raised for service_record ${record.id} (${sendErr?.code || sendErr?.name || 'exception'}); resend fenced`);
-      return { status: accepted ? 'sent' : 'unverified' };
+      return { status: accepted ? 'sent' : (notSent ? 'failed' : 'unverified') };
     }
 
     if (result && result.sent === true) {

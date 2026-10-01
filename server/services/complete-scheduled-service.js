@@ -12310,6 +12310,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       isBackfill: isBackfillCompletion,
       deliveryMode: typedDeliveryMode,
       internalOnly: isInternalOnlyCompletion,
+      // The completion text was REQUESTED (operator toggle, not suppressed,
+      // not a grouped stop's packet effects); its own failure or withholding
+      // still sends the watering text.
+      completionTextRequested: effectiveSendCompletionSms === true,
     }, {
       db,
       sendCustomerMessage,
