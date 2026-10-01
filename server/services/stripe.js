@@ -7,7 +7,7 @@ const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlacehold
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
-const { CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
+const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
 
 // Rendered-version stamp for a consent captured through an intent (codex
 // #5434 r1 P1): the saved-payment-method consent version the MINTING tab
@@ -1286,6 +1286,13 @@ const StripeService = {
   // `replacing`: the "use a different payment method" mint — keyed on the
   // retired intent's id (unbounded, no generation consumed) so re-requesting
   // the same replacement replays the same fresh intent.
+  // The intent is stamped with the saved-payment-method consent text version
+  // the page it is minted for renders (the GET mints it on page load, so
+  // this server's CONSENT_VERSION IS that page's), and the version salts the
+  // idempotency key: a page load after a copy change mints a fresh intent
+  // under the new text instead of replaying one stamped with the old, and
+  // the completion tail records a consent only under a current stamp
+  // (codex #5434 r1 P1).
   async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0, replacing = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
@@ -1300,9 +1307,10 @@ const StripeService = {
         purpose: 'appointment_card_request',
         request_id: String(requestId),
         scheduled_service_id: String(scheduledServiceId),
+        [CONSENT_VERSION_METADATA_KEY]: CONSENT_VERSION,
         ...(replacing ? { replaces: String(replacing) } : {}),
       },
-    }, { idempotencyKey: `appointment_card_request_${requestId}${salt}` });
+    }, { idempotencyKey: `appointment_card_request_${requestId}_${CONSENT_VERSION}${salt}` });
   },
 
   /**

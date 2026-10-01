@@ -232,6 +232,15 @@ router.post('/:token/complete', async (req, res) => {
         // the payload so a card-only intent is minted.
         return res.status(409).json({ error: 'Bank accounts aren’t available right now — please use a card.', code: 'bank_not_allowed' });
       }
+      if (result.code === 'consent_version_stale') {
+        // The intent this tab confirmed was minted for a page that rendered
+        // older consent text (the bundle attestation above passed, so the
+        // tab reloaded a newer bundle onto an old intent, e.g. a 3DS return
+        // across a copy change): nothing saved or enrolled — a fresh load
+        // re-mints under the current text.
+        const { consentVersionStaleResponse } = require('../services/payment-method-consent-text');
+        return res.status(409).json(consentVersionStaleResponse());
+      }
       if (result.code === 'consent_echo_failed') {
         // The card IS saved (row completed via webhook) but the browser's
         // sticky-consent echo could not be recorded — a retryable failure.

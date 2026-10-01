@@ -2015,6 +2015,16 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       await revertClaim();
       return { ok: false, code: 'intent_mismatch' };
     }
+    // The consent text the customer read is the version this intent's mint
+    // stamped (codex #5434 r1 P1). A stale or absent stamp — an intent
+    // minted for a page that rendered older copy, completed by the browser
+    // or by the webhook after a copy change — never saves, records or
+    // enrolls: the claim reverts (the row stays pending; a fresh page load
+    // mints under the current text) and the office gets one bell per intent.
+    if (!(await require('./payment-method-consents').deferredCaptureConsentVersionCurrent(live, { context: 'appointment card request completion', customerId: request.customer_id }))) {
+      await revertClaim();
+      return { ok: false, code: 'consent_version_stale' };
+    }
   }
 
   try {

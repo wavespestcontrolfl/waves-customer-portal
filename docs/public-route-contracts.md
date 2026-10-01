@@ -4351,13 +4351,22 @@ payer-billed, or Auto Pay is already active (the pending row is RETIRED to
 and chargeable; the POST runs the same
 live-verify (purpose `autopay_setup_link` + request id) and the same
 save → consent → enroll tail under the same claim/lease; `select-plan`
-is not applicable to these rows. `/complete` (both kinds) carries
-`consentTextVersion`, the saved-payment-method consent version the page
-rendered beside the capture checkbox (2026-09-30, codex #5434 r1 P1), and is
-refused with `409 { error, code: 'CONSENT_VERSION_STALE' }` before the
-capture service runs — no save, consent row or enrollment — when that is not
-the server's current version or is absent; the page prompts a refresh, which
-re-mints under the current text. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
+is not applicable to these rows. RENDERED CONSENT VERSION (2026-09-30, codex
+#5434 r1 P1, both kinds): the GET mints the SetupIntent for the page it
+serves, so the mint stamps the server's `CONSENT_VERSION` into the intent
+(`metadata.consent_text_version`) and salts the deterministic idempotency key
+with it — a page load after a copy change mints a fresh intent under the new
+text instead of replaying one stamped with the old. `/complete` carries
+`consentTextVersion`, the version the page rendered beside the capture
+checkbox, and is refused with `409 { error, code: 'CONSENT_VERSION_STALE' }`
+before the capture service runs when that is not the server's current version
+or is absent; and the shared completion tail — page POST and the
+`setup_intent.succeeded` backstop alike — re-reads the intent under its
+claim and refuses an intent whose stamp is stale or absent
+(`consent_version_stale`: nothing saved, recorded or enrolled, the claim
+reverts so the row stays pending, one Billing bell per intent for the office
+to re-collect; the route answers the same 409, the webhook acks). The page
+prompts a refresh, which re-mints under the current text. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
 AND the `secure_appointment_card` SMS template are both enabled, and
 unreachable until the funnel mints links. Bearer token
 (`appointment_card_requests.token` — 22-char base64url / 128-bit since
