@@ -195,16 +195,38 @@ function citedPagesByHost(pages) {
 }
 
 /**
- * citedPageFor(prospect, byHost) → the cited page to pitch, or null. The
- * prospect's own page when an engine cites it, else the domain's best-ranked
- * cited page. A subdomain prospect matches only its own host.
+ * citedPagesFor(prospect, byHost) → the cited pages to try, in order: the
+ * prospect's own page first when an engine cites it, then the host's other
+ * cited lists by rank (at most MAX_CITED_PAGES_TRIED). A subdomain prospect
+ * matches only its own host.
  */
-function citedPageFor(prospect, byHost) {
-  if (!byHost || !byHost.size) return null;
-  const pages = byHost.get(canonicalProspectDomain(prospect.target_domain));
-  if (!pages || !pages.length) return null;
+const MAX_CITED_PAGES_TRIED = 3;
+function citedPagesFor(prospect, byHost) {
+  const pages = (byHost && byHost.get(canonicalProspectDomain(prospect.target_domain))) || [];
   const own = prospect.target_url ? pageKey(prospect.target_url) : null;
-  return (own && pages.find((p) => p.key === own)) || pages[0];
+  const first = own ? pages.filter((p) => p.key === own) : [];
+  return [...first, ...pages.filter((p) => !first.includes(p))].slice(0, MAX_CITED_PAGES_TRIED);
+}
+
+/**
+ * pickCitedPage(candidates, fetchPageFn) → { cited, page } for the first
+ * readable candidate that does not already name Waves; otherwise a verdict
+ * for the prospect: { fail } when any candidate could not be read (whether
+ * Waves is on it is unknown — retry), else { skip } with every reason (each
+ * already names Waves or moved). One article naming Waves never rules out
+ * the publisher's other cited lists.
+ */
+async function pickCitedPage(candidates, fetchPageFn) {
+  const fails = [];
+  const skips = [];
+  for (const cited of candidates) {
+    let page = null;
+    try { page = await fetchPageFn(cited.url, { withText: true }); } catch { page = null; }
+    const verdict = citedPageVerdict(page, cited);
+    if (!verdict) return { cited, page };
+    (verdict.fail ? fails : skips).push(verdict.fail || verdict.skip);
+  }
+  return fails.length ? { verdict: { fail: fails.join('; ') } } : { verdict: { skip: skips.join('; ') } };
 }
 
 function citedPageBlock(cited) {
@@ -276,17 +298,21 @@ function citedPageVerdict(page, cited) {
 }
 
 /**
- * draftOne → { subject, body } | { skip: reason } | { fail: reason } | null
- * (no usable draft). With a cited page, the cited page is the one read: a page
- * that already names Waves is skipped, and one that cannot be read fails (the
- * lease retries) rather than being pitched unchecked.
+ * draftOne → { subject, body, cited } | { skip: reason } | { fail: reason } |
+ * null (no usable draft). With cited-page candidates, the first readable one
+ * that does not already name Waves is the page read and pitched (pickCitedPage);
+ * `cited` is that page, or null for the usual angle.
  */
-async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageText, cited = null }) {
+async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageText, candidates = [] }) {
   let page = null;
-  const url = cited ? cited.url : (prospect.target_url || `https://${prospect.target_domain}/`);
-  try { page = await fetchPageFn(url, cited ? { withText: true } : undefined); } catch { page = null; }
-  const verdict = cited ? citedPageVerdict(page, cited) : null;
-  if (verdict) return verdict;
+  let cited = null;
+  if (candidates.length) {
+    const picked = await pickCitedPage(candidates, fetchPageFn);
+    if (picked.verdict) return picked.verdict;
+    ({ cited, page } = picked);
+  } else {
+    try { page = await fetchPageFn(prospect.target_url || `https://${prospect.target_domain}/`); } catch { page = null; }
+  }
   const loc = pickLocation(prospect, profile);
   const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({
     model: DRAFT_MODEL,
@@ -297,7 +323,7 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
   const text = (resp && resp.content ? resp.content : []).map((b) => b.text || '').join('');
   const draft = parseDraft(text);
   if (!draft) ledgerCallRejected(resp, 'invalid_json');
-  return draft;
+  return draft && { ...draft, cited };
 }
 
 /**
@@ -369,16 +395,16 @@ async function pitchOne(p, { client, profile, fetchPageFn, citedByHost }) {
   const email = p.contact_email;
   // defensive — claim already required a contact_email
   if (!email || !worker.isValidEmail(email)) return { outcome: 'skipped', notes: 'no emailable contact' };
-  const cited = citedPageFor(p, citedByHost);
   let draft;
   try {
-    draft = await draftOne(p, { profile, anthropic: client, fetchPageFn, cited });
+    draft = await draftOne(p, { profile, anthropic: client, fetchPageFn, candidates: citedPagesFor(p, citedByHost) });
   } catch (err) {
     logger.error(`[outreach-drafter] error on ${p.target_domain}: ${err.message}`);
     return { outcome: 'failed', notes: `drafter error: ${String(err.message).slice(0, 160)}` };
   }
   if (draft && draft.skip) return { outcome: 'skipped', notes: draft.skip, sample: { domain: p.target_domain, skipped: draft.skip } };
   if (!draft || draft.fail) return { outcome: 'failed', notes: (draft && draft.fail) || 'drafter produced no usable draft' };
+  const { cited } = draft;
   return {
     outcome: 'drafted',
     notes: `auto-drafted (tier ${p.tier ?? '?'} ${p.link_type})${cited ? ` · cited page ${cited.url}` : ''}`,
@@ -425,4 +451,4 @@ async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn, cit
 }
 
 module.exports = { run };
-module.exports._internals = { citedPageVerdict, citedPagesByHost, citedPageFor, citedPageBlock, WAVES_FACTS, WAVES_LISTED_RE, parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };
+module.exports._internals = { citedPageVerdict, citedPagesByHost, citedPagesFor, pickCitedPage, citedPageBlock, WAVES_FACTS, WAVES_LISTED_RE, parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };

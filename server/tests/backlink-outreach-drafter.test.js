@@ -26,7 +26,7 @@ jest.mock('../services/seo/cited-pages', () => ({
 
 const worker = require('../services/seo/link-prospect-worker');
 const drafter = require('../services/seo/backlink-outreach-drafter');
-const { parseDraft, pickLocation, SYSTEM_PROMPT, citedPageFor, citedPagesByHost, citedPageVerdict, buildUserPrompt, WAVES_FACTS, WAVES_LISTED_RE } = drafter._internals;
+const { parseDraft, pickLocation, SYSTEM_PROMPT, citedPagesFor, pickCitedPage, citedPagesByHost, citedPageVerdict, buildUserPrompt, WAVES_FACTS, WAVES_LISTED_RE } = drafter._internals;
 
 const fakeAnthropic = (text) => ({ messages: { create: async () => ({ content: [{ type: 'text', text }] }) } });
 const noFetch = async () => null; // skip personalization fetch in tests
@@ -209,10 +209,10 @@ describe('cited-page pitches', () => {
     const best = citedPage();
     const other = citedPage({ key: 'floridist.com/lwr', url: 'https://floridist.com/lwr', rank: 2 });
     const byHost = citedPagesByHost([best, other]);
-    expect(citedPageFor({ target_domain: 'www.floridist.com' }, byHost)).toBe(best);
-    expect(citedPageFor({ target_domain: 'floridist.com', target_url: 'https://floridist.com/LWR/?utm_source=x' }, byHost)).toBe(other);
-    expect(citedPageFor({ target_domain: 'blog.floridist.com' }, byHost)).toBeNull();
-    expect(citedPageFor({ target_domain: 'floridist.com' }, new Map())).toBeNull();
+    expect(citedPagesFor({ target_domain: 'www.floridist.com' }, byHost)).toEqual([best, other]);
+    expect(citedPagesFor({ target_domain: 'floridist.com', target_url: 'https://floridist.com/LWR/?utm_source=x' }, byHost)).toEqual([other, best]);
+    expect(citedPagesFor({ target_domain: 'blog.floridist.com' }, byHost)).toEqual([]);
+    expect(citedPagesFor({ target_domain: 'floridist.com' }, new Map())).toEqual([]);
   });
 
   test('the prompt carries the page, its questions and engines, and only the approved Waves facts', () => {
@@ -265,6 +265,25 @@ describe('cited-page pitches', () => {
     expect(WAVES_LISTED_RE.test('Gulf waves and pest control tips')).toBe(false);
   });
 
+  test('a top list that already names Waves never rules out the publisher\'s other cited list', async () => {
+    const listed = citedPage();
+    const other = citedPage({ key: 'floridist.com/best-exterminators-venice', url: 'https://floridist.com/best-exterminators-venice', rank: 2 });
+    claims([cited]);
+    const fetchPageFn = jest.fn(async (url) => ({ title: 't', snippet: 's', text: url === listed.url ? `${ARTICLE} Waves Pest Control` : ARTICLE }));
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: '{"subject":"S","body":"B"}' }] }));
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn, citedPagesFn: async () => ({ pages: [listed, other] }) });
+    expect(r.drafted).toBe(1);
+    expect(create.mock.calls[0][0].messages[0].content).toContain(other.url);
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'drafted', notes: expect.stringContaining(`cited page ${other.url}`) }));
+  });
+
+  test('pickCitedPage: an unreadable candidate makes the prospect retry, never skip', async () => {
+    const a = citedPage();
+    const b = citedPage({ key: 'floridist.com/b', url: 'https://floridist.com/b' });
+    const fetchPageFn = async (url) => (url === a.url ? null : { text: `${ARTICLE} Waves Pest Control` });
+    expect(await pickCitedPage([a, b], fetchPageFn)).toEqual({ verdict: { fail: expect.stringMatching(/could not be read/) } });
+  });
+
   test('a cited page cut short (text null) fails the lease too', async () => {
     claims([cited]);
     const create = jest.fn();
@@ -287,12 +306,12 @@ describe('cited-page pitches', () => {
   });
 
   test('a page that is not itself a list never carries the angle, whatever question cited it', () => {
-    expect(citedPageFor({ target_domain: 'floridist.com' }, citedPagesByHost([citedPage({ listPage: false })]))).toBeNull();
+    expect(citedPagesFor({ target_domain: 'floridist.com' }, citedPagesByHost([citedPage({ listPage: false })]))).toEqual([]);
   });
 
   test('only pages cited for a provider question carry the angle — a cost guide keeps the usual pitch', () => {
     const costGuide = citedPage({ key: 'floridist.com/cost', url: 'https://floridist.com/cost', questions: [{ id: 'Q3', query: 'How much does pest control cost?', engines: ['claude'], provider: false }] });
-    expect(citedPageFor({ target_domain: 'floridist.com' }, citedPagesByHost([costGuide]))).toBeNull();
+    expect(citedPagesFor({ target_domain: 'floridist.com' }, citedPagesByHost([costGuide]))).toEqual([]);
   });
 
   test('a failed ranking read drafts with the usual angle', async () => {
