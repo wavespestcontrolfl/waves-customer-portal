@@ -255,6 +255,8 @@ describe('writerRulesRejection', () => {
     ["You texted 'roaches again by the sink' last week.", 'quote'],
     ['Your follow-up is complimentary.', 'price'],
     ['The recheck is on the house.', 'price'],
+    ['We treated a 120-LF section of foundation.', 'footage'],
+    ["You told the technician, 'roaches again by the sink'.", 'quote'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -294,6 +296,7 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('Zero captures were recorded in the attic traps.')).toBeNull();
     expect(writerRulesRejection('The ants were back the next day, you said.')).toBeNull();
     expect(writerRulesRejection("The customer's kitchen had ghost ants along the counter.")).toBeNull();
+    expect(writerRulesRejection('You told us about the ants by the sink.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();

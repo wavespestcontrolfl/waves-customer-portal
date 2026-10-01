@@ -226,7 +226,7 @@ function activeIngredientsMentioned(text, value) {
 }
 
 const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|cc|ccs|cubic\s+centimet(?:er|re)s?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gals?|gallons?|qts?|ozs|pts?|tsps|tbsps|lbs?|pounds?|grams?|kilograms?|kgs?)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
-const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\b\d[\d,.]*\s*(?:lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\bacres?\b|\bacreage\b/i;
+const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\bacres?\b|\bacreage\b/i;
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
 const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
@@ -274,7 +274,7 @@ const TIMEFRAME_RE = new RegExp(
 // kitchen") opens no quote, and a paraphrase ("You mentioned ants near the
 // dishwasher") passes. Each quoted span is found once and its words counted
 // in code, so a long unclosed quote costs one linear scan.
-const ATTRIBUTED_QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told\s+us|reported|asked|noted)\b[^.!?]{0,20}?(?:[:,]\s*|\s+)["“‘']\w/i;
+const ATTRIBUTED_QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b[^.!?]{0,30}?(?:[:,]\s*|\s+)["“‘']\w/i;
 const QUOTED_SPAN_RE = /["“]([^"”\n]*)["”]/g;
 function quotesCustomer(copy) {
   if (ATTRIBUTED_QUOTE_RE.test(copy)) return true;
