@@ -59,9 +59,16 @@ function scriptedDb(scenario) {
       case 'rate_review_snapshots':
       case 'rate_review_snapshots as r':
         return chain({
-          // three reads share this table: prior reviews (customer_id, family_key),
-          // latest snapshots (… status, review_date …) and the batch page (r.*)
-          rows: (q) => (q.calls.some(([name, args]) => name === 'select' && args.includes('review_date')) ? (scenario.latestSnapshots || []) : (scenario.priorReviews || [])),
+          // four reads share this table: prior reviews (customer_id, family_key),
+          // latest snapshots (… status, review_date …), the owner-decision check
+          // (status, flags — scripted as a QUEUE, one answer per read, so a test
+          // can land a decision between two reads) and the batch page (r.*)
+          rows: (q) => {
+            const selected = q.calls.filter(([name]) => name === 'select').flatMap(([, args]) => args);
+            if (selected.includes('review_date')) return scenario.latestSnapshots || [];
+            if (selected.includes('flags')) return (scenario.ownerDecisionReads || []).shift() || [];
+            return scenario.priorReviews || [];
+          },
           count: () => ({ n: scenario.sentRowCount || 0 }),
           onInsert: (rows) => writes.snapshotInserts.push(...(Array.isArray(rows) ? rows : [rows])),
           onDelete: () => { writes.snapshotDeletes += 1; },

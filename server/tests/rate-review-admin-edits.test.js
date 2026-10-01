@@ -550,6 +550,21 @@ describe('rebuild vs decisions', () => {
     expect(fake.reads.slice(start + 1).every((r) => r.inTx)).toBe(true); // slice past the digest read made here, outside
   });
 
+  test('the tick\u2019s commit judges owner decisions under the lock: an edit that landed during the ranking refuses the rebuild; an explicit rebuild replaces it', async () => {
+    const { commitBatchRows, batchRowsForDigest } = rateReview._private;
+    const fake = fakeDb(seed());
+    const before = rateReview.batchDigest(await batchRowsForDigest(fake, '2027-01'));
+    fake.tables.rate_review_snapshots.find((r) => r.id === ROW_A).flags = JSON.stringify(['admin_edited']); // an edit landed, same digest (flags are not in it)
+    const commit = (preserveOwnerDecisions) => commitBatchRows(fake, {
+      batchKey: '2027-01', expectedDigest: before, rows: [snapshot(ROW_NEW, { customer_id: CUST(5), flags: [] })], computedAt: new Date('2026-12-01T11:20:00Z'), preserveOwnerDecisions,
+      batch: { window_from: '2027-01-01', window_to: '2027-01-31', allowances: '{}', config: '{}', line_rph: '{}', book_lines: 1 },
+    });
+    expect(await commit(true)).toEqual({ refused: 'batch_has_owner_decisions' });
+    expect(fake.tables.rate_review_snapshots.map((r) => r.id).sort()).toEqual([ROW_A, ROW_B, ROW_C, ROW_D].sort());
+    expect(await commit(false)).toEqual({ refused: null });
+    expect(fake.tables.rate_review_snapshots.map((r) => r.id)).toEqual([ROW_NEW]);
+  });
+
   test('a retried monthly tick re-delivers a batch the owner edited instead of rebuilding over the edits', async () => {
     const edited = seed(); // built on day 1, digest not delivered, one amount edited from the screen since
     edited.rate_review_snapshots[0].flags = JSON.stringify(['admin_edited']);

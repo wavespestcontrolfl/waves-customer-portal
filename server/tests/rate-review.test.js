@@ -1883,6 +1883,32 @@ describe('runMonthlyRateReview', () => {
     db.transaction.mockImplementation((fn) => empty.transaction(fn)); // getBatch reads the batch and its rows in one snapshot
     expect(await rateReview.sendBatchEmail({ batchKey: '2026-11' })).toEqual({ sent: false, skipped: 'no_batch' });
   });
+  test('an owner decision that lands while the tick ranks leaves the batch standing: the commit re-judges the flags under the lock and the digest goes out without a rebuild', async () => {
+    const book = fixture.decemberBook();
+    const scenario = {
+      planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: book.ledger,
+      // an unsent batch built on day 1 …
+      batchRow: { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' }, batchStampRows: 1,
+      // … the tick's pre-check sees no decision; by the time the commit holds the lock the owner has edited a row
+      ownerDecisionReads: [[], [{ status: 'green', flags: '["admin_edited"]' }], [{ status: 'green', flags: '["admin_edited"]' }]],
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const out = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(out).toMatchObject({ ok: true, batchKey: '2026-11', rebuilt: false, rows: 1, emailed: true });
+    expect(out.email.sent).toBe(true);
+    // the ranking ran (the pre-check saw nothing) but nothing was replaced: the decision stands
+    expect(scripted.writes.snapshotInserts).toHaveLength(0);
+    expect(scripted.writes.snapshotDeletes).toBe(0);
+    expect(scripted.writes.batchUpserts).toHaveLength(0);
+    expect(scripted.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['rate_review_batch:2026-11']);
+    expect(scenario.ownerDecisionReads).toHaveLength(0); // the pre-check, the check under the lock, the standing batch's count
+  });
+
   test('a tick whose digest was not delivered (mailer unconfigured, external recipient) is a FAILED tick, not a healthy one', async () => {
     const book = fixture.decemberBook();
     const make = () => {

@@ -1912,11 +1912,16 @@ async function batchRowsForDigest(dbh, batchKey) {
 // the build is simply run again. Nothing in here reads the pool: with a
 // two-connection pool and the build lease holding one, a pool read inside
 // this transaction would wait on itself.
-async function commitBatchRows(dbh, { batchKey, expectedDigest, rows, computedAt, batch }) {
+async function commitBatchRows(dbh, { batchKey, expectedDigest, rows, computedAt, batch, preserveOwnerDecisions = false }) {
   const run = async (conn) => {
     await lockBatch(conn, batchKey);
     const refusal = await batchRebuildRefusal(conn, batchKey);
     if (refusal) return { refused: refusal };
+    // The tick's retry never replaces a decision of the owner's — judged
+    // HERE, under the lock: the monthly lease does not serialize updateRow,
+    // so a row edited between the tick's pre-check and the ranking's digest
+    // capture is already in that digest and would pass the check below.
+    if (preserveOwnerDecisions && (await batchOwnerDecisions(conn, batchKey)).decided) return { refused: 'batch_has_owner_decisions' };
     if (batchDigest(await batchRowsForDigest(conn, batchKey)) !== expectedDigest) return { refused: 'batch_changed' };
     // Literal table names on every WRITER (insert / merge / update): the
     // status-integrity scan in tests/annual-prepay-term-states.test.js fails
@@ -2295,7 +2300,7 @@ function resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, win
   return { from, to, digestReset: !!(existing && existing.email_sent_at) };
 }
 
-async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor = null, trx = null, now = new Date(), deps = {} } = {}) {
+async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor = null, trx = null, now = new Date(), deps = {}, preserveOwnerDecisions = false } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
   assertYmd(anniversaryFrom, 'anniversaryFrom');
@@ -2339,7 +2344,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   const computedAt = now;
   const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
   const landed = await commitBatchRows(dbh, {
-    batchKey, expectedDigest: before, rows, computedAt,
+    batchKey, expectedDigest: before, rows, computedAt, preserveOwnerDecisions,
     batch: { window_from: from, window_to: to, allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson), book_lines: book.length },
   });
   if (landed.refused) return { ok: false, reason: landed.refused, batchKey };
@@ -2955,28 +2960,36 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
 // Scheduler entry (1st of the month): build the batch for anniversaries in
 // the FOLLOWING month and email it once. Gate read first — off = return
 // before any query. A batch with sent rows is never rebuilt.
+// The tick's batch. No explicit window: buildBatch keeps an EXISTING batch's
+// stored window; a NEW batch (a day-1 build, or a retry after a day-1 build
+// that failed before persisting) is anchored on the first of the build
+// month, so every tick of the month covers the same anniversaries. A retry
+// (the digest did not go out) rebuilds the unsent batch only while it
+// carries no decision of the owner's: once a row was edited, skipped,
+// included or approved from the screen, the batch stands and only the
+// delivery is retried — judged before the ranking (its cost is skipped) and
+// again under the commit lock (a decision can land while it runs).
+async function tickBatch(dbh, batchKey, { now, deps }) {
+  const standing = await batchOwnerDecisions(dbh, batchKey);
+  if (standing.decided) return { ok: true, batchKey, rows: standing.rows, rebuilt: false };
+  const built = await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps, preserveOwnerDecisions: true });
+  if (built.ok || built.reason !== 'batch_has_owner_decisions') return { ...built, rebuilt: true };
+  const decided = await batchOwnerDecisions(dbh, batchKey);
+  return { ok: true, batchKey, rows: decided.rows, rebuilt: false };
+}
+
 async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null, deps = {} } = {}) {
   if (!rateReviewLive()) return { skipped: 'gate_off' };
   // batch_key = the BUILD month. A batch already emailed is finished for
   // the month — a retried tick must not rebuild it (and slide its window).
   const batchKey = etMonthStart(now, 0).slice(0, 7);
   if (await alreadyEmailed(dbh, batchKey)) return { skipped: 'already_emailed', batchKey, emailed: false };
-  // No explicit window: buildBatch keeps an EXISTING batch's stored window;
-  // a NEW batch (a day-1 build, or a retry after a day-1 build that failed
-  // before persisting) is anchored on the first of the build month, so every
-  // tick of the month covers the same anniversaries. A retry (the digest did
-  // not go out) rebuilds the unsent batch only while it carries no decision
-  // of the owner's: once a row was edited, skipped, included or approved
-  // from the screen, the batch stands and only the delivery is retried.
-  const standing = await batchOwnerDecisions(dbh, batchKey);
-  const built = standing.decided
-    ? { ok: true, batchKey, rows: standing.rows, rebuilt: false }
-    : { ...(await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps })), rebuilt: true };
+  const built = await tickBatch(dbh, batchKey, { now, deps });
   if (!built.ok) {
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
     return { skipped: built.reason, batchKey };
   }
-  if (standing.decided) logger.info(`[rate-review] ${batchKey} carries owner decisions — delivery retried without a rebuild`);
+  if (!built.rebuilt) logger.info(`[rate-review] ${batchKey} carries owner decisions — delivery retried without a rebuild`);
   // The batch is persisted either way. A delivery failure is RE-THROWN so
   // runExclusive records the job as failed (job_health) instead of a quiet
   // success with email_sent_at still null; the tick runs on days 1–7 and is
