@@ -498,14 +498,20 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
         if (seen) return null;
         // Re-read the lead under a row lock (codex #5399 r14): staff may have
         // reassigned its phone, linked it to another customer or closed it since
-        // the open-lead query above. The advisory lock only orders closers, so
-        // the lead's own state and phone identity are re-proven right here.
-        const current = await trx('leads').where({ id: lead.id }).forUpdate().first('lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name');
+        // the open-lead query above, and the customer may have refreshed the
+        // request (a newer last_requested_at is new work, never this booking's
+        // to close). The advisory lock only orders closers, so the lead's own
+        // state, phone identity and request recency are re-proven right here.
+        const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
+          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name',
+          trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
+        );
         const stillOurs = current
           && current.lead_type === LEAD_TYPE
           && OPEN_LEAD_STATUSES.includes(current.status)
           && !current.converted_at
           && !current.deleted_at
+          && current.requested_in_time === true
           && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
           && (!current.customer_id || String(current.customer_id) === String(customerId));
         if (!stillOurs) return null;

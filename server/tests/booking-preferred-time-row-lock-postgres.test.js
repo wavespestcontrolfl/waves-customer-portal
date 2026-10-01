@@ -316,6 +316,38 @@ jest.setTimeout(60000);
     expect(await database('leads').where({ id: first.leadId }).first()).toMatchObject({ status: 'new' });
   });
 
+  test('a customer refresh landing between the candidate query and the row lock (a request newer than the booking) is NOT closed (pre-push P1)', async () => {
+    const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
+    const first = await recordPreferredTimeRequest(database, value(), { notify: false });
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() + 5000) }).returning(['id', 'created_at']);
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    await database('lead_activities').del();
+    mockNotifyAdmin.mockClear();
+    // The submit's refresh holds the lead row and stamps a request time past the booking + 60 s while the closer's
+    // candidate query (a plain read) has already passed: the closer parks on the row lock, then re-reads the newer stamp.
+    const refresh = gate();
+    const customer = database.transaction(async (trx) => {
+      await trx('leads').where({ id: first.leadId }).forUpdate().first('id');
+      await refresh.p;
+      await trx('leads').where({ id: first.leadId }).update({
+        extracted_data: trx.raw("extracted_data || ?::jsonb", [JSON.stringify({ last_requested_at: new Date(Date.now() + 600000).toISOString() })]),
+      });
+    });
+    await tick();
+    const closing = closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    const closingState = settled(closing);
+    await tick();
+    expect(closingState.done).toBe(false); // parked on the lead row
+    refresh.open();
+    await customer;
+    expect(await closing).toEqual({ live: true, closed: 0 });
+    expect(await database('leads').where({ id: first.leadId }).first()).toMatchObject({ status: 'new' });
+    expect(await closeRows()).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a booking made BEFORE the request began (beyond the skew slack) is not this request\'s to reconcile: not closed, the bell rings', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();

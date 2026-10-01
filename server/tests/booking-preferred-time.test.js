@@ -183,7 +183,7 @@ beforeEach(() => {
   mockExistingLead = null;
   mockCustomer = null;
   mockOpenLeads = [];
-  mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null };
+  mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, requested_in_time: true };
   mockLeadUpdateRows = 1;
   mockRetireError = null;
   mockBookedSince = null;
@@ -761,7 +761,7 @@ describe('a completed booking closes the customer\'s open preferred-time request
     mockCustomer = { phone: '+1 (941) 555-0100' };
     mockOpenLeads = [{ id: 'lead-1' }];
     mockScheduledService = { id: 'visit-7', self_booking_id: 'sba-1', service_type: 'Lawn Care', scheduled_date: '2026-10-08' };
-    mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample' };
+    mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample', requested_in_time: true };
   });
 
   test.each([
@@ -772,12 +772,22 @@ describe('a completed booking closes the customer\'s open preferred-time request
     ['it was converted', { converted_at: new Date() }],
     ['it was deleted', { deleted_at: new Date() }],
     ['it is no longer a preferred-time lead', { lead_type: 'phone_call' }],
+    ['the customer refreshed the request after the booking (newer than the booking + 60 s slack)', { requested_in_time: false }],
   ])('revalidated under the row lock (codex #5399 r14): %s -> not closed, no notice', async (_label, change) => {
     mockLockedLead = { ...mockLockedLead, ...change };
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0 });
     expect(activities()).toHaveLength(0);
     expect(closeWrites()).toHaveLength(0);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the locked re-read applies the same request-recency cutoff as the candidate query (booking + 60 s slack)', async () => {
+    await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+    const cutoffs = mockRaws.filter((o) => o.table === 'leads' && /<= \?/.test(o.arg));
+    expect(cutoffs).toHaveLength(1); // the candidate query; the locked read selects it as a column
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    expect(src).toMatch(/\.forUpdate\(\)\.first\([^)]*trx\.raw\(`\(\$\{LAST_REQUESTED_SQL\.replace\(' > \?', ' <= \?'\)\}\) AS requested_in_time`, \[new Date\(bookedMs \+ BOOKING_SLACK_MS\)\]\)/s);
+    expect(src).toMatch(/current\.requested_in_time === true/);
   });
 
   test('a lead that vanished between the query and the lock is not closed', async () => {
