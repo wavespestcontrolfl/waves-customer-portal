@@ -517,14 +517,14 @@ const EXPECTATION_TEXT = {
     + 'harborage. Activity can spike for a few days, then declines over the next couple of weeks.',
   // The closing instruction to the customer is left out of the writer's plain
   // version: the writer's rule 7 bans aftercare instructions (codex #5523 P2).
-  // Placement in the label's own terms (Advion ant gel: active foraging
-  // areas; roach gel: crack and crevice), never a spot the record doesn't
-  // name (codex #5523).
-  ant_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} where ants were `
-    + 'foraging. Foragers feed on it and share it through the colony before it takes effect. You may see more '
+  // No placement claim: the builders read no application area or method,
+  // so the bait and dust lines never say where the product went (codex
+  // #5523 r2).
+  ant_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} for the ants. `
+    + 'Foragers feed on it and share it through the colony before it takes effect. You may see more '
     + `ants on the placements for a few days.${aftercare ? ' Leave them alone; they\'re carrying the bait back to the nest.' : ''}`,
-  roach_gel_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} as `
-    + 'crack-and-crevice placements in harborage areas. Roaches feed on it and carry it back into '
+  roach_gel_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} for the `
+    + 'roaches. Roaches feed on it and carry it back into '
     + 'harborage, where the active ingredient eliminates them. Over the next week or two you may see roaches out in '
     + 'daylight, slowed and disoriented, as the active ingredient takes effect.'
     + `${aftercare ? ' Don\'t use over-the-counter sprays near the placements; a residual spray contaminates the bait and keeps roaches off it.' : ''}`,
@@ -540,13 +540,15 @@ const EXPECTATION_TEXT = {
   pyrethroid_unconfirmed: (ai) => `We applied ${ai ? `${ai}, a residual insecticide` : 'a residual insecticide'} that `
     + 'binds to treated surfaces and eliminates insects on contact. Finding a few affected insects over the next '
     + 'couple of weeks means it\'s working.',
-  // Dust formulations go into cracks, voids, and gaps — never a surface
-  // barrier (owner ruling 2026-09-28). Delta Dust label: up to 8 months
-  // when left undisturbed.
-  dust: (ai) => `We applied ${ai ? `a ${ai} insecticide dust` : 'an insecticide dust'} into cracks, crevices and voids. `
-    + 'Dust holds up inside voids where sprays can\'t reach, and it is labeled for up to 8 months of residual control '
-    + 'of crawling insects when left undisturbed. It works inside the structure, so results build over the next few '
-    + 'weeks.',
+  // Never a surface barrier (owner ruling 2026-09-28). Delta Dust label: up
+  // to 8 months when left undisturbed. The label duration is left out of the
+  // writer's plain version: a residual period is not a follow-up window, and
+  // the writer takes EXPECTATIONS timeframes as contact windows (codex #5523
+  // r2).
+  dust: (ai, { labelDuration = true } = {}) => `We applied ${ai ? `a ${ai} insecticide dust` : 'an insecticide dust'}. `
+    + 'Dust holds up in cracks and voids where sprays can\'t reach'
+    + `${labelDuration ? ', and it is labeled for up to 8 months of residual control of crawling insects when left undisturbed' : ''}`
+    + '. Results build over the next few weeks.',
   igr: (ai, { sixMonthLabel = false } = {}) => `We added an insect growth regulator (IGR)${ai ? ` with ${ai}` : ''}. `
     + 'It stops immature insects from developing into breeding adults and reduces egg hatch, which breaks the '
     + `breeding cycle.${sixMonthLabel ? ' It is labeled for up to 6 months of activity on cockroach nymphs.' : ''}`,
@@ -642,10 +644,14 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
         )), { footage: !plain });
       }
       if (cls === 'igr') {
-        const sixMonthLabel = classProducts.some((p) => IGR_SIX_MONTH_LABEL.has(normalizeProductName(p?.name)));
+        // The label's 6-month figure is for cockroach nymphs, so it needs a
+        // Tekko Pro application tagged for roaches (Tekko also covers
+        // fleas, flies and mosquitoes), and never reaches the writer.
+        const sixMonthLabel = !plain && classProducts.some((p) => IGR_SIX_MONTH_LABEL.has(normalizeProductName(p?.name))
+          && Array.isArray(p?.targets) && p.targets.some((t) => /roach/i.test(t)));
         return EXPECTATION_TEXT.igr(ai, { sixMonthLabel });
       }
-      return EXPECTATION_TEXT[cls](ai, { aftercare: !plain });
+      return EXPECTATION_TEXT[cls](ai, { aftercare: !plain, labelDuration: !plain });
     })
     .filter((line) => validateCustomerCopy(line));
   return lines.length ? { lines } : null;

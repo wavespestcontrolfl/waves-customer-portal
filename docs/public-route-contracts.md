@@ -401,7 +401,11 @@ exterior chip is spot work and gets the general non-repellent wording. Each line
 closed product-name map (fipronil, dinotefuran, indoxacarb, bifenthrin,
 lambda-cyhalothrin, esfenvalerate, deltamethrin, (S)-hydroprene,
 pyriproxyfen and novaluron; owner 2026-10-01: never a brand name), and the
-barrier sentence names only the products recorded exterior. Never a
+barrier sentence names only the products recorded exterior. The bait and
+dust lines make no placement claim (the builder reads no area or method),
+the AI writer's plain variant leaves out label durations ("up to 8
+months") and customer instructions, and the Tekko Pro 6-month
+cockroach-nymph sentence needs a roach target on that application. Never a
 "guaranteed" or "eliminated" claim (screened through the existing
 `validateCustomerCopy` banned-copy guard). The what-to-expect facts (never the rain block, never
 the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section

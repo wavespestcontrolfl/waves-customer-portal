@@ -597,7 +597,7 @@ describe('buildWhatToExpect', () => {
     it('gets its own dust-class line, not the pyrethroid barrier line', () => {
       const out = buildWhatToExpect({ products: [{ name: 'Delta Dust' }] });
       expect(out.lines).toHaveLength(1);
-      expect(out.lines[0]).toMatch(/cracks, crevices and voids/);
+      expect(out.lines[0]).toMatch(/^We applied a deltamethrin insecticide dust\. Dust holds up in cracks and voids/);
       expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
     });
 
@@ -719,7 +719,7 @@ describe('buildWhatToExpect', () => {
     // — pyrethroid and igr dropped.
     expect(out.lines[0]).toMatch(/non-repellent/);
     expect(out.lines[1]).toMatch(/share it through the colony/);
-    expect(out.lines[2]).toMatch(/crack-and-crevice placements/);
+    expect(out.lines[2]).toMatch(/gel bait for the roaches/);
     expect(out.lines.join(' ')).not.toMatch(/barrier around the outside|breeding cycle/);
   });
 
@@ -773,15 +773,21 @@ describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
     const gentrol = buildWhatToExpect({ products: [{ name: 'Gentrol IGR' }] });
     expect(gentrol.lines[0]).toMatch(/with \(S\)-hydroprene/);
     expect(gentrol.lines[0]).not.toMatch(/6 months/);
-    const tekko = buildWhatToExpect({ products: [{ name: 'Tekko Pro IGR' }] });
+    const tekko = buildWhatToExpect({ products: [{ name: 'Tekko Pro IGR', targets: ['German cockroaches'] }] });
     expect(tekko.lines[0]).toMatch(/with pyriproxyfen and novaluron.*up to 6 months of activity on cockroach nymphs\.$/);
+    // The figure is for cockroach nymphs: a flea visit never brings up roaches.
+    const fleas = buildWhatToExpect({ products: [{ name: 'Tekko Pro IGR', targets: ['Fleas'] }] });
+    expect(fleas.lines[0]).not.toMatch(/cockroach|6 months/);
+    // Label durations never reach the writer (they are not follow-up windows).
+    const plain = buildWhatToExpect({ plain: true, products: [{ name: 'Tekko Pro IGR', targets: ['German cockroaches'] }, { name: 'Delta Dust' }] });
+    expect(plain.lines.join(' ')).not.toMatch(/months/);
   });
 
   it('the roach gel line keeps the over-the-counter spray warning from the label', () => {
     const out = buildWhatToExpect({ products: [{ name: 'Advion Evolution Cockroach Gel Bait' }] });
-    expect(out.lines[0]).toMatch(/^We placed an indoxacarb gel bait as crack-and-crevice placements in harborage areas\./);
-    // No placement the record doesn't name.
-    expect(out.lines[0]).not.toMatch(/hinges|voids/);
+    expect(out.lines[0]).toMatch(/^We placed an indoxacarb gel bait for the roaches\./);
+    // No placement claim: the builder reads no area or method.
+    expect(out.lines[0]).not.toMatch(/hinges|voids|crack-and-crevice/);
     expect(out.lines[0]).toMatch(/a residual spray contaminates the bait/);
   });
 });

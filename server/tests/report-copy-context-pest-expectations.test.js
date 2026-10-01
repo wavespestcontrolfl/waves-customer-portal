@@ -309,6 +309,6 @@ describe('buildReportCopyContext — writer rules: name-only products', () => {
       writerRules: true,
       knex,
     });
-    expect(contextText).toContain('We placed a gel bait as crack-and-crevice placements');
+    expect(contextText).toContain('We placed a gel bait for the roaches');
   });
 });
