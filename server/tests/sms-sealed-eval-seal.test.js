@@ -69,10 +69,13 @@ const {
   BILLING_DELIMITER: D_, exactSectionSuffix: exactSuffix_,
 } = require('../services/sms-company-facts');
 const EXACT = exactSuffix_();
+// FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
+const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
+const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
 const CONTRACT_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
   D_, D_, EXACT.length, EXACT,
-  '%FREE RE-SERVICE:%',
+  ...RS_BINDINGS,
 ];
 
 describe('sealEvalItems — selection contract', () => {
@@ -360,7 +363,7 @@ test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND for
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
-    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND COALESCE\(facts_block, ''\) NOT LIKE \?$/);
+    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
     expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
   } finally {
     spy.mockRestore();

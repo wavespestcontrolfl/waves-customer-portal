@@ -27,7 +27,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { shortenOrPassthrough } = require('./short-url');
-const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
+const { reserviceSelfServeEnabled, loadReserviceEligibility } = require('./reservice-scheduler');
 
 function reserviceSmsLineFor(url) {
   return url ? `Book your free re-service here: ${url}\n\n` : '';
@@ -86,20 +86,24 @@ async function reserviceLineForCustomer() {
  * above and the report-page link, so the two delivery surfaces can't drift.
  * null (the safe render) unless both gates are lit, the customer row is live
  * with a reservice_token, and the plan grants at least one lane. Never throws.
+ *
+ * Codex round-6 P1: the "live, non-deleted, active, tokened customer with a
+ * qualifying lane" half of this predicate now delegates to
+ * reservice-scheduler.js's loadReserviceEligibility — the SAME loader
+ * loadEligibleReserviceLanes builds on for the SMS FREE RE-SERVICE fact and
+ * the send-time promise recheck — so this route (and the requests,
+ * photo-ID, report-data and cancellation surfaces that call it) can never
+ * disagree with those about who is eligible. Only the reserviceStreamline
+ * gate check and the { token, lanes } shape stay local to this function.
  */
 async function reserviceStreamlineAccess(customerId) {
   try {
     if (!customerId) return null;
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('reserviceStreamline') || !reserviceSelfServeEnabled()) return null;
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .whereNull('deleted_at')
-      .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-    if (!customer || customer.active === false || !customer.reservice_token) return null;
-    const lanes = await reserviceLanesForCustomer(customer);
-    if (!lanes.length) return null;
-    return { token: customer.reservice_token, lanes };
+    const eligibility = await loadReserviceEligibility(customerId);
+    if (!eligibility) return null;
+    return { token: eligibility.customer.reservice_token, lanes: eligibility.lanes };
   } catch (err) {
     logger.warn(`[reservice-link] access lookup failed for ${customerId}: ${err.message}`);
     return null;

@@ -1,3 +1,9 @@
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -13,6 +19,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
   claimAttempt: jest.fn(async () => ({ allowed: true })),
+  releaseHeldReservation: jest.fn(async () => true),
 }));
 
 jest.mock('../services/logger', () => ({
@@ -264,6 +271,66 @@ describe('late-payment checker email sidecar', () => {
     expect(result.notified).toBe(0);
     expect(result.emailedFallback).toBe(0);
     expect(result.skipped).toBe(1);
+  });
+
+  // Dispute hold (owner ruling 2026-09-30) placed after the checker's rail-guard consult: the send
+  // boundary refuses a leg. A WAIT - the reservation is released (no failed row), the tier is not
+  // deduped and no other leg goes out, so the whole reminder goes out on the first run after the release.
+  describe('a dispute hold landing after the preflight', () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    const ownershipReads = (n) => Array(n).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }));
+
+    test('the Text leg refused at the send boundary is released, not failed; nothing else sends and the tier stays open', async () => {
+      sendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
+      });
+      ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+      const dedupeInsertSpy = jest.fn(async () => undefined);
+      const insertChain = chain();
+      insertChain.insert = dedupeInsertSpy;
+      setDbQueues({
+        invoices: [chain({ result: [invoice] }), ...ownershipReads(2)],
+        activity_log: [chain({ first: null }), chain({ result: [] }), insertChain],
+        customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' } })],
+      });
+      expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, emailedFallback: 0, skipped: 1 });
+      expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'late_payment_checker' });
+      expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }));
+      expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+      expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+      expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled(); // held with the Text, not sent alone
+      expect(dedupeInsertSpy).not.toHaveBeenCalled(); // tier left open -> retried after the release
+    });
+
+    test('the Email leg refused at the billing email authority is released, not failed', async () => {
+      // The Text leg could not deliver anyway (landline), so the Email fallback is the leg in play.
+      sendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'SUPPRESSED_NON_MOBILE', retryable: false,
+      });
+      BalanceReminder.sendLatePaymentEmail.mockResolvedValueOnce({
+        ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'COLLECTION_HOLD_DEFER',
+      });
+      ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+      const dedupeInsertSpy = jest.fn(async () => undefined);
+      const insertChain = chain();
+      insertChain.insert = dedupeInsertSpy;
+      setDbQueues({
+        invoices: [chain({ result: [invoice] }), ...ownershipReads(4)],
+        activity_log: [chain({ first: null }), insertChain],
+        customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+18777175476' } })],
+      });
+      expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, emailedFallback: 0, skipped: 1 });
+      expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
+      expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledWith(expect.objectContaining({ id: 'email-14' }));
+      // only the genuinely failed Text leg is stamped failed; the held Email leg is not
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(1);
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }), expect.anything());
+      expect(dedupeInsertSpy).not.toHaveBeenCalled();
+    });
   });
 
   test.each([
