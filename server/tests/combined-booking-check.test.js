@@ -168,6 +168,13 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual(['price_missing']);
   });
 
+  test('a member the office split onto its own invoice is judged off the combined total', () => {
+    const lawn = lawnRows({ parentOverrides: { has_own_live_invoice: true } });
+    const pestOnly = invoice([setupFee, firstApp(150, 'Quarterly Pest Control')]);
+    expect(run([PEST, LAWN], [...pestRows(), ...lawn], { invoice: pestOnly }).problems).toEqual([]);
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: pestOnly }))).toEqual(['first_invoice_mismatch']);
+  });
+
   test('a left-out family still on the shared first invoice keeps its share of the invoice total', () => {
     const three = invoice([setupFee, firstApp(150, 'Quarterly Pest Control'), firstApp(100, 'Lawn Care'), firstApp(60, 'Tree & Shrub')]);
     const verdict = run([PEST, LAWN, TREE], [...pestRows(), ...lawnRows(), ...treeRows()],

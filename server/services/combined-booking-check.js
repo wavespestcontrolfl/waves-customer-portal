@@ -361,8 +361,11 @@ function evaluateCombinedBooking(ctx) {
   // A combined first-application invoice still bills a family left out above
   // (a held tree program's first visit stays on it), so the invoice is judged
   // against every accepted family it covers, not only the ones still checked.
+  // A member the office has since split off onto its own invoice (the
+  // sibling-split workflow's resolution evidence, has_own_live_invoice) is
+  // covered by that invoice, not the combined one.
   const stamped = (ctx.rows || []).filter((row) => isPlanRow(row, accepted.programs) && !NOT_LIVE.has(row.status)
-    && !row.recurring_parent_id && row.first_application_invoice_id);
+    && !row.recurring_parent_id && row.first_application_invoice_id && !row.has_own_live_invoice);
   const invoicePrograms = new Map([...accepted.programs]
     .filter(([family]) => programs.has(family) || stamped.some((row) => rowFamilies(row).includes(family))));
   // Rows were created and every one was cancelled: the customer or office
@@ -398,7 +401,7 @@ function evaluateCombinedBooking(ctx) {
   // covers, even a seasonal companion whose first visit lands on a later date,
   // so the invoice is judged against all live top-level rows carrying a stamp
   // (`stamped`, above).
-  const unstamped = firstDayRows.filter((row) => !row.first_application_invoice_id && !isPrepaid(row));
+  const unstamped = firstDayRows.filter((row) => !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row));
   const problems = [
     ...checkTimeAndTech(dated, programs),
     ...checkLaterPrices(dated, programs, firstDay),
@@ -466,6 +469,29 @@ async function markPrepaidCoverage(conn, rows) {
   }
 }
 
+// Sets row.has_own_live_invoice on a stamped member the office split off onto
+// its own invoice: the same evidence first-application-sibling-split.js
+// resolves a split on (flagOwnLiveInvoices) — a live invoice linked to the
+// member's own id that bills its base application. The combined invoice
+// itself (linked to the anchor) is never the anchor's "own" invoice.
+async function markOwnFirstInvoices(conn, rows) {
+  const stamped = rows.filter((row) => row.first_application_invoice_id && !row.recurring_parent_id);
+  if (!stamped.length) return;
+  const InvoiceService = require('./invoice');
+  const { invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
+  const own = await conn('invoices')
+    .whereIn('scheduled_service_id', stamped.map((row) => row.id))
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+    .select('id', 'scheduled_service_id', 'line_items');
+  const byRow = new Map(stamped.map((row) => [String(row.id), row]));
+  for (const invoice of own) {
+    const row = byRow.get(String(invoice.scheduled_service_id));
+    if (row && String(invoice.id) !== String(row.first_application_invoice_id) && invoiceBillsBaseApplication(invoice)) {
+      row.has_own_live_invoice = true;
+    }
+  }
+}
+
 async function loadContext(conn, estimate) {
   const estimateId = estimate.id;
   const customerId = estimate.customer_id;
@@ -495,6 +521,7 @@ async function loadContext(conn, estimate) {
     .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   await markPrepaidCoverage(conn, rows);
+  await markOwnFirstInvoices(conn, rows);
   const invoiceIds = [...new Set(rows.map((row) => row.first_application_invoice_id).filter(Boolean))];
   const invoices = new Map();
   if (invoiceIds.length) {
