@@ -546,10 +546,13 @@ export default function TriageInboxTabV2({ isAdmin }) {
   const confirmHold = (item) => {
     const visitId = parsePayload(item.payload)?.scheduled_service_id;
     if (!visitId) { setError("This hold has no linked visit — open the schedule instead."); return; }
+    if (!item.visit_address) { setError("The visit's current address did not load — reload the inbox before confirming."); return; }
     setActioning(item.id);
     adminFetch(`/admin/dispatch/${visitId}/status`, {
       method: "PUT",
-      body: JSON.stringify({ status: "confirmed" }),
+      // The address the dialog SHOWED: the server refuses (409 address_changed) if the visit's address
+      // moved since, so a correction made meanwhile is never confirmed unseen.
+      body: JSON.stringify({ status: "confirmed", expected_service_address: item.visit_address }),
     })
       .then(() => {
         setActioning(null);
@@ -1144,6 +1147,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
               {parsePayload(confirmHoldFor.payload)?.visit_when && (
                 <div className="text-13 text-ink-secondary mb-3">Visit: {parsePayload(confirmHoldFor.payload).visit_when}</div>
               )}
+              {!confirmHoldFor.visit_address && (
+                <div className="text-12 text-alert-fg mb-2">The visit's current address did not load. Reload the inbox before confirming.</div>
+              )}
               <label className="flex items-start gap-2 text-13 text-zinc-900">
                 <input
                   type="checkbox"
@@ -1159,7 +1165,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
               <Button
                 variant="primary"
                 size="sm"
-                disabled={!holdReadBack || actioning === confirmHoldFor.id}
+                disabled={!holdReadBack || !confirmHoldFor.visit_address || actioning === confirmHoldFor.id}
                 onClick={() => confirmHold(confirmHoldFor)}
               >
                 {actioning === confirmHoldFor.id ? "Confirming…" : "Confirm & book"}

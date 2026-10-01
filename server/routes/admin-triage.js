@@ -300,8 +300,7 @@ router.get('/', async (req, res) => {
           for (const { item, payload } of holds) {
             const r = byId.get(String(payload.scheduled_service_id));
             if (!r) continue;
-            const line = [r.service_address_line1, r.service_address_line2, r.service_address_city, r.service_address_state, r.service_address_zip]
-              .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
+            const line = require('../services/street-level-hold').visitServiceAddressLine(r);
             if (line) item.visit_address = line;
           }
         } catch (addrErr) {

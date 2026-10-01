@@ -829,7 +829,15 @@ async function releaseStreetLevelHoldForCompletion(svc, actor = {}, routeTag = '
       row = { ...row, status: 'confirmed' };
     }
     if (!row) return false;
-    const released = await runOfficeConfirmActivation(dbh, row, routeTag, { skipCardRequest: true });
+    let released = await runOfficeConfirmActivation(dbh, row, routeTag, { skipCardRequest: true });
+    if (!released) {
+      // The completion's own transition to 'completed' also schedules the lazy activation post-commit;
+      // if that one won the confirmed stamp, this call's stamp matched no row and answered false even
+      // though the hold IS released (the hook legs are idempotent, the stamp at-most-once). Re-read
+      // before calling it a failure.
+      const after = await dbh('scheduled_services').where({ id: svc.id }).first('customer_confirmed');
+      if (after?.customer_confirmed === true) released = true;
+    }
     if (released) {
       // The caller's snapshot reflects the confirmed state from here on.
       svc.customer_confirmed = true;

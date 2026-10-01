@@ -200,4 +200,27 @@ async function refreshOwedFollowUpPlan(conn, visit, plan) {
   return true;
 }
 
-module.exports = { refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+// The visit's service address as one comma line (the form the triage list shows the office).
+function visitServiceAddressLine(row) {
+  return [row?.service_address_line1, row?.service_address_line2, row?.service_address_city, row?.service_address_state, row?.service_address_zip]
+    .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
+}
+const normAddress = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// The office confirmed the address it was SHOWN: when a confirm of a live street-level hold names
+// that address (expected_service_address), it must still be the visit's address under the row lock,
+// or a correction made after the dialog opened would be confirmed unseen. 409 address_changed
+// otherwise. An absent expectation (any other caller) keeps today's behavior. Throws a status/code
+// error the status routes already map.
+async function assertExpectedServiceAddress(trx, visitId, expected) {
+  const want = normAddress(expected);
+  if (!want) return;
+  if (!(await isStreetLevelHoldVisit(visitId, trx))) return;
+  const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
+    .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+  if (normAddress(visitServiceAddressLine(row)) !== want) {
+    throw Object.assign(new Error('The visit address changed since you opened this. Reload and read the current address back to the customer.'), { status: 409, code: 'address_changed' });
+  }
+}
+
+module.exports = { assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };

@@ -2574,6 +2574,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // live-status resend bypass the 7-day window too.
           allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
+        // The office confirmed the address the dialog SHOWED (a hold card's "Confirm address & book"):
+        // under the row lock it must still be the visit's address. Absent field = today's behavior.
+        if (isOfficeReviewConfirm && typeof req.body?.expected_service_address === 'string') {
+          await require('../services/street-level-hold').assertExpectedServiceAddress(trx, svc.id, req.body.expected_service_address);
+        }
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked

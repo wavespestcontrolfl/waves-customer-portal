@@ -325,3 +325,76 @@ describe('a failed release keeps the saved completion resumable', () => {
     void handle;
   });
 });
+
+describe('the two completion activators race: the lazy post-commit one may win the stamp', () => {
+  const { releaseStreetLevelHoldForCompletion } = require('../services/outbound-review-confirm');
+  // A fake where the activation hook runs but the guarded stamp matches no row (the other helper stamped first).
+  const world = ({ stampedByOther }) => {
+    const calls = { reads: 0 };
+    const h = (table) => {
+      const q = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'whereExists', 'orderBy', 'forUpdate', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => {
+        if (table === 'scheduled_services as ss') return { id: 'v1' };
+        if (table === 'scheduled_services') { calls.reads += 1; return { ...baseVisit({ status: 'completed' }), customer_confirmed: stampedByOther && calls.reads > 1 }; }
+        return null;
+      });
+      q.update = jest.fn(async () => 0);       // our guarded stamp loses the race
+      q.select = jest.fn(async () => []);
+      return q;
+    };
+    h.transaction = async (cb) => cb(h); h.fn = { now: () => new Date() }; h.raw = jest.fn(async () => ({}));
+    return h;
+  };
+  test('a stamp lost to the other activator is a SUCCESS (the visit is confirmed), not a failed release', async () => {
+    db.mockImplementation(world({ stampedByOther: true }));
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ status: 'completed' }), { technicianId: 't' })).toBe(true);
+  });
+  test('a hold nobody released stays a failure', async () => {
+    db.mockImplementation(world({ stampedByOther: false }));
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ status: 'completed' }), { technicianId: 't' })).toBe(false);
+  });
+});
+
+describe('r20: the confirm is bound to the address the office was shown', () => {
+  const { assertExpectedServiceAddress, visitServiceAddressLine } = require('../services/street-level-hold');
+  const row = { service_address_line1: '1234 Sample Newbuild Trl', service_address_line2: null, service_address_city: 'Parrish', service_address_state: 'FL', service_address_zip: '34219' };
+  const trxFor = ({ held, live }) => {
+    const calls = { locked: false };
+    const t = (table) => {
+      const q = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.forUpdate = jest.fn(() => { calls.locked = true; return q; });
+      q.first = jest.fn(async () => (table === 'scheduled_services as ss' ? (held ? { id: 'v1' } : undefined) : live));
+      return q;
+    };
+    return { t, calls };
+  };
+
+  test('the same address (formatting aside) passes; a corrected one is a 409 address_changed, read under the row lock', async () => {
+    const same = trxFor({ held: true, live: row });
+    await expect(assertExpectedServiceAddress(same.t, 'v1', '1234 sample newbuild trl, parrish, fl 34219')).resolves.toBeUndefined();
+    expect(same.calls.locked).toBe(true);
+    const moved = trxFor({ held: true, live: { ...row, service_address_line1: '1240 Sample Newbuild Trl' } });
+    await expect(assertExpectedServiceAddress(moved.t, 'v1', '1234 Sample Newbuild Trl, Parrish, FL, 34219')).rejects.toMatchObject({ status: 409, code: 'address_changed' });
+  });
+
+  test('an absent expectation, or a visit that is not a hold, is today\'s behavior (no lookup / no refusal)', async () => {
+    const none = trxFor({ held: true, live: row });
+    await expect(assertExpectedServiceAddress(none.t, 'v1', '')).resolves.toBeUndefined();
+    expect(none.calls.locked).toBe(false);
+    const plain = trxFor({ held: false, live: { ...row, service_address_line1: 'elsewhere' } });
+    await expect(assertExpectedServiceAddress(plain.t, 'v1', '1 Other St')).resolves.toBeUndefined();
+  });
+
+  test('the dispatch status route applies it to an office confirm under the lock; the list and the check share one address format', () => {
+    const s = fs.readFileSync(require.resolve('../routes/admin-dispatch.js'), 'utf8');
+    const lock = s.indexOf("const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status']");
+    const check = s.indexOf('assertExpectedServiceAddress(trx, svc.id, req.body.expected_service_address)', lock);
+    expect(check).toBeGreaterThan(lock);
+    expect(check).toBeLessThan(s.indexOf('await transitionJobStatus({', check));
+    const t = fs.readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
+    expect(t).toContain("require('../services/street-level-hold').visitServiceAddressLine(r)");
+    expect(visitServiceAddressLine(row)).toBe('1234 Sample Newbuild Trl, Parrish, FL, 34219');
+  });
+});

@@ -485,7 +485,7 @@ describe('street-level address hold: office confirm', () => {
     visit_link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=visit-1',
   };
   const hold = { ...ordinary, id: 'hold', first_name: 'Hold', last_name: 'Card', reason_code: 'outbound_booking_review',
-    feedback_verdict: null, payload: JSON.stringify(holdPayload) };
+    feedback_verdict: null, payload: JSON.stringify(holdPayload), visit_address: '1234 Sample Newbuild Trl, Parrish, FL, 34219' };
   const mockList = (confirmImpl) => adminFetch.mockImplementation(async (url, opts) => {
     if (url.startsWith('/admin/triage?')) return { items: [hold], counts: { open: 1, resolved: 0, dismissed: 0 } };
     if (confirmImpl && url.includes('/status')) return confirmImpl(url, opts);
@@ -511,7 +511,7 @@ describe('street-level address hold: office confirm', () => {
     fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
     fireEvent.click(await screen.findByLabelText(/read this address back to the customer/i));
     fireEvent.click(screen.getByRole('button', { name: /^confirm & book$/i }));
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dispatch/visit-1/status', { method: 'PUT', body: JSON.stringify({ status: 'confirmed' }) }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dispatch/visit-1/status', { method: 'PUT', body: JSON.stringify({ status: 'confirmed', expected_service_address: '1234 Sample Newbuild Trl, Parrish, FL, 34219' }) }));
     await waitFor(() => expect(adminFetch.mock.calls.filter(([u]) => u.startsWith('/admin/triage?')).length).toBeGreaterThanOrEqual(2));
   });
 
@@ -554,5 +554,32 @@ describe('street-level address hold: office confirm', () => {
     fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
     expect(await screen.findByText('1234 Sample Newbuild Trl, Parrish, FL, 34219', { selector: 'div' })).toBeInTheDocument();
     expect(screen.queryByText('Current visit address')).not.toBeInTheDocument();
+  });
+
+  it('sends the address the dialog SHOWED (the live one), and a server address_changed refusal is shown, not swallowed', async () => {
+    const corrected = { ...hold, visit_address: '1240 Sample Newbuild Trl, Parrish, FL, 34219' };
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url.startsWith('/admin/triage?')) return { items: [corrected], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      throw Object.assign(new Error('The visit address changed since you opened this.'), { status: 409, code: 'address_changed', body: opts });
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    fireEvent.click(await screen.findByLabelText(/read this address back to the customer/i));
+    fireEvent.click(screen.getByRole('button', { name: /^confirm & book$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dispatch/visit-1/status', { method: 'PUT', body: JSON.stringify({ status: 'confirmed', expected_service_address: '1240 Sample Newbuild Trl, Parrish, FL, 34219' }) }));
+    await waitFor(() => expect(screen.getByText('The visit address changed since you opened this.')).toBeInTheDocument());
+  });
+
+  it('keeps Confirm disabled when the live visit address did not load', async () => {
+    const noLive = { ...hold, visit_address: undefined };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [noLive], counts: { open: 1, resolved: 0, dismissed: 0 } } : { success: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    fireEvent.click(await screen.findByLabelText(/read this address back to the customer/i));
+    expect(screen.getByText(/current address did not load/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^confirm & book$/i })).toBeDisabled();
   });
 });
