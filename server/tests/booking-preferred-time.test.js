@@ -19,7 +19,8 @@ let mockLeadUpdateRows = 1;    // rows a conditional leads UPDATE matches (0 = s
 let mockRetireError = null;    // makes the booking_intents suppression UPDATE throw
 let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
 let mockLiveCustomer = null;   // the booked customer as the close's share-locked re-read sees it (null = same as mockCustomer)
-let mockVisitDiesBeforeLock = false; // the visit is live on the first read, cancelled by the locked re-read
+let mockVisitDiesBeforeLock = false;
+let mockLockedVisitChange = null; // fields the visit's locked re-read sees changed since the first read // the visit is live on the first read, cancelled by the locked re-read
 let mockDeadVisit = false;      // the booking's only visit is cancelled/skipped/rescheduled (the live-status lookup finds nothing)
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
 const mockRaws = [];            // whereRaw calls (query-shape asserts)
@@ -66,6 +67,7 @@ function builder(table) {
         : table === 'customers' ? (b._forShare && mockLiveCustomer ? mockLiveCustomer : mockCustomer)
           : table === 'self_booked_appointments as sba' ? mockBookedSince
             : table === 'scheduled_services' && mockVisitDiesBeforeLock && b._forUpdate ? { status: 'cancelled', is_callback: false }
+            : table === 'scheduled_services' && mockLockedVisitChange && b._forUpdate ? { ...mockScheduledService, ...mockLockedVisitChange }
             : table === 'scheduled_services' && mockDeadVisit ? (b._liveOnly ? null : { id: 'ss-dead' })
             : table === 'scheduled_services' && mockScheduledService ? mockScheduledService
             : table === 'scheduled_services' && mockBookedSince ? { id: 'ss-1', self_booking_id: mockBookedSince.id, service_type: 'Pest Control', scheduled_date: '2026-10-08' }
@@ -212,6 +214,7 @@ beforeEach(() => {
   mockScheduledService = null;
   mockDeadVisit = false;
   mockVisitDiesBeforeLock = false;
+  mockLockedVisitChange = null;
   mockLiveCustomer = null;
   mockOrder.length = 0;
   mockMarkConverted.mockClear();
@@ -940,10 +943,27 @@ describe('a completed booking closes the customer\'s open preferred-time request
     ['a pest request, then an online lawn booking', 'Pest Control', 0],
     ['a lawn request, then the lawn booking', 'Lawn Care', 1],
     ['a request that named no service', null, 1],
+    ['a lawn + pest request, then a lawn-only booking (codex #5477 r10)', 'Lawn Care + Pest Control', 0],
   ])('a booking settles only the request for its own service line (codex #5477 r9): %s', async (_label, serviceInterest, closed) => {
     mockLockedLead = { ...mockLockedLead, service_interest: serviceInterest };
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed });
     expect(closeWrites()).toHaveLength(closed);
+  });
+
+  test.each([
+    ['the multi-service booking of both', 'Lawn Care + Pest Control', 1],
+    ['a Lawn & Pest visit', 'Lawn & Pest', 1],
+  ])('a composite request is answered by %s (codex #5477 r10)', async (_label, bookedService, closed) => {
+    mockScheduledService = { ...mockScheduledService, service_type: bookedService };
+    mockLockedLead = { ...mockLockedLead, service_interest: 'Lawn Care + Pest Control' };
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed });
+  });
+
+  test('the audit row and the FYI name the visit as locked, not the earlier read (codex #5477 r10)', async () => {
+    mockLockedVisitChange = { scheduled_date: '2026-10-09' };
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ closed: 1 });
+    expect(mockNotifyAdmin.mock.calls[0][2]).toContain('for Fri, Oct 9;');
+    expect(JSON.stringify(activities())).toContain('Fri, Oct 9');
   });
 
   test('the customer share lock is taken before the visit lock (codex #5477 r9: a merge locks customer, then visits)', () => {

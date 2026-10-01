@@ -454,14 +454,23 @@ function corroboratesBookedCustomer(lead, customer, customerId) {
   return !!(first && last && first === normName(lead.first_name) && last === normName(lead.last_name));
 }
 const CLOSED_STATUS = 'handled';
-// A booking settles only the request it answers (codex #5477 r9): the same service
-// line (lawn, pest, mosquito, termite...). A request that named no service is
-// answered by any booking; one for another line (a lawn request, then an online
-// pest booking) stays open for the office.
-function sameServiceLine(requestedService, bookedService) {
-  if (!String(requestedService || '').trim()) return true;
-  return inferServiceLine(requestedService) === inferServiceLine(bookedService);
+// A booking settles only the request it answers (codex #5477 r9/r10): every service
+// line the request asked for (lawn, pest, mosquito, termite...) must be in the booked
+// visit. Both sides may be composites ('Lawn Care + Pest Control', the multi-service
+// label; 'Lawn & Pest'), so each is read as its full set of lines. A request that
+// named no service is answered by any booking; one asking for a line the visit does
+// not carry (a lawn + pest request, then a lawn-only booking) stays open.
+const serviceLines = (text) => new Set(String(text || '').split(/[+&]/)
+  .map((part) => part.trim()).filter(Boolean).map(inferServiceLine));
+function bookingAnswersRequest(requestedService, bookedService) {
+  const booked = serviceLines(bookedService);
+  return [...serviceLines(requestedService)].every((line) => booked.has(line));
 }
+// The words the audit row and the FYI name the visit by.
+const visitWords = (visit) => ({
+  service: clean(visit.service_type, 120) || 'a service',
+  day: visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day',
+});
 
 // The one FYI the office gets when a request closes itself. composeAdminAlert
 // enforces docs/admin-notifications.md (headline 60, one-sentence why of 110, no
@@ -513,12 +522,10 @@ async function resendCloseNotices(db, { booking }) {
       if (!visitId) continue;
       const visit = await db('scheduled_services').where({ id: visitId }).first('service_type', 'scheduled_date');
       if (!visit) continue;
-      const service = clean(visit.service_type, 120) || 'a service';
-      const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
       await notifyRequestClosed({
         lead: { id: row.lead_id },
         customerName: [row.first_name, row.last_name].filter(Boolean).join(' '),
-        service, day, visitId,
+        ...visitWords(visit), visitId,
       });
     }
   } catch (err) {
@@ -575,8 +582,6 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         .whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [new Date(bookedMs + BOOKING_SLACK_MS)]),
       ten,
     ).select('id')) || [];
-    const service = clean(visit.service_type, 120) || 'a service';
-    const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
     let closed = 0;
     for (const lead of open) {
       // Per-(lead, visit) advisory lock: the booking's own post-commit path and
@@ -600,7 +605,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         const liveCustomer = await trx('customers').where({ id: customerId }).forShare()
           .first('phone', 'first_name', 'last_name', 'email');
         const liveTen = tenDigitPhone(liveCustomer && liveCustomer.phone);
-        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback', 'service_type');
+        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback', 'service_type', 'scheduled_date');
         if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
         // Re-read the lead under a row lock (codex #5399 r14): staff may have
         // reassigned its phone, linked it to another customer or closed it since
@@ -624,8 +629,10 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
           && [String(current.phone || '').replace(/\D/g, '').slice(-10), liveTen].every((phone) => phone === ten)
           && (!current.customer_id || String(current.customer_id) === String(customerId))
           && corroboratesBookedCustomer(current, liveCustomer, customerId)
-          && sameServiceLine(current.service_interest, liveVisit.service_type);
+          && bookingAnswersRequest(current.service_interest, liveVisit.service_type);
         if (!stillOurs) return null;
+        // Named from the visit as locked (codex #5477 r10), not the earlier read.
+        const { service, day } = visitWords(liveVisit);
         await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
         await trx('lead_activities').insert({
           lead_id: lead.id,
@@ -644,11 +651,11 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
             ...(convertedIds.length ? { converted_lead_ids: convertedIds } : {}),
           }),
         });
-        return { name: [current.first_name, current.last_name].filter(Boolean).join(' ') };
+        return { name: [current.first_name, current.last_name].filter(Boolean).join(' '), service, day };
       });
       if (!result) continue;
       closed += 1;
-      await notifyRequestClosed({ lead, customerName: result.name, service, day, visitId: visit.id });
+      await notifyRequestClosed({ lead, customerName: result.name, service: result.service, day: result.day, visitId: visit.id });
     }
     // Every request THIS booking closed (just now, or on an earlier run), including one
     // whose FYI above failed and was swallowed: the FYI is re-sent here. The persistent

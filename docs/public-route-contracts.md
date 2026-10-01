@@ -950,10 +950,13 @@ terminal status `handled`. A lead qualifies only when its phone matches (last
 corroborates the booked customer (`corroboratesBookedCustomer`): it is linked
 to that customer, or its email matches the customer's non-blank email, or its
 first AND last name both match. A phone match alone never closes a request (a
-shared household or reassigned number). The request must also be for the booked
-visit's service line (`inferServiceLine`: lawn, pest, mosquito, termite, ...); a
-request that named no service is answered by any booking, and one for another
-line stays open for the office. A request staff attached an estimate
+shared household or reassigned number). The booked visit must also carry every
+service line the request asked for (`inferServiceLine` per part of a composite
+such as `Lawn Care + Pest Control` or `Lawn & Pest`, on both sides); a request
+that named no service is answered by any booking, and one asking for a line the
+visit does not carry (a lawn + pest request, then a lawn-only booking) stays
+open for the office. The audit row and the FYI name the visit's service and day
+as read under the visit lock. A request staff attached an estimate
 to (`leads.estimate_id` set) is never closed and never converted by the
 booking: it stays open, as before this change, and converts the way any
 estimate-linked lead does (the estimate's acceptance,
