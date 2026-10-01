@@ -5135,6 +5135,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       ...(boundToAccept && estimateData?.acceptedRecurringCardConsentVariant === 'after_visit_card'
         ? { consentVariant: 'after_visit_card' }
         : {}),
+      // PR-B: the accept stamped an explicit Auto Pay opt-out — recovery keeps
+      // the card (saved + consent) but must not enroll it either.
+      ...(boundToAccept && estimateData?.acceptedRecurringCardSkipEnrollment === true
+        ? { skipEnrollment: true }
+        : {}),
     });
     // This handler can be the ONLY durable recovery path (crash after the
     // accept commit, browser never returned) — a TRANSIENT failure must

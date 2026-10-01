@@ -1358,18 +1358,57 @@ prepay carve-out are unchanged, and a customer already on Auto Pay is still
 card on file but the pause is never lifted and nothing is auto-charged: completion skips the
 charge (`customerOnAutopay` is false while paused) and the normal pay link goes out in the
 completion text after the visit. `GET /api/estimates/:token/data` `recurringCardPolicy` gains
-three keys, each OMITTED (never `false`) unless it applies, so gate-off responses are
+up to four keys, each OMITTED (never `false`) unless it applies, so gate-off responses are
 byte-identical: `afterVisitExisting: true` (an existing customer moved onto the rail by this
 sub-gate, any lane state), `afterVisitConsent: true` (that customer must capture a card and is
 shown the `after_visit_card` v12 authorization, which the accept then records; never set for a
-paused customer), and `afterVisitPaused: true` (the paused cohort: the page says the card is
+paused or Auto-Pay-off customer), and `afterVisitPaused: true` (the paused cohort: the page says the card is
 kept and a pay link follows each service; the base consent is recorded, not `after_visit_card`).
-The estimate-accepted notification for this cohort says nothing is charged today and the card
-is billed after the first visit (a pay link follows the visit when Auto Pay is paused) instead of
-"our team will follow up with the invoice details". A setup-only first invoice (no
-first-application amount) is still minted unattached with its pay link at accept, as before.
-Owner R4 (a monthly-membership member's add-on must not be billed before its first performed
-visit) is NOT part of this change.
+The estimate-accepted notification for this cohort says nothing is charged today and the saved
+payment method (tender-neutral: a bank capture is not "a card") is billed after the first visit (a
+pay link follows the visit when Auto Pay is paused or off) instead of "our team will follow up with
+the invoice details". A setup-only first invoice (no first-application amount) is still minted
+unattached with its pay link at accept, as before. Owner R4 (a monthly-membership member's add-on
+must not be billed before its first performed visit) is NOT part of this change.
+
+Annual prepay is never widened: the resolver skips the sub-gate whenever the request's payment
+preference is `prepay_annual`, so with `GATE_PREPAY_CARD_AND_CHARGE` on a prepay accept from a plan
+member (paused or not) resolves exactly as before (`existing_plan_customer` / `autopay_paused`, never
+the in-lane prepay charge-at-accept plan). `/data` resolves with no preference, so it forces
+`recurringCardPolicy.prepayInLane` to `false` for the moved cohort (those customers are shown no
+in-lane prepay copy or capture).
+
+Explicit Auto Pay opt-out (held cohort). An otherwise-eligible plan member who turned Auto Pay off
+on purpose (`customers.autopay_enabled` is not true AND the latest `autopay_log` toggle row, event
+type `autopay_enabled` | `autopay_disabled`, is `autopay_disabled` — the same rule
+`autopay-setup-link.js` uses) is treated like the paused cohort: the card is kept/captured but
+NEVER enrolled (`autopay_enabled` stays false; the accept, the saved-card auto-enroll and the
+`setup_intent.succeeded` recovery all skip enrollment, the last via the
+`estimate_data.acceptedRecurringCardSkipEnrollment` stamp), nothing is auto-charged, no pay link at
+accept, the normal pay link goes out after the visit, and the BASE consent is recorded. The policy
+carries `autopayDisabled: true` (independent of the pause: a customer can be both paused and opted
+out, e.g. the in-charge card was detached during a pause, and then both markers are kept and the
+paused copy wins); `/data` adds `recurringCardPolicy.afterVisitAutopayOff: true`
+(omitted otherwise) with neutral copy ("we send you a link to pay after your first visit", no
+"paused" claim). A failed opt-out lookup fails closed to today's `existing_plan_customer`.
+
+Commercial manual billing now clears every card-rail shape of this cohort (including the
+`saved_method_consented` auto-satisfy shape, which has `required: false`) in both `/data` and the
+accept, through one helper, so the two agree: `required: false`, `exemptReason:
+'commercial_manual_billing'`, no saved-method auto-enroll, no after-visit markers.
+
+`PUT /:token/accept` request fields `recurringCardConsentVariant` (`'after_visit_card'`) and
+`recurringCardConsentVersion` (the v12 label `v12_2026-09-30`) attest the authorization text the
+tab RENDERED (sent only when `/data` `afterVisitConsent` is true and the preference is not prepay;
+absent otherwise, so every other client is unchanged). When a card is captured at accept the server
+recomputes the variant it would record from live pause / opt-out state and answers `409 { code:
+'CONSENT_VARIANT_STALE' }` when it differs from the attestation in either direction (an absent
+attestation when `after_visit_card` would be recorded, or an `after_visit_card` attestation when the
+base text would be recorded) — nothing is recorded or committed and the client reloads `/data`. The
+accept also re-judges the moved cohort under the transaction's customer lock: if `billing_mode`
+moved into an ineligible lane, the pause or opt-out state changed, or the accept landed on no
+existing customer, it aborts with `409 { code: 'ACCEPT_BILLING_CHANGED' }` (nothing suppressed,
+charged or enrolled on the stale decision; the client reloads `/data`).
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and

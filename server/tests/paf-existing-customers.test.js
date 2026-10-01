@@ -28,8 +28,9 @@ describe('accept notification copy (existing customer on the card rail)', () => 
   test('afterVisitBilling: says the card on file is billed after the first visit and promises no invoice or pay link', () => {
     const payload = buildAcceptNotificationPayload({ ...base, afterVisitBilling: true });
     expect(payload.customerTitle).toBe('Estimate accepted');
-    expect(payload.customerBody).toBe('Your Silver WaveGuard plan is confirmed. Nothing is charged today — your card on file is billed after your first visit.');
-    expect(payload.customerBody).not.toMatch(/invoice|pay link/i);
+    // Tender-neutral: a us_bank_account capture (GATE_ACCEPT_ACH_CAPTURE) is not "a card".
+    expect(payload.customerBody).toBe('Your Silver WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.');
+    expect(payload.customerBody).not.toMatch(/\bcard\b|invoice|pay link/i);
     expect(payload.adminBody).toContain('billed after the first visit');
     expect(payload.adminBody).not.toMatch(/Invoice follow-up needed/);
   });
@@ -37,13 +38,25 @@ describe('accept notification copy (existing customer on the card rail)', () => 
   test('afterVisitBilling + afterVisitPaused: card kept, nothing charged, a pay link follows the visit (never promises an automatic charge)', () => {
     const payload = buildAcceptNotificationPayload({ ...base, afterVisitBilling: true, afterVisitPaused: true });
     expect(payload.customerBody).toBe('Your Silver WaveGuard plan is confirmed. Nothing is charged today. Your Auto Pay is paused, so we\'ll send you a link to pay after your first visit.');
-    expect(payload.customerBody).not.toMatch(/card on file is billed|charged after/i);
+    expect(payload.customerBody).not.toMatch(/payment method is billed|charged after/i);
     expect(payload.adminBody).toContain('Auto Pay paused');
     expect(payload.adminBody).toContain('no auto-charge');
   });
 
-  test('afterVisitPaused alone (no rail accept) changes nothing', () => {
+  test('afterVisitBilling + afterVisitDisabled (explicit Auto Pay opt-out): neutral pay-link-after-the-visit copy, no charge promise, no "paused" claim', () => {
+    const payload = buildAcceptNotificationPayload({ ...base, afterVisitBilling: true, afterVisitDisabled: true });
+    expect(payload.customerBody).toBe('Your Silver WaveGuard plan is confirmed. Nothing is charged today. We\'ll send you a link to pay after your first visit.');
+    expect(payload.customerBody).not.toMatch(/paused|billed after|charged after/i);
+    expect(payload.adminBody).toContain('Auto Pay off');
+    expect(payload.adminBody).toContain('not enrolled');
+    // Paused wins when both somehow arrive.
+    expect(buildAcceptNotificationPayload({ ...base, afterVisitBilling: true, afterVisitDisabled: true, afterVisitPaused: true }))
+      .toEqual(buildAcceptNotificationPayload({ ...base, afterVisitBilling: true, afterVisitPaused: true }));
+  });
+
+  test('afterVisitPaused / afterVisitDisabled alone (no rail accept) change nothing', () => {
     expect(buildAcceptNotificationPayload({ ...base, afterVisitPaused: true })).toEqual(buildAcceptNotificationPayload(base));
+    expect(buildAcceptNotificationPayload({ ...base, afterVisitDisabled: true })).toEqual(buildAcceptNotificationPayload(base));
   });
 
   test('afterVisitBilling never overrides a branch that really sent a pay link (payer fallback re-opened delivery)', () => {
@@ -59,7 +72,7 @@ describe('accept route wiring (source pins)', () => {
 
   test('the card enrollment records after_visit_card (v12) for a moved existing customer who captures a card (NOT a paused one: never auto-charged), with prepay_card still winning for in-lane prepay', () => {
     expect(src).toMatch(
-      /const recurringCardAfterVisitVariant = recurringCardPolicy\.required === true\s*&& recurringCardPolicy\.afterVisitCard === true\s*&& recurringCardPolicy\.autopayPaused !== true\s*\? 'after_visit_card' : null;/,
+      /const recurringCardAfterVisitVariant = recurringCardPolicy\.required === true\s*&& recurringCardPolicy\.afterVisitCard === true\s*&& !RecurringCards\.afterVisitHeld\(recurringCardPolicy\)\s*\? 'after_visit_card' : null;/,
     );
     expect(src).toMatch(
       /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: recurringCardAfterVisitVariant,/,
@@ -82,12 +95,52 @@ describe('accept route wiring (source pins)', () => {
     expect(src).toMatch(/if \(recurringCardLaneActive && standardInvoiceAttached\) \{[\s\S]{0,900}invoiceModeResult = false;\s*invoicePayUrlResult = null;/);
   });
 
+  test('render attestation: the accept 409s CONSENT_VARIANT_STALE when the recorded variant differs from the one the page rendered (never records unseen text)', () => {
+    // Checked only when a card is captured (a consent row is recorded) and not for prepay.
+    expect(src).toMatch(/if \(recurringCardPolicy\.required === true && !annualPrepaySelected\) \{[\s\S]{0,1400}code: 'CONSENT_VARIANT_STALE'/);
+    // Version is verified against the server's own constant, variant against the live-recomputed one.
+    expect(src).toMatch(/attestedConsentVersion === require\('\.\.\/services\/payment-method-consent-text'\)\.AFTER_VISIT_CONSENT_VERSION/);
+    expect(src).toMatch(/const consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'\s*\? !attestedAfterVisit\s*: attestedConsentVariant !== '';/);
+    expect(src).toMatch(/return res\.status\(409\)\.json\(\{[^}]*code: 'CONSENT_VARIANT_STALE'/);
+  });
+
+  test('locked-customer drift aborts the accept with a reloadable 409 BEFORE any conversion / enrollment (inside the accept transaction)', () => {
+    expect(src).toMatch(
+      /if \(recurringCardPolicy\.afterVisitCard === true\s*&& await RecurringCards\.pafExistingDriftUnderLock\(trx, \{ customerId, policy: recurringCardPolicy \}\)\) \{[\s\S]{0,300}err\.status = 409;[\s\S]{0,120}err\.code = 'ACCEPT_BILLING_CHANGED';\s*throw err;/,
+    );
+    // ...and it sits before the intent re-read, i.e. before anything is committed or enrolled.
+    expect(src.indexOf("err.code = 'ACCEPT_BILLING_CHANGED'")).toBeLessThan(src.indexOf('verifyRecurringCardIntentUnderLock({ setupIntentId: recurringCardVerification.setupIntentId })'));
+  });
+
+  test('explicit Auto Pay opt-out: the card is kept but never enrolled, at accept, from a saved card, and in the webhook recovery', () => {
+    expect(src).toMatch(/skipEnrollment: recurringCardPolicy\.autopayDisabled === true,/);
+    expect(src).toMatch(/&& recurringCardPolicy\.savedMethodRowId && customerId\s*\/\/[^\n]*\n\s*&& recurringCardPolicy\.autopayDisabled !== true\) \{/);
+    expect(src).toMatch(/'\{acceptedRecurringCardSkipEnrollment\}', 'true'::jsonb\)/);
+    const hook = read('routes/stripe-webhook.js');
+    expect(hook).toMatch(/boundToAccept && estimateData\?\.acceptedRecurringCardSkipEnrollment === true\s*\? \{ skipEnrollment: true \}/);
+  });
+
+  test('commercial manual billing clears EVERY card-rail shape through one helper in both /data and the accept', () => {
+    expect(src.match(/RecurringCards\.applyCommercialManualBillingExemption\(/g)).toHaveLength(2);
+    expect(src).toMatch(/applyCommercialManualBillingExemption\(recurringCardPolicyForData,/);
+    expect(src).toMatch(/applyCommercialManualBillingExemption\(recurringCardPolicy,/);
+  });
+
+  test('/data never advertises in-lane prepay to the moved cohort (prepay resolves as today for them)', () => {
+    expect(src).toMatch(
+      /prepayInLane: recurringCardLaneActiveForData && RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*&& recurringCardPolicyForData\.afterVisitCard !== true,/,
+    );
+    const rc = read('services/recurring-card-on-file.js');
+    expect(rc).toMatch(/const pafExisting = require\('\.\.\/config\/feature-gates'\)\.pafExistingCustomersLive\(\)\s*&& paymentMethodPreference !== 'prepay_annual';/);
+  });
+
   test('every policy shape the resolver now returns for a moved existing customer is on the rail', () => {
     for (const policy of [
       { required: true, exemptReason: null, afterVisitCard: true },
       { required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true },
       { required: false, exemptReason: 'saved_method_consented', afterVisitCard: true },
       { required: false, exemptReason: 'saved_method_consented', afterVisitCard: true, autopayPaused: true },
+      { required: true, exemptReason: null, afterVisitCard: true, autopayDisabled: true },
     ]) {
       expect(payAfterFirstVisitInvoiceRail(policy)).toBe(true);
     }

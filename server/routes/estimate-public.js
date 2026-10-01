@@ -9913,25 +9913,54 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       });
     // A site-confirmation-held commercial accept collects nothing at accept
     // (manual billing after the on-site price confirmation).
-    if (recurringCardPolicy.required && commercialAcceptDepositExempt({
-      isCommercialAccept,
-      siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
-      treatAsOneTime,
-      billByInvoice,
-    })) {
-      recurringCardPolicy.required = false;
-      recurringCardPolicy.exemptReason = 'commercial_manual_billing';
-    }
+    // (The helper also clears the pay-after-first-visit existing-customer
+    // shapes that do NOT set required — saved_method_consented — so a
+    // commercial accept never rides the card rail for that cohort either.)
+    RecurringCards.applyCommercialManualBillingExemption(recurringCardPolicy, {
+      commercialManualBilling: commercialAcceptDepositExempt({
+        isCommercialAccept,
+        siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
+        treatAsOneTime,
+        billByInvoice,
+      }),
+    });
     const recurringCardLaneActive = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicy);
     // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the consent variant the capture UI
     // rendered for a moved existing customer who must capture a card. Paused
-    // Auto Pay (owner R5) is never auto-charged, so it keeps the base consent.
+    // Auto Pay (owner R5) and an explicit Auto Pay opt-out are never
+    // auto-charged, so they keep the base consent.
     // Stamped on the estimate with the accepted SetupIntent so the webhook
     // recovery records the SAME variant the customer saw.
     const recurringCardAfterVisitVariant = recurringCardPolicy.required === true
       && recurringCardPolicy.afterVisitCard === true
-      && recurringCardPolicy.autopayPaused !== true
+      && !RecurringCards.afterVisitHeld(recurringCardPolicy)
       ? 'after_visit_card' : null;
+    // Render attestation (GitHub Codex #5481 r1 P1): the capture UI sends the
+    // consent variant + version IT RENDERED (/data recurringCardPolicy
+    // .afterVisitConsent, never for prepay). The recorded variant is
+    // recomputed from live pause / opt-out state above, so a mismatch in
+    // either direction means the customer saw different text than we would
+    // record — refuse with the reloadable 409 (same shape as
+    // TERMS_VERSION_STALE) and record nothing. Only checked when a consent
+    // row is actually recorded (a captured card); an absent attestation is
+    // fine unless the after-visit text is what would be recorded.
+    if (recurringCardPolicy.required === true && !annualPrepaySelected) {
+      const attestedConsentVariant = typeof req.body?.recurringCardConsentVariant === 'string'
+        ? req.body.recurringCardConsentVariant.trim().slice(0, 40) : '';
+      const attestedConsentVersion = typeof req.body?.recurringCardConsentVersion === 'string'
+        ? req.body.recurringCardConsentVersion.trim().slice(0, 40) : '';
+      const attestedAfterVisit = attestedConsentVariant === 'after_visit_card'
+        && attestedConsentVersion === require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION;
+      const consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'
+        ? !attestedAfterVisit
+        : attestedConsentVariant !== '';
+      if (consentMismatch) {
+        return res.status(409).json({
+          error: 'Your payment terms were just updated. Please reload the page and review the card authorization before confirming.',
+          code: 'CONSENT_VARIANT_STALE',
+        });
+      }
+    }
     // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
     // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
     // contract) is removed — resolveDepositPolicy is permanently
@@ -11073,6 +11102,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         });
       }
 
+      // PR-B: an explicit Auto Pay opt-out keeps the card but is never
+      // enrolled — stamp it with the accepted intent so the setup_intent
+      // recovery (stripe-webhook.js) honors the same decision.
+      if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && recurringCardPolicy.autopayDisabled === true) {
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSkipEnrollment}', 'true'::jsonb)",
+          ),
+        });
+      }
+
       // PR-B: persist the consent variant with the accepted intent so the
       // setup_intent.succeeded recovery (stripe-webhook.js) records the same
       // authorization the capture UI rendered (after_visit_card v12).
@@ -11403,6 +11443,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const err = new Error('Save a card for Auto Pay to confirm your recurring plan');
         err.status = 402;
         err.code = 'RECURRING_CARD_REQUIRED';
+        throw err;
+      }
+      // PR-B (GitHub Codex #5481 r1 P1): the pay-after-first-visit existing-
+      // customer cohort was judged from an UNLOCKED customers snapshot. Re-judge
+      // it under this transaction's customer lock — billing_mode flipping to
+      // monthly_membership, a pause starting/ending or an Auto Pay opt-out
+      // landing since preflight would otherwise still suppress the pay link and
+      // enroll the card. On drift abort (nothing committed) with the reloadable
+      // 409; the refreshed page resolves today's behavior for the new state.
+      if (recurringCardPolicy.afterVisitCard === true
+        && await RecurringCards.pafExistingDriftUnderLock(trx, { customerId, policy: recurringCardPolicy })) {
+        const err = new Error('Your account just changed. Please reload the page and confirm again.');
+        err.status = 409;
+        err.isOperational = true;
+        err.code = 'ACCEPT_BILLING_CHANGED';
         throw err;
       }
       // The verified intent re-read UNDER THIS ROW LOCK (#4144): a
@@ -12919,6 +12974,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // fall back to the account payer and refuse.
           scheduledServiceId: postCommitPayerScopeSsId,
           authorizedAt: acceptAuthorizedAt,
+          // PR-B: explicit Auto Pay opt-out — save the card + record the base
+          // consent, but never enroll (autopay_enabled stays false).
+          skipEnrollment: recurringCardPolicy.autopayDisabled === true,
           // In-lane prepay renders + records the prepay authorization
           // (immediate 12-month charge) instead of the base card text. Keyed
           // off what the capture UI RENDERED (in-lane prepay accept), not
@@ -12938,7 +12996,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
-      && recurringCardPolicy.savedMethodRowId && customerId) {
+      && recurringCardPolicy.savedMethodRowId && customerId
+      // PR-B: an explicit Auto Pay opt-out is never auto-enrolled from a saved card.
+      && recurringCardPolicy.autopayDisabled !== true) {
       // Auto-satisfy (spec §3.2): capture was skipped because a saved card
       // already carries an enrollment-qualifying consent — enroll THAT
       // method so the accept lands with the same Auto Pay protection a
@@ -14656,6 +14716,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           && recurringCardLaneActive
           && require('../config/feature-gates').pafExistingCustomersLive(),
         afterVisitPaused: recurringCardPolicy.autopayPaused === true,
+        afterVisitDisabled: recurringCardPolicy.autopayDisabled === true,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -20023,6 +20084,9 @@ function buildAcceptNotificationPayload({
   // ...and the customer's Auto Pay is paused: the card is kept but never
   // auto-charged, so the copy says a pay link follows the first visit.
   afterVisitPaused = false,
+  // ...or the customer explicitly turned Auto Pay off: same held shape (card
+  // kept, nothing auto-charged, a pay link follows the visit), neutral copy.
+  afterVisitDisabled = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -20282,6 +20346,15 @@ function buildAcceptNotificationPayload({
     };
   }
 
+  if (afterVisitBilling && afterVisitDisabled && !afterVisitPaused) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer, Auto Pay off: card kept on file, not enrolled, no auto-charge, pay link goes out after the first visit.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today. We'll send you a link to pay after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
   if (afterVisitBilling && afterVisitPaused) {
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
@@ -20296,7 +20369,7 @@ function buildAcceptNotificationPayload({
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer on the card rail: no pay link sent, billed after the first visit.`,
       customerTitle: 'Estimate accepted',
-      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your card on file is billed after your first visit.`,
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.`,
       customerLink: '/?tab=billing',
     };
   }
@@ -27568,15 +27641,14 @@ async function composeEstimateDataPayload(estimate, {
     // required:true here, walk the customer through card capture, and then the
     // accept-side exemption would skip enrollment — a captured card that never
     // enrolls (Codex #2668 P2). Matches /recurring-card-intent's mirror.
-    if (recurringCardPolicyForData.required && commercialAcceptDepositExempt({
-      isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
-      siteConfirmationHold,
-      treatAsOneTime: depositStructuralOneTime,
-      billByInvoice: effectiveInvoiceMode,
-    })) {
-      recurringCardPolicyForData.required = false;
-      recurringCardPolicyForData.exemptReason = 'commercial_manual_billing';
-    }
+    RecurringCards.applyCommercialManualBillingExemption(recurringCardPolicyForData, {
+      commercialManualBilling: commercialAcceptDepositExempt({
+        isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+        siteConfirmationHold,
+        treatAsOneTime: depositStructuralOneTime,
+        billByInvoice: effectiveInvoiceMode,
+      }),
+    });
     // Card lane supersedes the deposit (mirrors the accept gate) — the
     // client keys the deposit modal off this policy, so during the rollout
     // window with both flags on it must see required:false or the "$0
@@ -28120,7 +28192,14 @@ async function composeEstimateDataPayload(estimate, {
         // payer-check-uncertain / commercial-manual-billing exemption must
         // NOT advertise a charge the accept route deliberately skips
         // (Codex r9). The accept gate re-resolves authoritatively either way.
-        prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled(),
+        // Never for the PR-B existing-customer cohort (GitHub Codex #5481 r1):
+        // an annual-prepay accept resolves those members exactly as today
+        // (existing_plan_customer / autopay_paused — the resolver does not widen
+        // a prepay_annual preference), so the in-lane prepay charge plan must
+        // not be advertised to them just because the widening put them on the
+        // rail here (this payload resolves with no preference).
+        prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled()
+          && recurringCardPolicyForData.afterVisitCard !== true,
         // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): this customer
         // is on the card rail AND the gate is on — the same predicate that
         // drives the server-rendered "nothing is charged today" wording
@@ -28141,8 +28220,13 @@ async function composeEstimateDataPayload(estimate, {
         ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.autopayPaused === true
           && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
           ? { afterVisitPaused: true } : {}),
+        // Explicit Auto Pay opt-out: same held shape as paused (card kept,
+        // never enrolled or charged, pay link after the visit), neutral copy.
+        ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.autopayDisabled === true
+          && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
+          ? { afterVisitAutopayOff: true } : {}),
         ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.required === true
-          && recurringCardPolicyForData.autopayPaused !== true
+          && !RecurringCards.afterVisitHeld(recurringCardPolicyForData)
           ? { afterVisitConsent: true } : {}),
       },
       estimate: {

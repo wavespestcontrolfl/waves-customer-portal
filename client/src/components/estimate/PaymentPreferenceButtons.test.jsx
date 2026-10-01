@@ -347,10 +347,10 @@ describe('PaymentPreferenceButtons', () => {
       expect(screen.getByText(/we will send the first application invoice after confirmation/)).toBeInTheDocument();
     });
 
-    it('flag on + Auto Pay paused: card kept but never charged automatically — says a pay link follows the visit', () => {
+    it('flag on + Auto Pay paused: card kept but never charged automatically — says a pay link follows the visit (once)', () => {
       renderButtons({ payAfterFirstVisit: true, autopayPaused: true });
       expect(screen.getByText(/Your Auto Pay is paused, so we send you a pay link after your first visit\./)).toBeInTheDocument();
-      expect(screen.queryByText(/your card on file is billed/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/is billed for your first visit/)).not.toBeInTheDocument();
     });
 
     it('flag on but a SETUP-ONLY invoice (no first-application amount): keeps the existing disclosure (its pay link goes out at accept)', () => {
@@ -363,10 +363,57 @@ describe('PaymentPreferenceButtons', () => {
       expect(screen.getByText(/we will send the setup invoice after confirmation/)).toBeInTheDocument();
     });
 
-    it('flag on: says nothing is charged today and the card on file is billed after the first visit', () => {
+    it('flag on: says nothing is charged today and the saved payment method is billed after the first visit (tender-neutral: a bank capture is not "a card")', () => {
       renderButtons({ payAfterFirstVisit: true });
-      expect(screen.getByText(/Nothing is charged today — your card on file is billed for your first visit after it is completed\./)).toBeInTheDocument();
+      expect(screen.getByText(/Nothing is charged today — your saved payment method is billed for your first visit after it is completed\./)).toBeInTheDocument();
       expect(screen.queryByText(/we will send the/)).not.toBeInTheDocument();
+    });
+
+    it('flag on + Auto Pay explicitly off: neutral pay-link-after-the-visit wording, never an automatic charge', () => {
+      renderButtons({ payAfterFirstVisit: true, autopayOff: true });
+      expect(screen.getByText(/Nothing due today\. We send you a link to pay after your first visit\./)).toBeInTheDocument();
+      expect(screen.queryByText(/is billed for your first visit/)).not.toBeInTheDocument();
+    });
+
+    // GitHub Codex #5481 r1 P1: the invoice box's "Auto Pay bills your card"
+    // line rendered for every required-capture customer, including the paused
+    // and Auto-Pay-off cohorts that are never auto-charged.
+    describe('invoice-box "Auto Pay bills your card" line', () => {
+      const AUTO_PAY_LINE = /Auto Pay bills your card after your first application/;
+
+      it('renders for a customer who will be auto-charged (required capture, not held)', () => {
+        renderButtons({ payAfterFirstVisit: true, prepayCardCapture: true });
+        expect(screen.getByText(AUTO_PAY_LINE)).toBeInTheDocument();
+      });
+
+      it('is suppressed for a paused customer and says a pay link follows the visit instead (prepay-offered layout too, where the combined fineprint is hidden)', () => {
+        renderButtons({ payAfterFirstVisit: true, autopayPaused: true, prepayCardCapture: true, annualPrepayEligible: true });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.getByText(/Nothing due today\. Your Auto Pay is paused, so we send you a pay link after your first visit\./)).toBeInTheDocument();
+      });
+
+      it('is suppressed for an Auto-Pay-off customer, with neutral wording', () => {
+        renderButtons({ payAfterFirstVisit: true, autopayOff: true, prepayCardCapture: true, annualPrepayEligible: true });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.getByText(/Nothing due today\. We send you a link to pay after your first visit\./)).toBeInTheDocument();
+      });
+
+      it('a paused customer with a saved card (capture not required) still sees the pay-link sentence', () => {
+        renderButtons({ payAfterFirstVisit: true, autopayPaused: true, prepayCardCapture: false, annualPrepayEligible: true });
+        expect(screen.getByText(/Your Auto Pay is paused, so we send you a pay link after your first visit\./)).toBeInTheDocument();
+      });
+
+      it('a held customer with a setup-only invoice gets no "nothing due" claim (its pay link goes out at accept)', () => {
+        renderButtons({
+          payAfterFirstVisit: true,
+          autopayPaused: true,
+          prepayCardCapture: true,
+          selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly', monthly: 49 },
+          extraInvoiceRows: [{ label: 'Rodent bait-station setup', amount: 99 }],
+        });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
+      });
     });
   });
 });

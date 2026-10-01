@@ -54,7 +54,7 @@ import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimat
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -3051,7 +3051,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // afterVisit (GATE_PAF_EXISTING_CUSTOMERS): existing customer on the
 // pay-after-first-visit card rail — the checkbox renders the after_visit_card
 // (v12) authorization, the variant the accept records.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false, paused = false }) {
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false, paused = false, autopayOff = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3234,10 +3234,10 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
               ? (bank
                 ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
                 : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
-              : (paused
-                // Paused Auto Pay: the method is kept on file but never charged
-                // automatically — a pay link follows each visit.
-                ? `Save your ${bankOffered ? 'card or bank account' : 'card'} on file to confirm your plan — nothing is charged today. Your Auto Pay is paused, so we send you a pay link after each completed service.`
+              : ((paused || autopayOff)
+                // Paused / explicitly-off Auto Pay: the method is kept on file
+                // but never charged automatically — a pay link follows each visit.
+                ? `Save your ${bankOffered ? 'card or bank account' : 'card'} on file to confirm your plan — nothing is charged today. ${paused ? 'Your Auto Pay is paused, so we' : 'We'} send you a pay link after each completed service.`
                 : (bank
                   ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
                   : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`))}
@@ -7192,6 +7192,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // Never for annual prepay: the line is not shown for that lane (paid
           // up front), so nothing is attested and nothing is recorded.
           termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
+          // Attests which card-authorization copy THIS TAB RENDERED
+          // (GATE_PAF_EXISTING_CUSTOMERS) — render-bound, sent only when the
+          // after_visit_card (v12) text is what the capture UI shows (never for
+          // prepay, never for the paused / Auto-Pay-off cohorts, which keep the
+          // base text). The server 409s CONSENT_VARIANT_STALE when what it would
+          // record differs from what was shown.
+          recurringCardConsentVariant: (paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true)
+            ? 'after_visit_card' : undefined,
+          recurringCardConsentVersion: (paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true)
+            ? AFTER_VISIT_CONSENT_VERSION : undefined,
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -7287,6 +7297,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'CONSENT_VARIANT_STALE' || body.code === 'ACCEPT_BILLING_CHANGED') {
+            // The card-authorization text (or the account's billing cohort) moved
+            // since this tab loaded — refetch so the capture UI renders exactly
+            // what the server will record, drop the captured intent (its
+            // checkbox was for the old text) and keep the plan selections.
+            recurringCardSetupIntentIdRef.current = null;
+            setInlineCardIntent(null);
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'Your payment terms were updated — please review them and confirm again.');
+          }
           if (body.code === 'TERMS_VERSION_STALE') {
             // The acceptance copy changed since this tab loaded — refetch so
             // the line above Accept is the one the server will record, keep
@@ -9043,6 +9063,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
                 autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
+                autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />
             </>
           ) : null}
@@ -9200,6 +9221,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                         : CARD_SURCHARGE_DISCLOSURE)
                       : (data?.recurringCardPolicy?.afterVisitPaused === true
                         ? `Nothing is charged today. Your Auto Pay is paused, so we keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`
+                        : data?.recurringCardPolicy?.afterVisitAutopayOff === true
+                        ? `Nothing is charged today. We keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`
                         : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`)))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
@@ -9220,6 +9243,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepay={paymentPreference === 'prepay_annual'}
                 afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
                 paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
+                autopayOff={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
@@ -9317,6 +9341,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               prepay={paymentPreference === 'prepay_annual'}
               afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
               paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
+              autopayOff={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitAutopayOff === true}
             />
           ) : null}
           {websiteMode ? null : aiPanelBlock}
@@ -9390,6 +9415,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
                 autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
+                autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />
             </div>
           ) : null

@@ -129,3 +129,36 @@ describe('estimate_recurring_card recovery records the accepted consent variant'
     expect(mockCompleteEnrollment).not.toHaveBeenCalled();
   });
 });
+
+describe('estimate_recurring_card recovery honors an explicit Auto Pay opt-out (PR-B)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('an accept stamped acceptedRecurringCardSkipEnrollment recovers with skipEnrollment (card kept, never enrolled)', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_1',
+      acceptedRecurringCardSkipEnrollment: true,
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({ skipEnrollment: true }));
+  });
+
+  test('no stamp (or a non-true value): enrollment proceeds exactly as before', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment.mock.calls[0][0]).not.toHaveProperty('skipEnrollment');
+    mockCompleteEnrollment.mockClear();
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1', acceptedRecurringCardSkipEnrollment: 'yes' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment.mock.calls[0][0]).not.toHaveProperty('skipEnrollment');
+  });
+
+  test('only the accepted intent carries the opt-out stamp', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_other',
+      acceptedRecurringCardSkipEnrollment: true,
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+});

@@ -52,12 +52,16 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // paused (server /data recurringCardPolicy.afterVisitPaused): the customer's
   // Auto Pay is paused — the card is kept on file but never charged
   // automatically, so the copy says a pay link follows each service.
+  // autopayOff (server /data recurringCardPolicy.afterVisitAutopayOff): the
+  // customer explicitly turned Auto Pay off — same held shape as paused (card
+  // kept, never enrolled or charged, pay link after each service), neutral copy.
   // savedFor: what the replayed saved method is "already saved for" —
   // "this plan" (estimate accept, default), "this visit" (one-time secure
   // appointment), "Auto Pay" (standalone link). Copy only.
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan', afterVisit = false, paused = false },
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false },
   ref,
 ) {
+  const held = paused || autopayOff;
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -272,15 +276,15 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       <div style={{ fontSize: 15, fontWeight: 600, color: NAVY }}>
         {prepay
           ? (bank ? 'Annual prepay — your bank account pays for the year' : 'Annual prepay — your card pays for the year')
-          : (paused ? 'Card on file — nothing charged today' : 'Auto Pay — nothing charged today')}
+          : (held ? 'Card on file — nothing charged today' : 'Auto Pay — nothing charged today')}
       </div>
       <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 4 }}>
         {prepay
           ? (bank
             ? 'When you confirm, we show your exact 12-month total and debit this bank account. Bank transfers have no added card surcharge.'
             : 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
-          : (paused
-            ? `Your Auto Pay is paused, so we keep this ${bankOffered ? 'payment method' : 'card'} on file and send you a pay link after each completed service.`
+          : (held
+            ? `${paused ? 'Your Auto Pay is paused, so we' : 'We'} keep this ${bankOffered ? 'payment method' : 'card'} on file and send you a pay link after each completed service.`
             : (bank
               ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
               : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`))}
@@ -320,10 +324,14 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
             ? (bank
               ? 'I authorize Waves to save this bank account and debit my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
               : 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.')
-            : (paused
+            // The recorded terms (base v11, shown under "View full terms")
+            // authorize charging "as agreed", so the short label says so too
+            // rather than promising a save-only authorization (GitHub Codex
+            // #5481 r1 P3). Nothing is charged automatically while held.
+            : (held
               ? (bank
-                ? 'I authorize Waves to save this bank account on file — cancel anytime.'
-                : 'I authorize Waves to save this card on file — cancel anytime.')
+                ? 'I authorize Waves to save this bank account on file and debit it for future invoices as agreed — cancel anytime.'
+                : 'I authorize Waves to save this card on file and charge it for future invoices as agreed — cancel anytime.')
               : (bank
                 ? 'I authorize Waves to debit this bank account after each completed service — cancel anytime.'
                 : 'I authorize Waves to charge this card after each completed service — cancel anytime.'))}

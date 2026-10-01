@@ -190,6 +190,45 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
     expect(captured).not.toHaveProperty('afterVisitPaused');
   });
 
+  // Explicit Auto Pay opt-out: held like the pause (card kept, never enrolled or
+  // charged, pay link after the visit), but with its own flag so the client copy
+  // never claims the plan is "paused".
+  test('PR-B: explicit Auto Pay opt-out surfaces afterVisitAutopayOff, never afterVisitConsent / afterVisitPaused', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    const off = await policyFor({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayDisabled: true });
+    expect(off.afterVisitExisting).toBe(true);
+    expect(off.afterVisitAutopayOff).toBe(true);
+    expect(off).not.toHaveProperty('afterVisitConsent');
+    expect(off).not.toHaveProperty('afterVisitPaused');
+    const plain = await policyFor({ enforced: true, required: true, exemptReason: null, afterVisitCard: true });
+    expect(plain).not.toHaveProperty('afterVisitAutopayOff');
+  });
+
+  // GitHub Codex #5481 r1: /data resolves with no payment preference, so the
+  // PR-B widening puts the cohort on the rail here, but an annual-prepay accept
+  // resolves them exactly as today (never in-lane) — prepayInLane must stay false.
+  test('PR-B: prepayInLane is never advertised to the moved existing-customer cohort, even with GATE_PREPAY_CARD_AND_CHARGE on', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    try {
+      // control: a NEW customer on the rail does get in-lane prepay
+      expect((await policyFor(CAPTURE)).prepayInLane).toBe(true);
+      for (const policy of [
+        { enforced: true, required: true, exemptReason: null, afterVisitCard: true },
+        { enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true },
+        { enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayDisabled: true },
+        { enforced: true, required: false, exemptReason: 'saved_method_consented', afterVisitCard: true },
+      ]) {
+        expect((await policyFor(policy)).prepayInLane).toBe(false);
+      }
+    } finally {
+      delete gates.autoApplyAccountCredit;
+      delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+    }
+  });
+
   test('PR-B: a new customer on the rail and every exempt customer carry neither flag', async () => {
     process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
     for (const policy of [
@@ -204,6 +243,7 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
       expect(p).not.toHaveProperty('afterVisitExisting');
       expect(p).not.toHaveProperty('afterVisitConsent');
       expect(p).not.toHaveProperty('afterVisitPaused');
+      expect(p).not.toHaveProperty('afterVisitAutopayOff');
     }
   });
 

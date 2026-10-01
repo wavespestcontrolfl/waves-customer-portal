@@ -17,7 +17,7 @@ jest.mock('../models/db', () => {
         return v ?? null;
       },
     };
-    for (const m of ['where', 'whereNot', 'whereNotNull', 'whereNull', 'orderBy', 'forUpdate']) c[m] = () => c;
+    for (const m of ['where', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'orderBy', 'forUpdate']) c[m] = () => c;
     return c;
   };
   const mock = jest.fn((table) => chain(table));
@@ -117,6 +117,10 @@ const {
   replaceRecurringCardIntent,
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
+  afterVisitHeld,
+  explicitAutopayDisable,
+  pafExistingDriftUnderLock,
+  applyCommercialManualBillingExemption,
   payAfterFirstVisitCardRail,
   payAfterFirstVisitInvoiceRail,
   _private: { recurringCardIntentMatchesEstimate, classifyDeliveryOutcome },
@@ -710,6 +714,207 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
       expect(p.exemptReason).toBe('payer_billed');
       expect(p).not.toHaveProperty('afterVisitCard');
+    });
+
+    // GitHub Codex #5481 r1 P1/P2: with GATE_PREPAY_CARD_AND_CHARGE on, a
+    // prepay_annual preference reaches the customer-dependent exemptions; the
+    // PR-B widening must not move an existing member into the in-lane prepay
+    // charge-at-accept plan (refused for paused customers by stripe.js).
+    describe('annual prepay with GATE_PREPAY_CARD_AND_CHARGE on is NOT widened', () => {
+      afterEach(() => { delete process.env.GATE_PREPAY_CARD_AND_CHARGE; });
+
+      it('paused member + prepay_annual: today\'s autopay_paused exemption, no marker', async () => {
+        live();
+        process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+        mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_paused_until: '2099-01-01' };
+        mockIsPaused.mockReturnValue(true);
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER, paymentMethodPreference: 'prepay_annual' });
+        expect(p).toEqual({ enforced: true, required: false, exemptReason: 'autopay_paused' });
+        expect(payAfterFirstVisitInvoiceRail(p)).toBe(false);
+      });
+
+      it('non-autopay member + prepay_annual: today\'s existing_plan_customer exemption, no marker', async () => {
+        live();
+        process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+        mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER, paymentMethodPreference: 'prepay_annual' });
+        expect(p).toEqual({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+      });
+
+      it('the same members with a per-application preference (or none) still move', async () => {
+        live();
+        process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+        mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+        expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER, paymentMethodPreference: 'pay_at_visit' })).afterVisitCard).toBe(true);
+        expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).afterVisitCard).toBe(true);
+      });
+    });
+
+    // Explicit Auto Pay disable: detected by customers.autopay_enabled !== true
+    // AND the latest autopay_log toggle row being autopay_disabled (the same
+    // rule autopay-setup-link.js uses for its opt-out), held like the pause.
+    describe('explicit Auto Pay disable (held cohort: card kept, never enrolled, never charged)', () => {
+      const OFF_CUSTOMER = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+
+      it('explicitAutopayDisable: latest toggle disabled -> true; enabled / no rows / autopay on -> false', async () => {
+        mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
+        expect(await explicitAutopayDisable(OFF_CUSTOMER)).toBe(true);
+        mockDbFixtures.autopay_log = { event_type: 'autopay_enabled' };
+        expect(await explicitAutopayDisable(OFF_CUSTOMER)).toBe(false);
+        mockDbFixtures.autopay_log = null;
+        expect(await explicitAutopayDisable(OFF_CUSTOMER)).toBe(false);
+        mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
+        expect(await explicitAutopayDisable({ ...OFF_CUSTOMER, autopay_enabled: true })).toBe(false);
+        expect(await explicitAutopayDisable(null)).toBe(false);
+      });
+
+      it('gate on: an eligible member who turned Auto Pay off keeps/captures the card with the held marker (no paused marker)', async () => {
+        live();
+        mockDbFixtures.customers = OFF_CUSTOMER;
+        mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayDisabled: true });
+        expect(afterVisitHeld(p)).toBe(true);
+        expect(payAfterFirstVisitInvoiceRail(p)).toBe(true);
+        expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      });
+
+      it('PAUSED and opted out (card detached during a pause): both markers kept, so the accept never enrolls the replacement card', async () => {
+        live();
+        mockDbFixtures.customers = { ...OFF_CUSTOMER, autopay_paused_until: '2099-01-01' };
+        mockIsPaused.mockReturnValue(true);
+        mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true, autopayDisabled: true });
+        // A paused non-member with an opt-out too.
+        mockDbFixtures.customers = { id: 'cust-1', pipeline_stage: 'lead', billing_mode: null, monthly_rate: null, autopay_paused_until: '2099-01-01' };
+        const nonMember = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+        expect(nonMember.autopayPaused).toBe(true);
+        expect(nonMember.autopayDisabled).toBe(true);
+      });
+
+      it('a never-toggled (or re-enabled) non-autopay member is NOT held: normal moved cohort', async () => {
+        live();
+        mockDbFixtures.customers = OFF_CUSTOMER;
+        mockDbFixtures.autopay_log = { event_type: 'autopay_enabled' };
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true });
+        expect(afterVisitHeld(p)).toBe(false);
+      });
+
+      it('a failed disable lookup fails closed to today\'s exemption (never moves, never enrolls)', async () => {
+        live();
+        mockDbFixtures.customers = OFF_CUSTOMER;
+        mockDbFixtures.autopay_log = () => { throw new Error('log table down'); };
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+        expect(p).toEqual({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+      });
+
+      it('a failed disable lookup for a PAUSED customer keeps today\'s autopay_paused exemption (member or non-member), never the capture lane', async () => {
+        live();
+        mockIsPaused.mockReturnValue(true);
+        mockDbFixtures.autopay_log = () => { throw new Error('log table down'); };
+        mockDbFixtures.customers = { ...OFF_CUSTOMER, autopay_paused_until: '2099-01-01' };
+        expect(await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).toEqual({ enforced: true, required: false, exemptReason: 'autopay_paused' });
+        mockDbFixtures.customers = { id: 'cust-1', pipeline_stage: 'lead', billing_mode: null, monthly_rate: null, autopay_paused_until: '2099-01-01' };
+        expect(await resolveRecurringCardPolicyForEstimate({ estimate: EST })).toEqual({ enforced: true, required: false, exemptReason: 'autopay_paused' });
+      });
+
+      it('gate off: an Auto Pay opt-out changes nothing (today\'s existing_plan_customer)', async () => {
+        mockDbFixtures.customers = OFF_CUSTOMER;
+        mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+        expect(p).toEqual({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+      });
+
+      it('the monthly-membership lane stays exempt even with an opt-out (not eligible)', async () => {
+        live();
+        mockDbFixtures.customers = { ...MONTHLY_CUSTOMER, autopay_enabled: false };
+        mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
+        expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('existing_plan_customer');
+      });
+    });
+
+    // GitHub Codex #5481 r1 P1: eligibility is re-judged under the accept
+    // transaction's customer lock; drift (billing_mode flip, pause / opt-out
+    // change, no customer) aborts the accept rather than suppressing the pay
+    // link and enrolling the card on a stale decision.
+    describe('pafExistingDriftUnderLock (locked-row recheck)', () => {
+      const trxFor = (customersRow, logRow = null) => {
+        const chain = (row) => {
+          const c = { first: async () => (typeof row === 'function' ? row() : row) };
+          for (const m of ['where', 'whereIn', 'orderBy', 'forUpdate']) c[m] = () => c;
+          return c;
+        };
+        return jest.fn((table) => chain(table === 'autopay_log' ? logRow : customersRow));
+      };
+      const MOVED = { afterVisitCard: true };
+
+      it('no drift when the locked row still matches the preflight cohort', async () => {
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }), { customerId: 'cust-1', policy: MOVED })).toBe(false);
+      });
+
+      it('drift: billing_mode flipped to monthly_membership between preflight and the lock', async () => {
+        expect(await pafExistingDriftUnderLock(trxFor(MONTHLY_CUSTOMER), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, billing_mode: 'annual_prepay' }), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+      });
+
+      it('drift: pause started / ended, or an opt-out landed / was reversed', async () => {
+        mockIsPaused.mockReturnValue(true);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }), { customerId: 'cust-1', policy: { ...MOVED, autopayPaused: true } })).toBe(false);
+        mockIsPaused.mockReturnValue(false);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }, { event_type: 'autopay_disabled' }), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }, { event_type: 'autopay_disabled' }), { customerId: 'cust-1', policy: { ...MOVED, autopayDisabled: true } })).toBe(false);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }, { event_type: 'autopay_enabled' }), { customerId: 'cust-1', policy: { ...MOVED, autopayDisabled: true } })).toBe(true);
+        // Paused AND opted out: the opt-out is judged independently of the pause.
+        mockIsPaused.mockReturnValue(true);
+        const pausedOptedOut = trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }, { event_type: 'autopay_disabled' });
+        expect(await pafExistingDriftUnderLock(pausedOptedOut, { customerId: 'cust-1', policy: { ...MOVED, autopayPaused: true, autopayDisabled: true } })).toBe(false);
+        expect(await pafExistingDriftUnderLock(pausedOptedOut, { customerId: 'cust-1', policy: { ...MOVED, autopayPaused: true } })).toBe(true);
+      });
+
+      it('fails closed: no customer, missing row, lookup error', async () => {
+        expect(await pafExistingDriftUnderLock(trxFor(PER_APP_CUSTOMER), { customerId: null, policy: MOVED })).toBe(true);
+        expect(await pafExistingDriftUnderLock(trxFor(null), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+        expect(await pafExistingDriftUnderLock(trxFor(() => { throw new Error('boom'); }), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+      });
+
+      it('never fires for a policy that is not the moved cohort', async () => {
+        const trx = trxFor(MONTHLY_CUSTOMER);
+        expect(await pafExistingDriftUnderLock(trx, { customerId: 'cust-1', policy: { enforced: true, required: true, exemptReason: null } })).toBe(false);
+        expect(trx).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('applyCommercialManualBillingExemption (every card-rail shape)', () => {
+      it('clears the saved-method auto-satisfy shape of the moved cohort (required:false escaped the old required-only check)', () => {
+        const p = { enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-1', afterVisitCard: true, autopayPaused: true };
+        applyCommercialManualBillingExemption(p, { commercialManualBilling: true });
+        expect(p).toEqual({ enforced: true, required: false, exemptReason: 'commercial_manual_billing' });
+        expect(payAfterFirstVisitInvoiceRail(p)).toBe(false);
+      });
+
+      it('clears the capture-required shape, including the held markers', () => {
+        const p = { enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayDisabled: true };
+        applyCommercialManualBillingExemption(p, { commercialManualBilling: true });
+        expect(p).toEqual({ enforced: true, required: false, exemptReason: 'commercial_manual_billing' });
+        const plain = { enforced: true, required: true, exemptReason: null };
+        applyCommercialManualBillingExemption(plain, { commercialManualBilling: true });
+        expect(plain).toEqual({ enforced: true, required: false, exemptReason: 'commercial_manual_billing' });
+      });
+
+      it('leaves everything else alone: not commercial, a non-moved saved-method policy, an exempt policy', () => {
+        const moved = { enforced: true, required: true, exemptReason: null, afterVisitCard: true };
+        applyCommercialManualBillingExemption(moved, { commercialManualBilling: false });
+        expect(moved).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true });
+        const saved = { enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-1' };
+        applyCommercialManualBillingExemption(saved, { commercialManualBilling: true });
+        expect(saved.exemptReason).toBe('saved_method_consented');
+        const exempt = { enforced: true, required: false, exemptReason: 'payer_billed' };
+        applyCommercialManualBillingExemption(exempt, { commercialManualBilling: true });
+        expect(exempt.exemptReason).toBe('payer_billed');
+      });
     });
 
     it('gate on: a label-only (auto tier) customer is not a member and is unaffected (still the normal required lane, no marker)', async () => {
@@ -1452,6 +1657,17 @@ describe('completeRecurringCardEnrollment (save → consent → enroll)', () => 
     expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
     // The variant, not the base text, is also the idempotency key.
     expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_1', expect.objectContaining({ variant: 'after_visit_card' }));
+  });
+
+  it('skipEnrollment (PR-B explicit Auto Pay opt-out): saves the card + records consent but NEVER enrolls', async () => {
+    mockDbFixtures.payment_methods = null;
+    mockSavePaymentMethod.mockResolvedValue({ id: 'pmrow-1', method_type: 'card' });
+    const r = await completeRecurringCardEnrollment({ ...ARGS, skipEnrollment: true });
+    expect(r).toEqual({ enrolled: false, reason: 'autopay_opt_out_kept', paymentMethodRowId: 'pmrow-1' });
+    expect(mockSavePaymentMethod).toHaveBeenCalled();
+    expect(mockRecordConsent).toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   it('is idempotent: reuses an existing pm row and skips a duplicate consent', async () => {

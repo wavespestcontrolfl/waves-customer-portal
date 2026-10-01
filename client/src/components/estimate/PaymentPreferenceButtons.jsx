@@ -132,6 +132,9 @@ export default function PaymentPreferenceButtons({
   // ...and their Auto Pay is paused (server afterVisitPaused): the card is
   // kept but never auto-charged, so the copy says a pay link follows the visit.
   autopayPaused = false,
+  // ...or they explicitly turned Auto Pay off (server afterVisitAutopayOff):
+  // same held shape, neutral wording.
+  autopayOff = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -258,11 +261,29 @@ export default function PaymentPreferenceButtons({
               // Only a first-application invoice rides the card rail: a
               // setup-only invoice is unattached and its pay link goes out at
               // accept, so it keeps the existing disclosure.
-              ? (autopayPaused
-                ? 'Choose pay per application. Nothing is charged today. Your Auto Pay is paused, so we send you a pay link after your first visit.'
-                : 'Choose pay per application. Nothing is charged today — your card on file is billed for your first visit after it is completed.')
+              ? (autopayPaused || autopayOff
+                // The invoice box above carries the held cohort's pay-link
+                // sentence (and survives the prepay-offered layout, which hides
+                // this line) — don't repeat it here.
+                ? 'Choose pay per application.'
+                : 'Choose pay per application. Nothing is charged today — your saved payment method is billed for your first visit after it is completed.')
               : `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`)
             : 'Choose pay per application. Your first service visit will be billed after completion.';
+  // The invoice box's when-money-moves sentence. Held cohorts (Auto Pay paused or
+  // explicitly off) are never auto-charged, so "Auto Pay bills your card" must
+  // not render for them (GitHub Codex #5481 r1 P1) — they are told a pay link
+  // follows the visit, here in the box so it also shows in the prepay-offered
+  // layout where the combined fineprint below is hidden. Only a first-
+  // application invoice rides the rail: a setup-only invoice's pay link goes out
+  // at accept, so a held customer gets no "nothing due" claim for it.
+  const afterVisitHeld = payAfterFirstVisit && (autopayPaused || autopayOff);
+  const invoiceBoxNote = afterVisitHeld
+    ? (hasFirstVisitInvoice
+      ? (autopayPaused
+        ? 'Nothing due today. Your Auto Pay is paused, so we send you a pay link after your first visit.'
+        : 'Nothing due today. We send you a link to pay after your first visit.')
+      : '')
+    : (prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
     : invoiceRows.length > 0
@@ -357,9 +378,9 @@ export default function PaymentPreferenceButtons({
                   <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(invoiceTotal)}</strong>
                 </div>
               ) : null}
-              {prepayCardCapture || Number(oneTimeExtrasTotal) > 0 ? (
+              {invoiceBoxNote || Number(oneTimeExtrasTotal) > 0 ? (
                 <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
-                  {prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : ''}
+                  {invoiceBoxNote}
                   {Number(oneTimeExtrasTotal) > 0
                     ? ` One-time services (${fmtMoney(oneTimeExtrasTotal)}) are billed after completion.`
                     : ''}
