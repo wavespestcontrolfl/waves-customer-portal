@@ -455,9 +455,9 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [];
     await runAdminAlertRelevanceSweep({ now: NOW });
     // The retire pass's query (the re-arm pass reads stamped rows first).
-    const q = mockQueries.find((x) => x.table === 'notifications' && x.calls.some(([m, col]) => m === 'whereNull' && col === 'done_at'));
+    const q = mockQueries.find((x) => x.table === 'notifications' && x.calls.some(([m, sql]) => m === 'whereRaw' && sql === "metadata->'retired' IS NULL"));
     const flat = JSON.stringify(q.calls);
-    expect(q.calls).toEqual(expect.arrayContaining([['where', { recipient_type: 'admin' }], ['whereNull', 'done_at'], ['whereRaw', "metadata->'retired' IS NULL", []]]));
+    expect(q.calls).toEqual(expect.arrayContaining([['where', { recipient_type: 'admin' }], ['whereRaw', "metadata->'retired' IS NULL", []]]));
     // Read is not done: a row someone opened is still open work.
     expect(q.calls).not.toContainEqual(['whereNull', 'read_at']);
     expect(flat).toContain("metadata->>'feed'");
@@ -606,7 +606,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(JSON.parse(row.metadata).retired).toMatchObject({ by: 'alert-relevance', at: NOW.toISOString() });
   });
 
-  test('a row a person marks DONE mid-sweep is never touched: their done, resolution and read stand', async () => {
+  test('a row a person marks DONE whose subject moved on is taken over (done_by relevance, no Reopen), not retired: their done, resolution and read stand', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
     const row = staleNote(uid(521));
     mockTables.notifications = [row];
@@ -614,7 +614,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     onVisitRead((n) => { if (n === 1) Object.assign(row, { done_at: doneAt, done_by: '7', resolution: 'Handled by phone', read_at: doneAt }); });
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 1, retired: 0, byClass: {} });
-    expect(row).toMatchObject({ done_at: doneAt, done_by: '7', resolution: 'Handled by phone', read_at: doneAt });
+    expect(row).toMatchObject({ done_at: doneAt, done_by: 'relevance', resolution: 'Handled by phone', read_at: doneAt });
     expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 

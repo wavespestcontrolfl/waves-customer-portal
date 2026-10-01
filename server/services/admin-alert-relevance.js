@@ -293,7 +293,14 @@ function classify(row) {
 function candidateQuery(cursor) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
-    .whereNull('done_at')
+    // Open rows, and rows a PERSON marked done (openToCloser's rule): when the
+    // subject moves on, the sweep takes the close over so their Reopen can't
+    // bring back an obsolete alert. A row any system component closed is left.
+    // Bounded to the Recently done window (7 days), the only place a Reopen is
+    // offered, so a person-done row is not re-read by every sweep forever.
+    .where((q) => q.whereNull('done_at').orWhere((p) => p
+      .whereRaw(`COALESCE(${require('./notification-service')._private.PERSON_DONE_BY_SQL}, false)`)
+      .whereRaw("done_at >= now() - interval '7 days'")))
     .whereRaw("metadata->'retired' IS NULL")
     .where((q) => {
       for (const c of CLASSES) {
@@ -306,7 +313,7 @@ function candidateQuery(cursor) {
     .modify((q) => { if (cursor) q.where('id', '>', cursor); })
     .orderBy('id', 'asc')
     .limit(PAGE_SIZE)
-    .select('id', 'category', 'link', 'metadata', 'created_at');
+    .select('id', 'category', 'link', 'metadata', 'created_at', 'done_at', 'done_by');
 }
 
 // The row as the batch read it, still: a refresh that rewrote it since is
@@ -339,6 +346,7 @@ function unretired(metadata) {
 // locks: see the module header. A change after the final judgement is the
 // re-arm pass's.
 async function retireIfStillMovedOn(row, cls, todayET, now) {
+  if (row.done_at) return takeOverPersonDone(row, cls, todayET);
   const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('done_at')
     .first('id', 'category', 'link', 'metadata', 'created_at');
   if (!current || !sameRow(current, row)) return null;
@@ -380,6 +388,24 @@ function retiredQuery(cursor, since) {
     .orderBy('id', 'asc')
     .limit(PAGE_SIZE)
     .select('id', 'category', 'link', 'metadata', 'read_at', 'created_at');
+}
+
+// A row a person already marked done whose subject has moved on: the sweep
+// takes the close over (done_by 'relevance'), fenced on that person's done_by
+// still being the one on the row. Their done time, read and resolution stand.
+// No retired stamp: the row is already out of the bell, so there is nothing
+// for the re-arm pass to put back — it only stops a stale Reopen.
+async function takeOverPersonDone(row, cls, todayET) {
+  const current = await db('notifications').where({ id: row.id, recipient_type: 'admin', done_by: row.done_by })
+    .whereNotNull('done_at').first('id', 'category', 'link', 'metadata', 'created_at');
+  if (!current || !sameRow(current, row)) return null;
+  const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
+  if (!reason) return null;
+  const updated = await db('notifications').where({ id: row.id, recipient_type: 'admin', done_by: row.done_by })
+    .whereNotNull('done_at').update({ done_by: 'relevance', resolution: db.raw('COALESCE(resolution, ?)', [reason]) });
+  // Not counted as a retire: the row was already out of the bell.
+  if (updated) logger.info(`[alert-relevance] notification ${row.id}: took over a person's Done (${reason})`);
+  return null;
 }
 
 // The put-back write: not done, no retired stamp, and unread only when the
