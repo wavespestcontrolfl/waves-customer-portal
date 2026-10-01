@@ -429,6 +429,8 @@ function attemptSend(run, set) {
     channels: run.sendChannels,
     metadata: run.snapshotMeta,
     send: makeSender(ctx),
+    // the office "send now" skips a plain dispute hold at the policy consult too (a fallback hold still waits)
+    ...(run.operatorInitiated ? { holdExempt: 'operator' } : {}),
   });
 }
 
@@ -636,6 +638,7 @@ async function decideShadowPolicy(run, set) {
   const verdicts = await reminderPolicyVerdicts({
     customerId: run.schedule.customer_id, invoiceId: null, invoiceIds: memberIds, policyInvoiceIds: memberIds,
     source: SOURCE, purpose: 'late_payment', entries: event?.entries || [],
+    ...(run.operatorInitiated ? { holdExempt: 'operator' } : {}),
   }, pending);
   if (verdicts.some((v) => v?.balanceIncomplete)) return decision('hold', 'COLLECTIONS_POLICY', { denied: pending });
   const denied = pending.filter((_c, i) => !verdictAllows(verdicts[i]));

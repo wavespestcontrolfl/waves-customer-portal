@@ -3066,6 +3066,21 @@ describe('collections hold (dispute / wrong-party): a WAIT everywhere, as in the
     expectWait(await run({ operatorInitiated: true, force: true }));
   });
 
+  test('the engine forwards holdExempt "operator" to the policy consult for a send-now only (the real rail guard is covered in customer-dunning-operator-hold-policy)', async () => {
+    mockHold = { kind: 'dispute' };
+    await run({ operatorInitiated: true, force: true });
+    expect(mockPolicy.mock.calls.length).toBeGreaterThan(0);
+    for (const [args] of mockPolicy.mock.calls) expect(args.holdExempt).toBe('operator');
+
+    setup();
+    mockLedger.length = 0;
+    mockPolicy.mockClear();
+    await run(); // a scheduled run: the decide phase holds first, so force the consult through the shadow helper's twin
+    const { reminderPolicyVerdicts } = require('../services/billing-reminder-delivery');
+    await reminderPolicyVerdicts({ customerId: CUSTOMER_ID, invoiceId: null, invoiceIds: ['inv-a'], source: 'invoice_followups_customer', purpose: 'late_payment', entries: [] }, ['sms']);
+    for (const [args] of mockPolicy.mock.calls) expect(args.holdExempt).toBeUndefined();
+  });
+
   test('operator EMAIL (comms-lock handoff): a fallback hold landing during render vetoes it; a dispute hold landing does not', async () => {
     customer.phone = null;
     landDuringRender('fallback');

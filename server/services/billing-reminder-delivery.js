@@ -154,12 +154,14 @@ function pendingReminderChannels(channels, delivered, resolved) {
 }
 
 function reminderPolicyVerdicts({
-  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries,
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries, holdExempt = null,
 }, pending) {
   return Promise.all(pending.map((channel) => collectionsChannelPermitted({
     customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
     invoiceIds: policyInvoiceIds ?? invoiceIds,
     detail: true,
+    // A deliberate operator send only (the rail guard skips a plain dispute hold for it; a fallback hold never).
+    ...(holdExempt ? { holdExempt } : {}),
   })));
 }
 
@@ -234,7 +236,7 @@ async function restoreSettledLeg(claim, entry, channel, { delivered, resolved, r
 }
 
 async function sendReminderChannels({
-  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents,
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents, holdExempt,
 }) {
   const progress = await reminderProgress(customerId, source, channels);
   // A missing episode has the same shape as restored progress. These sets
@@ -247,7 +249,7 @@ async function sendReminderChannels({
   const results = {};
   const pending = pendingReminderChannels(channels, delivered, resolved);
   const permitted = await reminderPolicyVerdicts({
-    customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries,
+    customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries, holdExempt,
   }, pending);
   // Partial debt evidence cannot authorize a leg or settle a restored waiver.
   // Keep the entire pending episode retryable before any delivery mutation.
