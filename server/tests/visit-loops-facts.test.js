@@ -128,7 +128,13 @@ describe('techPosition', () => {
       techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
       visitId: 'visit-1', techId: 'tech-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
     });
-    expect(computeStopsAhead).toHaveBeenCalledWith(conn, 'visit-1', { readOnly: true, today: '2026-10-01' });
+    expect(computeStopsAhead).toHaveBeenCalledWith(conn, 'visit-1', { readOnly: true, today: '2026-10-01', throwOnError: false });
+  });
+
+  test('strict (send-time rebuild) asks the tracker to rethrow, so an outage is a recheck failure', async () => {
+    computeStopsAhead.mockRejectedValueOnce(new Error('route read down'));
+    await expect(loadVisitLoops({ customerId: 'c1', now: NOW, conn: fakeConn(handlers()), strict: true })).rejects.toThrow('route read down');
+    expect(computeStopsAhead).toHaveBeenLastCalledWith(expect.anything(), 'visit-1', expect.objectContaining({ throwOnError: true }));
   });
 
   test('no tracker count (gate off, over the cap, not yet the durable floor): no number', async () => {

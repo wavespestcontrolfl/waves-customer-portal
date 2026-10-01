@@ -160,12 +160,13 @@ function crossesIntoNow(row, nowMin) {
 // three-stop cap, the never-increase floor), read-only: a number is used only when
 // it is already the durable floor the tracker shows; otherwise none. An SMS never
 // states a count the tracker would not, and this module never writes.
-async function trackerStopsAhead(conn, visit, now) {
-  const result = await require('./stops-ahead').computeStopsAhead(conn, String(visit.id), { readOnly: true, today: etDateString(now) });
+async function trackerStopsAhead(conn, visit, now, strict) {
+  // strict (send-time rebuild): an outage throws instead of reading as "no count"
+  const result = await require('./stops-ahead').computeStopsAhead(conn, String(visit.id), { readOnly: true, today: etDateString(now), throwOnError: Boolean(strict) });
   return Number.isInteger(result?.stopsAhead) ? result.stopsAhead : null;
 }
 
-async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
+async function loadTechPosition(todayRows, { conn, now, deriveWindow, strict }) {
   const visit = todayRows.find((r) => r.technician_id);
   if (!visit) return null;
   const status = await conn('tech_status').where({ tech_id: visit.technician_id })
@@ -183,7 +184,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
   const currentJob = fresh && String(status?.current_job_id ?? '') === String(visit.id);
   const notStarted = NOT_STARTED_STATUSES.includes(visit.status) && !currentJob
     && !LIVE_TRACK_STATES.includes(visit.track_state) && visit.track_state !== 'complete';
-  const stopsAhead = notStarted ? await trackerStopsAhead(conn, visit, now) : null;
+  const stopsAhead = notStarted ? await trackerStopsAhead(conn, visit, now, strict) : null;
   return {
     techName: firstName(visit.technician_name),
     status: fresh ? String(status.status) : 'stale',
@@ -470,7 +471,7 @@ async function loadCommitments({ conn, customerId, now }) {
 async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false } = {}) {
   const out = emptyVisitLoops();
   if (!customerId) return out;
-  const ctx = { conn, now, deriveWindow, customerId };
+  const ctx = { conn, now, deriveWindow, customerId, strict };
   const read = strict ? (_field, _fallback, fn) => fn() : safely;
 
   const todayRows = await read('today visits', [], () => loadTodayRows(customerId, ctx));

@@ -70,7 +70,8 @@ function dateOnly(value) {
  *   "Now at stop X of Y / You're stop Z" strip. Null when the count
  *   shouldn't render (gate off, no tech, not today, terminal visit,
  *   sibling already underway, active stop beyond the target, beyond the
- *   cap, or any error). With opts.readOnly (the public GET), a value that
+ *   cap, or any error — rethrown instead with opts.throwOnError). With
+ *   opts.readOnly (the public GET), a value that
  *   is not yet the durable floor returns {pending: true} instead of
  *   writing — the caller's explicit POST runs the persisting path.
  */
@@ -418,6 +419,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     }
     return null;
   } catch (err) {
+    // opts.throwOnError (additive; the SMS send-time recheck): an outage must not
+    // read as "no count" there. Every other caller keeps the fail-soft null.
+    if (opts.throwOnError) throw err;
     logger.warn(`[stops-ahead] compute failed for ${serviceId}: ${err.message}`);
     return null;
   }
