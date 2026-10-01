@@ -79,7 +79,7 @@ const { rateReviewLive, isEnabled } = require('../config/feature-gates');
 const { resolveActualMinutes } = require('./pricing-reality-check');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
-const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+const { hasAuthoritativeZeroPrice, resolveBillingLane } = require('./billing-lane');
 const { COUNTING_SOURCE_STATUSES } = require('./recurring-series-cancel-reseed');
 
 const SNAPSHOTS = 'rate_review_snapshots';
@@ -109,7 +109,7 @@ const CADENCE_VISITS = Object.freeze({ monthly: 12, bimonthly: 6, quarterly: 4, 
 const ENGINE_SERVICE_KEYS = Object.freeze({
   pest_control: ['pest_control'],
   lawn_care: ['lawn_care'],
-  tree_shrub: ['tree_shrub'],
+  tree_shrub: ['tree_shrub', 'palm_injection'], // ordered: a palm-only series (catalog category tree_shrub) prices as palm_injection alone
   mosquito: ['mosquito'],
   termite: ['termite_bait'],
   rodent: ['rodent_bait'],
@@ -134,6 +134,9 @@ const LEDGER_FAMILIES_FOR_LINE = Object.freeze({
   termite: ['termite_bait', 'termite'],
   rodent: ['rodent_bait', 'rodent'],
 });
+// reservice-scheduler's open-callback lane keys per family (facts.js
+// openCallbackLanes); families with no re-service lane are never held by one.
+const CALLBACK_LANE_FOR_FAMILY = Object.freeze({ pest_control: 'pest', lawn_care: 'lawn' });
 const MAX_USABLE_MINUTES = 240;
 // A home visit's wall clock minus the allowance never reads below this —
 // an allowance is a line average, not this visit's conversation.
@@ -638,6 +641,7 @@ function evaluateExceptions(line, config = DEFAULT_CONFIG) {
   // per_visit and one_time are explicit per-visit lanes (billing-lane.js); a
   // recurring series on either, or on the legacy NULL lane, is cleanup first.
   if (line.billingLane === 'per_visit' || line.billingLane === 'one_time' || line.billingLane == null) flags.push('lane_cleanup');
+  if (line.laneInferred) flags.push('lane_inferred');
   if (line.listLowConfidence) flags.push('list_low_confidence');
   if (line.familyKey === 'other') flags.push('unsupported_family');
   if (!f) flags.push('facts_unavailable');
@@ -941,7 +945,9 @@ function engineItemVisits(item) {
 function listRateFromEngineResult(result, line, cadence, { includeRiders = false, expectedVisits = null, riderAllow = null } = {}) {
   const keys = ENGINE_SERVICE_KEYS[line] || [];
   const items = result && Array.isArray(result.lineItems) ? result.lineItems : [];
-  const item = items.find((i) => keys.includes(i.service));
+  // First key present wins (tree_shrub before palm_injection); a standalone
+  // palm program is then the primary, never a rider of a missing line.
+  const item = keys.map((k) => items.find((i) => i.service === k)).find(Boolean);
   if (!item) return null;
   if (engineItemLowConfidence(item)) return { lowConfidence: true, tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null };
   const annual = positive(item.annualAfterDiscount ?? item.annual);
@@ -952,7 +958,7 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   // Riders (a palm program beside Tree & Shrub) join the MONTHLY figure only,
   // mirroring the ledger slice the monthly current rate was read from.
   const riderKeys = includeRiders
-    ? (ENGINE_RIDER_KEYS[line] || []).filter((k) => !Array.isArray(riderAllow) || riderAllow.includes(k))
+    ? (ENGINE_RIDER_KEYS[line] || []).filter((k) => k !== item.service && (!Array.isArray(riderAllow) || riderAllow.includes(k)))
     : [];
   const riders = items.filter((i) => riderKeys.includes(i.service));
   // A rider the current slice carries is part of the compared bundle: one
@@ -1021,7 +1027,10 @@ async function loadConfig(dbh = db) {
   return config;
 }
 
-const LINE_SQL = `CASE COALESCE(sv.category, s.service_category_snapshot,
+// The scheduled row's FROZEN service_category_snapshot first (a later
+// catalog re-categorization must not move a booked series between
+// families); the live catalog only when the row carries no snapshot.
+const LINE_SQL = `CASE COALESCE(s.service_category_snapshot, sv.category,
     CASE WHEN s.service_type ILIKE '%mosquito%' THEN 'mosquito'
          WHEN s.service_type ILIKE '%termite%' OR s.service_type ILIKE '%wdo%' THEN 'termite'
          WHEN s.service_type ILIKE '%rodent%' OR s.service_type ILIKE '%trap%' THEN 'rodent'
@@ -1160,7 +1169,9 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
 // the paid invoice total NET of any refund recorded on its payments (a
 // partially refunded invoice stays 'paid'; the refund lives on the payment,
 // linked the way invoice.js links them: Stripe intent / charge id, or the
-// payment's metadata invoice_id — there is no payments.invoice_id).
+// payment's metadata invoice_id — there is no payments.invoice_id). A
+// combined setup/initial + first-application invoice contributes its
+// application lines only; a pure setup invoice contributes nothing.
 async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
   if (!customerIds.length) return [];
   const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
@@ -1183,13 +1194,14 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       s.check_in_time, s.check_out_time, s.arrived_at, s.completed_at,
       s.annual_prepay_term_id,
       apt.coverage_visit_count AS term_visit_count,
-      (SELECT pi.total - COALESCE((
+      -- the term's COVERAGE money (prepay_amount — the invoice total may also carry a setup line), capped by what settled net of refunds
+      (SELECT LEAST(apt.prepay_amount, pi.total - COALESCE((
           SELECT sum(COALESCE(p.refund_amount, 0)) FROM payments p
           WHERE COALESCE(p.refund_amount, 0) > 0
             AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pi.stripe_payment_intent_id)
               OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = pi.stripe_charge_id)
               OR p.metadata::jsonb ->> 'invoice_id' = pi.id::text)
-        ), 0)
+        ), 0))
         FROM invoices pi
         WHERE pi.id = apt.prepay_invoice_id AND pi.archived_at IS NULL
           AND (pi.paid_at IS NOT NULL OR pi.status IN ('paid', 'prepaid'))
@@ -1197,18 +1209,29 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       ) AS term_settled_amount,
       te.time_entry_minutes, te.time_entry_clock_in, te.time_entry_clock_out,
       sr.service_record_started_at, sr.service_record_ended_at, sr.service_record_structured_notes, sr.customer_interaction,
-      (SELECT sum(i.total) - COALESCE(sum((
-          SELECT sum(COALESCE(p.refund_amount, 0)) FROM payments p
-          WHERE COALESCE(p.refund_amount, 0) > 0
-            AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
-              OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
-              OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
-        )), 0) FROM invoices i
+      (SELECT sum(LEAST(
+          i.total - COALESCE((
+            SELECT sum(COALESCE(p.refund_amount, 0)) FROM payments p
+            WHERE COALESCE(p.refund_amount, 0) > 0
+              AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+                OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
+                OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
+          ), 0),
+          -- a combined setup/initial + application invoice contributes its APPLICATION lines only
+          CASE WHEN (COALESCE(i.title, '') ILIKE '%setup%' OR COALESCE(i.title, '') ILIKE '%initial%'
+                     OR COALESCE(i.line_items::text, '') ILIKE '%setup%' OR COALESCE(i.line_items::text, '') ILIKE '%initial%')
+               THEN CASE WHEN jsonb_typeof(COALESCE(i.line_items::jsonb, 'null'::jsonb)) = 'array'
+                         THEN (SELECT COALESCE(sum(NULLIF(regexp_replace(li ->> 'amount', '[^0-9.-]', '', 'g'), '')::numeric), 0)
+                               FROM jsonb_array_elements(i.line_items::jsonb) li
+                               WHERE NOT (COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%setup%'
+                                          OR COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%initial%'))
+                         ELSE 0 END
+               ELSE i.total END
+        ))
+        FROM invoices i
         WHERE i.scheduled_service_id = s.id AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
           AND (i.paid_at IS NOT NULL OR i.status IN ('paid', 'prepaid'))
           AND i.status NOT IN (${notSettled.map(() => '?').join(', ')})
-          AND NOT (COALESCE(i.title, '') ILIKE '%setup%' OR COALESCE(i.title, '') ILIKE '%initial%'
-                   OR COALESCE(i.line_items::text, '') ILIKE '%setup%' OR COALESCE(i.line_items::text, '') ILIKE '%initial%')
       ) AS paid_revenue
     FROM scheduled_services s
     LEFT JOIN services sv ON sv.id = s.service_id
@@ -1438,8 +1461,11 @@ function matchPrepayTerm(terms, planLine, familyKey) {
   return { term: null, ambiguous: unlabeled.length > 0 };
 }
 
+// `lane` comes from billing-lane.js#resolveBillingLane — the canonical
+// reader: an explicit billing_mode wins; a legacy NULL infers
+// monthly_membership for a real WaveGuard tier with dues, else per_visit.
 function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
-  const lane = customer.billing_mode || null;
+  const lane = resolveBillingLane(customer).mode;
   const prepayLinked = !!planLine.prepay_linked;
   const visitMedianCents = toCents(planLine.median_price);
   const feeCents = toCents(customer.per_application_fee);
@@ -1570,7 +1596,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
     loadLiveTerms(dbh, customerIds, { today }),
     loadLedgerSlices(dbh, customerIds),
   ]);
-  const monthlyIds = [...customers.values()].filter((c) => c.billing_mode === 'monthly_membership').map((c) => c.id);
+  const monthlyIds = [...customers.values()].filter((c) => resolveBillingLane(c).mode === 'monthly_membership').map((c) => c.id);
   const settledDues = await loadSettledDues(dbh, monthlyIds, { sinceYmd });
   const estimateIds = [...new Set(planLines.flatMap((p) => p.source_estimate_ids || []))];
   const estimates = await loadEstimates(dbh, estimateIds);
@@ -1679,7 +1705,7 @@ function computeLineReferences(book) {
     // and unclassified families never establish another line's list rate.
     if (entry.current.cents > 0 && entry.current.unit === 'application' && entry.familyKey !== 'other'
       && ['visit_median', 'per_application_fee'].includes(entry.current.source) && !entry.current.prepayMidTerm
-      && entry.customer.billing_mode === 'per_application') {
+      && resolveBillingLane(entry.customer).mode === 'per_application') {
       const key = `${entry.familyKey}|${entry.cadence}`;
       if (!modeByGroup.has(key)) modeByGroup.set(key, []);
       modeByGroup.get(key).push(entry.current.cents);
@@ -1773,9 +1799,14 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
     const manualAt = facts && facts.manualPriceOverrideAt ? etDay(facts.manualPriceOverrideAt) : null;
     const tierProtected = customer.tier_protected_until && dateColumn(customer.tier_protected_until) >= today;
     const callbackLines = signals ? signals.callbackLines : 'error';
+    // Open re-service callbacks (facts.openCallbackLanes: 'pest' | 'lawn' |
+    // 'unknown') hold only the family they belong to; 'unknown' holds all.
+    const openLanes = facts && Array.isArray(facts.openCallbackLanes) ? facts.openCallbackLanes : [];
+    const familyLane = CALLBACK_LANE_FOR_FAMILY[familyKey] || null;
     const callbackRecent = callbackLines === 'error'
       || callbackLines.some((line) => line === familyKey || line === 'other')
-      || !!(facts && Array.isArray(facts.openCallbackLanes) && facts.openCallbackLanes.length);
+      || openLanes.includes('unknown')
+      || (familyLane != null && openLanes.includes(familyLane));
     const holdFamilies = signals ? signals.planHoldFamilies : 'error';
     const planHoldActive = holdFamilies === 'error' || holdFamilies.length > 0 || !!tierProtected;
 
@@ -1785,7 +1816,8 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
       familyKey,
       cadence,
       visitsPerYear: entry.visitsPerYear,
-      billingLane: customer.billing_mode || null,
+      billingLane: resolveBillingLane(customer).mode,
+      laneInferred: resolveBillingLane(customer).source === 'inferred',
       anniversaryDate: entry.anniversary.date,
       anniversarySource: entry.anniversary.source,
       anniversaryConflict: entry.anniversary.conflict,
@@ -1845,10 +1877,15 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   // a new batch takes the standing review window (35–65 days out) counted
   // from `windowAnchor` when the caller names one (the monthly job: the
   // first of the build month) or from the build date.
-  const existing = anniversaryFrom && anniversaryTo ? null : await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to');
-  const defaults = existing && dateColumn(existing.window_from) && dateColumn(existing.window_to)
+  const existing = await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to', 'email_sent_at');
+  const defaults = !(anniversaryFrom && anniversaryTo) && existing && dateColumn(existing.window_from) && dateColumn(existing.window_to)
     ? { from: dateColumn(existing.window_from), to: dateColumn(existing.window_to) }
     : reviewWindowFor(now, { anchor: windowAnchor });
+  // An allowed rebuild of a batch whose digest already went out resets the
+  // one-email marker: the rankings the owner read are stale, so the next
+  // delivery (the day 1–7 tick, or the admin build route right away) sends
+  // the updated digest instead of 'already_emailed' forever.
+  const digestReset = !!(existing && existing.email_sent_at);
   const from = anniversaryFrom || defaults.from;
   const to = anniversaryTo || defaults.to;
   if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
@@ -1882,8 +1919,8 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
     await conn('rate_review_batches').insert({
       batch_key: batchKey, window_from: from, window_to: to,
       allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson),
-      book_lines: book.length, computed_at: computedAt, updated_at: computedAt,
-    }).onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at']);
+      book_lines: book.length, computed_at: computedAt, updated_at: computedAt, email_sent_at: null, email_subject: null,
+    }).onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at', 'email_sent_at', 'email_subject']);
     await conn(SNAPSHOTS).where({ batch_key: batchKey }).whereNotIn('status', SENT_STATUSES).delete();
     if (rows.length) {
       await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
@@ -1893,7 +1930,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
 
   const summary = summarizeRows(rows);
   logger.info(`[rate-review] batch ${batchKey} built: ${rows.length} rows (${summary.green} green, ${summary.exception} exceptions, ${summary.no_change} no-change, ${summary.skipped} skipped) from ${book.length} active plan lines`);
-  return { ok: true, batchKey, window: { from, to }, rows: rows.length, summary, config, allowances, lineRph: lineRphJson };
+  return { ok: true, batchKey, window: { from, to }, rows: rows.length, summary, config, allowances, lineRph: lineRphJson, digestReset };
 }
 
 // ── summaries / reads ───────────────────────────────────────────────────
@@ -2147,7 +2184,7 @@ module.exports = {
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd,
     PLAN_ROW_SQL, LIVE_STATUS_SQL,
-    CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS,
+    CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,

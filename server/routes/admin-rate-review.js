@@ -75,7 +75,18 @@ router.post('/batches/:key/build', async (req, res) => {
       return res.status(409).json({ error: 'This batch already has rows that were sent to customers — it cannot be recomputed.', reason: result.reason });
     }
     if (!result.ok) return res.status(409).json({ error: 'Rate review batch could not be built', reason: result.reason });
-    return res.json({ ok: true, batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances });
+    // The owner already read this batch's digest → it is stale now: deliver
+    // the updated one (the same ops email to contact@; never a customer send).
+    let digest = result.digestReset ? 'reset' : 'unchanged';
+    if (result.digestReset) {
+      try {
+        const sent = await rateReview.sendBatchEmail({ batchKey: key });
+        digest = sent && sent.sent ? 'resent' : 'reset';
+      } catch (err) {
+        logger.error(`[admin-rate-review] updated digest for ${key} could not be sent (status ${Number.isInteger(err && err.status) ? err.status : 'network'})`);
+      }
+    }
+    return res.json({ ok: true, batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances, digest });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] build failed for ${key}: ${err.message}`);

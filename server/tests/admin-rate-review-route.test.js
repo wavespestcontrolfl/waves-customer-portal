@@ -29,11 +29,13 @@ jest.mock('../middleware/admin-auth', () => ({
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
+const mockSendBatchEmail = jest.fn();
 jest.mock('../services/rate-review', () => ({
   listBatches: (...args) => mockListBatches(...args),
   getBatch: (...args) => mockGetBatch(...args),
   buildBatch: (...args) => mockBuildBatch(...args),
   loadConfig: (...args) => mockLoadConfig(...args),
+  sendBatchEmail: (...args) => mockSendBatchEmail(...args),
 }));
 
 const express = require('express');
@@ -129,6 +131,27 @@ describe('POST /batches/:key/build', () => {
     await withServer(async (base) => {
       await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
       expect(mockBuildBatch).toHaveBeenCalledWith({ batchKey: '2026-12', anniversaryFrom: null, anniversaryTo: null });
+    });
+  });
+  test('a rebuild that reset an already-delivered digest re-sends the updated ops email; an unchanged one sends nothing', async () => {
+    mockBuildBatch.mockResolvedValue({ ok: true, batchKey: '2026-12', window: { from: '2026-12-06', to: '2027-01-05' }, rows: 6, summary: { rows: 6 }, allowances: {}, digestReset: true });
+    mockSendBatchEmail.mockResolvedValue({ sent: true, subject: 'ACT: Rate review — …' });
+    await withServer(async (base) => {
+      const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(out.status).toBe(200);
+      expect(out.body.digest).toBe('resent');
+      expect(mockSendBatchEmail).toHaveBeenCalledWith({ batchKey: '2026-12' });
+      mockSendBatchEmail.mockClear();
+      mockBuildBatch.mockResolvedValue({ ok: true, batchKey: '2026-12', window: { from: '2026-12-06', to: '2027-01-05' }, rows: 6, summary: { rows: 6 }, allowances: {}, digestReset: false });
+      const quiet = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(quiet.body.digest).toBe('unchanged');
+      expect(mockSendBatchEmail).not.toHaveBeenCalled();
+      // a delivery failure never fails the rebuild
+      mockBuildBatch.mockResolvedValue({ ok: true, batchKey: '2026-12', window: { from: '2026-12-06', to: '2027-01-05' }, rows: 6, summary: { rows: 6 }, allowances: {}, digestReset: true });
+      mockSendBatchEmail.mockRejectedValue(Object.assign(new Error('sendgrid 503'), { status: 503 }));
+      const failed = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(failed.status).toBe(200);
+      expect(failed.body.digest).toBe('reset');
     });
   });
   test('refuses once any row in the batch was sent', async () => {
