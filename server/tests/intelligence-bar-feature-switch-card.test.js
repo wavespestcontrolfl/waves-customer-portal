@@ -1,8 +1,7 @@
 /**
  * Feature-switch cards (set_railway_gate, set_growthbook_feature_environment)
  * — Codex r1 on #5489: the card shows the live preview facts (not the raw
- * model params). The commit path has shipped, so the contract is no longer
- * preview_only and the card shows Confirm.
+ * model params), including every GrowthBook targeting rule a confirm puts live.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -10,7 +9,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { confirmationDisplayParams } = require('../routes/admin-intelligence-bar');
 const { buildContract } = require('../services/intelligence-bar/authorization-contract');
-const { PREVIEW_ONLY_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 
 const gatePreview = {
   preview: true,
@@ -34,6 +32,10 @@ const gbPreview = {
   new_state: 'enabled in production',
   default_value: 'false',
   rule_count: 2,
+  rules: {
+    rule_1: 'force · serves true · when {"email":{"$regex":"@wavespestcontrol.com$"}}',
+    rule_2: 'rollout · serves true · to 25% of matching traffic',
+  },
   effect_note: "Once enabled, production serves the feature's default value (false) plus its 2 targeting rule(s) — enabling does not by itself make it serve true.",
 };
 
@@ -50,36 +52,31 @@ describe('feature-switch cards show the live preview facts', () => {
     });
   });
 
-  test('GrowthBook card: environment change, default value, rule count and served-value effect', () => {
+  test('GrowthBook card: environment change, default value, every rule and served-value effect', () => {
     const shown = confirmationDisplayParams('set_growthbook_feature_environment', { feature_id: 'pricing-hub', enabled: true }, gbPreview);
     expect(shown).toEqual({
       feature: 'pricing-hub',
       change: 'disabled in production → enabled in production',
       default_value: 'false',
       targeting_rules: 2,
+      rules: gbPreview.rules,
       effect: gbPreview.effect_note,
     });
   });
 
-  test('the contract effects carry those lines, and the card is confirmable (not preview_only)', () => {
+  test('the contract effects carry those lines — each GrowthBook rule on its own line', () => {
     for (const [toolName, params, preview] of [
       ['set_railway_gate', { gate_name: 'GATE_LATE_PAYMENT_CHECKER_OFF', value: 'true' }, gatePreview],
       ['set_growthbook_feature_environment', { feature_id: 'pricing-hub', enabled: true }, gbPreview],
     ]) {
       const displayParams = confirmationDisplayParams(toolName, params, preview);
       const contract = buildContract({ toolName, params, displayParams, preview, summary: 's' });
-      expect(contract.preview_only).toBeUndefined();
-      const labels = contract.effects.map((e) => e.label).join('\n');
-      expect(labels).toMatch(toolName === 'set_railway_gate' ? /turns the thing it names OFF/ : /does not by itself make it serve true/);
+      const labels = contract.effects.map((e) => e.label);
+      expect(labels.join('\n')).toMatch(toolName === 'set_railway_gate' ? /turns the thing it names OFF/ : /does not by itself make it serve true/);
+      if (toolName === 'set_growthbook_feature_environment') {
+        expect(labels).toContain(`rule 1: ${gbPreview.rules.rule_1}`);
+        expect(labels).toContain(`rule 2: ${gbPreview.rules.rule_2}`);
+      }
     }
-  });
-
-  test('ordinary outside writes are not preview_only', () => {
-    const contract = buildContract({
-      toolName: 'purge_cloudflare_cache', params: { zone_name: 'wavespestcontrol.com' }, displayParams: { zone_name: 'wavespestcontrol.com' }, preview: {}, summary: 's',
-    });
-    expect(contract.preview_only).toBeUndefined();
-    // The commit path shipped: no switch is preview-only any more.
-    expect([...PREVIEW_ONLY_WRITE_TOOL_NAMES]).toEqual([]);
   });
 });

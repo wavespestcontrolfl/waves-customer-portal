@@ -20,7 +20,7 @@
  * are unchanged (an edit made anywhere — including the GrowthBook UI —
  * refuses). Then it calls GrowthBook's documented toggle endpoint,
  * POST /api/v2/features/{id}/toggle with
- * { environments: { "<env>": true|false }, reason, comment }, which publishes
+ * { environments: { "<env>": true|false } } only, which publishes
  * immediately. (The v1 toggle is deprecated in favor of v2, same body; the
  * reads stay on v1.) GrowthBook has no conditional toggle, so the re-read
  * narrows the race window but cannot close it.
@@ -85,7 +85,6 @@ const READ_ONLY_KEY_MESSAGE = 'The GrowthBook key cannot change flags — it nee
 const FEATURE_CHANGED_MESSAGE = 'The GrowthBook feature changed after the card was shown (edited, archived, or its environment state moved). Nothing was changed — ask again for a fresh confirmation card.';
 const FEATURE_ID_RE = /^[A-Za-z0-9_.:-]{1,100}$/;
 const ENVIRONMENT_RE = /^[A-Za-z0-9_-]{1,40}$/;
-const MAX_DEFAULT_VALUE_CHARS = 120;
 
 const NOT_CONFIGURED_MESSAGE = 'GrowthBook access is not configured. Add the GROWTHBOOK_API_KEY service variable (a GrowthBook secret key — a read-only key is enough to look, toggling a flag will need write access) in the Railway dashboard.';
 
@@ -303,10 +302,36 @@ async function getExperimentResultsSummary() {
 
 // ── set_growthbook_feature_environment ──────────────────────────────────
 
-function shortValue(v) {
+// Values are shown in full, never truncated: the card is the operator's
+// only view of what a confirm puts live.
+function fullValue(v) {
   if (v === undefined || v === null) return null;
-  const text = typeof v === 'string' ? v : JSON.stringify(v);
-  return text.length > MAX_DEFAULT_VALUE_CHARS ? `${text.slice(0, MAX_DEFAULT_VALUE_CHARS)}…` : text;
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+// Every targeting rule in the environment, one plain line each — what it
+// serves, to whom (condition, saved groups, prerequisites), how much traffic
+// and when. Enabling the environment puts ALL of these live at once (Codex
+// r1 on #5514, P1), so the card lists them in full rather than a count.
+// Keyed rule_1, rule_2, … so the card renders one line per rule.
+function describeRules(rules) {
+  if (!Array.isArray(rules) || !rules.length) return null;
+  const json = (v) => (v === undefined || v === null ? null : fullValue(v));
+  return Object.fromEntries(rules.map((r, i) => {
+    const parts = [
+      `${r.type || 'rule'}${r.enabled === false ? ' (this rule is turned off)' : ''}`,
+      r.description ? `"${r.description}"` : null,
+      r.value !== undefined ? `serves ${json(r.value)}` : null,
+      r.variations ? `variations ${json(r.variations)}` : null,
+      r.weights ? `weights ${json(r.weights)}` : null,
+      r.coverage !== undefined && r.coverage !== null ? `to ${Math.round(Number(r.coverage) * 1000) / 10}% of matching traffic` : null,
+      r.condition ? `when ${json(r.condition)}` : null,
+      r.savedGroupTargeting ? `saved groups ${json(r.savedGroupTargeting)}` : null,
+      r.prerequisites ? `prerequisites ${json(r.prerequisites)}` : null,
+      r.scheduleRules ? `schedule ${json(r.scheduleRules)}` : null,
+    ].filter(Boolean);
+    return [`rule_${i + 1}`, parts.join(' · ')];
+  }));
 }
 
 async function setGrowthbookFeatureEnvironment(input) {
@@ -360,13 +385,14 @@ async function setGrowthbookFeatureEnvironment(input) {
     current_state: word(priorEnabled),
     new_state: word(input.enabled),
     change: `Feature ${feature.id || featureId}: ${word(priorEnabled)} → ${word(input.enabled)}`,
-    default_value: shortValue(envCfg.defaultValue ?? feature.defaultValue),
+    default_value: fullValue(envCfg.defaultValue ?? feature.defaultValue),
     rule_count: ruleCount,
+    rules: describeRules(envCfg.rules),
     // What the switch actually does to served values — enabled is not "on":
     // an enabled feature serves its default value and rules; a disabled
     // environment makes SDK callers fall back to their own code default.
     effect_note: input.enabled
-      ? `Once enabled, ${environment} serves the feature's default value (${shortValue(envCfg.defaultValue ?? feature.defaultValue) ?? 'none set'}) plus its ${ruleCount} targeting rule(s) — enabling does not by itself make it serve true.`
+      ? `Once enabled, ${environment} serves the feature's default value (${fullValue(envCfg.defaultValue ?? feature.defaultValue) ?? 'none set'}) plus ALL ${ruleCount} targeting rule(s) listed on this card at once — enabling does not by itself make it serve true.`
       : `Once disabled, ${environment} stops serving this feature's value and rules; SDK callers fall back to the default written in their own code.`,
     // Pins for the commit path: the toggle must refuse if the flag was edited
     // (anywhere, including the GrowthBook UI) after this card was shown. Named
@@ -423,10 +449,11 @@ async function commitGrowthbookFeatureEnvironment(input) {
   const enabled = !priorEnabled;
   const word = enabled ? 'enabled' : 'disabled';
   try {
+    // Only the environment switch the card showed — no extra fields (Codex
+    // r1 on #5514: an undisclosed reason/comment would be a write the
+    // operator never saw).
     await gbPost(`/api/v2/features/${encodeURIComponent(featureId)}/toggle`, {
       environments: { [environment]: enabled },
-      reason: 'Intelligence Bar: owner-confirmed card',
-      comment: `Intelligence Bar: ${word} in ${environment} (owner-confirmed card)`,
     });
   } catch (err) {
     // Only a permission refusal proves nothing changed. GrowthBook applies a

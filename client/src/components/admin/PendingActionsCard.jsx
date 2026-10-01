@@ -305,7 +305,6 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
         const expired = status === 'expired' || (!settled && !busy && remaining !== null && remaining <= 0);
-        const previewOnly = action.contract?.preview_only === true;
 
         return (
           <div
@@ -324,7 +323,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               style={dark ? { color: D.text, fontSize: 14, fontWeight: 500, marginBottom: 6 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-900 font-medium mb-1.5"}
             >
-              {expired ? "Expired proposal: " : settled ? "Action result: " : previewOnly ? "Preview only: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
+              {expired ? "Expired proposal: " : settled ? "Action result: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
             </div>
 
             {settled || expired ? <details style={{ marginBottom: 8, fontSize: 14 }}>
@@ -400,19 +399,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                     {countdownLabel(remaining)}
                   </div>
                 )}
-                {/* Preview-only cards (contract.preview_only) show the live
-                    facts but offer no Confirm — the server cannot commit
-                    them yet and /confirm-action refuses them. */}
-                {previewOnly && (
-                  <div
-                    style={dark ? { fontSize: 14, color: D.amber } : undefined}
-                    className={dark ? undefined : "text-[14px] text-zinc-700"}
-                  >
-                    Preview only — this can&apos;t be applied from the bar yet. Make the change in its own dashboard.
-                  </div>
-                )}
               <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
-                {!previewOnly && <button
+                <button
                   type="button"
                   disabled={busy}
                   onClick={() => decide(action, "confirm")}
@@ -424,7 +412,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
                 >
                   {status === "confirming" ? statusLabel.confirming : "Confirm"}
-                </button>}
+                </button>
                 <button
                   type="button"
                   disabled={busy}
@@ -436,7 +424,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   } : undefined}
                   className={dark ? undefined : `bg-white text-zinc-600 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
                 >
-                  {status === "cancelling" ? statusLabel.cancelling : previewOnly ? "Dismiss" : "Cancel"}
+                  {status === "cancelling" ? statusLabel.cancelling : "Cancel"}
                 </button>
               </div>
               </div>

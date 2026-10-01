@@ -65,7 +65,7 @@ const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/in
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
-  FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES, PREVIEW_ONLY_WRITE_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES,
 } = require('../services/intelligence-bar/write-gates');
 const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
@@ -795,6 +795,8 @@ const PINNED_DISPLAY_BUILDERS = {
       change: `${preview.current_state} → ${preview.new_state}`,
       default_value: preview.default_value ?? 'none set',
       targeting_rules: preview.rule_count,
+      // Every rule in full, one line each (Codex r1 on #5514, P1).
+      ...(preview.rules ? { rules: preview.rules } : {}),
       effect: preview.effect_note,
     }
     : null),
@@ -1649,13 +1651,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     modelResult: {
       ...preview,
       ...(preview.params ? { params: Object.fromEntries(Object.entries(preview.params).filter(([key]) => !key.startsWith('_'))) } : {}),
-      ...(PREVIEW_ONLY_WRITE_TOOL_NAMES.has(toolUse.name) ? {
-        preview_only: true,
-        note: 'Preview shown on a card that CANNOT be confirmed — applying this from the bar is not available yet. Do NOT retry this tool and do NOT say it will run; tell the operator the preview is on the card and the change has to be made in its own dashboard for now.',
-      } : {
-        pending_confirmation: true,
-        note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
-      }),
+      pending_confirmation: true,
+      note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
     },
     clientPayload: {
       id: row.id,
@@ -3453,15 +3450,6 @@ router.post('/confirm-action', async (req, res, next) => {
     if (action.tool_name === 'cancel_appointment'
       && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
-      await PendingActions.recordResult(action.id, result);
-      return res.status(409).json(result);
-    }
-
-    // Preview-only switches (Codex r1 on #5489): their card shows no Confirm
-    // and their executors cannot commit yet, so a forged or stale confirm is
-    // refused here, before any dispatch.
-    if (PREVIEW_ONLY_WRITE_TOOL_NAMES.has(action.tool_name)) {
-      const result = { error: 'This is a preview only — applying it from the bar is not available yet.', code: 'preview_only' };
       await PendingActions.recordResult(action.id, result);
       return res.status(409).json(result);
     }

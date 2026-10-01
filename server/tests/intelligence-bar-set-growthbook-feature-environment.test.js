@@ -80,7 +80,7 @@ describe('set_growthbook_feature_environment', () => {
     expect(result.default_value).toBe('false');
     // Enabled is not "serving true" (Codex r1 on #5489): the card says what
     // the environment will actually serve.
-    expect(result.effect_note).toMatch(/serves the feature's default value \(false\) plus its 2 targeting rule/);
+    expect(result.effect_note).toMatch(/serves the feature's default value \(false\) plus ALL 2 targeting rule/);
     expect(result.effect_note).toMatch(/does not by itself make it serve true/);
     expect(result.rule_count).toBe(2);
     expect(result.prior_enabled).toBe(false);
@@ -162,6 +162,34 @@ describe('set_growthbook_feature_environment', () => {
   });
   const posts = () => global.fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
 
+  // Codex r1 on #5514 (P1): enabling puts every rule live, so the card lists
+  // each one in full — what it serves, to whom, how much, when — and the
+  // default value untruncated.
+  test('the preview lists every targeting rule in full, and the full default value', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    const longDefault = JSON.stringify({ tiers: Array.from({ length: 40 }, (_, i) => `tier-${i}`) });
+    global.fetch.mockResolvedValueOnce(jsonResponse(featureBody({
+      environments: {
+        production: {
+          enabled: false,
+          defaultValue: longDefault,
+          rules: [
+            { type: 'force', value: 'true', condition: '{"email":{"$regex":"@wavespestcontrol.com$"}}', description: 'staff only' },
+            { type: 'rollout', value: 'true', coverage: 0.25 },
+            { type: 'experiment', variations: [{ value: 'false' }, { value: 'true' }], weights: [0.5, 0.5], enabled: false },
+          ],
+        },
+      },
+    })));
+    const result = await propose({});
+    expect(result.default_value).toBe(longDefault);
+    expect(Object.keys(result.rules)).toEqual(['rule_1', 'rule_2', 'rule_3']);
+    expect(result.rules.rule_1).toMatch(/force · "staff only" · serves "?true"? · when .*wavespestcontrol/);
+    expect(result.rules.rule_2).toMatch(/rollout · serves "?true"? · to 25% of matching traffic/);
+    expect(result.rules.rule_3).toMatch(/experiment \(this rule is turned off\) · variations .* · weights \[0\.5,0\.5\]/);
+    expect(result.effect_note).toMatch(/ALL 3 targeting rule\(s\) listed on this card/);
+  });
+
   test('confirmed without pins refuses with missing_verified_pin and no network call', async () => {
     process.env.GROWTHBOOK_API_KEY = 'secret_test';
     const result = await propose({ confirmed: true });
@@ -180,8 +208,8 @@ describe('set_growthbook_feature_environment', () => {
     const [[url, init]] = posts();
     expect(url).toBe('https://api.growthbook.io/api/v2/features/pricing-hub/toggle');
     const body = JSON.parse(init.body);
-    expect(body.environments).toEqual({ production: true });
-    expect(body.reason).toMatch(/Intelligence Bar/);
+    // Exactly the switch the card showed — no undisclosed reason/comment.
+    expect(body).toEqual({ environments: { production: true } });
     expect(JSON.stringify(global.fetch.mock.calls)).not.toContain('forged-from-input');
   });
 

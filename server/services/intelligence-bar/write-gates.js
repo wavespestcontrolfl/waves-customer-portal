@@ -44,13 +44,6 @@ const OUTSIDE_WRITE_TOOL_NAMES = new Set([
   'set_growthbook_feature_environment',
 ]);
 
-// Proposals whose card is shown but CANNOT be confirmed yet: their executors
-// refuse confirmed:true until the commit-path PR. The contract carries
-// preview_only (the card hides Confirm) and /confirm-action refuses them
-// before dispatch. The commit-path PR removes a tool from this set.
-// Empty now: the feature switches' commit path shipped (after #5489).
-const PREVIEW_ONLY_WRITE_TOOL_NAMES = new Set([]);
-
 // Every outside write is full-access-only. Named separately from
 // WRITE_TWO_STEP_TOOL_NAMES (rather than inferred) so a future two-step tool
 // that is NOT an outside write does not silently inherit the restriction.
@@ -132,5 +125,4 @@ module.exports = {
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   OUTSIDE_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
-  PREVIEW_ONLY_WRITE_TOOL_NAMES,
 };
