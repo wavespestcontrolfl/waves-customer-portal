@@ -56,6 +56,9 @@ function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleIn
     const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
     const recheck = require('./sms-amount-recheck');
     if (recheck.hasAffirmativeZelleMention(body)) {
+      // Codex round-52 P1: the recipient is an env setting no row records - rerun the same recipient check (pure, no read)
+      const recipient = recheck.outgoingZelleStale(body);
+      if (recipient.stale) return { ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', reason: `the Zelle recipient changed (${recipient.reason})` };
       const offer = await zelleOfferStillOpen({ customerId, zelleInvoiceId, dbh });
       if (!offer.ok) return offer;
     }

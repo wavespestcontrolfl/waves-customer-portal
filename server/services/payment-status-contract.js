@@ -358,7 +358,8 @@ const STATUS_ALTERNATIVES = [
   'owe[sd]?', 'owing', 'due', 'overdue', 'outstanding', 'balance', 'delinquent', 'arrears', 'late fees?', 'past due',
   'all set', 'all good', 'squared(?: away| up)?', 'taken care of', 'good to go', 'up to date', 'caught up', 'current', 'in good standing',
   'nothing (?:more |else |further )?(?:owed|due|to pay|needed)', 'no (?:balance|charges?|payments?|record)', 'zero',
-  '(?:have|has|had|got|gotten)\\s+(?:your|the)\\s+(?:payments?|funds|money|transfer|deposit|che(?:ck|que)|zelle|ach)', '(?:got|have|has)\\s+(?:it|that|this|them)',
+  // (Codex round-52 P2: cash, and a received / collected / picked-up cash or check, are receipts too)
+  '(?:have|has|had|got|gotten|received|collected|picked up)\\s+(?:your|the)\\s+(?:payments?|funds|money|transfer|deposit|che(?:ck|que)s?|zelle|ach|cash)', '(?:got|have|has)\\s+(?:it|that|this|them)',
   "(?:don'?t|do not|can'?t|cannot|haven'?t|have not|hasn'?t|has not|didn'?t|did not|not)\\s+(?:\\w+\\s+){0,2}?(?:see|seen|find|found|show|showing|reflect\\w*|there)",
   'no record', 'missing', 'showing', 'shows?', 'reflect(?:ed|s|ing)?', 'recorded', 'logged', 'visible',
   'sorted', 'handled', 'resolved', 'dealt with', 'wrapped up', 'in the clear', 'all done', 'covered',

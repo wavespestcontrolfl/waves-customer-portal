@@ -50,7 +50,8 @@ describe('a Zelle offer at the provider boundary: the invoice\'s PaymentIntent i
   };
   const INV = { id: 'inv-1', customer_id: 'c1', stripe_payment_intent_id: 'pi_1' };
   const offer = (over = {}) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at pay@example.com.', ...over });
-  afterEach(() => { mockGuard.mockReset(); mockGuard.mockResolvedValue({ ok: true }); });
+  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; });
+  afterEach(() => { mockGuard.mockReset(); mockGuard.mockResolvedValue({ ok: true }); delete process.env.ZELLE_RECIPIENT; });
   test('no payment in flight => ok (inspect-only, on the invoice the recheck checked)', async () => {
     await expect(offer()({ dbi: dbiWith('abc', INV) })).resolves.toEqual({ ok: true });
     expect(mockGuard).toHaveBeenCalledWith(INV, { inspectOnly: true });
@@ -102,4 +103,20 @@ describe('a Zelle denial at the provider boundary: the PaymentIntent baseline mu
     await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c1', dbh: dbiWith(INV) })).resolves.toBe('blocked');
     await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c2', dbh: dbiWith(INV) })).resolves.toBe('unreadable');
   });
+});
+
+// Codex round-52 P1: the Zelle recipient is an env setting no row records - rechecked at the boundary
+test('a Zelle offer whose recipient was removed or rotated after the recheck is refused at the boundary (no Stripe call)', async () => {
+  const prev = process.env.ZELLE_RECIPIENT;
+  const dbi = jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'inv-1', customer_id: 'c1', stripe_payment_intent_id: null }) }) }));
+  dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] });
+  const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at old@example.com.' });
+  try {
+    process.env.ZELLE_RECIPIENT = 'old@example.com';
+    await expect(check({ dbi })).resolves.toEqual({ ok: true });
+    process.env.ZELLE_RECIPIENT = 'new@example.com';
+    await expect(check({ dbi })).resolves.toMatchObject({ ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY' });
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(check({ dbi })).resolves.toMatchObject({ ok: false });
+  } finally { if (prev === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = prev; }
 });

@@ -593,3 +593,13 @@ describe('older Codex threads: the class cannot happen under the contract', () =
     expect(h.OWN_COLLECTIBLE_INVOICE_STATUSES).toEqual(['sent', 'viewed', 'overdue']); // billing route and SMS facts share ONE collectible set
   });
 });
+
+// Codex round-52 P2: a cash (or check) receipt is a payment-status assertion; how-to-pay wording is not
+describe('cash and check receipts', () => {
+  test.each(['We got your cash.', "We've got the cash.", 'We collected your cash payment.', 'We received your check.'])('held: %s', (b) => {
+    expect(c.assertsPaymentStatus(b, { inboundText: 'Did you get my cash payment?' })).toBe(true);
+  });
+  test.each(['Please bring cash to the visit.', 'We take cash or check.', 'You can pay with cash or check at the visit.'])('not a status: %s', (b) => {
+    expect(c.assertsPaymentStatus(b, { inboundText: 'Can I pay cash?' })).toBe(false);
+  });
+});
