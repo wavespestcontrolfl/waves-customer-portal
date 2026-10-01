@@ -25,4 +25,20 @@ async function lockTriageCall(trx, callLogId) {
   );
 }
 
-module.exports = { lockTriageCall, LOCK_NAMESPACE };
+// The call_log.review_status aggregate every card writer keeps in sync
+// (admin-triage transitionCore's rule): 'open' while any card on the call is
+// open / in_progress, else `closedStatus`. Call it INSIDE the transaction that
+// holds lockTriageCall, right after the card writes.
+async function syncCallReviewStatus(trx, callLogId, closedStatus = 'resolved') {
+  if (!callLogId) return null;
+  const stillOpen = await trx('triage_items')
+    .where({ call_log_id: callLogId })
+    .whereIn('status', ['open', 'in_progress'])
+    .count('* as n')
+    .first();
+  const status = parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : closedStatus;
+  await trx('call_log').where({ id: callLogId }).update({ review_status: status, updated_at: new Date() });
+  return status;
+}
+
+module.exports = { lockTriageCall, syncCallReviewStatus, LOCK_NAMESPACE };

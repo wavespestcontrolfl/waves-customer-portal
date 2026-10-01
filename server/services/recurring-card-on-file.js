@@ -121,8 +121,10 @@ function payAfterFirstVisitCardRail(policy) {
 // the after_visit_card authorization. A customer satisfied by a saved or
 // enrolled method (saved_method_consented / autopay_already_active) sees no
 // capture and so never that text: the fee keeps today's payable invoice.
+// A held cohort (Auto Pay paused or turned off, PR-B) is never auto-charged,
+// so it is never promised that either.
 function payAfterFirstVisitSetupFeeRail(policy) {
-  return payAfterFirstVisitCardRail(policy) && policy.required === true;
+  return payAfterFirstVisitCardRail(policy) && policy.required === true && !afterVisitHeld(policy);
 }
 
 // The ONE predicate for "this accept's invoice rides the card lane": the
@@ -235,6 +237,130 @@ async function resolveProspectiveAcceptCustomer(estimate, database = db) {
   return { customerId, lookupFailed };
 }
 
+// PR-B (GATE_PAF_EXISTING_CUSTOMERS): which existing customers the sub-gate may
+// move onto the pay-after-first-visit card rail. Deliberately narrow:
+//  - monthly-membership-lane customers (billing_mode monthly_membership, or
+//    NULL with a real rate — customerPreservesMonthlyMembership, the same
+//    predicate the converter uses) stay exempt: their add-on joins
+//    customers.monthly_rate and the monthly cron can bill it on the next
+//    billing_day, so a card-rail accept would neither delay that charge (owner
+//    R4, NOT built — see PR notes) nor be how those customers pay, and
+//    capturing + enrolling a card would switch the monthly cron ON for a
+//    member who pays dues another way;
+//  - annual_prepay-lane customers stay exempt: their visits are covered by the
+//    prepay term, not billed per application.
+// Everything else (per_application, per_visit, one_time, non-member profiles)
+// moves. A missing row never moves (caller passes null -> not eligible).
+function pafExistingCustomerEligible(customerRow) {
+  if (!customerRow) return false;
+  const { customerPreservesMonthlyMembership } = require('./billing-cadence');
+  if (customerPreservesMonthlyMembership(customerRow)) return false;
+  if (customerRow.billing_mode === 'annual_prepay') return false;
+  return true;
+}
+
+// PR-B: "explicit Auto Pay disable" (owner R5 sibling): the customer turned
+// Auto Pay OFF on purpose. Detected exactly the way autopay-setup-link.js does
+// (`optedOut`): customers.autopay_enabled is not true AND the LATEST
+// autopay_log toggle row (event_type autopay_enabled | autopay_disabled) is
+// `autopay_disabled`. customer-autopay.js (PUT /billing/autopay), billing-v2,
+// the card-detach webhook and contract cancel all commit that row with the
+// state change, so it is the one durable record. A customer who never
+// toggled (no rows) or who re-enabled since (latest row is autopay_enabled) is
+// NOT a disabler. Throws on a lookup failure — callers fail toward today's
+// exempt behavior (no enrollment).
+async function explicitAutopayDisable(customerRow, database = db) {
+  if (!customerRow || customerRow.autopay_enabled === true) return false;
+  const lastToggle = await database('autopay_log')
+    .where({ customer_id: customerRow.id })
+    .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
+    .orderBy('created_at', 'desc')
+    .first('event_type');
+  return lastToggle?.event_type === 'autopay_disabled';
+}
+
+// A moved existing customer whose card is KEPT but never auto-charged: Auto Pay
+// paused (R5) and/or explicitly turned off (both can hold at once). Same accept shape for both: no
+// auto-enroll beyond today's pause semantics, no auto-charge, no pay link at
+// accept, pay link after the visit, base consent text.
+function afterVisitHeld(policy) {
+  return !!policy && (policy.autopayPaused === true || policy.autopayDisabled === true);
+}
+
+// Under the accept transaction's customer lock (GitHub Codex #5481 r1 P1): the
+// resolver judged eligibility from an UNLOCKED snapshot, and billing_mode / the
+// pause / an Auto Pay opt-out can move before the converter takes its customer
+// lock. Returns true when the LOCKED row no longer matches the cohort the
+// preflight policy promised (not eligible, or pause / disable state changed,
+// or the accept landed on no existing customer) — the caller aborts the accept
+// with a refresh-required 409 so nothing is suppressed, charged or enrolled on
+// a stale decision. Fail closed: a lookup error counts as drift.
+async function pafExistingDriftUnderLock(trx, { customerId, policy }) {
+  if (!policy || policy.afterVisitCard !== true) return false;
+  if (!customerId) return true;
+  // GitHub Codex #5481 r2 P1: the preflight resolver judged ONE customer
+  // (phone-matched / grouped-sibling). The accept transaction re-resolves
+  // authoritatively under its own lock and can land on a different profile,
+  // whose eligibility / pause / opt-out the booleans below would then be
+  // compared against the WRONG policy. The resolver stamps policy.customerId
+  // on every after-visit policy; a missing stamp or any mismatch is drift.
+  if (!policy.customerId || String(policy.customerId) !== String(customerId)) return true;
+  try {
+    const row = await trx('customers').where({ id: customerId }).forUpdate().first();
+    if (!row) return true;
+    if (!pafExistingCustomerEligible(row)) return true;
+    const { isPaused } = require('./autopay-eligibility');
+    if (isPaused(row) !== (policy.autopayPaused === true)) return true;
+    const disabled = await explicitAutopayDisable(row, trx);
+    if (disabled !== (policy.autopayDisabled === true)) return true;
+    // GitHub Codex #5481 r5 P1: this policy was resolved with NO active Auto
+    // Pay (an active one is exempt as autopay_already_active). If another tab
+    // turned it on since, the post-commit enrollment would keep THAT method in
+    // charge and the first invoice would be charged to a method other than the
+    // one this accept authorizes — drift. Fail closed on an unreadable method.
+    if (policy.autopayPaused !== true && policy.autopayDisabled !== true) {
+      const { customerOnAutopay } = require('./autopay-eligibility');
+      if (await customerOnAutopay(row, { db: trx, failClosed: true })) return true;
+    }
+    // GitHub Codex #5481 r8 P1: a saved-method policy suppresses the first
+    // invoice's pay link on the promise that THIS consented card is billed
+    // after the visit. Re-run the same lookup under the lock (it must still be
+    // the method the policy chose) and row-lock it until commit, so a portal
+    // removal cannot take it out from under the accept.
+    if (policy.exemptReason === 'saved_method_consented' && policy.savedMethodRowId) {
+      const ConsentService = require('./payment-method-consents');
+      const live = await ConsentService.findConsentedChargeableCard(customerId, { dbh: trx });
+      if (!live || String(live.id) !== String(policy.savedMethodRowId)) return true;
+      const reserved = await trx('payment_methods').where({ id: live.id, customer_id: customerId }).forUpdate().first('id');
+      if (!reserved) return true;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[recurring-cof] locked eligibility recheck failed for customer ${customerId} — treating as drift: ${err.message}`);
+    return true;
+  }
+}
+
+// Commercial manual-billing accepts collect nothing at accept, so a policy
+// that would capture OR reuse a card for the pay-after-first-visit existing-
+// customer cohort is cleared back to the commercial exemption: required:false,
+// no saved-method auto-enroll, no consent variant. Required-only policies
+// (every other cohort) keep exactly today's behavior. One helper so /data and
+// the accept (the only two consumers that apply it) cannot drift (GitHub
+// Codex #5481 r1 P1: the saved_method_consented shape escaped the exemption).
+function applyCommercialManualBillingExemption(policy, { commercialManualBilling = false } = {}) {
+  if (!policy || commercialManualBilling !== true) return policy;
+  if (!(policy.required === true || policy.afterVisitCard === true)) return policy;
+  policy.required = false;
+  policy.exemptReason = 'commercial_manual_billing';
+  delete policy.savedMethodRowId;
+  delete policy.customerId;
+  delete policy.afterVisitCard;
+  delete policy.autopayPaused;
+  delete policy.autopayDisabled;
+  return policy;
+}
+
 async function resolveRecurringCardPolicyForEstimate({
   estimate,
   membership = null,
@@ -310,6 +436,25 @@ async function resolveRecurringCardPolicyForEstimate({
   // non-members: a payer-billed invoice is never auto-charged at completion,
   // so it must not be held from delivery either.
 
+  // PR-B (GATE_PAF_EXISTING_CUSTOMERS, owner ruling 2026-09-30/10-01): an
+  // existing customer adding a service saves/uses a card and pays AFTER the
+  // visit, so the two exemptions that put them on the pay-link-at-accept path
+  // (`autopay_paused`, `existing_plan_customer`) are skipped below. Read at
+  // call time. `existingCustomerRow` is the live customers row the Auto Pay
+  // check loads; null (lookup failed / customer unresolved) keeps today's
+  // exemptions — the sub-gate only ever moves a customer we positively
+  // classified as eligible (see pafExistingCustomerEligible).
+  // A prepay_annual accept is never moved (GitHub Codex #5481 r1 P1/P2): with
+  // GATE_PREPAY_CARD_AND_CHARGE on, a prepay preference reaches this point and
+  // widening it would put an existing member into the in-lane prepay
+  // charge-at-accept plan (immediate 12-month charge, refused for paused
+  // customers). Prepay resolves exactly as today.
+  const pafExisting = require('../config/feature-gates').pafExistingCustomersLive()
+    && paymentMethodPreference !== 'prepay_annual';
+  let existingCustomerRow = null;
+
+  let pausedKept = false;
+  let disabledKept = false;
   if (resolvedCustomerId) {
     // Payer-billed: match the eventual invoice's payer precedence
     // (scheduled_services.payer_id ?? customers.payer_id), scoped to the
@@ -343,6 +488,7 @@ async function resolveRecurringCardPolicyForEstimate({
     try {
       const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
       const customer = await db('customers').where({ id: resolvedCustomerId }).first();
+      existingCustomerRow = customer || null;
       // An ACTIVE autopay pause is the customer's explicit "don't
       // auto-charge" (Codex #3492 r12): without this check the paused
       // cohort fell through to saved_method_consented, the UI promised a
@@ -353,10 +499,46 @@ async function resolveRecurringCardPolicyForEstimate({
       // no capture demanded (asking a paused customer to save a card for
       // auto-charging contradicts the pause), invoices stay on the normal
       // payable path.
+      // PR-B owner ruling R5 (paused Auto Pay): an eligible paused customer
+      // is NOT classified out of the lane — they fall through to the
+      // saved-method / capture checks below so the accept KEEPS a card on
+      // file, with the invoice attached to the visit and no pay link at
+      // accept. The pause itself is never lifted: enrollConsentedMethod does
+      // not touch autopay_paused_until, and customerOnAutopay() stays false
+      // while it stands, so the completion auto-charge rail
+      // (complete-scheduled-service.js `customerAutopayActive` + the
+      // charge-boundary re-check) does not charge and the completion SMS
+      // carries the normal pay link.
       if (customer && isPaused(customer)) {
-        return { enforced: true, required: false, exemptReason: 'autopay_paused' };
+        if (!(pafExisting && pafExistingCustomerEligible(customer))) {
+          return { enforced: true, required: false, exemptReason: 'autopay_paused' };
+        }
+        pausedKept = true;
       }
-      if (customer && await customerOnAutopay(customer)) {
+      // PR-B: an eligible plan member who explicitly turned Auto Pay OFF is held
+      // exactly like the paused cohort — the card is kept/captured but NEVER
+      // enrolled (autopay_enabled stays false: the opt-out is not undone by an
+      // add-on accept) and never auto-charged. A failed read keeps today's
+      // exemption (existingCustomerRow cleared below).
+      // Independent of the pause (pre-push audit P1): a customer can be BOTH
+      // paused and opted out (the in-charge card detached during a pause
+      // disables Auto Pay without clearing the pause), and enrolling the
+      // replacement card would re-arm automatic charges when the pause ends.
+      // Both markers are kept.
+      if (pafExisting && (isPlanMember || pausedKept) && customer && pafExistingCustomerEligible(customer)) {
+        try {
+          disabledKept = await explicitAutopayDisable(customer);
+        } catch (err) {
+          logger.warn('[recurring-cof] explicit Auto Pay disable lookup failed — keeping today\'s exemption', { error: err.message });
+          // Fail closed to today's behavior: a paused customer keeps the
+          // autopay_paused exemption (a paused NON-member has no plan-member
+          // exemption below to fall back on, and would otherwise reach capture
+          // with no held marker), a plan member keeps existing_plan_customer.
+          if (pausedKept) return { enforced: true, required: false, exemptReason: 'autopay_paused' };
+          existingCustomerRow = null;
+        }
+      }
+      if (!pausedKept && !disabledKept && customer && await customerOnAutopay(customer)) {
         return { enforced: true, required: false, exemptReason: 'autopay_already_active' };
       }
     } catch (err) {
@@ -368,9 +550,27 @@ async function resolveRecurringCardPolicyForEstimate({
   // on the normal payable path. Deliberately ahead of the saved-method
   // auto-satisfy below — a member who saved a card without enrolling is not
   // enrolled into Auto Pay by a later accept.
-  if (isPlanMember) {
+  // PR-B: under the sub-gate an ELIGIBLE existing plan customer is not exempt
+  // — they fall into the card-required lane (saved-method auto-satisfy, else
+  // capture) exactly like a new self-pay accept: invoice attached to the
+  // visit, no pay link at accept, charged after the visit.
+  const convertedExisting = pafExisting && existingCustomerRow
+    && (isPlanMember || pausedKept) && pafExistingCustomerEligible(existingCustomerRow);
+  if (isPlanMember && !convertedExisting) {
     return { enforced: true, required: false, exemptReason: 'existing_plan_customer' };
   }
+  // Marker the accept / data route read: consent variant after_visit_card and
+  // the "billed after your first visit" copy apply to exactly this cohort.
+  const convertedMarker = convertedExisting
+    ? {
+      afterVisitCard: true,
+      // The customer these eligibility booleans were judged against — the
+      // accept transaction's locked recheck must land on the SAME profile.
+      customerId: resolvedCustomerId,
+      ...(pausedKept ? { autopayPaused: true } : {}),
+      ...(disabledKept ? { autopayDisabled: true } : {}),
+    }
+    : {};
 
   if (resolvedCustomerId) {
     // Auto-satisfy (spec §3.2: existing customers with a saved card are
@@ -387,6 +587,10 @@ async function resolveRecurringCardPolicyForEstimate({
           required: false,
           exemptReason: 'saved_method_consented',
           savedMethodRowId: savedCard.id,
+          // The method belongs to THIS customer; the accept honors it only
+          // when its own resolved customer is the same one.
+          customerId: resolvedCustomerId,
+          ...convertedMarker,
         };
       }
     } catch (err) {
@@ -394,7 +598,7 @@ async function resolveRecurringCardPolicyForEstimate({
     }
   }
 
-  return { enforced: true, required: true, exemptReason: null };
+  return { enforced: true, required: true, exemptReason: null, ...convertedMarker };
 }
 
 // Mint the SetupIntent that captures the Auto Pay card for a recurring accept.
@@ -662,6 +866,58 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
   });
 }
 
+// Provenance for a capture minted under the PR-B after-visit flow (r3 pre-push
+// P0): an abandoned / orphaned intent must never be recovered as a legacy
+// capture once the sub-gate (or the policy) moves, whatever the next accept
+// carries. The stamp rides the intent's Stripe metadata; the recovery refuses
+// an UNBOUND intent that carries it. ok:false = Stripe could not confirm, and
+// the mint route then offers no capture (fail closed).
+async function markAfterVisitCaptureIntent(setupIntentId) {
+  if (!setupIntentId) return { ok: false, reason: 'no_setup_intent' };
+  try {
+    await StripeService.markSetupIntentAfterVisit(setupIntentId);
+  } catch (err) {
+    logger.warn(`[recurring-cof] after-visit provenance stamp failed for ${setupIntentId}`, { error: err.message });
+    return { ok: false, reason: 'stamp_failed' };
+  }
+  return { ok: true };
+}
+
+// An accept refused because the live policy no longer expects the capture the
+// tab made (CONSENT_VARIANT_STALE) leaves that SetupIntent succeeded in Stripe
+// and unbound. Retire it so no later recovery can treat it as a legacy capture
+// (the setup_intent.succeeded recovery live-reads an unbound intent and skips a
+// retired one) — durable whichever way the policy moved (gate off, saved method
+// landed, exemption). Only an intent that belongs to THIS estimate is touched
+// (a crafted id must not retire another estimate's capture); an unknown /
+// foreign / already-retired / canceled intent needs nothing. ok:false only when
+// Stripe could not confirm — the caller fails closed.
+async function retireOrphanedCaptureIntent({ estimate, setupIntentId }) {
+  if (!setupIntentId) return { ok: true, retired: false };
+  let current = null;
+  try {
+    current = await readLiveSetupIntent(setupIntentId);
+  } catch (err) {
+    if (isStripeResourceMissing(err)) return { ok: true, retired: false };
+    logger.warn('[recurring-cof] orphaned-capture lookup failed', { error: err.message });
+    return { ok: false, reason: 'verification_failed' };
+  }
+  if (!current) return { ok: false, reason: 'verification_failed' };
+  if (!recurringCardIntentBelongsToEstimate(current, estimate.id)
+    || current.status === 'canceled'
+    || isRetiredSetupIntent(current)) {
+    return { ok: true, retired: false };
+  }
+  try {
+    await StripeService.retireSetupIntent(current.id);
+  } catch (err) {
+    logger.warn(`[recurring-cof] orphaned-capture retire failed for ${current.id}`, { error: err.message });
+    return { ok: false, reason: 'retire_failed' };
+  }
+  logger.info(`[recurring-cof] retired orphaned SetupIntent ${current.id} for estimate ${estimate.id} — accept refused it (policy no longer expects a capture)`);
+  return { ok: true, retired: true };
+}
+
 // In-transaction re-check of the verified intent under the accept's row lock
 // (pre-push Codex P1 r3): the pre-transaction verify can be a moment stale —
 // a replacement from another tab/request retires the intent between that
@@ -788,6 +1044,15 @@ async function completeRecurringCardEnrollment({
   // AFTER this moment, so a delayed recovery never silently re-enables a
   // revoked authorization.
   authorizedAt = null,
+  // PR-B: an eligible member who explicitly turned Auto Pay off keeps the
+  // card on file (saved + base consent recorded) but is NOT enrolled — the
+  // opt-out stands, nothing auto-charges.
+  skipEnrollment = false,
+  // { text, version } — the exact authorization the accept recorded as shown
+  // (estimate_data.acceptedRecurringCardConsent). When present it is recorded
+  // verbatim instead of re-deriving today's copy, so a recovery that runs
+  // after a copy change never records wording the customer did not see.
+  renderedConsent = null,
 }) {
   if (!customerId || !stripePaymentMethodId) return { enrolled: false, reason: 'missing_args' };
   try {
@@ -816,8 +1081,9 @@ async function completeRecurringCardEnrollment({
     // consent (prepay immediate charge) is checked against its own snapshot
     // (Codex r5 P1): an older future-invoice consent must not suppress the
     // immediate-charge authorization the prepay checkbox rendered.
-    const consentAlreadyRecorded = consentVariant
-      ? await ConsentService.hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType: saved?.method_type || 'card', variant: consentVariant, ...(authorizedAt ? { since: authorizedAt } : {}) })
+    const rendered = renderedConsent?.text && renderedConsent?.version ? renderedConsent : null;
+    const consentAlreadyRecorded = (consentVariant || rendered)
+      ? await ConsentService.hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType: saved?.method_type || 'card', variant: consentVariant, ...(rendered ? { text: rendered.text } : {}), ...(authorizedAt ? { since: authorizedAt } : {}) })
       : await ConsentService.hasEnrollmentScopedConsent(customerId, stripePaymentMethodId);
     if (!consentAlreadyRecorded) {
       // The capture modal rendered the locked v8 card consent verbatim
@@ -832,10 +1098,15 @@ async function completeRecurringCardEnrollment({
         ip,
         userAgent,
         consentVariant,
+        ...(rendered ? { renderedConsent: rendered } : {}),
       });
     }
     if (saved?.id) {
       await ConsentService.linkPaymentMethodId(stripePaymentMethodId, saved.id);
+    }
+    if (skipEnrollment) {
+      logger.info(`[recurring-cof] customer ${customerId} card saved at accept, Auto Pay NOT enrolled (explicit opt-out stands; estimate ${estimateId})`);
+      return { enrolled: false, reason: 'autopay_opt_out_kept', paymentMethodRowId: saved?.id || null };
     }
     const { enrollConsentedMethod } = require('./autopay-enrollment');
     const enrollment = await enrollConsentedMethod({
@@ -1720,12 +1991,115 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
   return { scanned: rows.length, resumed };
 }
 
+// Stamped into estimate_data.acceptedRecurringCardSetupIntentId by an accept
+// that committed without a verified capture: no SetupIntent may ever be
+// recovered/enrolled for it by the setup_intent.succeeded webhook.
+const ACCEPTED_NO_CAPTURE_MARKER = 'no_capture_at_accept';
+
+// ---------------------------------------------------------------------------
+// ONE collection promise (GitHub Codex #5481 r3 — view-vs-accept consent drift,
+// structural fix). What a capture's consent text PROMISES about when money
+// moves is a function of: the live policy cohort (after-visit / paused /
+// opted out), the tender family the customer actually used (card vs bank),
+// and whether the standard first-application invoice is really deferred to
+// the first visit or goes out at accept. /data, the capture UI's attestation,
+// the accept's in-transaction re-check, the recorded consent snapshot and the
+// webhook recovery all read THIS, never their own copies of the predicates.
+//
+// The after-visit authorization (v12) has card copy only: a bank method has no
+// bank-specific variant (the base ACH text already covers a debit after the
+// invoice is due), so a bank capture's promise is the base ACH consent.
+function normalizeCollectionTender(tender) {
+  return tender === 'us_bank_account' || tender === 'ach' ? 'us_bank_account' : 'card';
+}
+
+// Where the accept leaves the standard setup / first-application invoice. The
+// card lane suppresses delivery ONLY for an invoice attached to the first
+// visit (completion reuse finds only attached invoices); an unattached one —
+// the SETUP-ONLY shape, or no first scheduled service — keeps the normal
+// payable path with a pay link at accept. A lane accept that mints no invoice
+// collects nothing at accept either. Shared by the accept's suppression
+// branch and the promise below so they cannot drift.
+function standardInvoiceDelivery({ laneActive = false, minted = false, attached = false } = {}) {
+  const suppressed = !!laneActive && !!minted && !!attached;
+  return { suppressed, collectsAtAccept: !!minted && !suppressed };
+}
+
+function resolveCollectionPromise({
+  policy,
+  tender = 'card',
+  annualPrepay = false,
+  collectsAtAccept = false,
+  // GATE_PAF_SETUP_FEE: this accept stamped the setup fee on the first visit
+  // (nothing collected at accept), so the capture rendered the after-visit
+  // authorization for a fresh card capture — the PR-B cohort or not.
+  setupFeeDeferred = false,
+} = {}) {
+  const t = normalizeCollectionTender(tender);
+  const afterVisit = !annualPrepay
+    && !collectsAtAccept
+    && t === 'card'
+    && !!policy
+    && policy.required === true
+    && (policy.afterVisitCard === true || setupFeeDeferred === true)
+    && !afterVisitHeld(policy);
+  const variant = afterVisit ? 'after_visit_card' : null;
+  return {
+    variant,
+    version: require('./payment-method-consent-text').consentVersionForVariant(variant, t),
+    tender: t,
+  };
+}
+
+// Does what the capture UI attested it RENDERED equal the promise the accept
+// would record? variant must match exactly (null == not attested). When the
+// promise is the after-visit text, the version and tender must match too; any
+// other promise still rejects a tender the client claims that differs from the
+// verified one.
+function collectionPromiseMatches(expected, attested = {}) {
+  const variant = attested.variant || null;
+  if (variant !== (expected.variant || null)) return false;
+  if (attested.tender && normalizeCollectionTender(attested.tender) !== expected.tender) return false;
+  // A tab that attests its tender also attests the version of the text it
+  // rendered for that tender — the base card / ACH text included (GitHub
+  // Codex #5481 r5 P1): during a copy rollout an older tab must not have the
+  // newer wording recorded. (Older tabs send no tender and keep the legacy
+  // checks below.)
+  if (attested.tender && attested.version !== expected.version) return false;
+  if (expected.variant) {
+    if (attested.version !== expected.version) return false;
+    if (normalizeCollectionTender(attested.tender) !== expected.tender) return false;
+  }
+  return true;
+}
+
+// True when a no-capture accept must stamp the marker above: the policy is the
+// PR-B existing-customer cohort (afterVisitCard is set only while
+// GATE_PAF_EXISTING_CUSTOMERS is live, never for prepay, and is cleared by the
+// commercial manual-billing exemption), so a tab could have captured an intent
+// under the after-visit flow that this accept did not bind. Every other policy
+// (gate-off, payer_billed, autopay_already_active, commercial, one-time,
+// invoice-mode) keeps estimate_data exactly as it was before PR-B.
+function acceptDiscardsBindableCapture(policy) {
+  return !!policy && policy.afterVisitCard === true;
+}
+
 module.exports = {
+  ACCEPTED_NO_CAPTURE_MARKER,
+  acceptDiscardsBindableCapture,
+  normalizeCollectionTender,
+  standardInvoiceDelivery,
+  resolveCollectionPromise,
+  collectionPromiseMatches,
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   payAfterFirstVisitCardRail,
   payAfterFirstVisitSetupFeeRail,
   payAfterFirstVisitInvoiceRail,
+  afterVisitHeld,
+  explicitAutopayDisable,
+  pafExistingDriftUnderLock,
+  applyCommercialManualBillingExemption,
   resolveRecurringCardPolicyForEstimate,
   resolveGroupedEstimateOwnerId,
   resolvePrepayChargeMethod,
@@ -1735,6 +2109,8 @@ module.exports = {
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
   replaceRecurringCardIntent,
+  retireOrphanedCaptureIntent,
+  markAfterVisitCaptureIntent,
   resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
   verifyRecurringCardIntentUnderLock,

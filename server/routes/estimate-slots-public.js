@@ -85,6 +85,7 @@ const {
   createRecurringCardSetupIntentForEstimate,
   replaceRecurringCardIntent,
   resolveRecurringCardPolicyForEstimate,
+  markAfterVisitCaptureIntent,
 } = require('../services/recurring-card-on-file');
 const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
 
@@ -847,6 +848,18 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     }
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+    }
+    // PR-B (GATE_PAF_EXISTING_CUSTOMERS): stamp the intent's provenance BEFORE
+    // the client can confirm it, so a capture this flow produced can only ever
+    // enroll through an explicit accept bind — an abandoned one (tab closed,
+    // accept later on a no-capture path after the gate moved) is refused by the
+    // setup_intent.succeeded recovery instead of read as a legacy capture that
+    // would undo an Auto Pay opt-out. Fail closed: no capture without the stamp.
+    if (policy.afterVisitCard === true) {
+      const stamped = await markAfterVisitCaptureIntent(intent.setupIntentId);
+      if (!stamped.ok) {
+        return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+      }
     }
     // The customer reached the save-a-card step — the only local evidence of
     // it (the SetupIntent lives in Stripe). Non-throwing; feeds the

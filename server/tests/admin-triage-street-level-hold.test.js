@@ -1,0 +1,217 @@
+// A street-level address hold's outbound_booking_review card (owner ruling
+// 2026-09-30) is settled by its visit, never by a generic call verdict or a
+// single-card Resolve / Dismiss while the visit is still pending. On confirm,
+// the promised follow-up (deferred at booking) is filed as the existing owed
+// follow-up card. Synthetic data only.
+const fs = require('fs');
+const adminTriage = require('../routes/admin-triage');
+const { fileOwedFollowUpForStreetLevelHold } = require('../services/outbound-review-confirm');
+
+const { streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL } = adminTriage.__private;
+
+const card = (extra = {}) => ({
+  reason_code: 'outbound_booking_review',
+  payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1' },
+  ...extra,
+});
+const connWithVisit = (visit) => () => ({ where() { return this; }, first: async () => visit });
+
+describe('streetLevelHoldStillPending', () => {
+  test('protected until the activation stamps customer_confirmed: pending, or confirmed-but-unstamped', async () => {
+    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'pending', customer_confirmed: false }), card())).toBe(true);
+    // Office confirm committed status but the hook has not stamped (or failed transiently): still protected.
+    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'confirmed', customer_confirmed: false }), card())).toBe(true);
+    // Activation finished, or the visit was cancelled / skipped / rescheduled / gone: the card may settle.
+    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'confirmed', customer_confirmed: true }), card())).toBe(false);
+    for (const status of ['cancelled', 'skipped', 'rescheduled']) {
+      expect(await streetLevelHoldStillPending(connWithVisit({ status, customer_confirmed: false }), card())).toBe(false);
+    }
+    expect(await streetLevelHoldStillPending(connWithVisit(undefined), card())).toBe(false);
+  });
+
+  test('the voice agent\'s own outbound_booking_review card (no street-level flag) is untouched', async () => {
+    const plain = card({ payload: { origin: 'voice_agent', scheduled_service_id: 'visit-1' } });
+    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'pending', customer_confirmed: false }), plain)).toBe(false);
+    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'pending', customer_confirmed: false }), card({ reason_code: 'missing_service_address' }))).toBe(false);
+  });
+
+  test('a JSON-string payload is read too', async () => {
+    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'pending', customer_confirmed: false }), card({ payload: JSON.stringify(card().payload) }))).toBe(true);
+  });
+});
+
+describe('the routes keep the hold out of generic verdicts and single-card actions', () => {
+  const src = fs.readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
+  test('the bulk verdict resolve excludes a still-pending hold card (a sibling verdict never sweeps it)', () => {
+    // Two-valued: an ordinary card (no street_level_address key) must evaluate FALSE, not NULL,
+    // or `NOT (...)` would silently drop it from the bulk resolve.
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("COALESCE(triage_items.payload->>'street_level_address', '') = 'true'");
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain('hold_ss.customer_confirmed = false');
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("hold_ss.status NOT IN ('cancelled', 'skipped', 'rescheduled')");
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).not.toContain("status = 'pending'");
+    const bulk = src.indexOf('.whereRaw(`NOT ${STREET_LEVEL_HOLD_OPEN_SQL}`)');
+    expect(bulk).toBeGreaterThan(src.indexOf('.whereRaw("payload->\'reschedule_proposal\' IS NULL")'));
+    expect(src.indexOf('.update({', bulk)).toBeGreaterThan(bulk);
+  });
+  test('the clicked hold card is refused by the verdict route and by Resolve / Dismiss', () => {
+    expect(src).toContain("if (await streetLevelHoldStillPending(db, item)) {\n      return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });");
+    // Inside the transaction, after the per-call lock (atomic with the write).
+    const guard = src.indexOf("await streetLevelHoldStillPending(trx, liveCard ? { ...item, ...liveCard } : item)) {\n      throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE)");
+    // The card is re-read under the lock (the live payload is what the guard judges).
+    expect(src.indexOf("await trx('triage_items').where({ id }).first('reason_code', 'payload')")).toBeGreaterThan(src.indexOf('await lockTriageCall(trx, item.call_log_id);', src.indexOf('async function transitionCore')));
+    expect(guard).toBeGreaterThan(src.indexOf('const result = await conn.transaction(async (trx) => {'));
+    expect(guard).toBeGreaterThan(src.indexOf('await lockTriageCall(trx, item.call_log_id);', src.indexOf('async function transitionCore')));
+  });
+  test('transitionCore refuses a pending hold inside the locked transaction, before any write', async () => {
+    const writes = [];
+    const make = () => {
+      const t = (table) => {
+        const q = {
+          where() { return q; }, whereIn() { return q; }, forUpdate() { return q; },
+          first: async () => (table === 'triage_items' ? { id: 't1', status: 'open', ...card() } : { status: 'pending', customer_confirmed: false }),
+          update: async (u) => { writes.push(u); return 1; },
+        };
+        return q;
+      };
+      t.raw = async () => ({ rows: [{}] });
+      t.schema = { hasTable: async () => false };
+      t.transaction = async (fn) => fn(t);
+      return t;
+    };
+    await expect(adminTriage.transitionCore({ id: 't1', nextStatus: 'resolved', conn: make() })).rejects.toMatchObject({ statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    expect(writes).toHaveLength(0);
+    // Claiming / assigning the card while the visit is pending is allowed.
+    await expect(adminTriage.transitionCore({ id: 't1', nextStatus: 'in_progress', conn: make() })).resolves.not.toMatchObject({ outcome: 'already' });
+  });
+});
+
+describe('the promotion-during-resolve race', () => {
+  test('a plain card (pre-lock read) promoted to a street-level hold while Resolve waited for the lock is refused on the LIVE payload, with no write', async () => {
+    const writes = [];
+    const plain = { id: 't1', status: 'open', reason_code: 'outbound_booking_review', call_log_id: 'c1', payload: { origin: 'voice_agent' } };
+    const live = { reason_code: 'outbound_booking_review', payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1' } };
+    const trx = (table) => {
+      const q = {
+        where() { return q; }, whereIn() { return q; }, forUpdate() { return q; },
+        first: async () => (table === 'triage_items' ? live : { status: 'pending', customer_confirmed: false }),
+        update: async (u) => { writes.push(u); return 1; },
+      };
+      return q;
+    };
+    trx.raw = async () => ({ rows: [{}] });
+    const conn = (table) => ({ where() { return this; }, first: async () => (table === 'triage_items' ? plain : null) });
+    conn.schema = { hasTable: async () => false };
+    conn.transaction = async (fn) => fn(trx);
+    for (const nextStatus of ['resolved', 'dismissed']) {
+      await expect(adminTriage.transitionCore({ id: 't1', nextStatus, conn })).rejects.toMatchObject({ statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    }
+    expect(writes).toHaveLength(0);
+  });
+});
+
+describe('office confirm files the deferred follow-up as the owed follow-up card', () => {
+  const svc = { id: 'visit-1', source_call_log_id: 'call-1' };
+  const plan = { scheduled_date: '2026-10-19', window_start: '09:00' };
+  // A fake trx: the visit's latest street-level card (any status), child visits, handled owed cards.
+  const make = ({ card, child = null, handled = null }) => {
+    const inserts = [];
+    const trx = (table) => {
+      const q = {
+        _reason: null,
+        where(arg) { if (arg && arg.reason_code) q._reason = arg.reason_code; return q; },
+        whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; },
+        first: async () => {
+          if (table === 'triage_items' && q._reason === 'outbound_booking_review') return card;
+          if (table === 'scheduled_services') return child;
+          return handled;
+        },
+        insert(row) { inserts.push({ table, row }); return q; },
+        onConflict() { return q; }, merge: async () => [],
+      };
+      return q;
+    };
+    trx.raw = (s) => s;
+    return { trx, inserts };
+  };
+  const heldCard = (status, extra = {}) => ({ id: 't1', status, summary: 'x', payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1', follow_up_plan: plan, ...extra } });
+
+  test('a confirmed street-level hold with a promised follow-up files attached_booking_followup_unbooked carrying the plan', async () => {
+    const { trx, inserts } = make({ card: heldCard('open') });
+    expect(await fileOwedFollowUpForStreetLevelHold(trx, svc)).toBe(true);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].row.reason_code).toBe('attached_booking_followup_unbooked');
+    expect(JSON.stringify(inserts[0].row.payload)).toContain('2026-10-19');
+    expect(JSON.stringify(inserts[0].row.payload)).toContain('street_level_address_confirmed_follow_up_unbooked');
+  });
+  test('recording replacement path: the card was superseded (resolved) but the plan still files on confirm', async () => {
+    for (const status of ['resolved', 'dismissed']) {
+      const { trx, inserts } = make({ card: heldCard(status) });
+      expect(await fileOwedFollowUpForStreetLevelHold(trx, svc)).toBe(true);
+      expect(inserts).toHaveLength(1);
+    }
+  });
+  test('idempotent and scoped: nothing without a plan, no street-level card, an existing child, or a handled card', async () => {
+    for (const opts of [
+      { card: heldCard('open', { follow_up_plan: undefined }) },
+      { card: undefined },
+      { card: heldCard('open'), child: { id: 'child-1' } },
+      { card: heldCard('open'), handled: { id: 'done' } },
+    ]) {
+      const { trx, inserts } = make(opts);
+      expect(await fileOwedFollowUpForStreetLevelHold(trx, svc)).toBe(false);
+      expect(inserts).toHaveLength(0);
+    }
+  });
+  test('the hook runs it inside the card-resolve transaction, before the review card is resolved', () => {
+    const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
+    const file = s.indexOf('await fileOwedFollowUpForStreetLevelHold(trx, svc, hold);');
+    expect(file).toBeGreaterThan(0);
+    expect(file).toBeLessThan(s.indexOf("status: 'resolved', updated_at: trx.fn.now()", file));
+  });
+  test('the confirm closes the call-level review state under the same lock, via the shared aggregate', () => {
+    const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
+    const resolve = s.indexOf("status: 'resolved', updated_at: trx.fn.now()");
+    const sync = s.indexOf('if (isHold) await syncCallReviewStatus(trx, svc.source_call_log_id);', resolve);
+    expect(sync).toBeGreaterThan(resolve);
+    expect(sync).toBeLessThan(s.indexOf('} catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed', sync));
+    expect(s.indexOf('await lockTriageCall(trx, svc.source_call_log_id);')).toBeLessThan(resolve);
+  });
+});
+
+describe('syncCallReviewStatus (shared aggregate)', () => {
+  const { syncCallReviewStatus } = require('../utils/triage-locks');
+  const make = (n) => {
+    const updates = [];
+    const trx = (table) => {
+      const q = {
+        where() { return q; }, whereIn() { return q; }, count() { return q; },
+        first: async () => ({ n }),
+        update: async (u) => { updates.push({ table, u }); return 1; },
+      };
+      return q;
+    };
+    return { trx, updates };
+  };
+  test('closes the call when no card is left open, keeps it open otherwise', async () => {
+    const closed = make(0);
+    expect(await syncCallReviewStatus(closed.trx, 'call-1')).toBe('resolved');
+    expect(closed.updates[0].u).toMatchObject({ review_status: 'resolved' });
+    const open = make('2');
+    expect(await syncCallReviewStatus(open.trx, 'call-1')).toBe('open');
+    expect(open.updates[0].u).toMatchObject({ review_status: 'open' });
+  });
+});
+
+describe('the list carries the hold visit\'s LIVE address for the read-back dialog', () => {
+  const src = fs.readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
+  test('admin-only, one batched read of the visits behind the hold cards, attached as item.visit_address', () => {
+    const at = src.indexOf("if (req.techRole === 'admin') {\n      const parse = ");
+    expect(at).toBeGreaterThan(0);
+    const block = src.slice(at, at + 1800);
+    expect(block).toContain("db('scheduled_services')\n            .whereIn('id',");
+    expect(block).toContain('service_address_line1');
+    expect(block).toContain('item.visit_address = line;');
+    expect(block).toContain("i.reason_code === 'outbound_booking_review'");
+    expect(at).toBeLessThan(src.indexOf('res.json({ items, counts });', at));
+  });
+});

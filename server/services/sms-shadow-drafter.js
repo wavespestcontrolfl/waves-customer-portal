@@ -28,7 +28,9 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
+const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
+const labelFactsLib = require('./sms-label-facts');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
 const { etParts } = require('../utils/datetime-et');
@@ -122,14 +124,31 @@ const PROMPT_VERSION = 'house_voice_v11';
 // facts as authoritative, so drafts made with them stamp the '_cf' token.
 // The two cohorts stay distinct: bare (pre both), '_cf' (company facts, no
 // re-service fact), '2' (re-service fact, no company facts), '2_cf' (both,
-// current). 32 chars; with all four category tags ('+bclm') 37, under
-// PROMPT_VERSION_COLUMN_MAX (40).
-// The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', any later
+// shipped), '3_cf' (both + LIVE ETA). 32 chars; with all four category tags ('+bclm') 37, under
+// PROMPT_VERSION_COLUMN_MAX (40). ('3_cfl' below adds LABEL FACTS: 33 chars, 38 with all four tags.)
+// The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', '3_cf', any later
 // suffix, any '+category' tags): readers that must recognize ALL of them —
 // sms-auto-send's gratitude discovery — match this prefix, never the current
 // constant, so a suffix bump cannot orphan rows stamped under earlier versions.
 const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}2_cf`;
+// LIVE ETA (Codex round-1 finding, PR #5334): the LIVE ETA prompt rule +
+// deterministic minutes guard change what a gate-on draft may say, so they need
+// their own cohort identity — pooling their graduation/exam evidence with
+// pre-LIVE-ETA drafts would credit this change with evidence that never
+// examined it. Merged with main's '2_cf' (free re-service + company facts)
+// identity (#5336): the fresh identity above both is the numeric token "3" —
+// 'house_voice_v12_real_answers3_cf' (32 chars; with all four category tags
+// ('+bclm') 37, under PROMPT_VERSION_COLUMN_MAX). A numeric token is the
+// cohort-bump mechanism sms-sealed-eval already understands (>= 2 = carries the
+// unconditional FREE RE-SERVICE line, so "3" keeps that contract and 'cf' keeps
+// COMPANY FACTS); the earlier '_eta' suffix on top of '2_cf' would have been 36
+// chars and 41 with all four category tags — one past the varchar(40) columns.
+// LABEL FACTS (owner ruling 2026-09-30): '_cfl' adds the per-draft LABEL FACTS
+// section (rainfast/re-entry from the label of the product applied at the
+// customer's last visit) and the matching timing-grounding rule. Still inside
+// REAL_ANSWERS_VERSION_FAMILY and cumulative: '3_cfl' = the re-service fact + LIVE ETA + COMPANY FACTS + LABEL FACTS.
+// 33 chars, 38 with all four category tags.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cfl`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -255,6 +274,9 @@ function followupSlaPhrase(now = new Date()) {
 // SLA_PHRASES / replyPromisesFollowup / slaPhraseStatus live in
 // ./sms-followup-sla (Codex r3) and are re-exported below.
 const followupSla = require('./sms-followup-sla');
+const { stripTrackLinks } = require('./sms-track-links');
+const { sanitizeTechNames } = require('./live-eta-destination');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 // The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
 // line (only the categories whose own gate is still off), one instruction
@@ -292,6 +314,11 @@ function realAnswersHandoffBullets() {
   }
   if (gateEnvValue('GATE_SMS_AGENT_LEGAL')) {
     lines.push('- LEGAL THREATS: answer from the facts only.');
+  }
+  if (!gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL')) {
+    // Owner ruling 2026-09-30: timing answered from LABEL FACTS is not a
+    // chemical/medical concern (the gate itself is unchanged).
+    lines.push('- Keyed to the KIND asked (LABEL FACTS sentences: "keep people and pets off treated areas ..." is the re-entry kind, "rain won\'t wash it off ..." is the rainfast kind): a question ONLY about when people or pets can go back out is NOT a chemical/medical concern when LABEL FACTS has a re-entry sentence, and a question ONLY about rain washing it off is NOT one when LABEL FACTS has a rainfast sentence - answer by copying that sentence word for word and do not hand it off. A rainfast sentence never excuses a people/pets question, nor a re-entry sentence a rain question. A people/pets timing question with no re-entry sentence (or none on file) is held for a person as before; a rain-only question with no rainfast sentence is answered from the COMPANY FACTS rain line. Symptoms, illness, exposure, or anyone or any pet that touched, ate, or breathed something always HOLD for a person.');
   }
   // PEST REPORTS (owner ruling 2026-09-29): "pests came back" / "still
   // seeing X after service" is NOT a complaint for hand-off purposes —
@@ -724,6 +751,22 @@ function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
     : `no longer eligible for a free${names} re-service`;
 }
 
+// LABEL FACTS (owner ruling 2026-09-30): rainfast/re-entry times from the
+// label of the product applied at the customer's last visit. Best-effort,
+// gate-on only; null (section omitted) on gate off, no customer, nothing
+// verified, an error or a timeout. The DB read, the wording and the grounding
+// live in ./sms-label-facts.
+async function fetchLabelFacts({ customerId } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  return labelFactsLib.fetchLabelFacts({ customerId });
+}
+
+function renderLabelFactsSection(labelFacts) {
+  // Always a header gate-on (sealed-eval contract marker for '_cfl'): the
+  // "none on file" section when there is no verified label timing to state.
+  return labelFactsLib.renderLabelFactsSection(labelFacts, { formatDate: formatEtDate }) || labelFactsLib.LABEL_FACTS_NONE_SECTION;
+}
+
 // The rendered fact line, and its reader. One line, fixed wording, so the
 // deterministic check below and a frozen replay read the same thing.
 const RESERVICE_FACT_LABEL = 'FREE RE-SERVICE:';
@@ -802,18 +845,27 @@ async function fetchReserviceFactState({ customerId } = {}) {
 // be a compound's tail ("pet-safe once dry") and the idiom must not carry a
 // timing modifier ("safe once dry in 30 minutes") — those stay in the text
 // for the screens below, and the exempt match is replaced by a neutral
-// token rather than removed so nothing around it is altered.
-const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-–—,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
-const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
-function hasBannedCustomerCopy(text) {
+// token rather than removed so nothing around it is altered (the idiom
+// itself lives in sms-label-facts.sanctionSafeOnceDry, shared with the
+// send-time recheck so both read a reply the same way).
+// `opts.rainTimeGuard` + `opts.labelFactsText` (LABEL FACTS, owner ruling
+// 2026-09-30, the EXACT-SENTENCE contract): label timing may reach a customer
+// only by copying a rendered LABEL FACTS sentence word for word. Those
+// sentences are stripped from the reply first; every screen below (the label
+// claim guard, the older banned lists, the "safe" claims) then reads only the
+// REMAINDER, so any other rainfast / re-entry / drying time or clearance
+// claim, and every "safe"/EPA claim, stays banned.
+function hasBannedCustomerCopy(text, opts = {}) {
   let bannedCopyGuard = null;
   try {
     ({ findBannedCustomerCopy: bannedCopyGuard } = require('./service-report/activity-indicators'));
   } catch { bannedCopyGuard = null; }
   if (!bannedCopyGuard) return true;
-  let t = String(text || '');
-  if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
-    t = t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
+  let t = labelFactsLib.sanctionSafeOnceDry(text);
+  if (opts && opts.rainTimeGuard) {
+    t = labelFactsLib.stripLabelSentences(labelFactsLib.stripHandoffDeadlines(t), opts.labelFactsText || '');
+    // ...and a bare yes / ok / "you can" answering a re-entry or rain question the customer asked (opts.asked)
+    if (labelFactsLib.hasUngroundedLabelClaim(t) || labelFactsLib.answersAskedLabelQuestion(t, opts.asked)) return true;
   }
   return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
 }
@@ -823,10 +875,17 @@ function hasBannedCustomerCopy(text) {
 // no longer rest on the prompt. A real-answers reply carrying banned copy is
 // a violation, fed into the same revise/verify loop; exhausting the budget
 // leaves the draft unconverged, which nothing publishes or sends.
-function validateComplianceCopy({ reply }) {
+function validateComplianceCopy({ reply, factsBlock, inboundMessage } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
-  if (!reply || !hasBannedCustomerCopy(reply)) return { ok: true, violations: [] };
-  return { ok: false, violations: ['the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'] };
+  const labelFactsText = labelFactsLib.labelFactsSectionFrom(factsBlock);
+  const asked = inboundMessage == null ? [] : labelFactsLib.askedLabelKinds(inboundMessage);
+  if (!reply || !hasBannedCustomerCopy(reply, { labelFactsText, rainTimeGuard: true, asked })) return { ok: true, violations: [] };
+  const answerNote = asked.length ? ' - and when the customer asks about re-entry or rain, never answer yes / no / ok / "you can" / "not yet": copy the LABEL FACTS sentence, or say the technician will confirm' : '';
+  // The LABEL FACTS wording only when the section actually carries a sentence.
+  const kinds = labelFactsLib.groundedLineKinds(labelFactsText);
+  return { ok: false, violations: [(kinds.rain || kinds.reentry)
+    ? 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved; rainfast or re-entry timing may be given ONLY by copying a LABEL FACTS sentence word for word (the whole sentence, unchanged, with its visit date) - any other drying, rainfast, re-entry or "you can go back out" wording, number, or clock time is banned; "safe once dry" with the technician confirming timing is also allowed'
+    : 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'].map((v) => v + answerNote) };
 }
 
 // "revisit" only reads as a re-service reference when it has no ordinary
@@ -1424,7 +1483,9 @@ const PEST_COMPLAINT_TIEBREAK = Object.freeze([
   { label: 'property damage', source: 'damag\\w*' },
   { label: 'a refund/credit demand', source: 'refund\\w*' },
   { label: 'a dispute over what happened or over billing', source: "disput\\w*|chargeback|charged\\s+(?:me\\s+)?(?:wrong|twice|again|incorrect\\w*)|(?:double|over|wrongly|incorrectly)[- ]?charg\\w*" },
-  { label: 'a threat to cancel over it', source: 'cancel\\w*' },
+  // Codex round-44 P2: a cancel HAND-OFF is request / threat language — "I want to cancel", "going to cancel", "please cancel my plan",
+  // "I'm cancelling", "cancel my service" — never a past-tense description ("the tech canceled yesterday's appointment").
+  { label: 'a threat to cancel over it', source: "(?:want(?:ed)?|wanna|going|gonna|plan(?:ning)?|need(?:ed)?|ready|decid\\w+|think(?:ing)?|consider(?:ing)?|about|trying|try|please|pls|will|would|should|may|might|could|gotta|have|like|let['’]?s)\\s+(?:to\\s+|of\\s+|about\\s+)?(?:be\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|(?:i|we)['’](?:ll|d)\\s+(?:be\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|cancel(?:l?ing)?\\s+(?:my|our|the|this|that|it|them|everything|all|service|plan|account|membership|subscription|program|contract|agreement|autopay|us|me|now|(?:on|for|after|before|by|until|starting|effective|tomorrow|today|tonight|next|following|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|[a-z]+['’]s)\\b|(?:i['’]?m|we['’]?re|i\\s+am|we\\s+are)\\s+(?:just\\s+)?cancel(?:l?ing)\\b|(?:i|we)\\s+(?:just\\s+)?cancel\\b|(?:want|need|like|request(?:ing)?)\\s+(?:a\\s+)?cancell?ation\\b|cancell?ation\\s+(?:please|pls|request)\\b|(?:(?:want(?:ed)?|wanna|need(?:ed)?|would\\s+like|['’]d\\s+like|like|gotta)\\s+(?:to\\s+(?:have|get)\\s+)?|(?:please|pls|just|(?:can|could|would|will)\\s+(?:you|u|we)(?:\\s+please)?|go\\s+ahead\\s+and)\\s+(?:(?:have|get)\\s+)?|\\bget\\s+)(?:(?:my|our|the|this|that|it|them|everything|all|us|me|service|plan|account|membership|subscription|program|contract|agreement|autopay|visit|appointment|[a-z]+['’]s)\\s+){1,4}cancell?ed\\b|(?:needs?\\s+to|should|must|has\\s+to|have\\s+to)\\s+be\\s+cancell?ed\\b|(?<![\\w'’])cancel(?:l?ing)?(?=\\s*(?:[.!?,;:–—]|$|please\\b|pls\\b|now\\b|asap\\b))" },
 ]);
 function pestComplaintTieBreakLabels() {
   const labels = PEST_COMPLAINT_TIEBREAK.map((c) => c.label);
@@ -1452,11 +1513,17 @@ function reserviceRefusalAffirmed(text) {
   return require('./reservice-scheduler').mentionsAffirmed(String(text || ''), RESERVICE_REFUSAL_RE);
 }
 // A true hand-off the customer's OWN words establish, or an explicit refusal, suppresses the owed offer (and the state replies below).
+// PR #5465 round 1: a cancellation DESCRIBED as someone else's / a past act ("Your tech had to cancel", "You called to cancel", "they decided to
+// cancel on Friday", "I had to cancel last time") is not the customer's request or threat. The span is blanked before the hand-off read, so a
+// clause-final bare "cancel" or a "cancel on Friday" reads as intent only when its subject is the customer. Requests with the tech as the
+// ADDRESSEE ("can you cancel on Friday", "I told you to cancel") have no past / obligation lead and stay requests.
+const RESERVICE_CANCEL_DESCRIBED_RE = /\b(?:(?:(?:your|the|a|our)\s+)?(?:tech\w*|office|team|crew|company|staff|dispatcher|rep|guy|lady|girl|person|someone|somebody|they|he|she|you|u|waves)|(?:i|we)(?=\s+(?:(?:already|just)\s+)?had\s+to\b))\s+(?:(?:already|just|always|never|also|actually|then)\s+)*(?:had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|did|got|ended|asked|came|went|kept)\s+(?:(?:(?:already|just|always|never|also|actually|then|had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|did|got|ended|asked|came|went|kept)\s+){0,2})(?:to\s+)?cancel(?:l?ing)?\b/gi;
 function reserviceOfferSuppressed(inboundMessage) {
   const handoffRe = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS') ? RESERVICE_HANDOFF_TEXT_RE : RESERVICE_HANDOFF_WITH_ANGER_RE;
+  const text = String(inboundMessage || '').replace(RESERVICE_CANCEL_DESCRIBED_RE, (m) => ' '.repeat(m.length));
   // Codex round-24 P2: only an AFFIRMED hand-off clause suppresses the offer — "I don't need a refund" or
   // "I don't want to cancel" mentions the term to negate it (the scheduler's clause-level negation rule).
-  return require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe) || reserviceRefusalAffirmed(inboundMessage);
+  return require('./reservice-scheduler').mentionsAffirmed(text, handoffRe) || reserviceRefusalAffirmed(inboundMessage);
 }
 function reserviceOfferOwed({ inboundMessage, lanes, context }) {
   if (reserviceOfferSuppressed(inboundMessage)) return false;
@@ -1767,7 +1834,7 @@ function reserviceBookedSnapshot(booked) {
 function reserviceBookedDayNames(info) {
   const day = new Date(`${info.date}T12:00:00Z`);
   const fmt = (opts) => day.toLocaleDateString('en-US', { timeZone: 'UTC', ...opts });
-  const names = [fmt({ weekday: 'long' }), fmt({ month: 'long', day: 'numeric' }), fmt({ month: 'short', day: 'numeric' }), `${day.getUTCMonth() + 1}/${day.getUTCDate()}`];
+  const names = [fmt({ weekday: 'long' }), fmt({ month: 'long', day: 'numeric' }), fmt({ month: 'short', day: 'numeric' }), `${day.getUTCMonth() + 1}/${day.getUTCDate()}`, String(info.date).slice(0, 10)];
   const time = info.windowStart ? require('../utils/sms-time-format').formatSmsTime(info.windowStart) : null;
   return [...names, time, time && time.replace(':00', '')].filter(Boolean);
 }
@@ -1796,13 +1863,21 @@ function reserviceAssertedDays(sentence) {
   for (const m of sentence.matchAll(/\b(sun|mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?)(?:day)?\b/gi)) out.push(m[1].slice(0, 3).toLowerCase());
   for (const m of sentence.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b/gi)) out.push(`${m[1].toLowerCase()} ${Number(m[2])}`);
   for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\b/g)) out.push(`${Number(m[1])}/${Number(m[2])}`);
+  // Codex round-44 P2: FULL dates — ISO "2026-10-09" (the FREE RE-SERVICE fact renders this form, so a draft copies it) and M/D/YYYY — are
+  // compared year-and-all as an `iso:` token against the live callback date (the M/D token above is pushed too, so a wrong year fails here).
+  for (const m of sentence.matchAll(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g)) out.push(`iso:${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`);
+  for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/g)) {
+    const year = m[3].length === 2 ? `20${m[3]}` : m[3];
+    out.push(`iso:${year}-${String(Number(m[1])).padStart(2, '0')}-${String(Number(m[2])).padStart(2, '0')}`);
+  }
   return out;
 }
 // The clock times / windows a sentence asserts, as minutes-of-day with an optional meridiem: "1–3 PM", "at 9", "9:30 am".
 const RESERVICE_LEXICAL_TIME_RE = /\b(?:noon|midnight|midday|tonight|later\s+today|this\s+(?:morning|afternoon|evening)|mornings?|afternoons?|evenings?|first\s+thing|end\s+of\s+(?:the\s+)?day|after\s+lunch|before\s+lunch|after\s+work|before\s+work|o['’]clock)\b/gi;
 function reserviceAssertedTimes(sentence) {
   const out = [];
-  let rest = String(sentence);
+  // an ISO / numeric full date is a DAY (reserviceAssertedDays), not a clock range ("2026-10-09" would read as the range 10–09)
+  let rest = String(sentence).replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ').replace(/\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/g, ' ');
   const push = (h, mi, mer) => out.push({ minutes: (Number(h) % 12) * 60 + Number(mi || 0) + (mer === 'p' ? 720 : 0), mer: mer || null });
   rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*(?:-|–|—|to|and|until)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h1, m1, mer1, h2, m2, mer2) => {
     const second = mer2[0].toLowerCase();
@@ -1835,12 +1910,18 @@ function reserviceLiveWindowMinutes(windowStart) {
 }
 function reserviceLiveDayTokens(dateStr) {
   const d = new Date(`${String(dateStr).slice(0, 10)}T12:00:00Z`);
-  return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`]);
+  return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`, `iso:${String(dateStr).slice(0, 10)}`]);
 }
 // The booked-callback claims of an OUTGOING body, one per referring sentence: { lanes, relative, days, times } where `lanes` are
 // the lanes the SENTENCE names (Codex round-31 P2 — derived from the body itself, never only from snapshotted lanes, so an
 // edited "Your lawn re-service is scheduled Thursday" is a lawn claim even with no lawn snapshot). A sentence refers when it
 // carries an existing-appointment marker, a relative day, or a snapshotted day/date/time AND has re-service context.
+const RESERVICE_FULL_DATE_RE = /\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/;
+// Round-3: a full date is an APPOINTMENT ASSERTION only with present / future scheduling wording and no historical / completed qualifier
+// ("Your last pest re-service was on 9/15/2026", "your re-service invoice from 2026-09-12" are history, not the booked callback).
+const RESERVICE_DATED_ASSERT_RE = /\b(?:is|are|will\s+be|set|slated|planned|falls?|lands?|arrives?|comes?|coming|happening|on\s+the\s+(?:calendar|schedule|books)|down\s+for)\b|['’]s\b/i;
+const RESERVICE_DATED_HISTORICAL_RE = /\b(?:was|were|had|did|last|previous\w*|prior|past|earlier|ago|completed|finished|done|performed|originally|invoice\w*|receipt)\b/i;
+const reserviceFullDateAssertion = (sentence) => RESERVICE_FULL_DATE_RE.test(sentence) && RESERVICE_DATED_ASSERT_RE.test(sentence) && !RESERVICE_DATED_HISTORICAL_RE.test(sentence);
 function reserviceBookedClaims(body, snapshot) {
   const named = Object.values(snapshot).flatMap((info) => reserviceBookedDayNames(info))
     .map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
@@ -1861,12 +1942,16 @@ function reserviceBookedClaims(body, snapshot) {
     .replace(/\b(Mr|Mrs|Ms|Dr|St|Ave|Blvd|Rd|approx|Apt|Ste|No)\./gi, '$1');
   for (const sentence of normalizedBody.split(/[.!?\n]+/)) {
     const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
-    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
+    // Round-1 C3: a FULL date (ISO / M/D/YYYY) is admitted whatever its value — an EDITED wrong date ("Your pest re-service is 2027-10-08") must reach the
+    // day comparison, not be skipped because it is not the snapshot's exact string; the re-service-context check below still gates it.
+    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || reserviceFullDateAssertion(sentence) || named.some((rx) => rx.test(sentence)))) continue;
     if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) continue;
     // A sentence whose re-service is a NEW OFFER (its marker belongs to something else: "Your lawn treatment is scheduled, and
     // I'll send your free pest re-service link") is not a reference to a booked callback.
     const spans = reserviceOfferSpans(sentence);
-    if (spans.length && !spans.some((span) => reserviceExistingApptGoverns(span, sentence))) continue;
+    // (a FULL date with no link / send / text wording is an assertion about a specific appointment even with no marker — "Your pest re-service is 2027-10-08")
+    const datedAssertion = reserviceFullDateAssertion(sentence) && !RESERVICE_PROMISE_AFTER_RE.test(sentence);
+    if (spans.length && !datedAssertion && !spans.some((span) => reserviceExistingApptGoverns(span, sentence))) continue;
     claims.push({
       lanes: RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l),
       relative: relative ? (relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today') : null,
@@ -2007,6 +2092,1349 @@ async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedL
   if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
   const { candidates, anyOf } = reserviceLanesToRequire({ lanes: fault.lanes, laneUnnamed, record });
   return reserviceLanesBlockedReason(candidates, await liveReserviceLaneState(customerId), anyOf);
+}
+
+// LIVE ETA minutes-away claim (independent review finding, PR #5334;
+// broadened — pre-push audit P1, PR #5334 round 2): scoped to arrival/away/
+// ETA phrasing found ANYWHERE in the SAME SENTENCE as the minutes figure, in
+// EITHER order — the original version only looked in a narrow window
+// immediately before/after the number, which missed ordinary phrasing like
+// "The tech is on the way, about 12 minutes." (the number sits after the
+// trigger, separated by a comma + "about"). Sentence-scoped trigger words:
+// "on the/his/her/their way", "en route", "heading over"/"heading your way",
+// "arriv*", "eta", "away", "out", "get(ting) there", "be(ing) there",
+// "show(ing) up", "pull(ing) up". An unrelated duration ("the treatment
+// takes about 30 minutes to dry", "allow 30 minutes before letting pets
+// out", "takes about 45 minutes") must still never false-positive even
+// though "out"/generic words can legitimately co-occur in the same sentence
+// ("...letting pets out") — a duration/wait phrase checked in a narrow
+// window right around the matched number (never sentence-wide) wins over
+// the sentence-level trigger.
+// Round 3 (audit P1: "take about 12 minutes to arrive" slipped through): a
+// STRONG arrival word in the sentence makes EVERY minutes figure in it a
+// claim, with no duration exclusion — arrival wording always wins. Only the
+// weak trigger "out" ("12 minutes out" vs "letting pets out") consults the
+// duration exclusions.
+// Round 4 (Codex round-4 P2, PR #5334): "20 minutes from you" / "from your
+// house" / "from the property", and "out from" — phrasing with no other
+// arrival word at all ("from you" alone has no "away"/"arriv"/"eta") was
+// missed entirely, so the reply passed both the draft-time verifier AND the
+// send-time freshness recheck with an unbound ETA claim.
+// Round 7 (Codex P2, PR #5334): "to go", "left", "until he/she/they/the
+// tech", "due in", "reach(ing) you" and "be(ing) with you" — yet another
+// round finding yet another phrasing ("20 minutes to go") the fixed word
+// list didn't cover. Adding these words is NOT the structural fix (see
+// findGroundedMinutesFigures below, which stops depending on this list
+// entirely once there's a LIVE ETA to check a claim against) — it only
+// keeps the ungrounded/no-snapshot trigger-based path (findEtaMinutesClaims,
+// bodyMentionsArrival, bodyHasTimedArrivalPhrase) from missing these exact
+// phrasings too.
+const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
+const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
+// Up to 5 digits (Codex round-9 P2, PR #5334): normalizeTimeQuantities below
+// rewrites hour figures into minutes ("17 hours" -> "1020 minutes"), so the
+// unit token must be able to read a normalized figure wider than 3 digits.
+// Decimal figures are one value (Codex round-10 P2, PR #5334): "12.5 minutes
+// away" is 12.5, never a fractional suffix "5" read on its own — a non-
+// integer claim can never equal an integer live-ETA minutes fact, so it is
+// rejected at both draft time and send time.
+const ETA_MINUTES_TOKEN_RE = /\b(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
+const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
+const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it|lasts?)\b[^.?!\n]{0,20}$/i;
+// A bare "in <number>" with no minutes unit at all ("be at your place in
+// 20", "he'll be there in 20") right after one of these arrival phrases —
+// Codex round-4 P2 sibling: never writing the word "minutes" doesn't make it
+// any less a stated ETA. Scoped tightly to the phrase immediately before
+// "in <number>" (never a sentence-wide trigger) so an unrelated "in 20"
+// ("read the invoice in 20", "back in 2026") never false-positives, and
+// excluded when a unit word DOES follow (seconds/hours/etc., or "minutes" —
+// which the ordinary unit-based pass above already claims on its own).
+// Round 7 (Codex P2): "due in 20" / "reach you in about 20" carry no unit
+// AND (for "due") no other STRONG trigger word at all — the phrase itself is
+// the trigger, same reasoning as the rest of this pass. An optional "about"
+// between "in" and the number is allowed ("reach you in about 20").
+// Round 8 (Codex P2, PR #5334): "the tech should make it in 20" — "make it
+// (there|here|to you)? in N" is the same shape (a fixed phrase right before
+// "in N") and joins this same alternation.
+const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here|with\s+you)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up|due|reach(?:ing)?\s+you|get(?:ting)?\s+to\s+you|make\s+it(?:\s+(?:there|here|to\s+you))?)\s+in\s+(?:about\s+)?(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// "He'll be by in 20" / "the tech will swing by in 20" / "they should be
+// there in 20" (Codex round-8 P2): the number sits after ARBITRARY words a
+// fixed phrase list can never enumerate, but "tech/he/she/they" + a
+// future-tense marker (will/should/the 'll contraction) earlier in the same
+// short span is itself as strong a trigger as any fixed phrase above — a
+// later bare "in N" in that span is claimed the same way, no unit word
+// required. Scoped to a short (<=30-char) gap so an unrelated later "in N"
+// elsewhere in a long sentence never false-positives.
+const FUTURE_ARRIVAL_IN_MINUTES_RE = /\b(?:tech|he|she|they)(?:'ll|\s+(?:will|should))\b[^.?!\n]{0,30}?\bin\s+(?:about\s+)?(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// Bare-integer ETA claims (Codex round-6 P2, PR #5334): "ETA: 20", "his ETA
+// is 20", "ETA 20", "eta ~20" carry no "minutes"/"in" wording at all — every
+// pass above requires SOME unit or connector word, so these skipped number
+// binding AND the send-time freshness window entirely (an unparsed status
+// claim never rechecks a stated figure). A STRONG arrival trigger anywhere
+// in the sentence — "eta" itself included — makes ANY bare integer 1-180 in
+// that sentence a minutes claim, UNLESS it reads as a time of day or an
+// address/phone-like token (see looksLikeTimeAddressOrPhone below); a number
+// with no trigger in its sentence at all is never touched by this pass.
+// Numbers already carrying a unit word are left to the passes above (the
+// negative lookahead here just keeps this pass from re-judging them under a
+// different rule).
+const BARE_ETA_NUMBER_RE = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|hrs?|days?|weeks?|months?|years?|%|st|nd|rd|th)\b)/gi;
+// "<N> out" with no unit and no OTHER trigger at all (round 6): the bare
+// "out" idiom ("20 out", "5 out") states an ETA exactly like "20 minutes
+// out" even though findEtaMinutesClaims has no unit to key off — the phrase
+// itself IS the trigger, same reasoning as IMPLICIT_MINUTES_ARRIVAL_RE above.
+// Scoped tightly to the word immediately following the number so an
+// unrelated count ("20 out of 30 completed", "call him — 20 out from
+// retirement") never claims; "of" is excluded outright, and "from" is left
+// to the STRONG-trigger pass above ("out from" is already its own trigger
+// phrase there).
+const BARE_MINUTES_OUT_RE = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)\s+out\b(?!\s+(?:of|from))/gi;
+// A bare integer that reads as a time of day (preceded by at/by/around, or
+// followed by am/pm/a colon-minutes/an "and <N> am/pm" range) or an
+// address/phone-like token (a street name right after it, or a digit group
+// on either side joined by a dash/dot, the shape of a phone number segment)
+// is never an ETA claim, however strong the sentence's arrival trigger is.
+const TIME_OF_DAY_BEFORE_RE = /(?:\b(?:at|by|around)|\d{1,2}:)\s*$/i;
+const TIME_OF_DAY_AFTER_RE = /^\s*(?::\d{2}\b|(?:am|pm|a\.m\.|p\.m\.)\b|(?:and|or|-|–|—|to)\s*\d{1,3}\s*(?:am|pm|a\.m\.|p\.m\.)\b)/i;
+const STREET_SUFFIX_RE = /^\s+[A-Z][A-Za-z.]*(?:\s+[A-Z][A-Za-z.]*)?\s+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Terrace|Trail)\b/;
+const PHONE_DIGIT_BEFORE_RE = /\d[-.]$/;
+const PHONE_DIGIT_AFTER_RE = /^[-.]\d/;
+function looksLikeTimeAddressOrPhone(str, index, length) {
+  const before = str.slice(Math.max(0, index - 12), index);
+  const after = str.slice(index + length, index + length + 24);
+  if (TIME_OF_DAY_BEFORE_RE.test(before)) return true;
+  if (TIME_OF_DAY_AFTER_RE.test(after)) return true;
+  if (STREET_SUFFIX_RE.test(after)) return true;
+  if (PHONE_DIGIT_BEFORE_RE.test(before) || PHONE_DIGIT_AFTER_RE.test(after)) return true;
+  return false;
+}
+// Bare-integer default-deny classification (Codex round-8 P2, PR #5334): once
+// findGroundedMinutesFigures's caller has a LIVE ETA to check a claim
+// against, a bare integer with NO unit/connector word at all ("The tech
+// should make it in 20") still needs to be told apart from every OTHER kind
+// of plain number a reply can contain — a dollar figure, a clock time, an
+// address, a date, a count of something that isn't time, an ordinal, or a
+// percentage. Each of these is checked in isolation, narrowly, against the
+// text immediately around the match; a bare integer that matches NONE of
+// them is the claim itself (default-deny). "N hour(s)" never reaches this
+// classifier — normalizeTimeQuantities (below) has already rewritten every
+// hour figure into a minutes figure by the time any pass runs.
+const MONEY_SIGN_BEFORE_RE = /\$\s*$/;
+const MONEY_WORD_AFTER_RE = /^\s*(?:dollars?|bucks?)\b/i;
+const ORDINAL_SUFFIX_AFTER_RE = /^(?:st|nd|rd|th)\b/i;
+const PERCENT_SIGN_AFTER_RE = /^\s*%/;
+const MONTH_NAME_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+const DATE_SLASH_AFTER_RE = /^\s*\/\s*\d{1,4}\b/;
+const DATE_SLASH_BEFORE_RE = /\d{1,4}\s*\/\s*$/;
+// A hyphenated word right after the figure ("2-hour", "3-bug") reads as its
+// unit/noun too, except "-ish" (a timed approximation).
+const WORD_AFTER_RE = /^(?:\s*|-(?!ish\b))[A-Za-z]+\b/i;
+// Qualifier words that belong to the ETA figure itself, not to a counted noun
+// (Codex round-15 P2): "ETA is 20 max", "20 or so", "20 tops", "about 20 at
+// most", "20 give or take", "20 approx". Only when the qualifier ends the
+// phrase, so "20 or so visits" still reads as a count.
+const ETA_QUALIFIER_AFTER_RE = /^\s*(?:max(?:imum)?|tops|or\s+so|or\s+less|or\s+more|or\s+thereabouts|at\s+(?:most|least)|give\s+or\s+take|approx(?:\.|imately)?|roughly|min(?:imum)?)(?=\s*(?:[.,;:!?)\u2014]|$|\s(?:away|out|from)\b))/i;
+// "N." / "N)" as a line's first token (optionally after a bullet), followed by
+// text: a numbered-list marker.
+function isListMarker(str, index, length) {
+  const prefix = str.slice(str.lastIndexOf('\n', index - 1) + 1, index);
+  return /^\s*(?:[-*\u2022]\s*)?$/.test(prefix) && /^[.)]\s+\S/.test(str.slice(index + length, index + length + 4));
+}
+// A number that is plainly NOT a duration/ETA figure: ordinal, percentage,
+// money, time of day / address / phone token, or a date. Shared by
+// classifyBareEtaNumber and the unclassified-ETA backstop.
+const UNIT_IDENTIFIER_BEFORE_RE = /(?:\b(?:(?:unit|apt|apartment|suite|ste|bldg|building|lot|room|rm)\.?|no\.)\s*#?\s*|#\s*)$/i;
+// A LABELED identifier / count ("invoice 12", "order #15", "account 30", "ticket 20", "zone 2", "Your confirmation code is 123") is a
+// reference number, never minutes (Codex #5334 P2). The label sits immediately before the figure: a document/record noun (optionally
+// "number"/"no."/"id"/"#"/":"), or a code-like noun joined by "is/was/=". Wider window than `before` — the labels run long.
+const LABELED_IDENTIFIER_BEFORE_RE = new RegExp(
+  '(?:\\b(?:invoice|inv|order|account|acct|ticket|confirmation|conf|code|zone|reference|ref|case|estimate|quote|job|policy|claim|id|pin)'
+  + '\\s*(?:(?:number|no\\.?|num|id|code)\\s*)?(?::\\s*)?#?\\s*'
+  + '|\\b(?:code|number|no\\.?|id|pin)\\s*(?:is|was|=)\\s*#?\\s*)$', 'i');
+function isLabeledIdentifier(str, index) {
+  return LABELED_IDENTIFIER_BEFORE_RE.test(str.slice(Math.max(0, index - 40), index));
+}
+function isNonDurationNumber(str, index, length) {
+  // A numbered-list marker ("1. Check the invoice", "2) Call us") at the start
+  // of a line is structure, never a duration (round-21 P2).
+  if (isListMarker(str, index, length)) return true;
+  const before = str.slice(Math.max(0, index - 15), index);
+  const after = str.slice(index + length, index + length + 24);
+  // Ordinal ("the 20th") / percentage ("100%") checked first — both would
+  // otherwise also match the generic trailing-word check.
+  if (ORDINAL_SUFFIX_AFTER_RE.test(after)) return true;
+  if (PERCENT_SIGN_AFTER_RE.test(after)) return true;
+  // A unit / apartment / suite / building / lot / room identifier ("on the way to unit 12",
+  // "apt 4", "Suite 200", "Bldg 3", "#7") is an address number, never minutes (round-44 P2).
+  if (UNIT_IDENTIFIER_BEFORE_RE.test(before)) return true;
+  // A labeled identifier ("invoice 12", "zone 2", "confirmation code is 123") likewise (Codex #5334 P2).
+  if (isLabeledIdentifier(str, index)) return true;
+  // Money ("$20", "20 dollars").
+  if (MONEY_SIGN_BEFORE_RE.test(before) || MONEY_WORD_AFTER_RE.test(after)) return true;
+  // Time of day / address / phone-like token — the shared helper above.
+  if (looksLikeTimeAddressOrPhone(str, index, length)) return true;
+  // Date: a month name nearby, or an N/N slash date.
+  if (MONTH_NAME_RE.test(before) || MONTH_NAME_RE.test(after)) return true;
+  return DATE_SLASH_AFTER_RE.test(after) || DATE_SLASH_BEFORE_RE.test(before);
+}
+function classifyBareEtaNumber(str, index, length) {
+  if (isNonDurationNumber(str, index, length)) return 'excluded';
+  const after = str.slice(index + length, index + length + 24);
+  // A count with a non-time noun directly after it ("3 bugs", "2 visits",
+  // "4 traps", "12 months", "30 days") — any other word sitting right after
+  // the number reads as its unit/noun, so it is never a bare arrival figure.
+  if (ETA_QUALIFIER_AFTER_RE.test(after)) return 'claim';
+  if (WORD_AFTER_RE.test(after)) return 'excluded';
+  return 'claim';
+}
+// Sentence spans over raw sentence-boundary punctuation only (. ? ! or a
+// newline) — an em dash, comma, or "—" never splits a sentence, so "heading
+// your way — 12 minutes" is one sentence and the trigger/number share it.
+function sentenceSpans(str) {
+  const spans = [];
+  let start = 0;
+  // A "." between two digits is a decimal point, never a sentence end (Codex
+  // round-10 P2): "12.5 minutes away" is ONE sentence, so the arrival word
+  // still shares it with the figure.
+  const re = /(?:[?!\n]|(?<!\d)\.|\.(?!\d))+/g;
+  let m;
+  while ((m = re.exec(str))) {
+    spans.push([start, m.index]);
+    start = re.lastIndex;
+  }
+  spans.push([start, str.length]);
+  return spans;
+}
+// Written-out minutes ("twelve minutes away", "twenty-five mins") are read
+// as digits before claim detection (audit P1, round 4), so a spelled number
+// is checked exactly like "12 minutes". Hundreds are ONE value (Codex round-11
+// P2, PR #5334): "one hundred twenty minutes away" used to read as "1 hundred
+// 20 minutes", so only the trailing 20 was validated. A number phrase is now
+// `[<1-9>|a|an] hundred [and] [<under-100>]` (also "hundred-twenty") or a
+// plain under-100 number, converted as a single figure. Anything it cannot
+// fully convert ("a thousand", "a dozen", "hundreds") is left as a word and
+// rejected next to a time unit by bodyHasUnconvertedNumberWord below.
+const NUMBER_WORD_UNITS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const NUMBER_WORD_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const NW_TENS = Object.keys(NUMBER_WORD_TENS).join('|');
+const NW_DIGITS = 'one|two|three|four|five|six|seven|eight|nine';
+const NW_UNDER_TWENTY = Object.keys(NUMBER_WORD_UNITS).join('|');
+const NUMBER_WORD_RE = new RegExp(
+  `\\b(?:(?:(?:(${NW_DIGITS}|an?)[\\s-]+)?hundred(?:(?:[\\s-]+and)?[\\s-]+(?:(${NW_TENS})(?:[\\s-]+(${NW_DIGITS}))?|(${NW_UNDER_TWENTY})))?)`
+  + `|(?:(${NW_TENS})(?:[\\s-]+(${NW_DIGITS}))?|(${NW_UNDER_TWENTY})))\\b`, 'gi');
+function lookupNumberWord(table, word) {
+  return word ? table[word.toLowerCase()] : 0;
+}
+function numberWordValue(m, hundredsWord, tens1, digit1, under20a, tens2, digit2, under20b) {
+  const isHundred = /hundred/i.test(m);
+  const multiplier = /^an?$/i.test(hundredsWord || '') || !hundredsWord ? 1 : lookupNumberWord(NUMBER_WORD_UNITS, hundredsWord);
+  const tens = lookupNumberWord(NUMBER_WORD_TENS, isHundred ? tens1 : tens2);
+  const digit = lookupNumberWord(NUMBER_WORD_UNITS, isHundred ? digit1 : digit2);
+  const under20 = lookupNumberWord(NUMBER_WORD_UNITS, isHundred ? under20a : under20b);
+  return (isHundred ? multiplier * 100 : 0) + tens + digit + under20;
+}
+// Every numeric/time parser enters here, so it also reads the text the CUSTOMER gets:
+// the provider path runs normalizeGsmPunctuation (curly apostrophes, en/em dashes,
+// smart quotes become plain ASCII) before delivery (Codex round-38 P2).
+function normalizeNumberWords(text) {
+  return normalizeGsmPunctuation(String(text || '')).replace(NUMBER_WORD_RE, (m, ...groups) => String(numberWordValue(m, ...groups.slice(0, 7))));
+}
+// A number word normalizeNumberWords cannot convert, right next to a time
+// unit ("a thousand minutes", "a dozen minutes", "hundreds of minutes") —
+// fail closed instead of letting the figure go unread.
+const UNCONVERTED_NUMBER_WORD_RE = /\b(?:hundreds|thousands?|millions?|dozens?|score|several|many|numerous|bunch|handful)\b[\s\w-]{0,20}?\b(?:min(?:ute)?s?|hours?|hrs?)\b/gi;
+// Structural time-quantity normalization (Codex round-9 P2, PR #5334): every
+// earlier round of this PR found ANOTHER way a customer-visible ETA could
+// slip past the exact-minutes comparison, and round 9 found the newest —
+// "About 2 hours out" was recorded as { minutes: 2 } (the raw captured
+// number, no unit conversion), so a live fact of "2 minutes" accepted an ETA
+// off by nearly two hours at both draft time and send time. The fix is ONE
+// function that reads every hour-unit quantity WITH its unit and rewrites it
+// as an equivalent "<total> minutes" figure BEFORE any claim pass runs, so
+// the existing minutes passes (units, ranges, trigger/duration-exclusion
+// judgment) compare real minutes: "2 hours" -> "120 minutes", "1 hr 20 min"
+// / "1h20m" / "1 hour and 20 minutes" -> "80 minutes", "2 and a half hours"
+// / "an hour and a half" -> "150"/"90 minutes", "1.5 hours" -> "90 minutes",
+// "1 to 2 hours" -> "60-120 minutes". Anything hour-ish it can NOT turn into
+// a number ("an hour", "half an hour", "a couple hours", "hour or so") is
+// left as-is on purpose and is rejected outright by bodyHasUnnormalizedHour-
+// Word below — fail closed, never guess. Used only by
+// findGroundedMinutesFigures (the two call sites with a LIVE ETA to compare
+// against) AND by findEtaMinutesClaims on every path, snapshot or not (Codex
+// pre-push P1, round 11: with no snapshot or tracking link "The tech is 2
+// hours away." passed while "120 minutes away" failed — hours were only
+// normalized in the live-context path). The tokenizer therefore always sees
+// "120 minutes away", and its existing trigger/duration exclusions apply
+// equally. An hour figure that names a WINDOW ("your 2 hour arrival window",
+// "a 2 hour window", "arrival window is 2 hours") is a scheduling span, never
+// an ETA. That decision lives in ONE predicate, isWindowQuantity below, shared
+// by normalizeTimeQuantities (which leaves a window figure alone), the
+// leftover-word checks (bodyHasUnnormalizedHourWord /
+// bodyHasUnconvertedNumberWord, via unreadDurationInArrivalSentence) and the
+// vague-phrase check (bodyHasTimedArrivalPhrase) — Codex round-12 P1, PR
+// #5334: they used to disagree, so a window hour the normalizer skipped was
+// then rejected as an "unread" ETA. Dry time / "takes about 2 hours" stay
+// excluded by the duration rules.
+const HOURS_TO_MINUTES = 60;
+// A duration figure that names a scheduling WINDOW rather than an arrival
+// time: "2 hour arrival window" / "a 2-hour slot" (window word AFTER) or
+// "arrival window is 2 hours" / "window: 1 to 2 hours" / "window is an hour"
+// (window word right BEFORE, an optional "N to" range prefix and article
+// allowed). `index`/`length` locate the figure — a number+unit span, a lone
+// hour word, or a number-word phrase — in `str`.
+const WINDOW_AFTER_RE = /^\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b/i;
+const WINDOW_BEFORE_RE = /\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:[./]\d+)?\s*(?:[-–—]|to|or)\s*)?(?:\d+(?:[./]\d+)?\s*|(?:(?:a\s+)?(?:half|quarter(?:\s+of)?)\s+)?an?\s+)?$/i;
+// Declarative service/treatment/visit/appointment DURATION (Codex round-22 P2):
+// "The service will be 20 minutes", "The treatment is 20 minutes long", "the
+// visit runs about an hour" describe how long the work takes — never when the
+// tech arrives. Subject noun DIRECTLY followed by the duration verb (so "For
+// your service, the tech will be 20 minutes away" and "the tech will be 20
+// minutes" — a technician subject — stay ETA claims), and an arrival cue right
+// after the figure ("20 minutes away / out / from you / until") keeps the ETA
+// reading even under a service subject.
+const SERVICE_DURATION_BEFORE_RE = /\b(?:service|treatment|visit|appointment|inspection|application|job|spray|session)(?:s|es)?(?:\s+(?:itself|time|duration|length))?(?:\s+(?:usually|typically|normally|generally|only|just|should|would|will|can|may))*\s+(?:is|are|be|takes?|lasts?|runs?)\s+(?:(?:about|only|around|roughly|approximately|approx\.?|just|usually|typically|normally|at\s+most|at\s+least|up\s+to|under|over)\s+)*$/i;
+const ARRIVAL_CUE_AFTER_RE = /^\s*(?:min(?:ute)?s?|hours?|hrs?)?[\s-]*(?:away|out|from|until|early|late|behind|to\s+go)\b/i;
+function isServiceDurationQuantity(str, index, length) {
+  const before = str.slice(Math.max(0, index - 60), index);
+  return SERVICE_DURATION_BEFORE_RE.test(before) && !ARRIVAL_CUE_AFTER_RE.test(str.slice(index + length, index + length + 24));
+}
+// The ONE shared "this figure is a scheduling/duration span, not an arrival
+// time" predicate every token kind consults: a scheduling window or a
+// service/treatment duration.
+// RETROSPECTIVE durations (Codex round-37/40 P2): "I emailed it 10 minutes ago", "We
+// sent the invoice 20 minutes ago", "for the last 20 minutes", "in the past hour",
+// "10 minutes after we spoke" look BACK; they are never a technician's arrival time.
+// The exclusion needs an actual ELAPSED relation ON THE FIGURE — "N units ago", a
+// "for/over/in/during the last/past/previous" lead-in, or "N units after|since
+// <someone> <past-tense verb>". A past-tense office verb elsewhere in the clause is
+// NOT enough: "We confirmed your technician is 20 minutes away" is a current ETA.
+const AGO_AFTER_RE = /^\s*(?:(?:min(?:ute)?s?|hours?|hrs?|seconds?|secs?|days?|weeks?)\s+)?ago\b/i;
+const RETRO_LEADIN_BEFORE_RE = /\b(?:for|over|in|during|within|throughout)\s+the\s+(?:last|past|previous)\s+(?:about\s+|roughly\s+)?$/i;
+const ELAPSED_AFTER_RE = /^\s*(?:(?:min(?:ute)?s?|hours?|hrs?|seconds?|secs?|days?|weeks?)\s+)?(?:after|since)\s+(?:i|we|you|someone|somebody|it|(?:the|our)\s+(?:office|team|tech\w*))\s+(?:was\s+|were\s+|had\s+|have\s+)?(?:\w+ed|sent|left|got|went|came|ran|began|took|made|saw|paid|spoke|met|heard|said|wrote|called)\b/i;
+function isRetrospectiveDuration(str, index, length) {
+  const after = str.slice(index + length);
+  if (AGO_AFTER_RE.test(after) || ELAPSED_AFTER_RE.test(after)) return true;
+  return RETRO_LEADIN_BEFORE_RE.test(str.slice(Math.max(0, index - 80), index));
+}
+function isWindowQuantity(str, index, length) {
+  return WINDOW_AFTER_RE.test(str.slice(index + length))
+    || WINDOW_BEFORE_RE.test(str.slice(Math.max(0, index - 60), index))
+    || isServiceDurationQuantity(str, index, length)
+    || isRetrospectiveDuration(str, index, length);
+}
+// String.replace that leaves a window figure exactly as written.
+function replaceQuantity(text, re, convert) {
+  return text.replace(re, (m, ...args) => {
+    const offset = args[args.length - 2];
+    const whole = args[args.length - 1];
+    return isWindowQuantity(whole, offset, m.length) ? m : convert(m, ...args);
+  });
+}
+// Office follow-up timing vs technician arrival timing (Codex pre-push P1,
+// round 13, PR #5334): "I'll confirm your arrival window within the hour."
+// and "I'll get back to you within the hour about your arrival." carry an
+// approved follow-up-SLA duration (sms-followup-sla SLA_PHRASES) that has
+// nothing to do with when the tech shows up — yet "arrival" in the sentence
+// made it read as an ETA. A duration is bound to the VERB that governs it:
+// the NEAREST verb phrase in its own sentence, office follow-up (confirm,
+// get back to you, text/call you back, follow up, check, let you know, send,
+// be in touch) or technician arrival (arrive, be there, on the way, en
+// route, pull/show up, away, out, get there / to you, reach you). Office
+// wins only when it is strictly nearer (a tie fails closed to ETA); a
+// duration that IS an SLA phrase with no arrival verb anywhere in the
+// sentence is office timing too. Shared by every ETA check (claim
+// tokenizers, leftover-word checks, vague phrases) so they cannot drift.
+// Round-24 P2: OBJECTLESS office callbacks ("I'll call in 20 minutes", "someone
+// from the office will text shortly") count too, but ONLY behind an office
+// subject (I / we / the office / someone from the office) — "The tech will call
+// in 20 minutes" has a technician subject, matches no office verb, and stays an
+// ETA-ish claim (conservative).
+const OFFICE_SUBJECT_CALLBACK = "(?:i|we|someone|somebody|(?:our|the)\\s+office|(?:someone|somebody|a\\s+(?:person|team\\s+member))\\s+(?:from|at)\\s+(?:the|our)\\s+office)(?:'ll|\\s+(?:will|can|shall|should|would))?\\s+(?:call|text|email|message|ping|phone)(?:ing)?(?:\\s+back)?";
+const OFFICE_FOLLOWUP_VERBS = /confirm(?:ing)?|get(?:ting)?\s+back\s+to\s+you|(?:text|call|email|message|ping)(?:ing)?\s+you(?:\s+back)?|reach(?:ing)?\s+out|follow(?:ing)?[\s-]+up|check(?:ing)?|let(?:ting)?\s+you\s+know|send(?:ing)?|update\s+you|circle\s+back|be\s+in\s+touch|touch\s+base/.source;
+const OFFICE_FOLLOWUP_VERB_RE = new RegExp(`\\b(?:${OFFICE_SUBJECT_CALLBACK}|${OFFICE_FOLLOWUP_VERBS})\\b`, 'gi');
+const TECH_ARRIVAL_VERB_RE = /\b(?:arrive[sd]?|arriving|be\s+there|be\s+(?:at\s+your|with\s+you)|on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|pull(?:ing)?\s+up|show(?:ing)?\s+up|away|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you|(?<!reach\s)out)\b/gi;
+// Characters between a verb match and the figure [a, b); 0 when they overlap.
+function nearestVerbGap(local, verbRe, a, b) {
+  let best = Infinity;
+  for (const m of local.matchAll(new RegExp(verbRe.source, verbRe.flags))) {
+    const end = m.index + m[0].length;
+    const gap = end <= a ? a - end : (m.index >= b ? m.index - b : 0);
+    best = Math.min(best, gap);
+  }
+  return best;
+}
+function isOfficeFollowupDuration(str, index, length) {
+  const [s, e] = sentenceSpans(str).find(([from, to]) => index >= from && index < to) || [0, str.length];
+  const local = str.slice(s, e);
+  const a = index - s;
+  const office = nearestVerbGap(local, OFFICE_FOLLOWUP_VERB_RE, a, a + length);
+  const tech = nearestVerbGap(local, TECH_ARRIVAL_VERB_RE, a, a + length);
+  if (office !== Infinity) return office < tech;
+  const lowered = local.toLowerCase();
+  return tech === Infinity && followupSla.SLA_PHRASES.some((p) => {
+    const at = lowered.indexOf(p.toLowerCase());
+    return at !== -1 && a >= at && a < at + p.length;
+  });
+}
+function hoursToMinutes(h) {
+  return Math.round(parseFloat(h) * HOURS_TO_MINUTES);
+}
+// Hours WITH a minutes part ("1 hr 20 min", "1h20m", "1 hour and 20 minutes",
+// "an hour and 20 minutes") -> one "<total> minutes" figure. Split out because
+// a mixed quantity must be read as ONE figure rather than mistaking its
+// trailing "20 min" for the whole ETA.
+function normalizeHourMinuteCompounds(text) {
+  let out = String(text || '');
+  // An article hour is read ONLY when a minutes figure follows it; a bare
+  // "an hour" / "half an hour" / "quarter of an hour" is vague and stays for
+  // bodyHasUnnormalizedHourWord to reject.
+  out = replaceQuantity(out, /(?<!half\s)(?<!quarter\s)(?<!of\s)\ban?\s+(?:hour|hr)\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi,
+    (m, mins) => `${HOURS_TO_MINUTES + parseInt(mins, 10)} minutes`);
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h(?=\d|\b))\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?|m)\b/gi,
+    (m, n, mins) => `${hoursToMinutes(n) + parseInt(mins, 10)} minutes`);
+  return out;
+}
+function normalizeTimeQuantities(text) {
+  let out = String(text || '');
+  // "1 to 2 hours" / "1-2 hours" / "1 or 2 hours" — both bounds scale.
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, a, b) => `${hoursToMinutes(a)}-${hoursToMinutes(b)} minutes`);
+  // "2 and a half hours" / "2 hours and a half" / "an hour and a half".
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b/gi,
+    (m, n) => `${hoursToMinutes(n) + 30} minutes`);
+  out = replaceQuantity(out, /\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b/gi,
+    (m, n) => `${hoursToMinutes(n || 1) + 30} minutes`);
+  // Slash fractions BEFORE the plain hour rewrite (Codex round-16 P2): "1/2
+  // hour" is 30 minutes, "3/4 hr" 45, "1 1/2 hours" 90 — never "1/120 minutes".
+  out = replaceQuantity(out, /\b(\d+)\s+(\d+)\/(\d+)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, w, n, d) => (Number(d) ? `${Math.round((Number(w) + Number(n) / Number(d)) * HOURS_TO_MINUTES)} minutes` : m));
+  out = replaceQuantity(out, /\b(\d+)\/(\d+)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, n, d) => (Number(d) ? `${Math.round((Number(n) / Number(d)) * HOURS_TO_MINUTES)} minutes` : m));
+  out = normalizeHourMinuteCompounds(out);
+  // "2 hours", "2h", "1.5 hrs".
+  out = replaceQuantity(out, /(?<!\d\/)\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h\b)/gi,
+    (m, n) => `${hoursToMinutes(n)} minutes`);
+  // "20m" / "20 m" as an ETA (Codex round-16 P2): a bare "m" unit is minutes
+  // only inside an arrival/ETA sentence (elsewhere it could be metres).
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)[ ]?m\b(?!\s*(?:\/|²|\^|2))/g,
+    (m, n, ...rest) => (ARRIVAL_TRIGGER_RE.test(sentenceAt(rest[rest.length - 1], sentenceSpans(rest[rest.length - 1]), rest[rest.length - 2])) ? `${n} minutes` : m));
+  // "90 seconds" -> "1.5 minutes" (Codex round-13 P2): a seconds ETA is a
+  // real, timed arrival claim; as a (usually non-integer) minutes figure it
+  // can only bind to a live fact that equals it exactly.
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)[\s-]*(?:seconds?|secs?)\b/gi,
+    (m, n) => `${Number((parseFloat(n) / 60).toFixed(4))} minutes`);
+  return out;
+}
+// Fail-closed leftover check for normalizeTimeQuantities: any hour word still
+// standing after the numeric rewrite is a duration the parser could not turn
+// into minutes ("an hour", "half an hour", "quarter hour", "a couple
+// hours", "an hour or so"). Judged with the SAME sentence rule a vague
+// arrival phrase gets (an arrival trigger in the sentence; a strong trigger
+// wins; a weak "out" consults the dry-time/wait-before duration exclusions)
+// so "the treatment needs about half an hour to dry" never false-positives.
+// Only meaningful — and only called — where there is a LIVE ETA to compare a
+// claim against; see validateLiveEtaMinutes and etaClaimBlockReason.
+// The shared sentence rule for a duration word the parser left unread: an
+// arrival trigger in the sentence; a strong trigger wins; a weak "out"
+// consults the dry-time/wait-before duration exclusions.
+// A TECH subject earlier in the sentence (Codex round-17 follow-up, PR #5334):
+// a counted day/week/month duration is a tech-arrival claim only when a
+// technician-style subject governs it — "the tech is 2 days away", "he will
+// arrive in 3 weeks" — never ordinary scheduling copy ("your visit is 2 days
+// away", "we'll see you in 2 weeks", "your next treatment is in 3 weeks").
+const TECH_SUBJECT_RE = /\b(?:tech(?:nician)?s?|he|she|they|driver|crew|our\s+(?:guy|team|tech(?:nician)?s?))\b/i;
+const LONG_UNIT_END_RE = /(?:days?|weeks?|months?)$/i;
+function hasTechSubjectBefore(str, spans, index) {
+  const [start] = spans.find(([from, to]) => index >= from && index < to) || [0];
+  // Only the CURRENT clause governs the duration (Codex round-27 P2): "He
+  // completed the service; your next visit is 2 days away." has its technician
+  // subject in an earlier clause. Same CLAUSE_BREAK_RE the negation checks use.
+  const sentenceBefore = str.slice(start, index);
+  let clauseStart = 0;
+  for (const m of sentenceBefore.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) clauseStart = m.index + m[0].length;
+  return TECH_SUBJECT_RE.test(sentenceBefore.slice(clauseStart));
+}
+// Is the figure at [index, index+length) inside one of the approved follow-up SLA
+// phrases ("within the hour", ...)? Those are ordinary English (sms-followup-sla:
+// "a reviewed reply can truthfully say a technician arrives within the hour"), so
+// with NO live ETA to hold the body to they are not an unverifiable timed claim.
+function insideSlaPhrase(str, index, length) {
+  const lowered = str.toLowerCase();
+  return followupSla.SLA_PHRASES.some((p) => {
+    const phrase = p.toLowerCase();
+    for (let at = lowered.indexOf(phrase); at !== -1; at = lowered.indexOf(phrase, at + 1)) {
+      if (index >= at && index + length <= at + phrase.length) return true;
+    }
+    return false;
+  });
+}
+function unreadDurationInArrivalSentence(str, wordRe, { ignoreSlaPhrases = false } = {}) {
+  const spans = sentenceSpans(str);
+  const re = new RegExp(wordRe.source, wordRe.flags);
+  for (const m of str.matchAll(re)) {
+    if (ignoreSlaPhrases && insideSlaPhrase(str, m.index, m[0].length)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    if (LONG_UNIT_END_RE.test(m[0]) && !hasTechSubjectBefore(str, spans, m.index)) continue;
+    const sentence = sentenceAt(str, spans, m.index);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)) return true;
+  }
+  return false;
+}
+// Hour words the normalizer could not convert, plus any counted day/week/month
+// duration (Codex round-13 P2: "in 2 days" is a timed arrival claim like
+// any other; a bare "day" — "have a great day" — is not).
+const UNREAD_LONG_DURATION_RE = /\b(?:hours?|hrs?)\b|\b(?:\d+(?:\.\d+)?|an?|a\s+(?:couple|few)(?:\s+of)?|several)[\s-]+(?:days?|weeks?|months?)\b/gi;
+function bodyHasUnnormalizedHourWord(text, opts) {
+  return unreadDurationInArrivalSentence(normalizeTimeQuantities(normalizeNumberWords(text)), UNREAD_LONG_DURATION_RE, opts);
+}
+// Codex round-11 P2 (PR #5334): a number word the converter could not turn
+// into digits next to a time unit is rejected outright, live ETA or not.
+function bodyHasUnconvertedNumberWord(text) {
+  return unreadDurationInArrivalSentence(normalizeNumberWords(text), UNCONVERTED_NUMBER_WORD_RE);
+}
+// STRUCTURAL BACKSTOP (Codex pre-push P1, round 16, PR #5334): every round of
+// this PR found one more ETA phrasing the claim parsers do not read ("ur tech
+// ≈ 15m out 🚚", "tech: 15 min"). Once there is a live snapshot/link to hold a
+// body to, ANY number (digits, "15m" shorthand, or a number word) sitting
+// within 3 tokens of a time unit or an arrival/status word is treated as a
+// possible ETA — after the window / office follow-up / duration exclusions and
+// the not-a-duration number kinds (money, time of day, date, ordinal, percent)
+// are removed — so the caller can require the bound visit to still be en
+// route and fresh instead of waving the body through as non-ETA copy.
+const ETA_SIGNAL_WORD_RE = /^(?:m|mins?|minutes?|hrs?|hours?|h|s|secs?|seconds?|away|out|arriv\w*|there|here|eta|close|closer|coming|heading|headed|nearby|route|way)$/i;
+// The figure with its own unit word attached, so a window check sees "2 hour"
+// (in "a 2 hour arrival window") as one span.
+const NUMBER_TOKEN_RE = /\d+(?:\.\d+)?(?:[\s-]*(?:hours?|hrs?|min(?:ute)?s?|days?|weeks?|months?))?/gi;
+function tokensAround(str, index, length) {
+  const wordsOf = (t) => t.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const before = wordsOf(str.slice(Math.max(0, index - 40), index)).slice(-3);
+  const after = wordsOf(str.slice(index + length, index + length + 40)).slice(0, 3);
+  return [...before, ...after];
+}
+function bodyHasUnclassifiedEtaSignal(text) {
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  for (const m of str.matchAll(NUMBER_TOKEN_RE)) {
+    if (isNonDurationNumber(str, m.index, m[0].length)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    if (durationExcluded(str, m.index, m[0].length) && !STRONG_ARRIVAL_TRIGGER_RE.test(sentenceAt(str, sentenceSpans(str), m.index))) continue;
+    if (LONG_UNIT_END_RE.test(m[0]) && !hasTechSubjectBefore(str, sentenceSpans(str), m.index)) continue;
+    const words = tokensAround(str, m.index, m[0].length);
+    // A figure that carries its own unit word ("15 minutes") is itself a signal.
+    if (/[a-z]/i.test(m[0]) || words.some((w) => ETA_SIGNAL_WORD_RE.test(w))) return true;
+  }
+  return false;
+}
+// A COMPLETED arrival (Codex round-13 P2, PR #5334): "has arrived", "just
+// arrived", "arrived at your home", "the tech is here / outside / at your
+// door", "pulled up" state the tech IS on site — a different fact from "on
+// the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
+// Every "arrived" form needs a technician-type subject (round-28 P2): "Your
+// payment has arrived at our office" is not a visit claim. Up to two words may
+// sit between the subject and the verb ("the tech, Sam, has arrived" / "your tech
+// Sam just arrived").
+// First-person plural ARRIVAL / on-site claims (Codex round-37 P2): "We've arrived",
+// "We just got there", "We're on site", "We're at your door". Explicit forms only —
+// bare "we're here" and "we have on-site inspections" stay excluded.
+const WE_ARRIVED_ALT = "we(?:'ve|\\s+have)?\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:arrived|(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address)))"
+  + "|we(?:'re|\\s+are)\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:on[\\s-]?site|at\\s+(?:your|the)\\s+(?:door|house|home|place|property|address)|outside\\s+(?:your|the)\\s+(?:door|house|home|place|property)|on\\s+(?:the|your)\\s+property)";
+const COMPLETED_ARRIVAL_BASE_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|made\s+it(?:\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|(?=\s*(?:[.!,;:?]|$)))|reached\s+(?:there|(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve))|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve)))|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_RE = new RegExp(COMPLETED_ARRIVAL_BASE_RE.source.replace(/\)\\b$/, `|${WE_ARRIVED_ALT})\\b`), 'i');
+// A negator governing a status phrase within the SAME clause (Codex pre-push
+// P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
+// way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
+// affirmative claims, and must not be blocked when the visit is done. Clause =
+// text since the last sentence/clause break (. , ; : ! ? — or "but"/"and").
+const NEGATOR_RE = /\b(?:not|no\s+longer|never|nobody|none|\w+n't)\b/i;
+const CLAUSE_BREAK_RE = /[.,;:!?\n\u2014\u2013]|\b(?:but|and|however|though)\b/gi;
+function isNegatedInClause(str, index) {
+  const before = str.slice(Math.max(0, index - 80), index);
+  let last = 0;
+  for (const m of before.matchAll(CLAUSE_BREAK_RE)) last = m.index + m[0].length;
+  return NEGATOR_RE.test(before.slice(last));
+}
+// THIS draft's technician names as extra status subjects. The prompt lets the
+// model NAME the technician ("Sam is on the way", "Sam is running late", "Sam has
+// arrived"), so a status idiom counts behind technician-type words OR one of the
+// technician first names the draft recorded (word-bounded, case-insensitive) —
+// never any capitalized word: "Dana's order is on the way" is not a claim unless
+// Dana is this snapshot's tech. Names only, no other PII; older snapshots carry
+// none and keep the technician-type-only behavior.
+function techNamesFromContext(context) {
+  return sanitizeTechNames([
+    ...(Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.flatMap((g) => g?.technicianNames || []) : []),
+    ...(Array.isArray(context?.upcomingServices) ? context.upcomingServices.map((u) => u?.tech) : []),
+  ]);
+}
+const nameAlt = (names) => sanitizeTechNames(names).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+const statusRegexCache = new Map();
+function statusRegexFor(kind, names) {
+  const alt = nameAlt(names);
+  if (!alt) return kind === 'completed' ? COMPLETED_ARRIVAL_RE : (kind === 'enRoute' ? EN_ROUTE_STATUS_RE : VISIT_STATUS_RE);
+  const key = `${kind}:${alt.toLowerCase()}`;
+  if (!statusRegexCache.has(key)) {
+    if (statusRegexCache.size > 200) statusRegexCache.clear();
+    let re;
+    if (kind === 'completed') {
+      let src = COMPLETED_ARRIVAL_RE.source;
+      for (const g of COMPLETED_ARRIVAL_SUBJECT_GROUPS) src = src.split(g).join(`${g.slice(0, -1)}|${alt})`);
+      re = new RegExp(src, 'i');
+    } else {
+      const subj = `(?:${VISIT_STATUS_SUBJECT.slice(3, -1)}|${alt})`;
+      re = kind === 'enRoute' ? buildEnRouteRe(subj) : buildVisitStatusRe(subj);
+    }
+    statusRegexCache.set(key, re);
+  }
+  return statusRegexCache.get(key);
+}
+const COMPLETED_ARRIVAL_SUBJECT_GROUPS = [
+  '(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)',
+  '(?:tech(?:nician)?s?|he|she|they|drivers?)',
+  '(?:crew|team)',
+  '(?:tech(?:nician)?|he|she|they|driver|crew)',
+];
+// Carry a technician subject across COORDINATED predicates (Codex round-35 P2):
+// "The technician isn't there yet, but is on the way" — the second predicate has
+// no subject of its own, so it is read with the nearest technician-type subject
+// (or recorded name) that precedes the conjunction in the same sentence, BEFORE
+// the negation/question/conditional exemptions run. Only when the conjunct starts
+// with a verb-ish token (a subjectless predicate); "…on the way and we'll follow
+// up" (a new subject) is left alone. Text is rewritten for classification only.
+const CARRY_SUBJECT_RE_SRC = "\\b(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they|we";
+const CARRY_CONJUNCTION_RE = /,?\s+(?:but|and|though|however|yet)\s+(?=(?:is|are|was|were|has|have|had|will|should|'ll|'s|now|just|already|almost|en[\s-]?route\b|on\s+(?:the|his|her|their|our|my)\s+way\b|running\b|coming\b|heading\b|headed\b|driving\b|arriv\w*|pulling\b|pull(?:ed)?\b|showing\b|nearby\b|close\b)\b)/gi;
+function carrySubjectAcrossConjunctions(str, techNames = []) {
+  const alt = nameAlt(techNames);
+  const subjectRe = new RegExp(`${CARRY_SUBJECT_RE_SRC}${alt ? `|${alt}` : ''})\\b`, 'gi');
+  let out = '';
+  let last = 0;
+  for (const m of str.matchAll(CARRY_CONJUNCTION_RE)) {
+    const sentenceStart = Math.max(str.lastIndexOf('.', m.index), str.lastIndexOf('!', m.index), str.lastIndexOf('?', m.index), str.lastIndexOf('\n', m.index), str.lastIndexOf(';', m.index)) + 1;
+    const before = str.slice(sentenceStart, m.index);
+    const subjects = [...before.matchAll(subjectRe)];
+    if (!subjects.length) continue;
+    const subject = subjects[subjects.length - 1][0];
+    out += `${str.slice(last, m.index + m[0].length)}${subject} `;
+    last = m.index + m[0].length;
+  }
+  return last ? out + str.slice(last) : str;
+}
+function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
+  for (const m of str.matchAll(new RegExp(statusRegexFor('completed', techNames).source, 'gi'))) {
+    // Same exemptions as the en-route classifiers: negation, question, a governing
+    // conditional ("once we've arrived I'll text"), and an explicit future day.
+    if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length, techNames)
+      && !isConditionalBefore(str.slice(Math.max(0, m.index - 60), m.index)) && !isFutureDayStatus(str, m.index, m[0].length)) return true;
+  }
+  return false;
+}
+// Does the body AFFIRMATIVELY say the tech is on the way? (Codex pre-push P1,
+// round 14, PR #5334.) The send-time freshness check treats such a body as an
+// en-route STATUS claim and rechecks it against the live tracker state — it
+// used to fire on any strong arrival TRIGGER word (arriv*, left, …), which
+// also matched non-claims: "I'll confirm your arrival window within the
+// hour", "Your arrival window is 2 hours", "You have 2 visits left this
+// year" then blocked valid replies once the visit was on site. Now only an
+// affirmative status phrase counts — on the way / en route / heading over /
+// has left for you / will be there / is close or nearby / is arriving /
+// pulling up / getting there — and never one that is
+//   - a conditional ("I'll text you once he's on the way", "when the tech
+//     is en route"), or
+//   - part of a scheduling window (isWindowQuantity).
+// ONE technician-subject rule for every visit-status regex (Codex round-30 P2):
+// "Your receipt is on the way" / "The replacement trap is en route" are fulfillment
+// copy, not a claim about the technician. A status idiom counts only behind a
+// technician-type subject (tech / technician / driver / crew / he / she / they),
+// optionally with a possessive/contraction ('s 're 'll 'd) and up to three
+// non-negating filler words between ("Your tech, Sam, is on his way", "He will be
+// arriving", "The tech is now en route"). EN_ROUTE_STATUS_RE (bodyMentionsArrival,
+// the en-route classifier etaClaimBlockReason uses) and VISIT_STATUS_RE (the
+// send-time default-deny vocabulary) are both built from this prefix.
+// Plural subjects count too (round-30 audit P1): grouped visits send "Your techs are on the way".
+// Same subject list as COMPLETED_ARRIVAL_RE's arrived form (round-31 P2: "Our team is
+// on the way"); "team ... here to help" stays non-status via the lookahead below.
+const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they)";
+function techStatusPrefix(subj) {
+  return `${subj}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet|was|were|had)\\b)\\w+,?){0,3}?\\s+`;
+}
+const TECH_STATUS_PREFIX = techStatusPrefix(VISIT_STATUS_SUBJECT);
+const ROUTE_IDIOM = '(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way)';
+const EN_ROUTE_PREDICATES = [
+  ROUTE_IDIOM,
+  '(?:head(?:ing|ed)|coming)\\s+(?:over|your\\s+way|to\\s+you|to\\s+your\\s+\\w+)',
+  '(?:coming|headed|heading|driving|rolling|travell?ing)\\b',
+  // The system prompt sanctions "running late" / "running ahead" (behind/ahead of
+  // schedule) beside LIVE STATUS, so they are live-status claims like "on the way".
+  'running\\s+(?:(?:(?:a\\s+)?(?:bit|little|touch)|a\\s+few\\s+minutes?|a\\s+couple\\s+(?:of\\s+)?minutes?|slightly|somewhat|(?:about\\s+)?\\d+\\s+minutes?)\\s+)?(?:late|behind|ahead|early)\\b',
+  '(?:behind|ahead\\s+of)\\s+schedule\\b',
+  '(?:in\\s+the\\s+(?:truck|van|vehicle)|on\\s+the\\s+road)\\b',
+  '(?:just\\s+|already\\s+)?left\\s+(?:for|to\\s+head|to\\s+you)',
+  'be\\s+(?:there|here|with\\s+you|at\\s+your\\s+\\w+)(?!\\s+to\\s+(?:help|assist|answer|support|serve))',
+  '(?:close|nearby|almost\\s+(?:there|here))',
+  '(?:arriv(?:e|ing)|arrives\\s+(?:soon|shortly|now))',
+  'pull(?:ing)?\\s+up',
+  'show(?:ing)?\\s+up',
+  'get(?:ting)?\\s+(?:there|to\\s+you)',
+  'reach(?:ing)?\\s+you',
+];
+// First-person plural route claims (Codex round-33 P2): "We're on our way", "We
+// will be there shortly", "We're en route". "we" is NOT a general status subject —
+// only these unambiguous route predicates, so "we're here to help" and scheduling
+// copy ("we will be there Tuesday": no shortly/soon/in-N, plus the future-day rule)
+// stay excluded.
+const WE_ROUTE_PREDICATES = [
+  ROUTE_IDIOM,
+  'pulling\\s+up',
+  'almost\\s+(?:there|here)',
+  EN_ROUTE_PREDICATES.find((p) => p.startsWith('running')),
+  '(?:there|here)\\s+(?:shortly|soon|momentarily|in\\s+\\d+(?:\\s*(?:min(?:ute)?s?|hrs?|hours?))?)',
+];
+const WE_ROUTE_ALT = `we(?:'re|\\s+are|'ll|\\s+will|\\s+should)(?:\\s+(?:now|just|already|almost|soon))*\\s+(?:be\\s+)?(?:${WE_ROUTE_PREDICATES.join('|')})`;
+const EN_ROUTE_STATUS_RE = buildEnRouteRe();
+function buildEnRouteRe(subj = VISIT_STATUS_SUBJECT) {
+  return new RegExp(`\\b(?:${techStatusPrefix(subj)}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT})\\b`, 'gi');
+}
+const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
+// Does a conditional word GOVERN the status clause (Codex round-29 P2)? Only the
+// text since the last clause boundary counts: "once he's on the way" and "when
+// the tech is en route" are conditional, but an introductory phrase CLOSED by a
+// comma ("After checking, your technician is en route") is not — the status
+// itself is asserted. Uses the same CLAUSE_BREAK_RE as the negation check.
+function isConditionalBefore(before) {
+  let last = 0;
+  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) last = m.index + m[0].length;
+  return CONDITIONAL_BEFORE_RE.test(before.slice(last));
+}
+// Is the match inside an interrogative CLAUSE (Codex round-29 P2)? "Has your
+// technician arrived yet?" asserts nothing. The clause runs from the previous
+// boundary to the next punctuation mark; it is a question when that mark is "?"
+// or it opens with subject-auxiliary inversion (has/have/is/are/did/was/were/
+// will/can/could/would/do/does + ...). A statement clause earlier in the same
+// sentence ("He is en route, is that ok?") is unaffected: its own boundary is
+// the comma.
+// An auxiliary opens a QUESTION only in real subject-auxiliary inversion: the next
+// token is a subject ("Has your technician arrived", "Will Sam be there", "Is he
+// here"). "Will is on the way" (technician Will) or "Mark has arrived" is a
+// declarative — the next token is a verb, and a recorded technician name is a
+// subject, never an auxiliary (Codex round-33 P2). A clause ending in "?" is a
+// question either way.
+const INTERROGATIVE_AUX = '(?:has|have|had|is|are|was|were|did|do|does|will|can|could|would|should)';
+const INTERROGATIVE_SUBJECT = "(?:you|he|she|they|it|we|i|the|your|our|my|his|her|their|this|that|there|any\\w+|every\\w+|someone|somebody|tech(?:nician)?s?|drivers?|crews?|teams?)";
+const interrogativeOpenerRe = (names) => {
+  const alt = nameAlt(names);
+  return new RegExp(`^\\s*${INTERROGATIVE_AUX}\\s+(?:${INTERROGATIVE_SUBJECT}${alt ? `|${alt}` : ''})\\b`, 'i');
+};
+function isInterrogativeAt(str, index, length = 0, names = []) {
+  const before = str.slice(0, index);
+  let start = 0;
+  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) start = m.index + m[0].length;
+  if (interrogativeOpenerRe(names).test(str.slice(start, index + length))) return true;
+  const end = /[.,;:!?\n\u2014\u2013]/.exec(str.slice(index + length));
+  return Boolean(end) && end[0] === '?';
+}
+// A status clause that names an explicit FUTURE day is a scheduling statement,
+// not live status for today's en-route stop (Codex round-31 P2): "Your technician
+// is coming tomorrow", "We will be there Friday", "on the 5th", "next week".
+// "today" / "tonight" / "now" / "this morning|afternoon|evening" keep it live.
+// A weekday counts as future only when it is not TODAY (America/New_York). Read
+// over the matched status clause, so the day word may lead or trail within it. ONE
+// predicate for bodyMentionsArrival, bodyMentionsVisitStatus and therefore the
+// send-time en-route classifier that uses them.
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const LIVE_DAY_RE = /\b(?:today|tonight|right\s+now|(?:this|later\s+this)\s+(?:morning|afternoon|evening)|now)\b/i;
+const FUTURE_DAY_RE = /\b(?:tomorrow|the\s+day\s+after|next\s+(?:week|month|visit|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|on\s+the\s+\d{1,2}(?:st|nd|rd|th)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{1,2}\/\d{1,2}|in\s+\d+\s+(?:days?|weeks?))\b/i;
+function todayWeekdayET(now = new Date()) {
+  return new Date(now).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }).toLowerCase();
+}
+function isFutureDayStatus(str, index, length = 0, now = new Date()) {
+  // Bounded to the matched status CLAUSE (Codex round-32 P2), same CLAUSE_BREAK_RE
+  // as isConditionalBefore / hasTechSubjectBefore: "Your technician is on the way,
+  // and we'll follow up tomorrow" keeps its status live because "tomorrow"
+  // belongs to the next clause. The clause starts after the last boundary before
+  // the match and ends at the first boundary after it (boundaries INSIDE the
+  // match, such as "your tech, Sam, is ...", do not end it).
+  const breaks = [...str.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))];
+  let clauseStart = 0;
+  let clauseEnd = str.length;
+  for (const b of breaks) {
+    if (b.index + b[0].length <= index) clauseStart = b.index + b[0].length;
+    else if (b.index >= index + length) { clauseEnd = b.index; break; }
+  }
+  const sentence = str.slice(clauseStart, clauseEnd);
+  if (LIVE_DAY_RE.test(sentence)) return false;
+  if (FUTURE_DAY_RE.test(sentence)) return true;
+  const today = todayWeekdayET(now);
+  return WEEKDAY_NAMES.some((day) => day !== today && new RegExp(`\\b${day}\\b`, 'i').test(sentence));
+}
+function bodyMentionsArrival(text, { techNames = [] } = {}) {
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
+  for (const m of str.matchAll(new RegExp(statusRegexFor('enRoute', techNames).source, 'gi'))) {
+    const before = str.slice(Math.max(0, m.index - 60), m.index);
+    if (isConditionalBefore(before)) continue;
+    if (isNegatedInClause(str, m.index)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length, techNames)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isFutureDayStatus(str, m.index, m[0].length)) continue;
+    return true;
+  }
+  return false;
+}
+// Round-20 structural gate: does the body say ANYTHING about the visit's live
+// status (arrival, route, position)? The send-time check uses this as the
+// DEFAULT-DENY trigger: a draft that carried a live snapshot and whose body
+// touches visit status in any form is rechecked against the snapshot's recorded
+// state / technician / destination even when no narrower classifier (numeric
+// ETA, "on the way", "has arrived") recognized the exact wording ("The
+// technician arrived.", "en-route", whatever comes next). Deliberately broad
+// (vocabulary, not phrasing); the only exemptions are the same non-claims the
+// narrower classifiers already honor: a conditional ("once he's on the way"), a
+// negated correction ("hasn't arrived"), and a scheduling window.
+function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
+  const PREFIX = techStatusPrefix(SUBJ);
+  return new RegExp(
+  // "en route" / "on the way" are technician idioms on their own. Verbal "arrive"
+  // forms (round-25 P2: not the noun in "arrival instructions") and coming/headed/
+  // driving need a technician-type subject (round-28 audit P1): "Your payment has
+  // arrived at our office" / "We're coming up on renewal" are not visit status.
+  // Up to three non-negating words may sit between ("He will be arriving").
+  '\\b(?:'
+  // Superset of every en-route predicate bodyMentionsArrival classifies, so the
+  // default-deny vocabulary can never be narrower than the specific classifier.
+  + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT}|${WE_ARRIVED_ALT}`
+  + `|${SUBJ}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet|was|were|had)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
+  // Positional status forms (here / there / outside / nearby / close / on site /
+  // at your door / almost there) count ONLY with a technician-type subject
+  // (round-21 P2): "We are here to help" / "we're here" are not a claim.
+  + `|${SUBJ}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
+  // Completed-arrival "got there/here" (round-36 P2): part of the same default-deny
+  // vocabulary as the completed-arrival classifier.
+  // Codex round-48 P2: "made it" / "reached" take the SAME technician-subject prefix as "got there" ("Glad you made it!" is not visit status).
+  + `|${PREFIX}(?:(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address)))`
+  // Movement forms (left for / pulled up / showed up) also need a technician-type
+  // subject (round-26 P2): "I pulled up your invoice" is not an arrival.
+  + `|${SUBJ}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');
+}
+const VISIT_STATUS_RE = buildVisitStatusRe();
+function bodyMentionsVisitStatus(text, { techNames = [] } = {}) {
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
+  for (const m of str.matchAll(new RegExp(statusRegexFor('visit', techNames).source, 'gi'))) {
+    const before = str.slice(Math.max(0, m.index - 60), m.index);
+    if (isConditionalBefore(before)) continue;
+    if (isNegatedInClause(str, m.index)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length, techNames)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isFutureDayStatus(str, m.index, m[0].length)) continue;
+    return true;
+  }
+  return false;
+}
+// Vague/approximate duration wording (Codex round-5 P2, PR #5334): a
+// reviewer or the model rewriting an exact "20 minutes away" claim as "half
+// an hour away" / "an hour out" / "a few minutes away" / "a couple minutes"
+// / "quarter hour" states a TIMED claim exactly like a parsed number does —
+// it says WHEN the tech arrives, not just THAT they're coming — even though
+// findEtaMinutesClaims can never parse an exact figure out of it. "soon" and
+// "shortly" / "any minute now" lean TIMED on purpose (owner-facing default:
+// fail closed): a customer reads any of them as a time-bounded promise, not
+// a pure status statement like "on the way"/"en route", which claims no
+// timeframe at all and is left alone. Scoped to a sentence that also carries
+// an arrival trigger (ARRIVAL_TRIGGER_RE), with the SAME duration-exclusion
+// window a numeric claim gets for a WEAK trigger only ("out") — a strong
+// arrival word in the sentence wins over the exclusion, same as round 3 —
+// so "the treatment needs about half an hour to dry" (no arrival word at
+// all besides "out" from an unrelated "letting pets out") never
+// false-positives.
+const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?(?:min(?:ute)?s?|sec(?:ond)?s?)|any\s+minute(?:\s+now)?|momentarily|shortly|soon)\b/i;
+// `unnormalizedHoursOnly` (Codex round-9 P2, PR #5334): instead of the vague
+// phrase list, report only whether an hour-based duration normalizeTimeQuantities
+// could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
+// Routed through this one already-shared entry point so every send seam's
+// existing import of the drafter keeps working unchanged.
+// "on-site inspection/visit/..." is an adjective use, not an arrival.
+const ON_SITE_ARRIVAL_TRIGGER_RE = /\b(?:on[\s-]?site(?!\s+(?:inspection|visit|service|treatment|appointment|estimate|work|fee|consult\w*|tech\w*|crew))|on\s+(?:the|your)\s+property|at\s+your\s+(?:door|home|house))\b/i;
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false, ignoreSlaPhrases = false, techNames = [] } = {}) {
+  if (unclassifiedSignalOnly) return bodyHasUnclassifiedEtaSignal(text);
+  if (completedArrivalOnly) return bodyClaimsCompletedArrival(text, { techNames });
+  if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text, { ignoreSlaPhrases });
+  if (unconvertedNumbersOnly) return bodyHasUnconvertedNumberWord(text);
+  const str = normalizeNumberWords(text);
+  const spans = sentenceSpans(str);
+  const sentenceFor = (index) => {
+    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+    return str.slice(span[0], span[1]);
+  };
+  const re = new RegExp(TIMED_ARRIVAL_PHRASE_RE.source, 'gi');
+  let m;
+  while ((m = re.exec(str))) {
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    const sentence = sentenceFor(m.index);
+    // Round-45 P2: future on-site / at-the-property wording ("will be on site soon") is arrival
+    // wording too, so a vague time beside it is a TIMED claim. Scoped to THIS vague-phrase check
+    // (not the numeric claim judges), and only past the same duration exclusions as a weak trigger.
+    const onSiteArrival = ON_SITE_ARRIVAL_TRIGGER_RE.test(sentence);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence) && !onSiteArrival) continue;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
+    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
+    const before = str.slice(Math.max(0, m.index - 30), m.index);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
+    return true;
+  }
+  return false;
+}
+// Range claims ("10–12 minutes away", "ten to twelve minutes away", "10 or
+// 12 minutes", "between 10 and 12 minutes") — Codex round-2 P2: the old
+// single-number pass matched only the bound sitting right next to
+// "min(s)/minutes" ("10-12 minutes" recorded 12 alone), so a reply stating
+// an unsupported OTHER bound was never caught by validateLiveEtaMinutes or
+// the send-time freshness recheck. Matched over the SAME number-words-read
+// string, BEFORE the single-number pass below, so every bound of a range
+// becomes its own claim; the range's own sentence/trigger/duration-exclusion
+// verdict (computed once, off the whole range span) applies to BOTH bounds
+// alike — they share one clause ("takes 10-12 minutes to dry" excludes both,
+// "10-12 minutes out" includes both) — and the span is marked `consumed` so
+// the single-number pass never double-claims the bound already covered.
+const RANGE_MINUTES_RE = /\b(\d{1,5}(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
+const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,5}(?:\.\d+)?)\s+and\s+(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
+// ONE ordered tokenizer over the normalized text (Codex round-10 P2, PR #5334;
+// replaces six successive passes with overlapping dedupe/consume rules — the
+// shape every "one more ETA phrasing" round kept extending). Each token spec
+// is a regex, the capture groups that carry a minutes figure, and a judge
+// rule. Specs run in this order over the SAME string; a match whose figure
+// span was already claimed by an earlier spec is skipped (consume-once, by
+// the figure's own span, so an unrelated later figure in the same phrase is
+// still judged on its own). Adding an ETA form means adding a row here.
+//   trigger  range/between/unit figures: need an arrival trigger in the
+//            sentence; a STRONG trigger always claims, a weak one ("out")
+//            consults the dry-time/wait-before duration exclusions.
+//   always   the phrase itself is the trigger ("be there in 20", "he'll be
+//            by in 20").
+//   out      "<N> out" with no unit: 1-180, not a time of day/address/phone.
+//   bare     a bare integer 1-180 in a STRONG-trigger sentence that
+//            classifyBareEtaNumber reads as neither time, money, address, a
+//            date, a non-time count, an ordinal nor a percentage.
+function inBareMinutesRange(m) {
+  const minutes = Number(m[1]);
+  return minutes >= 1 && minutes <= 180;
+}
+function durationExcluded(str, index, length) {
+  const after = str.slice(index + length, index + length + 30);
+  const before = str.slice(Math.max(0, index - 30), index);
+  return DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before);
+}
+const ETA_CLAIM_JUDGES = {
+  trigger: (str, m, sentence) => ARRIVAL_TRIGGER_RE.test(sentence)
+    && (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)),
+  always: () => true,
+  out: (str, m) => inBareMinutesRange(m) && !looksLikeTimeAddressOrPhone(str, m.index, m[0].length),
+  bare: (str, m, sentence) => STRONG_ARRIVAL_TRIGGER_RE.test(sentence)
+    && inBareMinutesRange(m)
+    && classifyBareEtaNumber(str, m.index, m[0].length) === 'claim',
+};
+const ETA_CLAIM_TOKENS = [
+  { re: RANGE_MINUTES_RE, groups: [1, 2], judge: 'trigger' },
+  { re: BETWEEN_MINUTES_RE, groups: [1, 2], judge: 'trigger' },
+  { re: ETA_MINUTES_TOKEN_RE, groups: [1], judge: 'trigger' },
+  { re: IMPLICIT_MINUTES_ARRIVAL_RE, groups: [1], judge: 'always' },
+  { re: FUTURE_ARRIVAL_IN_MINUTES_RE, groups: [1], judge: 'always' },
+  { re: BARE_MINUTES_OUT_RE, groups: [1], judge: 'out' },
+  { re: BARE_ETA_NUMBER_RE, groups: [1], judge: 'bare' },
+];
+function spansOverlap([s1, e1], [s2, e2]) {
+  return s1 < e2 && s2 < e1;
+}
+function sentenceAt(str, spans, index) {
+  const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+  return str.slice(span[0], span[1]);
+}
+function findEtaMinutesClaims(text) {
+  const claims = [];
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const spans = sentenceSpans(str);
+  const consumed = []; // [start, end) of every figure already claimed
+  for (const token of ETA_CLAIM_TOKENS) {
+    const re = new RegExp(token.re.source, `${token.re.flags}d`);
+    for (const m of str.matchAll(re)) {
+      const figureSpans = token.groups.map((g) => m.indices[g]);
+      if (figureSpans.some((fs) => consumed.some((c) => spansOverlap(fs, c)))) continue;
+      // Office follow-up timing (round 13): never a tech ETA. 'always' tokens
+      // ("be there in 20") carry their own arrival subject and are exempt.
+      if (token.judge !== 'always' && isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+      // ONE window predicate for EVERY token kind (Codex round-19 P2): "Your
+      // 120-minute arrival window" is a scheduling span whatever its unit.
+      if (isWindowQuantity(str, m.index, m[0].length)) continue;
+      // Round-23 P2: a bare figure that was a written number word with no unit or
+      // arrival cue beside it is a count ("we sprayed two"), not an ETA.
+      if (token.judge === 'bare' && numberWordOriginIndexes(text, str).has(m.index) && isPlainWordCount(str, m.index, m[0].length)) continue;
+      if (!ETA_CLAIM_JUDGES[token.judge](str, m, sentenceAt(str, spans, m.index))) continue;
+      for (const g of token.groups) claims.push({ minutes: Number(m[g]), index: m.index });
+      consumed.push(...figureSpans);
+    }
+  }
+  return claims;
+}
+// Structural default-deny (Codex round-7 P2, PR #5334): findEtaMinutesClaims
+// above requires an arrival-TRIGGER word to share the sentence with a
+// minutes figure, and every round of this PR has found one more phrasing
+// that trigger list doesn't cover ("on the way", written numbers, ranges,
+// "from you", bare "ETA: 20", now "20 minutes to go") — an open-ended
+// enumeration that can never be finished. This function is the fix for the
+// two call sites that actually have a LIVE ETA to check a claim against
+// (sms-eta-freshness.js's send-time recheck when the snapshot has entries or
+// the body carries a /track/ link, and validateLiveEtaMinutes below when the
+// facts carry a LIVE ETA line): a plain "N minute(s)" figure — after
+// number-word normalization, ranges/between bounds included — is a timed ETA
+// claim with NO trigger word required at all, UNLESS its own clause is an
+// explicit NON-arrival duration (treatment/dry time, "wait ... before
+// pets/re-entry", "takes about", "lasts", "the service takes ...") — a
+// short, closed list that doesn't grow the way ETA phrasing does. A STRONG
+// arrival word in the clause still wins over the exclusion (same as
+// findEtaMinutesClaims, e.g. "he'll take about 12 minutes to arrive" despite
+// "take about" also reading like a duration-exclusion prefix) — everything
+// else is identical to maybeClaim above minus the "no trigger at all ⇒ not a
+// claim" bailout, since removing that bailout IS the structural fix: a bare
+// "20 minutes." with nothing else in the sentence is exactly the shape a
+// trigger-word list can never catch, and grounded default-deny catches it.
+// Round 8 (Codex P2): the same default-deny now also covers a BARE integer
+// with no unit word at all ("The tech should make it in 20") — see the
+// bare-integer pass and classifyBareEtaNumber below, which tell an unclaimed
+// bare number apart from a time of day, money, an address/phone-like token,
+// a date, a count of something that isn't time, an ordinal, or a percentage.
+// Which figures in the normalized string came from a written NUMBER WORD
+// ("one", "two", ...) rather than digits the author typed (Codex round-23 P2):
+// "Yes, we completed one." reads as "…completed 1." after normalization, and the
+// bare pass must not take that count for an ETA. Marks each conversion with a
+// private control character, runs the SAME time normalization, and maps the
+// marks back to indexes in `str`; if stripping the marks does not reproduce
+// `str` exactly the mapping is untrustworthy and NO figure is treated as
+// number-word origin (default-deny stays).
+const NUMBER_WORD_MARK = '\u0001';
+function numberWordOriginIndexes(text, str) {
+  const marked = normalizeTimeQuantities(normalizeGsmPunctuation(String(text || '')).replace(NUMBER_WORD_RE, (m, ...groups) => NUMBER_WORD_MARK + String(numberWordValue(m, ...groups.slice(0, 7)))));
+  let plain = '';
+  const origins = new Set();
+  for (const ch of marked) {
+    if (ch === NUMBER_WORD_MARK) origins.add(plain.length);
+    else plain += ch;
+  }
+  return plain === str ? origins : new Set();
+}
+// A number-word figure is still an ETA next to an arrival cue: "five out",
+// "one away", "in five", "within ten", "ETA five".
+const WORD_FIGURE_CUE_AFTER_RE = /^\s*(?:away|out|from|until|early|late|behind|to\s+go)\b/i;
+const WORD_FIGURE_CUE_BEFORE_RE = /\b(?:in|within|eta\s*:?)\s*(?:about\s+|around\s+|roughly\s+)?$/i;
+function isPlainWordCount(str, index, length) {
+  return !WORD_FIGURE_CUE_AFTER_RE.test(str.slice(index + length)) && !WORD_FIGURE_CUE_BEFORE_RE.test(str.slice(Math.max(0, index - 20), index));
+}
+// findGroundedMinutesFigures, as three stages over one shared scan context (pure extraction — same
+// scans, same order, same claims). The context carries the normalized string, the accumulating claims
+// and the shared "is this figure a claim" judge.
+function groundedFigureContext(text) {
+  const claims = [];
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const spans = sentenceSpans(str);
+  const sentenceFor = (index) => {
+    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+    return str.slice(span[0], span[1]);
+  };
+  const maybeGroundedClaim = (minutes, matchIndex, matchLength, sentence) => {
+    // Round-19 P2: a window figure (any unit) is never an ETA claim.
+    if (isWindowQuantity(str, matchIndex, matchLength)) return false;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
+      claims.push({ minutes, index: matchIndex });
+      return true;
+    }
+    const after = str.slice(matchIndex + matchLength, matchIndex + matchLength + 30);
+    const before = str.slice(Math.max(0, matchIndex - 30), matchIndex);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) return false;
+    claims.push({ minutes, index: matchIndex });
+    return true;
+  };
+  return { claims, str, wordOrigins: numberWordOriginIndexes(text, str), sentenceFor, maybeGroundedClaim };
+}
+// Stage 1 — ranges ("10-12 minutes", "between 10 and 12 minutes"). Returns the consumed spans.
+function groundedRangeFigures({ str, sentenceFor, maybeGroundedClaim }) {
+  const consumed = [];
+  for (const rangeRe of [RANGE_MINUTES_RE, BETWEEN_MINUTES_RE]) {
+    const re = new RegExp(rangeRe.source, rangeRe.flags);
+    let rm;
+    while ((rm = re.exec(str))) {
+      const sentence = sentenceFor(rm.index);
+      const addedFirst = maybeGroundedClaim(Number(rm[1]), rm.index, rm[0].length, sentence);
+      const addedSecond = maybeGroundedClaim(Number(rm[2]), rm.index, rm[0].length, sentence);
+      if (addedFirst || addedSecond) consumed.push([rm.index, rm.index + rm[0].length]);
+    }
+  }
+  return consumed;
+}
+// Stage 2 — unit-bearing single figures ("12 minutes"), skipping spans a range already consumed.
+function groundedUnitFigures({ str, sentenceFor, maybeGroundedClaim }, consumed) {
+  const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
+  let m;
+  while ((m = re.exec(str))) {
+    if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
+    maybeGroundedClaim(Number(m[1]), m.index, m[0].length, sentenceFor(m.index));
+  }
+}
+// Stage 3 — bare integers, then "<N>ish". Bare-integer default-deny (Codex round-8 P2, PR #5334): "the
+// tech should make it in 20" carries no unit word AND matches none of findEtaMinutesClaims's fixed
+// phrase/trigger lists. Once there IS a live ETA to check a claim against, ANY bare integer 1-180 left
+// unclaimed above is a timed claim UNLESS classifyBareEtaNumber reads it as something else entirely — a
+// time of day, money, an address/phone-like token, a date, a count with a non-time noun right after it,
+// an ordinal, or a percentage. Numbers already claimed or excluded by the unit-based passes above are
+// skipped by index so this pass never double-claims or re-fights a duration exclusion those passes
+// already settled (a trailing "minutes" word reads here as an ordinary trailing noun either way, so the
+// verdict agrees).
+function groundedBareFigures({ claims, str, wordOrigins }, consumed) {
+  const bareRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)/g;
+  let bm2;
+  while ((bm2 = bareRe.exec(str))) {
+    if (consumed.some(([s, e]) => bm2.index >= s && bm2.index < e)) continue;
+    if (claims.some((c) => c.index === bm2.index)) continue;
+    const minutes = Number(bm2[1]);
+    if (minutes < 1 || minutes > 180) continue;
+    // Round-23 P2: a bare figure that was a written number word with no time unit or arrival cue beside
+    // it is a count ("we completed one"), not an ETA.
+    if (wordOrigins.has(bm2.index) && isPlainWordCount(str, bm2.index, bm2[0].length)) continue;
+    if (!isWindowQuantity(str, bm2.index, bm2[0].length) && classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
+      claims.push({ minutes, index: bm2.index });
+    }
+  }
+}
+// "<N>ish" (round 8): the digits and "ish" share no word boundary at all, so the \b-anchored bare-integer
+// pass can never match "20ish" — this tiny dedicated pass is the only way to catch it. Always a timed
+// approximation once findGroundedMinutesFigures runs at all; no exclusion category applies to an "-ish"
+// suffix.
+function groundedIshFigures({ claims, str }) {
+  const ishRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?=ish\b)ish\b/gi;
+  let ishm;
+  while ((ishm = ishRe.exec(str))) {
+    if (claims.some((c) => c.index === ishm.index)) continue;
+    const minutes = Number(ishm[1]);
+    if (minutes >= 1 && minutes <= 180 && !isWindowQuantity(str, ishm.index, ishm[0].length)) claims.push({ minutes, index: ishm.index });
+  }
+}
+function findGroundedMinutesFigures(text) {
+  const ctx = groundedFigureContext(text);
+  const consumed = groundedRangeFigures(ctx);
+  groundedUnitFigures(ctx, consumed);
+  groundedBareFigures(ctx, consumed);
+  groundedIshFigures(ctx);
+  // Office follow-up timing (round 13) is never an ETA — see isOfficeFollowupDuration.
+  return ctx.claims.filter((c) => !isOfficeFollowupDuration(ctx.str, c.index, 1));
+}
+// Backstop for sms-eta-freshness.js (round 6): does the outgoing body carry
+// an arrival-triggered sentence with a digit findEtaMinutesClaims could NOT
+// turn into a claim? Scoped to a STRONG-trigger sentence, same as the
+// bare-integer pass above, so this never fires on an unrelated digit
+// elsewhere in the message (a dollar amount, an address in another
+// sentence). Exists so a future phrasing this module's own parser still
+// can't read fails the send-time recheck closed rather than passing as pure
+// status copy. Round 8 (Codex P2): "he should be there at 2:30" / "on the
+// way to 123 Main St" carry a STRONG trigger ("be there" / "on the way")
+// alongside a digit that is plainly a clock time or a street address, never
+// an unread ETA phrasing — each digit run in a qualifying sentence is run
+// through classifyBareEtaNumber so a digit classified as something else
+// entirely (time of day, money, an address/phone-like token, a date, a
+// count with a non-time noun, an ordinal, a percentage) never trips this
+// backstop; a digit classifyBareEtaNumber can't otherwise explain still does.
+function bodyHasUnclassifiedArrivalDigit(text) {
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const spans = sentenceSpans(str);
+  const claims = findEtaMinutesClaims(text);
+  const digitRe = /(?<![\d.])\d{1,3}(?:\.\d+)?(?!\d|\.\d)/g;
+  return spans.some(([s, e]) => {
+    const sentence = str.slice(s, e);
+    if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return false;
+    if (claims.some((c) => c.index >= s && c.index < e)) return false;
+    const re = new RegExp(digitRe.source, digitRe.flags);
+    let dm;
+    while ((dm = re.exec(str))) {
+      if (dm.index < s || dm.index >= e) continue;
+      if (classifyBareEtaNumber(str, dm.index, dm[0].length) === 'claim') return true;
+    }
+    return false;
+  });
+}
+// The send-time freshness recheck (sms-eta-freshness.js) needs only "does
+// this outgoing body make an ETA-style minutes claim at all" — never the
+// factsBlock-derived correctness check below, which isn't available at
+// send time.
+function replyClaimsEtaMinutes(reply) {
+  return findEtaMinutesClaims(reply).length > 0;
+}
+
+// The send-time freshness snapshot for a drafted reply (independent review
+// finding, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2):
+// context.liveEtaGroups is the [{ minutes, scheduledServiceIds }] list
+// context-aggregator built, one entry per distinct resolved LIVE ETA
+// (grouped-stop siblings sharing one physical stop collapse to one entry —
+// see liveEtaDedupeKey there), never rendered into any prompt. Persisted as
+// { entries: [...] } alongside facts_generated_at exactly like
+// open_times_snapshot so sms-eta-freshness.js can bind each claimed minutes
+// figure in the outgoing body to the ONE entry it came from and recheck —
+// with no GPS/Distance Matrix call of its own — that THAT entry's visit(s),
+// not some other stop's, are still customer-facing en_route before the
+// claim may go out. A flat scheduledServiceIds list (the pre-round-2 shape)
+// could let a reply quoting one completed stop pass on another stop's
+// en_route status. null when this draft's facts carried no LIVE ETA at all;
+// a missing snapshot plus a minutes claim in the outgoing body fails closed
+// there — and the old flat shape (no `entries`) fails closed too, since
+// nothing merged yet ever persisted it.
+// `trackTokens` (Codex round-4 P2, PR #5334): each entry's own
+// /track/:token(s), carried through so sms-eta-freshness.js can revalidate a
+// reply that shares ONLY the tracking link — never rendered into any prompt.
+// Has the LIVE ETA behind this reply's minutes claim already gone stale, by the
+// SAME two clocks the send seams enforce (sms-eta-freshness draftFreshnessReason):
+// the facts are older than the 15-minute draft window, or the GPS fix behind an
+// entry passed its tracker-staleness deadline (fixExpiresAtMs). Only a reply that
+// actually states minutes is affected; status-only copy carries nothing to age.
+function liveEtaExpiredByPublication({ reply, context, factsAt = null, now = new Date() }) {
+  const entries = (buildLiveEtaSnapshot(context)?.entries || []).filter((e) => Number.isFinite(e.minutes));
+  if (!entries.length) return false;
+  // Parse the reply without its tracking links (same shared step as the draft and
+  // send validators): a token's trailing digits are not a minutes figure.
+  const text = stripTrackLinks(reply);
+  if (!findEtaMinutesClaims(text).length && !findGroundedMinutesFigures(text).length) return false;
+  const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness'); // lazy: that module requires this one lazily too
+  const t = now.getTime();
+  if (factsAt instanceof Date && t - factsAt.getTime() > ETA_FRESHNESS_WINDOW_MS) return true;
+  return entries.some((e) => Number.isFinite(e.fixExpiresAtMs) && t > e.fixExpiresAtMs);
+}
+function buildLiveEtaSnapshot(context) {
+  const groups = Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups : [];
+  const entries = groups
+    .filter((g) => g && (Number.isFinite(g.minutes) || g.minutes === null) && Array.isArray(g.scheduledServiceIds))
+    .map((g) => ({
+      minutes: g.minutes,
+      scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null),
+      trackTokens: Array.isArray(g.trackTokens) ? g.trackTokens.filter(Boolean) : [],
+      // Which technician the figure/status was about (Codex round-18 P2);
+      // sms-eta-freshness refuses at send when a reassignment changed it.
+      ...(g.technicianId != null ? { technicianId: g.technicianId } : {}),
+      ...(g.deviceImei ? { deviceImei: g.deviceImei } : {}),
+      // The tracker-mapping generation (bouncie_imei_changed_at) the ETA was computed under
+      // (round-41 P2): send time blocks when a remap advanced it, even A->B->A.
+      ...('mappingChangedAt' in g ? { mappingChangedAt: g.mappingChangedAt } : {}),
+      // Round-33: the technician first name(s) the draft may have used as a status
+      // subject ("Sam is on the way"); names only. Send time reads them from here.
+      ...(sanitizeTechNames(g.technicianNames).length ? { technicianNames: sanitizeTechNames(g.technicianNames) } : {}),
+      ...(typeof g.state === 'string' ? { state: g.state } : {}),
+      // Round-20 P2: the destination (property + stamped coordinates) the figure
+      // was computed for; send time refuses when the appointment moved.
+      ...(Array.isArray(g.destinations) ? { destinations: g.destinations.filter((d) => d && d.id != null) } : {}),
+      // The instant the GPS fix behind this figure goes stale to the public
+      // tracker (Codex round-11 P2, PR #5334); sms-eta-freshness.js expires a
+      // minutes claim at min(15-minute draft window, this). Omitted when
+      // unknown, so an entry without it keeps the draft-window-only rule.
+      ...(Number.isFinite(g.fixExpiresAtMs) ? { fixExpiresAtMs: g.fixExpiresAtMs } : {}),
+      // The GPS fix timestamp the figure used (round-24 P2): send time refuses when
+      // a newer fix has landed in tech_status.
+      ...(Number.isFinite(g.fixAtMs) ? { fixAtMs: g.fixAtMs } : {}),
+    }))
+    .filter((g) => g.scheduledServiceIds.length);
+  return entries.length ? { entries } : null;
+}
+
+// Deterministic backstop (independent review finding, PR #5334): today only
+// the LLM verifier checks that a stated ETA number matches LIVE ETA — this
+// runs alongside the other deterministic guards (validateReserviceOffer,
+// validateComplianceCopy) in the SAME revise/verify loop, and in single-pass
+// mode where no verifier would catch it at all. Any ETA-style minutes claim
+// must equal the LIVE ETA minutes the facts block actually carries, and must
+// not appear at all when the facts carry no LIVE ETA line.
+// Distinct EN-ROUTE stops in the context (the unit the send-time snapshot binds
+// a numeric ETA over): an on_property (on-site) group can't be the subject of
+// an ETA figure, so it is not counted. null when the context has no groups.
+function countEnRouteEtaStops(context) {
+  return Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.filter((g) => g && g.state !== 'on_property').length : null;
+}
+// validateLiveEtaMinutes, as four decision units (pure extraction — same checks, same order, same
+// violation text). Each returns a violation message or null.
+const liveEtaFail = (message) => ({ ok: false, violations: [message] });
+// Arrival-state consistency between the reply and the LIVE STATUS facts.
+function arrivalStateViolation(reply, factsBlock, techNames) {
+  const facts = String(factsBlock || '');
+  // Codex round-13 P2: a completed-arrival claim ("has arrived") with an en-route tech and no on-site
+  // fact is false — the facts must say the tech is on site before a reply may say so.
+  if (bodyClaimsCompletedArrival(reply, { techNames }) && /LIVE (?:STATUS: tech marked en route|ETA:)/.test(facts) && !/tech marked on site/.test(facts)) {
+    return 'the reply says the tech has ARRIVED but the facts show the tech is still EN ROUTE — say the tech is on the way (with the exact LIVE ETA if stated), never that they have arrived';
+  }
+  // Round-34 P2 (mirror of the arrived-vs-en-route check above): route wording ("on the way", "running
+  // late", "nearby") against an ON-SITE-only fact is false — the send-time guard requires en_route for
+  // it, so the draft must not converge.
+  if (/tech marked on site/.test(facts) && !/tech marked en route/.test(facts) && bodyMentionsArrival(reply, { techNames })) {
+    return 'the reply says the tech is on the way / running late / nearby but the facts show the tech is already ON SITE — say the tech has arrived (is on site), never that they are on the way';
+  }
+  return null;
+}
+// Time wording the parsers cannot turn into an exact figure.
+function unparseableTimeViolation(reply, hasLiveEta) {
+  // Codex round-9 P2 (PR #5334): an hour-based duration the normalizer could not turn into minutes ("an
+  // hour", "half an hour", "a couple hours") next to a real minutes figure ("about an hour out, 2
+  // minutes") would otherwise ride the numeric claim through — reject it outright once there is a LIVE
+  // ETA to hold the reply to.
+  if (bodyHasUnconvertedNumberWord(reply)) {
+    return 'the reply states an arrival time in number words that cannot be read as an exact figure — state the EXACT LIVE ETA minutes as digits, or drop the timeframe and say the tech is on the way';
+  }
+  if (hasLiveEta && bodyHasUnnormalizedHourWord(reply)) {
+    return 'the reply gives an hour-based arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number of minutes, or drop the timeframe and say the tech is on the way';
+  }
+  return null;
+}
+// No numeric claim was read: a vague / approximate duration is still a TIMED claim. Codex round-5 P2: a
+// vague/approximate duration ("half an hour away", "an hour out", "a few minutes", "a couple minutes",
+// "quarter hour", "shortly", "any minute now", "soon") is a TIMED claim exactly like a parsed number,
+// but there is no number here to check against the LIVE ETA fact — it is rejected outright, the same
+// direction as a claim that doesn't match, rather than waved through as pure status copy.
+function vagueTimeViolation(reply) {
+  return bodyHasTimedArrivalPhrase(reply)
+    ? 'the reply gives an approximate/vague arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number, or drop the timeframe and say the tech is on the way'
+    : null;
+}
+// Numeric claims vs the LIVE ETA figures: ambiguity across stops, then the exact-minute match.
+function exactMinuteViolation(claims, factsMinutes, liveStops) {
+  if (!factsMinutes.size) return 'the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one';
+  // Two distinct live ETAs (two techs en route at once): prose can't be bound to the right visit
+  // deterministically, so no minutes figure may go out at all (Codex r3) — rare, and failing closed
+  // costs one revision. Count LIVE ETA lines, not distinct values (Codex round-15 P2): two stops with the
+  // same figure are still two entries, which send-time binding rejects as ambiguous — so the number must
+  // never be approved here.
+  if (liveStops > 1) return 'more than one tech is en route, so a minutes-away figure cannot be tied to the right visit — say the techs are on the way and share the tracking link instead of stating minutes';
+  const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
+  return wrong.length ? `the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${[...factsMinutes].join(' or ')} minutes — use that EXACT number` : null;
+}
+function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount = null, techNames = [] }) {
+  // Round-19 P2: parse the reply without its tracking links (a token's trailing digits are not an ETA) —
+  // the same shared step the send-time check uses.
+  const reply = normalizeGsmPunctuation(stripTrackLinks(rawReply));
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  const stateViolation = arrivalStateViolation(reply, factsBlock, techNames);
+  if (stateViolation) return liveEtaFail(stateViolation);
+  // Every LIVE ETA line, not only the first (audit P1): a customer with two distinct live stops has two
+  // figures, and a reply about either is grounded.
+  const factsLineMinutes = [...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10));
+  // Distinct live STOPS (Codex round-16 P2): grouped siblings render the shared ETA once per service
+  // line, so rendered lines over-count; when the caller has the context's liveEtaGroups (the unit the
+  // send-time snapshot uses) it passes their count.
+  const liveStops = Number.isInteger(liveEtaStopCount) ? liveEtaStopCount : factsLineMinutes.length;
+  const factsMinutes = new Set(factsLineMinutes);
+  // Structural default-deny (Codex round-7 P2): once the facts actually carry a LIVE ETA to check a
+  // claim against, stop relying on findEtaMinutesClaims's trigger-word list — union in
+  // findGroundedMinutesFigures, which catches a plain minutes figure with no trigger word at all. With
+  // no LIVE ETA fact, keep the trigger-based detection only (there's nothing to bind an untriggered
+  // figure to here anyway, and this keeps an ordinary duration mention in a reply about a non-live visit
+  // from being second-guessed).
+  const claims = factsMinutes.size
+    ? [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)]
+    : findEtaMinutesClaims(reply);
+  const timeViolation = unparseableTimeViolation(reply, factsMinutes.size > 0);
+  if (timeViolation) return liveEtaFail(timeViolation);
+  if (!claims.length) {
+    const vague = vagueTimeViolation(reply);
+    return vague ? liveEtaFail(vague) : { ok: true, violations: [] };
+  }
+  const minuteViolation = exactMinuteViolation(claims, factsMinutes, liveStops);
+  return minuteViolation ? liveEtaFail(minuteViolation) : { ok: true, violations: [] };
 }
 
 // Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
@@ -2657,6 +4085,52 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
   };
 }
 
+// The LABEL FACTS source a delayed send re-verifies (sms-label-facts
+// labelFactsSendBlockReason): persisted next to open_times_snapshot, null when
+// the final reply copies no label sentence.
+// The customer's own messages the label-question check reads: the current inbound first, then the recent
+// inbound messages of the thread window the drafter shows (a follow-up like "is it ok now?" asks whatever
+// the thread was about). Inbound only, newest first, last 24 hours (an unreadable date is kept: fail closed).
+const ASKED_THREAD_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Only messages from the CURRENT inbound phone are inherited: a customer can have several numbers (a spouse, a
+// tenant), and their messages are not this sender's thread. A row with no phone, or no known current phone,
+// is left out (an elliptical follow-up with no thread then asks both kinds: fail closed). `unreadable` says the
+// thread could not be read for this sender - no known phone, or recent inbound history exists but none of it is
+// provably theirs - so a short follow-up ("is it okay now?") cannot be tied to a visit.
+function readInboundThread(context, inboundMessage, inboundPhone) {
+  const cutoff = Date.now() - ASKED_THREAD_WINDOW_MS;
+  const sender = phoneIdentityKey(inboundPhone);
+  const recent = (context?.smsHistory || []).slice(0, 10)
+    .filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && !(new Date(m.date) < cutoff));
+  const mine = sender ? recent.filter((m) => phoneIdentityKey(m.fromPhone) === sender) : [];
+  // The model is shown RECENT SMS THREAD = the first 10 rows, every direction and age. An inbound row there that is
+  // not provably from this sender (another number, no phone, or no known sender phone) makes the thread mixed:
+  // it may hold another person's question about another visit, so the latest visit's sentences cannot be authorized.
+  const mixed = (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound' && (!sender || phoneIdentityKey(m.fromPhone) !== sender));
+  // Visit references are read over EVERY same-sender inbound row the model is shown, whatever its age (the kind-inheritance
+  // window above is shorter): a 3-day-old "the May treatment" sits beside the facts just the same.
+  // ...and over every OUTBOUND row shown too ("[WAVES] I found the record for your May treatment"): the model reads what Waves said as well,
+  // and an outbound row is judged whoever it was sent to (a reply to another number is shown in the same thread), so any other-visit
+  // reference in it means none on file.
+  const rendered = (context?.smsHistory || []).slice(0, 10).filter((m) => m && typeof m.body === 'string' && m.body.trim());
+  // Each row keeps its own timestamp: its relative words ("you sprayed yesterday") mean the day IT was sent, not today.
+  const shown = rendered.filter((m) => m.direction === 'outbound' || (m.direction === 'inbound' && sender && phoneIdentityKey(m.fromPhone) === sender)).map((m) => ({ text: m.body, date: m.date ?? null }));
+  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], dates: [null, ...mine.map((m) => m.date ?? null)], shown, unreadable: !sender || (recent.length > 0 && !mine.length), mixed, noSender: !sender, hasInboundRows: (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound') };
+}
+
+// A thread that cannot be read for this sender fails closed silently, so say so once per draft (ids and a reason only - no message text).
+function logUnreadableThread(thread, context, lane) {
+  if (!thread.hasInboundRows || !(thread.noSender || thread.unreadable)) return;
+  logger.warn(`[sms-shadow] label-facts thread unreadable (${thread.noSender ? 'no_inbound_phone' : 'no_same_sender_rows'}); customer ${context?.customer?.id || 'unknown'}, lane ${lane || 'live'} - facts none on file for a short follow-up`);
+}
+
+function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage }) {
+  if (!labelFacts || !reply) return null;
+  return labelFactsLib.labelFactsSnapshotFor({
+    labelFacts, reply, sectionText: labelFactsLib.labelFactsSectionFrom(factsBlock), asked: labelFactsLib.askedLabelKinds(inboundMessage),
+  });
+}
+
 // The days a send-time recheck compares against: the picker's that minted the
 // snapshot (its `source`), else the zone finder's for a legacy snapshot. null
 // = that picker no longer offers times for this job.
@@ -2791,7 +4265,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
   // pins the full rendered system prompt.
   const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS' : ''}, the thread`;
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS, LABEL FACTS' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
     ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
@@ -2811,11 +4285,38 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
     ? `
 COMPANY FACTS:
 - The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
+
+LABEL FACTS (product timing from the label):
+- When a LABEL FACTS section is in the context block, each line is ONE finished sentence about the visit named in its header (a re-entry sentence and/or a rainfast sentence). To give label timing at all, COPY the sentence word for word - the whole sentence, unchanged, including its visit date. Never paraphrase, shorten, split, combine, round, convert, spell out, or add to it, and never give a time, a number of hours or minutes, a clock time, "overnight", "a couple of hours", "until dry", "rainfast", or a "you can go back out now" / "safe for the pets now" / "fine to water or mow" line in your own words. A re-entry sentence answers only when people or pets can go back out; a rainfast sentence answers only whether rain washes it off. Never name a product or brand.
+- With no LABEL FACTS sentence of the kind asked about (or with LABEL FACTS saying none is on file), give no timing of that kind at all. For a rain question with no rainfast sentence, answer from the COMPANY FACTS rain line - a treatment needs to dry and bond to surfaces, and after that it holds up to weather - plainly, as your own knowledge of how we work; never say the label is silent, missing, or does not list a rainfast time.
+- Never call a treatment safe, pet-safe, kid-safe, or non-toxic, and never say EPA-approved or "safe for" anyone - LABEL FACTS gives timing, not safety claims. A question about symptoms, illness, or exposure is not a timing question: it stays with a person.
 `
     : '';
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
+  // LIVE ETA (GATE_SMS_REAL_ANSWERS only — gate-off stays the exact v11
+  // literal, matching every other conditional in this function): the
+  // facts block now carries a LIVE ETA + TRACKING LINK line on a TODAY
+  // en-route visit whenever context-aggregator resolved one (same
+  // resolveFreshTechPosition + calculateBoundedTrackingEta bounds the
+  // customer tracking page uses). The model may state THAT number only —
+  // never compute or invent one — and share the link with it.
+  const liveEtaClause = realAnswersOn
+    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK.'
+    : '';
+  // Round-34 P2: route wording is authorized by an EN-ROUTE fact only. An ON-SITE
+  // fact authorizes arrived/on-site wording only — "on the way" beside it is false
+  // and every send seam would reject it. Gate-off keeps the exact v11 literal.
+  const liveStatusRule = realAnswersOn
+    ? "Say the tech is on the way, running late, running ahead, or nearby ONLY when TODAY's visit line shows LIVE STATUS: tech marked en route. When it shows LIVE STATUS: tech marked on site, say only that the tech has arrived / is on site — never on the way, running late, running ahead, or nearby."
+    : "Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site.";
+  const liveStatusMeaning = realAnswersOn
+    ? 'LIVE STATUS "en route" means you may confidently tell the customer the tech is on the way right now; LIVE STATUS "on site" means the tech is on site right now (say so — never "on the way").'
+    : 'LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now.';
+  const liveEtaUseRule = realAnswersOn
+    ? ' A visit line that also shows LIVE ETA and TRACKING LINK means you may tell the customer about how many minutes away the tech is (that exact number) and share the link.'
+    : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
@@ -2824,7 +4325,7 @@ ${CUSTOMER_SMS_HOUSE_VOICE}
 FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (${factSourceList}). A plausible-sounding guess is still a fabrication. You must NEVER:
 - State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. ${noAppointmentRule}
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
-- Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site. If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
+- ${liveStatusRule}${liveEtaClause} If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
 - Assert a service cadence or frequency ("every other month") or treatment timing ("safe to water in 1–2 hours") that isn't in the context.
 - Reference a billing event — a payment, an auto-pay attempt, a charge, an invoice — that isn't shown in BILLING.
@@ -2841,7 +4342,7 @@ PROPERTY & ACCESS RULES:
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
 ${deferRule}
 ${companyFactsRules}
-USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now. If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
+USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and ${liveStatusMeaning}${liveEtaUseRule} If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
 ${handoffBullet}
@@ -3006,6 +4507,11 @@ function buildFactsBlock(context, extras = {}) {
   const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? renderCompanyFactsSection()
     : '';
+  // LABEL FACTS (owner ruling 2026-09-30), gate-on only, and only when the
+  // fetch found verified label timing for the last visit's products.
+  const labelFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? renderLabelFactsSection(extras.labelFacts)
+    : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
   // grounding from ANY untrusted text — property notes, call summaries, and
@@ -3038,6 +4544,16 @@ function buildFactsBlock(context, extras = {}) {
   // the #1 live judge failure was invented day-of ETAs on exactly these
   // messages. The status is only trusted (and only shown) on a TODAY visit;
   // when it's absent the drafter genuinely doesn't know where the tech is.
+  // Codex round-4 P2, PR #5334: this used to read raw `s.status` here while
+  // liveEtaEligible (context-aggregator) decided ELIGIBILITY off the
+  // customer-facing tracker state (s.trackState) instead — two different
+  // sources that CAN disagree (see the track_state select comment in
+  // context-aggregator.js), which could show "LIVE STATUS: en route" for a
+  // stop the public tracking page doesn't consider live, or the reverse.
+  // ONE source now: on the gate-on path, `s.trackState` (when present)
+  // decides en-route/on-site, same as liveEtaEligible; the gate-off path —
+  // and any caller whose context predates trackState — stays exactly
+  // status-based, so gate-off output is byte-identical to v11.
   const upcoming = (context.upcomingServices || []).filter((s) => s && s.date);
   const upcomingBlock = upcoming.length
     ? upcoming
@@ -3045,8 +4561,31 @@ function buildFactsBlock(context, extras = {}) {
           const parts = [`${s.type}${s.isToday ? ' TODAY' : ''} on ${formatEtDate(s.date)}`];
           parts.push(s.window ? `window ${s.window}` : 'no arrival window set');
           parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
-          if (s.isToday && s.status === 'en_route') parts.push('LIVE STATUS: tech marked en route to this visit');
-          else if (s.isToday && s.status === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
+          const liveState = (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.trackState) ? s.trackState : s.status;
+          if (s.isToday && liveState === 'en_route') {
+            parts.push('LIVE STATUS: tech marked en route to this visit');
+            // LIVE ETA (GATE_SMS_REAL_ANSWERS): context-aggregator only
+            // ever populates s.liveEta from a fresh GPS position + bounded
+            // ETA (same functions + staleness/timeout the customer tracking
+            // page uses) — a stale/missing position, missing destination
+            // coords, or a provider timeout/error all resolve to null there,
+            // so this line is absent exactly when the drafter genuinely has
+            // no live minutes to state. Gate-checked again here (belt and
+            // suspenders) so a gate-off caller can never surface this fact,
+            // keeping this block byte-identical to v11 when the gate is off.
+            if (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.liveEta && Number.isFinite(s.liveEta.minutes) && s.liveEta.trackUrl) {
+              parts.push(`LIVE ETA: about ${s.liveEta.minutes} minutes (GPS, as of ${s.liveEta.asOf})`);
+              // SMS-safe, scheme-free form (comms-lint's portal-link-scheme
+              // rule fails any SMS carrying https:// — the send path itself
+              // strips it via the same helper, but that strip runs AFTER
+              // comms-lint already ran on the raw draft, so a model that
+              // just echoes this fact verbatim would fail lint at draft
+              // time). Same helper the send path uses — never a second
+              // normalizer.
+              const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+              parts.push(`TRACKING LINK: ${stripSmsUrlScheme(s.liveEta.trackUrl)}`);
+            }
+          } else if (s.isToday && liveState === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
           else if (s.isToday) parts.push('no live tech location known');
           return `- ${parts.join(', ')}`;
         })
@@ -3246,7 +4785,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}BILLING:
+${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}${labelFactsSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -3590,7 +5129,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -3704,6 +5243,22 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
+  // (the LABEL FACTS section exists only with real answers on: with the gate off no label query runs at all)
+  const fetchedLabelFacts = presetFactsBlock || !realAnswersApplied ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null });
+  // LABEL FACTS speaks for the customer's LATEST performed visit only: a text
+  // pointing at another visit (a coming one, an older one, another day) gets
+  // the none-on-file section for that draft. Ambiguity reads as another visit.
+  // The label sentences are English: a text in another language gets none on
+  // file too (a paraphrase in that language would slip past the English guard;
+  // the guard also holds that language's timing words, sms-label-facts).
+  const thread = readInboundThread(context, inboundMessage, inboundPhone);
+  const askedTexts = thread.texts;
+  logUnreadableThread(thread, context, presetLaneId || metricsLane);
+  // a short follow-up whose thread could not be read for this sender cannot be tied to the latest visit: none on file
+  // A rendered thread with another number's (or an unattributable) inbound message gets none on file whatever the
+  // current message says: the model reads that message too.
+  const labelFacts = thread.mixed || (thread.unreadable && labelFactsLib.inboundIsElliptical(askedTexts))
+    ? null : labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts, undefined, thread.shown, thread.dates);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -3716,7 +5271,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, labelFacts, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -3773,6 +5328,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     return {
       parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
       openTimesSnapshot: null,
+      labelFactsSnapshot: null,
     };
   }
   if (!VERIFY_ENABLED) {
@@ -3790,11 +5346,19 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
     }
+    // Round-19 P2: the deterministic live-ETA guard runs in single-pass mode too
+    // (no verifier here would catch a wrong minutes figure).
+    const singlePassLiveEta = validateLiveEtaMinutes({ reply: parsed?.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
+    if (!singlePassLiveEta.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassLiveEta.violations);
+    }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
         parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
         openTimesSnapshot: null,
+        labelFactsSnapshot: null,
       };
     }
     return {
@@ -3802,6 +5366,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
+      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts }),
     };
   }
 
@@ -3826,8 +5391,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
-    const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    for (const check of [reserviceCheck, complianceCheck]) {
+    const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts });
+    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
+    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -3889,6 +5455,17 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
+  // Codex round-30 P2: the draft/verify calls can outlive the live ETA. A card
+  // whose minutes claim is ALREADY stale at publication time is unusable (every
+  // send seam rejects it as eta_claim_stale_facts), so it is WITHHELD — kept as a
+  // shadow row, never published or auto-sent — instead of re-resolving (a second
+  // GPS + route-provider round trip and a full re-verify for a figure the next
+  // inbound will refresh anyway).
+  if (converged && liveEtaExpiredByPublication({ reply: parsed?.reply, context, factsAt })) {
+    logger.warn('[sms-shadow] live ETA expired while the draft was generated; withholding the card (not converged)');
+    converged = false;
+  }
+
   return {
     parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
@@ -3897,6 +5474,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     openTimesSnapshot: computeOpenTimesSnapshot({
       openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
+    // The LABEL FACTS source, only when the final reply copies a label sentence.
+    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts }),
   };
 }
 
@@ -4006,9 +5585,28 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // The webhook already matched a single active customer (deleted_at +
     // shared-number protection) — build context from that row instead of
     // re-looking-up by phone, which could pick a different account.
+    // includeLiveEta (Codex round-2 P2, PR #5334): getContextForCustomer
+    // defaults to NOT resolving LIVE ETA (a GPS + Distance Matrix call) —
+    // this is one of the two SMS drafting paths that actually renders the
+    // fact into the prompt (buildFactsBlock, below via generateGroundedDraft),
+    // so it opts in explicitly.
+    // Codex round-12 P2: a gratitude-only "thanks" (gratitudeCandidate, known
+    // above) is answered with the fixed approved reply, so a LIVE ETA could
+    // never affect delivery — skip the GPS + paid Distance Matrix lookup a
+    // "thanks" from an en-route customer would otherwise trigger.
+    // Codex round-16 P2: gate-off must be byte-identical — the live-row query
+    // changes the upcoming list, so the opt-in also requires the release gate.
+    const includeLiveEta = gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
     const context = customer
-      ? await ContextAggregator.getContextForCustomer(customer)
-      : await ContextAggregator.getFullCustomerContext(fromPhone);
+      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta })
+      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });
+    // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
+    const liveEtaSnapshot = buildLiveEtaSnapshot(context);
+    // The technician first name(s) this draft may have used as a status subject ("Sam is on
+    // the way"), persisted INDEPENDENTLY of live entries (round-42 P2): a decision with no
+    // live snapshot still needs them so the send-time no-snapshot check can read name-subjected
+    // status wording. Names only.
+    const techNames = techNamesFromContext(context);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -4018,9 +5616,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot, factsGeneratedAt, reserviceBooked,
+      openTimesSnapshot, labelFactsSnapshot, factsGeneratedAt, reserviceBooked,
     } = await generateGroundedDraft({
-      client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
+      client, context, inboundMessage, inboundPhone: fromPhone, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
     });
     if (!parsed) {
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
@@ -4117,6 +5715,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // auto-send publish creates, so every send path can re-verify
           // without re-deriving it from facts_block text.
           open_times_snapshot: openTimesSnapshot ?? null,
+          // The LABEL FACTS source a delayed send re-verifies (null = the
+          // reply copies no label sentence).
+          ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
           ...(gratitudeCandidate ? {
             gratitude: {
               source: 'live_webhook',
@@ -4209,11 +5810,17 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // TIMES at send time — dispatchClaimedSend re-fetches and refuses
           // to send if a quoted window is no longer offered.
           openTimesSnapshot,
+          labelFactsSnapshot,
           // Codex #5194 P2: the instant the drafter rendered the SLA phrase
           // into factsBlock — claimAutoSend persists it on the decision's
           // input_snapshot so slaDraftedAt can anchor the deadline to it
           // instead of the row's own (later) created_at.
           factsGeneratedAt,
+          // Independent review finding (PR #5334): the visit(s) this
+          // draft's LIVE ETA fact was drawn from — dispatchClaimedSend
+          // rechecks them are still en_route immediately before sending.
+          liveEtaSnapshot,
+          techNames,
           // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
           reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });
@@ -4251,9 +5858,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               promptVersion,
               lintFailures: lint.failures,
               openTimesSnapshot,
+              labelFactsSnapshot,
               intendedActions: parsed.intended_actions,
               // Codex #5194 P2 — see the maybeAutoSend call's comment above.
               factsGeneratedAt,
+              // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
+              liveEtaSnapshot,
+              techNames,
               // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
               reserviceLanesSnapshot,
               reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -4305,9 +5916,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             promptVersion,
             lintFailures: lint.failures,
             openTimesSnapshot,
+            labelFactsSnapshot,
             intendedActions: parsed.intended_actions,
             // Codex #5194 P2 — see the maybeAutoSend call's comment above.
             factsGeneratedAt,
+            // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
+            liveEtaSnapshot,
+            techNames,
             // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
             reserviceLanesSnapshot,
             reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -4390,9 +6005,23 @@ module.exports = {
   billingAmountCents,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
+  validateLiveEtaMinutes,
+  countEnRouteEtaStops,
+  findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival, bodyMentionsVisitStatus, sanitizeTechNames, techNamesFromContext,
+  bodyHasTimedArrivalPhrase,
+  bodyHasUnclassifiedArrivalDigit,
+  findGroundedMinutesFigures,
+  normalizeTimeQuantities,
+  bodyHasUnnormalizedHourWord,
+  bodyHasUnconvertedNumberWord,
+  bodyClaimsCompletedArrival,
+  replyClaimsEtaMinutes,
+  liveEtaExpiredByPublication,
+  buildLiveEtaSnapshot,
   replyBindsDeclaredDays,
   liveServiceType,
   serviceIdentityFor,
+  fetchLabelFacts,
   fetchReserviceFactState,
   liveReserviceLaneState,
   reserviceFactLine,

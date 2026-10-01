@@ -228,7 +228,7 @@ app.use((req, res, next) => {
 // middleware terminates OPTIONS for non-allowlisted origins without an
 // Access-Control-Allow-Origin header, which would break third-party embeds.
 // (Approved public surface — see AGENTS.md.) Keep this above the global cors().
-app.use('/api/public/pest-forecast', (req, res, next) => {
+app.use(['/api/public/pest-forecast', '/api/public/yard-calendar'], (req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
@@ -835,6 +835,7 @@ app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
+app.use('/api/public/yard-calendar', require('./routes/public-yard-calendar'));
 app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
@@ -904,6 +905,7 @@ app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthen
 app.use('/api/admin/data-hygiene', require('./routes/admin-data-hygiene'));
 app.use('/api/admin/agents', require('./routes/admin-agents'));
 app.use('/api/admin/agent-decisions', require('./routes/admin-agent-decisions'));
+app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions'));
 app.use('/api/admin/drafts', require('./routes/admin-drafts'));
 app.use('/api/admin/gbp', require('./routes/admin-gbp'));
 app.use('/api/admin/automations', require('./routes/admin-automations'));
@@ -957,6 +959,7 @@ app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
+app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));

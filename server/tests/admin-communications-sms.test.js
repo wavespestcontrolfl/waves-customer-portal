@@ -3596,6 +3596,8 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
       }
       if (table === 'agent_decisions') {
         const b = makeUniversalBuilder();
+        // the provider-boundary LABEL FACTS check re-reads the decision row (Codex #5416 P1)
+        b.first = jest.fn(async () => decision);
         b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
         return b;
       }
@@ -3673,6 +3675,32 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     });
     expect(sendCustomerMessage).toHaveBeenCalled();
     expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
+  });
+
+  // Codex round-41 P2 (PR #5334): the decision's live-ETA check also runs at the TRUE provider
+  // boundary for an Agent Review send — decision-linked sends only.
+  test('a decision-linked send carries the live-ETA + LABEL FACTS providerPreSendCheck; a hand-typed one does not', async () => {
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow({ suggested_message: 'Thanks for reaching out! We appreciate you.', input_snapshot: JSON.stringify({}) }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { agentDraft: 'Thanks for reaching out! We appreciate you.', body: 'Thanks for reaching out! We appreciate you.' });
+      expect(res.status).toBe(200);
+    });
+    const linked = sendCustomerMessage.mock.calls.at(-1)[0];
+    expect(typeof linked.providerPreSendCheck).toBe('function');
+    await expect(linked.providerPreSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+
+    sendCustomerMessage.mockClear();
+    mockDb({ decision: null, claimUpdates: [] });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Hand typed.' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].providerPreSendCheck).toBeUndefined();
   });
 
   test('a body with no SLA phrase is unaffected regardless of the time', async () => {

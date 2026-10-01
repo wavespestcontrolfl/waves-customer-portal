@@ -21,7 +21,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), reportWriterRulesLive: jest.fn(() => false) }));
 jest.mock('../services/call-recording-processor', () => ({
   CONTACT_MATCH_PHONE_COLS: ['phone'],
   summarizePriorCall: jest.fn(),

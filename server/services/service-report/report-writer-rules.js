@@ -11,30 +11,36 @@
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 
-const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v1';
+const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v2';
 
 // Remaining-service modules that belong to the lawn and tree/shrub/palm lanes.
 const WRITER_RULES_EXCLUDED_MODULES = new Set(['physical_lawn', 'palm_care']);
 
-const OWNER_RULES = `OWNER RULES — THE REPORT PARAGRAPH (these override every other instruction in this prompt)
+const OWNER_RULES = `OWNER RULES — THE SERVICE REPORT (these override every other instruction in this prompt)
 
-The customer reads your two sections joined into ONE paragraph, with no headings. Write the second section so it continues the first without repeating it.
+The customer reads four sections, in this order, each under its own title:
+WHAT WE FOUND: what the customer told us and what the technician saw today, with earlier visits when they show a pattern.
+WHAT WE DID AND WHY: each piece of work, where it went, and why it fits what was found.
+WHAT TO EXPECT: how today's work should change what the customer sees, from the EXPECTATIONS lines only.
+WHAT'S NEXT: what we will check or do next, what the customer can do, and when to contact us.
 
-1. Shape. Exactly the two section titles, each followed by exactly ONE line of plain text: no line breaks inside a section, no bullets, no greeting, no sign-off, no customer-name header. About 80–140 words in all; write less when the record is thin.
-2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, or a technician-reviewed photo caption. Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. If a dictated word looks like a transcription error, leave it out rather than guess.
-3. The customer's words. The booked reason, the customer's concern, and any calls, texts or emails are what the customer said, never a finding. Attribute them ("You mentioned…"). Never quote their messages, never say we read them, and never state that the technician confirmed something only the customer reported.
+1. Shape. Exactly the four titles above, in that order, each on its own line and followed by exactly ONE line of plain text (one to four sentences, no line breaks inside a section). No bullets, no greeting, no sign-off, no customer-name header. Length follows the record: a visit with history, several treatments or open questions gets more; a thin record gets a sentence or two per section. Never pad, and never make the same point in two sections. If a section has nothing grounded to say, write one short sentence that only invites the customer to tell us what they notice; never invent an inspection, a check or a follow-up.
+2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, a technician-reviewed photo caption, or a supplied record (EXPECTATIONS, HOW IT WORKS, SERVICE TYPE, REACH-OUT DATE, prior visits). Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. Keep conditions the technician recorded ("dry and calm") when they bear on the work. If a dictated word looks like a transcription error, leave it out rather than guess.
+3. The customer's words. The booked reason, the customer's concern, and any calls, texts or emails are what the customer said, never a finding. Attribute them ("You mentioned…") and keep each remark with its own place and time: never merge two remarks into one. Never quote their messages, never say we read them, and never state that the technician confirmed something only the customer reported.
 4. Every "none" stays local. State an absence only for the place and day the technician checked ("none were seen at the dishwasher today"). Never "all clear", "no problems", "nothing to worry about", or no activity for the whole property.
-5. Products by job only. Never name a product, brand, trade name or active ingredient, and never use the word "chemical". Say what the product did: an insect-control treatment, bait, an insect growth regulator, a larvicide.
+5. Products by job, and why. Never name a product, brand, trade name or active ingredient, and never use the word "chemical". Describe each product by its job (bait, an insect-control treatment, an insect growth regulator, a larvicide). For each piece of work, give one plain clause on why it fits what was found, taken from HOW IT WORKS or EXPECTATIONS; when neither covers it, describe the work without a reason. Those lines explain how a product works, never where or how it was applied today: the place and method come only from the record. Never add a mechanism, pest, residual period or effect they do not state.
 6. No amounts or measurements: no mL, cc, teaspoons, tablespoons, fluid ounces, ounces, gallons, pounds, grams, rates, mix strength, percentages, linear feet, square feet or acreage.
 7. Never the word "safe" in any form ("safe once dry", "pet-safe", "safely"), and never "non-toxic" or "harmless". Give no re-entry, drying, rainfast or waiting time and no aftercare or safety instructions: the report's own sections cover them.
 8. Say nothing about EPA registration. If it ever must appear, only "EPA-registered" or "EPA-exempt", never "EPA-approved".
 9. No prices, "free", "included", "covered", warranty, guarantee, bond, or "per visit". If a cadence must be named, say "per application".
 10. The company is "Waves Pest Control", or "we". Never "Waves Pest Control & Lawn Care", "Waves Lawn Care" or "Waves Lawn & Pest".
-11. No timeframes ("7–14 days", "a few days", "two weeks") and no next-visit date, day or arrival window. A recorded next step may be named without one ("at your next visit").
-12. Do not repeat what the report prints on its own: the product list, re-entry and aftercare guidance, the next visit's date and time, the technician's tip, the "What to expect", rain and spider cards, the "What you flagged" card, and the activity gauge's number or scale. The activity level in words ("light activity along the fence") is what the technician saw and belongs in the paragraph.
+11. Timeframes and dates. A timeframe ("a few days", "about 1–2 weeks") may appear only in WHAT TO EXPECT and WHAT'S NEXT, and only in the words of an EXPECTATIONS line: never invent, stretch, convert or combine one. Never write a calendar date, weekday or arrival window, except an earlier visit's date and the REACH-OUT DATE when one is supplied, written exactly as supplied. Never say whether a visit is booked, scheduled or coming: the report shows the next visit itself, as it stands when the customer opens it.
+12. Do not repeat what the report prints on its own: the product list, each product's "How it works" line word for word, re-entry and aftercare guidance, the next visit's date and window, the technician's tip, the rain and spider cards, the "What you flagged" card, and the activity gauge's number or scale. A short clause on why a treatment fits this problem is not repetition. The activity level in words ("light activity along the fence") is what the technician saw and belongs in WHAT WE FOUND.
 13. The report refuses these words, so never use them: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, "all clear", "is clear", "clear of pests", pest-free, any "-proof" word, guarantee, guaranteed, toxic, poison, poisonous, dangerous, deadly, unsafe.
 14. Never mention a treatment map, a traced route or a treated outline.
-15. Season, weather, prior visits and product labels are background. Never present them as something found today.
+15. History. Prior visits, season, weather and labels are background. Mention an earlier visit only when it bears on today's problem (the same pest or the same spot), always marked as past with its date, and skip visits with nothing to add. Absences in history stay local too. Never present history as something found today, and never say things are better or worse unless the records show both sides.
+16. Next time. Say what we will check or do at a next visit only when the technician note or a recorded recommendation says so. Never promise a visit, a return trip, a result, or more checks than the record shows.
+17. When to reach out. End WHAT'S NEXT with when to contact us: tie it to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe or a sign the customer can notice. Never ask the customer to watch something only the technician tracks.
 
 STYLE (the owner's prose rules; they never override the rules above)
 ${HUMAN_PROSE_RULES}
@@ -56,13 +62,18 @@ const PROMPT_REWRITES = Object.freeze([
   // v4 hard constraint 5: the parser accepts one line per section only.
   [
     '5. **Plain text only.** No markdown, no bold, no emojis, no bullet points, no headers in the output body. Just paragraphs under the two section titles.',
-    '5. **Plain text only.** No markdown, no bold, no emojis, no bullet points, no headers in the output body. Under each of the two section titles write exactly ONE line of text, with no line breaks inside a section.',
+    '5. **Plain text only.** No markdown, no bold, no emojis, no bullet points. Use only the four section titles in the OWNER RULES, each followed by exactly ONE line of plain text, with no line breaks inside a section.',
+  ],
+  // v4 hard constraint 6: length follows the record.
+  [
+    '6. **Length.** Each section should be 2–4 sentences. Together, both sections should total roughly 80–140 words. This is a report block, not an essay.',
+    '6. **Length.** Let the record decide: more when the visit, its history or the customer\'s questions call for it, less for a thin record. Never pad.',
   ],
   // v4 hard constraint 7: the dictated note holds work AND observations.
   [
     '   - **Completed work** (Service Notes, Actions completed, Areas serviced, Products applied, and the "Work recorded" lines of a STRUCTURED SERVICE FINDINGS block): what was actually done — safe to describe in WHAT WE DID.',
     '   - **Technician note** (the TECHNICIAN NOTE block): the technician\'s own words, often dictated. It can hold what was done, what was seen, what the customer said, and advice for later. Sort each sentence into the matching category below and never move a sentence into a different one.\n'
-      + '   - **Completed work** (Actions completed, Areas serviced, Products applied, the "Work recorded" lines of a STRUCTURED SERVICE FINDINGS block, and technician-note sentences about work done): what was actually done — describe it in WHAT WE DID.',
+      + '   - **Completed work** (Actions completed, Areas serviced, Products applied, the "Work recorded" lines of a STRUCTURED SERVICE FINDINGS block, and technician-note sentences about work done): what was actually done — describe it in WHAT WE DID AND WHY.',
   ],
   [
     '(Customer concern, and the "Customer communication" lines of a STRUCTURED SERVICE FINDINGS block)',
@@ -81,10 +92,20 @@ const PROMPT_REWRITES = Object.freeze([
     '9. **Active ingredients come only from Products applied.** Never infer an active ingredient or product from an action label or area (e.g. "Exterior perimeter band" does not imply bifenthrin). If Products applied is empty, use functional descriptions only.',
     '9. **Never infer a product.** Never infer a product or what it does from an action label or area; describe only the recorded work.',
   ],
-  // v4 hard constraint 11 still allowed a "justified" timeframe.
+  // v4 hard constraint 11: timeframes only in the approved wording, and
+  // earlier visits cited by their supplied dates.
+  [
+    'Never state how long someone has been a customer, how many visits they\'ve had, or "X years/seasons" unless that number is explicitly provided.',
+    'Never state how long someone has been a customer or "X years/seasons" unless that number is explicitly provided; cite an earlier visit only by its supplied date.',
+  ],
   [
     'Do not default to stock recovery windows like "7–14 days" or "10–14 days" — give a timeframe only when a specific product or the grounding context justifies one, and make it fit the situation.',
-    'Never state a recovery or response timeframe of any kind (no "7–14 days", "a few days" or "two weeks").',
+    'Give a recovery or response timeframe only in the words of an EXPECTATIONS line.',
+  ],
+  // Recurring pest module: the four-section shape, length by the record.
+  [
+    'Return exactly the existing WHAT WE DID / WHAT WE FOUND plain-text structure. Usually write 2–3 sentences for completed work and 2–4 sentences for findings, expectations, and supported nonduplicative follow-up. Target about 80–140 words, but write less for thin records.',
+    'Return the four-section plain-text structure in the OWNER RULES. Length follows the record; write less for thin records.',
   ],
   // Recurring pest module: the next-step chip it names was retired, and the
   // coverage block it waits for is never built.
@@ -107,7 +128,7 @@ const PROMPT_REWRITES = Object.freeze([
   ],
   [
     'State the recorded next program check or approved review plan without inventing a date. Use the existing approved device-handling instructions; do not encourage',
-    'Name a recorded next program check without a date, day or window. Leave device-handling instructions to the report\'s own sections; do not encourage',
+    'Name a recorded next program check without a date, day or window, and never say whether it is booked (the report shows the next visit itself). Leave device-handling instructions to the report\'s own sections; do not encourage',
   ],
   ['Relay only the approved site-specific precautions or referral.', 'Name a recorded referral; leave site precautions to the report\'s own sections.'],
   [
@@ -136,9 +157,13 @@ const PROMPT_REWRITES = Object.freeze([
     'Explain a response, limitation, aftercare instruction, or conducive condition only from supplied approved context.',
     'Explain a response, limitation, or conducive condition only from supplied approved context; leave aftercare instructions to the report\'s own sections.',
   ],
-  // Remaining-service main adapter: one line per section, and the owner
-  // rules now name what the report prints on its own.
-  ['Return exactly these titles and plain-text paragraphs:', 'Return exactly these titles, each followed by exactly one line of plain text:'],
+  // Remaining-service main adapter: the four sections, length by the
+  // record, and the owner rules name what the report prints on its own.
+  ['OUTPUT ADAPTER — MAIN TWO-SECTION REPORT', 'OUTPUT ADAPTER — MAIN REPORT'],
+  [
+    'Return exactly these titles and plain-text paragraphs:\n\nWHAT WE DID\n\nUsually 2–3 sentences describing the relevant work actually completed, where or how it occurred, and its supported purpose. Inspection-only and monitoring visits describe their actual work without implying an application.\n\nWHAT WE FOUND\n\nUsually 2–4 sentences describing the observed condition or attributed concern, its supported meaning, any verified progress or remaining limitation, and a relevant approved next step when it is not rendered elsewhere.\n\nTarget approximately 80–140 words across both sections. Write less with thin inputs.',
+    'Return exactly these titles, in this order, each followed by exactly one line of plain text:\n\nWHAT WE FOUND\n\nWhat the customer told us and what was observed today, with supported history.\n\nWHAT WE DID AND WHY\n\nThe work actually completed, where it went, and why it fits what was found. Inspection-only and monitoring visits describe their actual work without implying an application.\n\nWHAT TO EXPECT\n\nHow today\'s work should change what the customer sees, from the EXPECTATIONS lines only.\n\nWHAT\'S NEXT\n\nThe next check or step, the customer\'s own task, and when to contact us.\n\nLength follows the record. Write less with thin inputs.',
+  ],
   [
     ' Preserve material limitations and required instructions rather than deleting them merely to meet a word target; the rendering layer must handle necessary length.',
     ' Preserve material limitations rather than deleting them merely to meet a word target.',
@@ -159,6 +184,38 @@ function composeWriterRulesPrompt([header, ...parts]) {
 // User-message labels the route uses while the rules apply.
 const TECHNICIAN_NOTE_HEADER = "[TECHNICIAN NOTE — the technician's own words, often dictated; it may mix work done, what was seen, what the customer said, and advice for later: sort each sentence]";
 const CUSTOMER_WORDS_HEADER = 'WHAT THE CUSTOMER TOLD US (their own texts and emails, and AI summaries of calls; context only, never a finding)';
+
+// scheduled_services.customer_request* (why the customer booked; filled by
+// the re-service page, self-booking and AI call bookings).
+const BOOKED_REASON_SOURCES = Object.freeze({
+  picker: 'typed on the re-service page',
+  text: 'sent by text',
+  call: 'from a phone call; an AI summary of what they said, not their exact words',
+  office: 'taken down by the office',
+});
+// The customer typed this, so it gets the customer-words scrub (pest talk
+// only, access details dropped); without a scrub it is left out, never
+// passed on raw.
+function bookedReasonBlock(row, scrub) {
+  if (typeof scrub !== 'function') return '';
+  let pests = row?.customer_request_pests;
+  if (typeof pests === 'string') {
+    try { pests = JSON.parse(pests); } catch { pests = []; }
+  }
+  const pestWords = (Array.isArray(pests) ? pests : [])
+    .map((pest) => String(pest || '').replace(/[_-]+/g, ' ').trim())
+    .filter(Boolean);
+  const text = scrub(String(row?.customer_request || '').trim()).trim();
+  if (!text && !pestWords.length) return '';
+  const source = Object.hasOwn(BOOKED_REASON_SOURCES, row?.customer_request_source)
+    ? BOOKED_REASON_SOURCES[row.customer_request_source]
+    : 'recorded at booking';
+  return [
+    `BOOKED REASON (why the customer booked this visit, ${source}; attribute it with "You asked us…" or "You mentioned…", never a finding)`,
+    text ? `Reason: ${text}` : null,
+    pestWords.length ? `Pests picked: ${pestWords.join(', ')}` : null,
+  ].filter(Boolean).join('\n');
+}
 
 function withheldProductsLine(count) {
   return count > 0
@@ -226,7 +283,7 @@ function activeIngredientsMentioned(text, value) {
 }
 
 const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|cc|ccs|cubic\s+centimet(?:er|re)s?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gals?|gallons?|qts?|ozs|pts?|tsps|tbsps|lbs?|pounds?|grams?|kilograms?|kgs?)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
-const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\bacres?\b|\bacreage\b/i;
+const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft|yards?|yds?)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\s+(?:linear\s+|square\s+)?(?:feet|foot|lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\bacres?\b|\bacreage\b/i;
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
 const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
@@ -268,6 +325,62 @@ const TIMEFRAME_RE = new RegExp(
   + '|\\bnext\\s+(?:month|year|season|quarter)\\b',
   'i',
 );
+// The timeframe phrases inside supplied EXPECTATIONS lines, whole: the only
+// timeframes the writer may use (rule 11). A hedge ("about", "within") and a
+// range ("1–2 weeks", "a week or two") stay part of the phrase, so an
+// approved window can't pass shortened ("a week or two" never as "a week").
+const DURATION_PHRASE_RE = new RegExp(
+  '\\b(?:(?:about|around|roughly|approximately|up\\s+to|within)\\s+)?'
+  + `(?:\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}|${DURATION_NUMBER}\\s+${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?)\\b`,
+  'gi',
+);
+function groundedTimeframePhrases(lines) {
+  return [...new Set((Array.isArray(lines) ? lines : [])
+    .flatMap((line) => String(line || '').match(DURATION_PHRASE_RE) || [])
+    .map((phrase) => phrase.replace(/\s+/g, ' ').trim())
+    .filter(Boolean))];
+}
+// The calendar dates a text carries ("Wednesday, October 14", "October
+// 14"): a generated draft passed the generation screen, so its dates were
+// supplied ones, and an edit that keeps them is no new date.
+const CALENDAR_DATE_PHRASE_RE = /\b(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\b/g;
+function draftDatePhrases(text) {
+  return [...new Set(String(text || '').match(CALENDAR_DATE_PHRASE_RE) || [])]
+    .flatMap((date) => [date, date.replace(/^\w+day,\s+/, '')]);
+}
+
+// An allowed phrase matches with loose spacing and either dash.
+function allowedPhrasePattern(phrase) {
+  return String(phrase || '').trim().split(/\s+/)
+    .map((word) => escapeRe(word).replace(/[-–]/g, '[-–]'))
+    .join('\\s+');
+}
+
+// Customer messages are never quoted (rule 3): an attributed quotation
+// ("You said, “ants are everywhere”", "you texted 'roaches again'") or any
+// double-quoted run of three or more words. An apostrophe ("the customer's
+// kitchen") opens no quote, and a paraphrase ("You mentioned ants near the
+// dishwasher") passes. Each quoted span is found once and its words counted
+// in code, so a long unclosed quote costs one linear scan.
+const ATTRIBUTED_QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b[^.!?]{0,30}?(?:[:,]\s*|\s+)["“‘']\w/i;
+// The same attribution after a quotation ("‘Roaches again by the sink,’ you
+// said"), however long; an apostrophe between letters ("it's") stays inside
+// the quote, any other quote mark ends the scan, and a quote mark right
+// after a letter never opens one, so it stays linear.
+const REVERSE_ATTRIBUTED_QUOTE_RE = /(?<!\w)[‘'"“]\w(?:[^"“”‘’'\n]|(?<=\w)['’](?=\w)){2,}?[’'"”]\s*,?\s*(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b/i;
+// A span ends at the next opening quote too, so many unclosed quotes still
+// cost one linear pass.
+const QUOTED_SPAN_RE = /["“]([^"“”\n]*)["”]/g;
+// Single-quoted runs too ("According to you, 'ants are back by the sink'"),
+// opened and closed only away from letters so "the customer's kitchen" is
+// no quote; an apostrophe between letters stays inside, any other quote mark
+// ends the span.
+const SINGLE_QUOTED_SPAN_RE = /(?<!\w)['‘]((?:[^'‘’\n]|(?<=\w)['’](?=\w))*)['’](?!\w)/g;
+const wordCount = (text) => text.trim().split(/\s+/).filter(Boolean).length;
+function quotesCustomer(copy) {
+  if (ATTRIBUTED_QUOTE_RE.test(copy) || REVERSE_ATTRIBUTED_QUOTE_RE.test(copy)) return true;
+  return [...copy.matchAll(QUOTED_SPAN_RE), ...copy.matchAll(SINGLE_QUOTED_SPAN_RE)].some((match) => wordCount(match[1]) >= 3);
+}
 // The activity gauge's number or scale (rule 12) in any form: "the rating
 // was 2", "rated two out of five", "2 on the five-point scale". The level in
 // words ("activity was light") and a count of a set ("2 of 5 stations",
@@ -277,7 +390,7 @@ const GAUGE_RE = /\b(?:rat(?:ed|ing)|scored?|gauge|level)\s+(?:(?:was|is|of|at|r
 // forms ("the next check is free", "the follow-up is included") but not a
 // physical state ("covered by mulch", "free of standing water").
 const ENTITLEMENT_RE = /\b(?:is|are|was|were|be|comes?)\s+(?:(?:completely|totally|also|fully)\s+)?(?:free|included|covered)\b(?!\s+(?:by|with|in|under|of|from|on)\b)/i;
-const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]?|pricing|fees?|invoice[ds]?|billing|payments?)\b|(?<!\bin\s)\bcharg(?:e|es|ed|ing)\b|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
+const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]?|pricing|fees?|invoice[ds]?|billing|payments?|complimentary)\b|\b(?:(?:visit|follow-?up|recheck|re-?treatment|treatment|application|re-?service|service|inspection|call-?back|check|trip)s?|it|this|that|these|those|they)(?:['’]s|\s+(?:is|are|was|were|will\s+be|comes?|came))\s+on\s+the\s+house\b|(?<!\bin\s)\bcharg(?:e|es|ed|ing)\b|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
 // Next-visit dates, days and times (rule 11): the report prints the
 // appointment itself. "October 7", "next Tuesday", "10 AM".
 // "May" only capitalized, so "activity may 2…" is not a date. A date is
@@ -400,6 +513,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [REENTRY_RE, 'reentry'],
   [TIMEFRAME_RE, 'timeframe'],
   [GAUGE_RE, 'gauge'],
+  [quotesCustomer, 'quote'],
   [PRICE_RE, 'price'],
   [ENTITLEMENT_RE, 'price'],
   [(copy) => forwardMention(copy, MONTH_DAY_RE), 'date'],
@@ -413,8 +527,71 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // Returns a short rejection reason, or null when the copy passes. Runs on
 // top of the report's existing screens (banned words, access codes, shape,
 // this visit's trade names), only while the rules apply.
-function writerRulesRejection(text, { activeIngredients = [] } = {}) {
-  const copy = String(text || '');
+// A visit tied to a supplied date ("your next visit is …", "we'll be back
+// …", "booked for …") is never a reach-out date: the report shows the next
+// visit itself (Codex #5500).
+const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
+// The reach-out date is the day to get in touch: its sentence must ask the
+// customer to contact us, and the date never ends a period ("keeps working
+// until Wednesday, October 14" would make it a residual claim; Codex #5500).
+const REACH_OUT_CONTACT_RE = /\b(?:contact us|let us know|tell us|call us|text us|email us|message us|reach out|get in touch|give us a (?:call|text|ring)|call or text|text or call)\b/i;
+const DURATION_END_BEFORE_DATE = '\\b(?:until|till|through|thru)\\s+(?:on\\s+)?';
+
+// The four report titles, alone on a line or written inline with text.
+const REPORT_TITLE_LINE_RE = /^\s*(WHAT WE FOUND|WHAT WE DID AND WHY|WHAT TO EXPECT|WHAT['’]S NEXT)(?::(.*))?\s*$/;
+const ALLOWANCE_SECTIONS = new Set(['WHAT TO EXPECT', 'WHAT\'S NEXT']);
+// Applies `fn` only to the text of the sections where supplied timeframes
+// and dates belong (rule 11): WHAT TO EXPECT and WHAT'S NEXT. Copy with no
+// report titles at all (a single sentence) is one such section.
+function withinAllowanceSections(copy, fn) {
+  const lines = copy.split('\n');
+  if (!lines.some((line) => REPORT_TITLE_LINE_RE.test(line))) return fn(copy);
+  let current = null;
+  return lines.map((line) => {
+    const title = REPORT_TITLE_LINE_RE.exec(line);
+    if (title) {
+      current = title[1].replace(/[’]/g, "'");
+      const rest = title[2];
+      return rest !== undefined && ALLOWANCE_SECTIONS.has(current) ? line.replace(rest, fn(rest)) : line;
+    }
+    return current && ALLOWANCE_SECTIONS.has(current) ? fn(line) : line;
+  }).join('\n');
+}
+
+function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [], allowedDates = [] } = {}) {
+  // Supplied timeframes (an EXPECTATIONS line's own words) pass exactly as
+  // supplied, and a supplied date (the reach-out date) passes only in a
+  // sentence that ties it to no visit; anything else still trips the
+  // timeframe and date screens.
+  let copy = String(text || '');
+  const dates = (Array.isArray(allowedDates) ? allowedDates : []).filter((date) => String(date || '').trim().length >= 3);
+  // Sentences without the section titles: "WHAT'S NEXT" itself carries
+  // "next" and must not read as a visit cue (Codex #5500).
+  const titleFree = copy.split('\n').map((line) => {
+    const title = REPORT_TITLE_LINE_RE.exec(line);
+    return title ? (title[2] || '') : line;
+  }).join('\n');
+  const sentences = titleFree.split(/(?<=[.!?])\s+|\n+/);
+  for (const date of dates) {
+    const datePattern = new RegExp(`(?<![\\w-])${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
+    const durationEnd = new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
+    if (sentences.some((sentence) => datePattern.test(sentence)
+      && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
+      return 'date';
+    }
+  }
+  // An allowed phrase passes only where it belongs: inside WHAT TO EXPECT
+  // and WHAT'S NEXT; the same words elsewhere (a residual period in WHAT WE
+  // DID AND WHY) still trip the screen (Codex #5500).
+  // Longest first, so a whole phrase is matched before any part of it.
+  const phrases = [...(Array.isArray(allowedPhrases) ? allowedPhrases : []), ...dates]
+    .sort((a, b) => String(b || '').length - String(a || '').length);
+  for (const phrase of phrases) {
+    const pattern = allowedPhrasePattern(phrase);
+    if (String(phrase || '').trim().length < 3 || !pattern) continue;
+    const phraseRe = new RegExp(`(?<![\\w-])${pattern}(?![\\w-])`, 'gi');
+    copy = withinAllowanceSections(copy, (part) => part.replace(phraseRe, 'X'));
+  }
   const hit = WRITER_RULE_SCREENS.find(([check]) => (typeof check === 'function' ? check(copy) : check.test(copy)));
   if (hit) return hit[1];
   const patterns = [...new Set([...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
@@ -432,7 +609,10 @@ module.exports = {
   TECHNICIAN_NOTE_HEADER,
   CUSTOMER_WORDS_HEADER,
   withheldProductsLine,
+  bookedReasonBlock,
   COMMON_ACTIVE_INGREDIENTS,
   activeIngredientsMentioned,
+  groundedTimeframePhrases,
+  draftDatePhrases,
   writerRulesRejection,
 };

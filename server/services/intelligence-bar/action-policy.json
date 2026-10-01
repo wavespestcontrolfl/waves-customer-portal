@@ -951,6 +951,22 @@
     "approval": "ui_confirm",
     "scope": "none"
   },
+  "set_railway_gate": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "set_growthbook_feature_environment": {
+    "module": "growthbook-tools.js",
+    "domain": "growthbook",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "get_recent_completions": {
     "module": "tools.js",
     "domain": "customers",
@@ -1385,6 +1401,14 @@
   },
   "list_gap_reports": {
     "module": "gap-report-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
+  "needs_me": {
+    "module": "needs-me-tools.js",
     "domain": "ops",
     "kind": "read",
     "role": "admin",

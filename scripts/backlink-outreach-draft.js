@@ -34,7 +34,9 @@ function parseArgs() {
     // Dry-run previews print to STDOUT here (operator terminal), never via the app
     // logger — recipient emails/bodies must not land in Railway's plain-text logs.
     for (const s of r.samples || []) {
+      if (s.skipped) { console.log(`\n── ${s.domain}  SKIPPED: ${s.skipped}`); continue; }
       console.log(`\n── ${s.domain}  (T${s.tier ?? '?'} ${s.link_type})  → ${s.to_email}`);
+      if (s.cited_page) console.log(`   CITED PAGE: ${s.cited_page}`);
       console.log(`   SUBJECT: ${s.subject}`);
       console.log(s.body.split('\n').map((l) => `   ${l}`).join('\n'));
     }

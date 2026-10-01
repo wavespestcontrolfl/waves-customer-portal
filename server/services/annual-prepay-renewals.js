@@ -1151,6 +1151,28 @@ async function seededVisitPriceForTerm(term, conn, coverageVisitCount) {
 // slide persisted to term_end — even when no visit is linked to it yet (a
 // legacy decided lapse): only slots inside the stored window are filled.
 // Unset (every activation / refresh caller), the behavior is unchanged.
+// Durable record that a term's coverage window already slid for a late
+// payment (see the slide in ensureCoverageRowsForTerm). One row per term; the
+// newest wins. Returns { originalTermEnd } or null. A failed read
+// THROWS — the caller fails safe (no second slide).
+const WINDOW_SLID_ACTION = 'annual_prepay_window_slid';
+async function findWindowSlideMarker(term, conn) {
+  const row = await conn('activity_log')
+    .where({ action: WINDOW_SLID_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [String(term.id)])
+    .orderBy('created_at', 'desc')
+    .first('metadata');
+  if (!row) return null;
+  let meta = row.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  if (!meta) return null;
+  return {
+    originalTermEnd: dateOnly(meta.original_term_end),
+  };
+}
+
 async function ensureCoverageRowsForTerm(term, conn = db, {
   today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null, gapFillOnly = false,
 } = {}) {
@@ -1231,9 +1253,34 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // installation date + 12 months, and the anchoring sweep runs after the
   // installation, so the lag would otherwise stretch every anchored year.
   // Nor does a termite renewal SUCCESSOR (windowFixedAtCreation).
-  if (!alreadyActivated && !windowFixedAtCreation(term)
-    && anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
-    effectiveTermEnd = addDaysYmd(termEnd, anchorLagDays);
+  // The slide is a pure function of the term's ORIGINAL end and the anchor,
+  // never an increment on whatever term_end currently holds. A first
+  // activation can persist the slid term_end (below) and then fail (or defer
+  // seeding) BEFORE any visit is linked to the term — "already activated" is
+  // inferred from linked rows, so the retry would look like a first
+  // activation again and add the payment lag to the already-slid end. The
+  // slide therefore leaves a durable marker (activity_log, written BEFORE
+  // term_end moves) recording the term's original end; a retry recomputes
+  // original end + lag(anchor), which is the same value for the same anchor
+  // (no change, no double slide) and grows only by what a genuinely later
+  // anchor adds.
+  let priorSlide = null;
+  let slideMarkerUnreadable = false;
+  const slideEligible = !alreadyActivated && !windowFixedAtCreation(term)
+    && anchorLagDays != null && anchorLagDays > 0 && !!(await annualPrepayColumns(conn)).term_end;
+  if (slideEligible) {
+    try {
+      priorSlide = await findWindowSlideMarker(term, conn);
+    } catch (err) {
+      // Fail SAFE (same posture as the successor check): without certainty
+      // the slide was not already applied, don't slide again.
+      slideMarkerUnreadable = true;
+      logger.warn(`[annual-prepay] term ${term.id} window-slide marker lookup failed (${err.message}) — coverage window not extended this run`);
+    }
+  }
+  if (slideEligible && !slideMarkerUnreadable) {
+    const slideBase = priorSlide?.originalTermEnd || termEnd;
+    effectiveTermEnd = addDaysYmd(slideBase, anchorLagDays);
     // Never slide into a successor term: a long-pending invoice can be paid
     // after the customer already bought the NEXT year, and overlapping paid
     // windows would let both terms claim the same visits. Cap at the day
@@ -1249,7 +1296,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       const successor = await conn('annual_prepay_terms')
         .where({ customer_id: term.customer_id })
         .whereNot({ id: term.id })
-        .where('term_start', '>', termEnd)
+        .where('term_start', '>', slideBase)
         .orderBy('term_start', 'asc')
         .first('term_start');
       if (successor && dateOnly(successor.term_start) <= effectiveTermEnd) {
@@ -1261,6 +1308,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       logger.warn(`[annual-prepay] term ${term.id} successor check failed (${err.message}) — coverage window not extended`);
       effectiveTermEnd = termEnd;
     }
+    // A retry never SHRINKS a window an earlier run already persisted.
+    if (effectiveTermEnd < termEnd) effectiveTermEnd = termEnd;
   }
   const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, effectiveTermEnd, anchorOptions);
   if (!targetDates.length) {
@@ -1537,6 +1586,24 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // the same lag). The in-memory term is mutated too: refreshTermSnapshot
   // passes this same object to the attach/stamp steps that follow.
   if (effectiveTermEnd !== termEnd) {
+    // Marker FIRST (see priorSlide above): if the term_end write then fails,
+    // the retry finds the marker and recomputes the same end from the recorded
+    // original; the reverse order could slide twice. A retry that already
+    // holds the marker does not write another.
+    if (!priorSlide) {
+      await conn('activity_log').insert({
+        customer_id: term.customer_id,
+        action: WINDOW_SLID_ACTION,
+        description: 'Annual prepay paid after its anchor: coverage window slid once so all sold visits stay in-window.',
+        metadata: {
+          term_id: term.id,
+          original_term_end: termEnd,
+          effective_term_end: effectiveTermEnd,
+          anchor_date: targetDates[0] || null,
+          lag_days: anchorLagDays,
+        },
+      });
+    }
     await conn('annual_prepay_terms')
       .where({ id: term.id })
       .update({ term_end: effectiveTermEnd, updated_at: new Date() });
@@ -1877,6 +1944,52 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     else await conn.transaction((trx) => retimeAdoptedRow(trx));
   }
 
+  // datesToSeed was computed BEFORE the customer-comms lock every windowless
+  // insert below takes. Two refreshes of one term can overlap (the re-stamp
+  // sweep against an admin edit or the activation refresh, the daily leg
+  // against the hourly one): both would read the same gaps, then insert one
+  // after the other and leave DUPLICATE future appointments. Re-evaluated
+  // UNDER the lock that serializes the inserts, against what other
+  // transactions have committed since: a visit this call has not seen that
+  // fills the sold count, or sits within the slot tolerance of this date
+  // (exactly on the date for the promised slot), means the slot is taken.
+  const consumedConcurrentIds = new Set();
+  const seedStillNeeded = async (t, scheduledDate) => {
+    // The canonical coverage selection itself, re-read under the lock: only a
+    // row THIS term would count (same service family, renewal property
+    // scope, foreign-term exclusion) can fill one of its slots — a lawn visit
+    // or another property's visit must never suppress a sold seed.
+    // The scheduled_services read goes through a distinct alias — a presence
+    // probe of its own — so it is its own statement to anything that
+    // distinguishes it from the seeder's reads and inserts (same device as the
+    // owner probe above).
+    const probe = (table, ...rest) => t(table === 'scheduled_services' ? 'scheduled_services as seed_recheck' : table, ...rest);
+    const fresh = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: effectiveTermEnd }, probe);
+    const known = new Set([...existingRows, ...createdRows].map((row) => String(row.id)));
+    const concurrent = (fresh || []).filter((row) => !known.has(String(row.id))
+      && dateOnly(row.scheduled_date) && adoptableCoverageRow(row));
+    if (!concurrent.length) return true;
+    // fresh is the canonical set (capped at the sold count, known rows
+    // included), so a full set means every slot is taken.
+    if (fresh.length >= coverageVisitCount) return false;
+    // Each concurrent visit fills ONE slot: once it has suppressed a seed it
+    // can't suppress a neighbouring one too (a visit halfway between two
+    // slots on a short cadence sits within tolerance of both).
+    const filler = concurrent.find((row) => {
+      if (consumedConcurrentIds.has(String(row.id))) return false;
+      const existingDate = dateOnly(row.scheduled_date);
+      if (scheduledDate === promisedTarget) return existingDate === scheduledDate;
+      const diff = daysUntil(existingDate, scheduledDate);
+      return diff != null && Math.abs(diff) <= slotToleranceDays;
+    });
+    if (!filler) return true;
+    consumedConcurrentIds.add(String(filler.id));
+    return false;
+  };
+  const skipConcurrentSeed = (scheduledDate) => {
+    logger.info(`[annual-prepay] term ${term.id}: ${scheduledDate} was filled by a concurrent refresh under the lock — not seeding a duplicate`);
+  };
+
   for (const scheduledDate of datesToSeed) {
     const wantsWindow = !!firstVisitWindowStart && scheduledDate === firstTargetDate;
     let created;
@@ -1895,6 +2008,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
         created = null;
       } else if (await termOwnerMovedUnderFence(conn)) {
         created = null;
+      } else if (!(await seedStillNeeded(conn, scheduledDate))) {
+        skipConcurrentSeed(scheduledDate);
+        created = null;
       } else {
         // Visit groups: deliberately NOT stamped — these are windowless
         // seeds (buildInsert(date, null)), which maybeGroupRow refuses by
@@ -1907,6 +2023,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       // Visit groups: deliberately NOT stamped — windowless seed (above).
       [created] = await withCustomerCommsLock(conn, term.customer_id, async (trx) => {
         if (await termOwnerMovedUnderFence(trx)) return [null];
+        if (!(await seedStillNeeded(trx, scheduledDate))) {
+          skipConcurrentSeed(scheduledDate);
+          return [null];
+        }
         return trx('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
       });
     }
@@ -4108,7 +4228,18 @@ async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false,
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
-async function refreshTermSnapshot(termOrId, conn = db) {
+async function fileSkippedPastSlots(conn, term, skippedPast, windowEnd) {
+  if (!skippedPast?.length) return;
+  const many = skippedPast.length > 1;
+  await fileCoverageExceptionAfterCommit(conn, term, 'restamp_past_slot_unscheduled',
+    `This customer's paid annual prepay has ${many ? `${skippedPast.length} visits` : 'a visit'} with no appointment whose date has passed (${skippedPast.join(', ')}). Coverage runs through ${windowEnd}. If the slot was cancelled on purpose, no action is needed; otherwise book ${many ? 'replacements' : 'a replacement'} with the customer.`,
+    { title: 'Annual prepay: a paid visit needs a replacement booked' });
+}
+
+// seedNotBefore (opt-in, the re-stamp sweep): the gap-fill never seeds a
+// visit dated before it — passed through to ensureCoverageRowsForTerm.
+// Unset (every activation / schedule-edit caller), behavior is unchanged.
+async function refreshTermSnapshot(termOrId, conn = db, { seedNotBefore = null } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
     ? termOrId
@@ -4117,8 +4248,6 @@ async function refreshTermSnapshot(termOrId, conn = db) {
 
   const termStart = dateOnly(term.term_start);
   const termEnd = dateOnly(term.term_end);
-  const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
-  const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
   // A late payment can SLIDE the coverage window (ensureCoverageRowsForTerm
   // persists the new term_end and reports it back). Every downstream step in
@@ -4146,8 +4275,13 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   // nightly sweep replaces a skipped visit). A void/refund 'cancelled' row
   // (renewal_decision NULL) or an end_now_refund lapse is never touched.
   if (ACTIVE_STATUSES.includes(term.status)) {
-    const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
+    const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn, { seedNotBefore });
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
+    // A paid slot the floor declined to seed (its date passed) is never
+    // dropped silently: after a partial activation the sweep would stamp
+    // what exists and stop matching the term, leaving the customer a visit
+    // short (Codex #5515 r1 P2). Filed after commit, deduped per term.
+    if (seedNotBefore) await fileSkippedPastSlots(conn, term, ensured?.unseededPastDates, windowEnd);
     // Attach + prepaid stamping run even on a palm-identity DEFERRAL
     // (codex r18 pre-push P0, superseding the earlier hard-stop): the
     // prepaid stamp is the anti-double-bill mechanism — an already-booked
@@ -4171,6 +4305,16 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     const kept = await keepEndAtTermLapseCoverage(term, conn);
     if (kept?.windowEnd) windowEnd = kept.windowEnd;
   }
+  return writeLastServiceSnapshot(term, termStart, windowEnd, conn);
+}
+
+// The term's last-scheduled-visit snapshot (renewal notices key off
+// last_scheduled_service_date). The tail of refreshTermSnapshot, shared with
+// the re-stamp sweep's stamp-only pass, which must leave it as current as a
+// completed activation would have.
+async function writeLastServiceSnapshot(term, termStart, windowEnd, conn) {
+  const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
+  const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
   const coveredRows = coverageServiceType && coverageVisitCount
     ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn)
     : [];
@@ -5700,6 +5844,257 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   await retryPaidLapseReconciles(conn);
   if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
+  }
+  return summary;
+}
+
+// ---------------------------------------------------------------------------
+// RESTAMP LEG — closes the "activated but never stamped" window.
+//
+// syncTermForInvoicePayment flips a term pending -> active in its own
+// transaction and only THEN stamps its visits (refreshTermSnapshot). When that
+// stamp pass throws (a lost price lookup now fails CLOSED, #5387), the Stripe
+// webhook only logs: the term is active and paid, its canonical visits are
+// unstamped, activatePaidPendingTerms ignores it (it only picks up
+// payment_pending terms) and nothing else re-stamps an ordinary active term
+// until somebody edits that customer's schedule. A covered visit that
+// COMPLETES in that window bills the customer on top of the prepay.
+//
+// This leg re-runs the SAME stamp path (refreshTermSnapshot) for exactly the
+// terms that need it, from the daily workflow that already carries
+// reconcileCoveredTermsSweep. Idempotent by construction: a term whose
+// canonical visits are all stamped, terminal, prepaid elsewhere or price-held
+// is never refreshed, so a second run writes nothing.
+//
+// A price-held visit (holdPriceDriftedRows) is left held ON PURPOSE: the
+// stamp-time price check owns that decision and already told the office once.
+// A term that fails is logged and alerted (fileCoverageException's 7-day
+// per-term dedupe, no failure counter / migration) and the sweep moves on.
+// ---------------------------------------------------------------------------
+const RESTAMP_FAILED_REASON = 'restamp_sweep_failed';
+
+function rowStampedByTerm(term, row) {
+  return row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(row.prepaid_amount) > 0
+    && row.annual_prepay_term_id != null
+    && String(row.annual_prepay_term_id) === String(term.id);
+}
+
+// One term: decide from the canonical rows whether a refresh has anything to
+// do, then run it under the paid-backing recheck. Returns 'clean' (nothing
+// unstamped), 'held' (only price-held rows are unstamped), 'skipped' (no
+// longer a paid live term, or its customer row is locked by another
+// transaction — retried next run) or 'restamped'.
+// Stamp the term's existing canonical visits without seeding (attach + apply,
+// the stamping half of refreshTermSnapshot), then its last-visit snapshot —
+// an activation that threw mid-stamp never reached that write either.
+async function stampTermCoverageOnly(term, t) {
+  const window = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
+  await attachScheduledServices(window, t);
+  await applyPrepaidCoverageForTerm(window, t);
+  await writeLastServiceSnapshot(term, window.term_start, window.term_end, t);
+}
+
+async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), stampOnly = stampTermCoverageOnly) {
+  // A live term goes through the full refresh — the same seeding, callback
+  // detach, identity repair, stamping and snapshot an activation runs — but
+  // with a today floor on the gap-fill: an activated term's refresh
+  // otherwise fills its whole stored window, re-creating a slot the office
+  // cancelled months ago as a pending visit dated in the past (#5453
+  // terminal review P2). A term whose window has ENDED still owes its stamps
+  // to unfinished in-window visits (Codex #5453 r2 P1) but is only stamped,
+  // never refreshed: every slot it could seed is in the past.
+  const ended = !!term.term_end && term.term_end < todayKey;
+  const rows = await coverageRowsForTerm(term, conn);
+  const open = rows.filter((row) => row.id
+    && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
+    && !rowPrepaidElsewhere(term, row)
+    && !rowStampedByTerm(term, row));
+  if (!open.length) {
+    // Nothing unstamped among the canonical rows — but a term whose
+    // activation failed BEFORE seeding has no rows at all, and the prefilter
+    // admits it for that reason. A term that ever carried a linked visit is
+    // never re-seeded here (the office may have cancelled slots on purpose),
+    // nor is one that cannot seed yet (termite awaiting installation).
+    if (ended || !(await activationNeverSeeded(term, rows, conn))) return 'clean';
+  } else {
+    const { held, heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
+    // Every open row price-held: nothing to stamp — unless the activation
+    // never seeded, when the refresh must still schedule the remaining sold
+    // visits (it keeps the hold itself). Fable review on #5515.
+    if (!open.some((row) => !heldIds.has(String(row.id)))
+      && (ended || !(await activationNeverSeeded(term, rows, conn)))) {
+      // The stamp pass that held these may have thrown before its after-commit
+      // alert filed; the hold's dedupe key is per term+visit and never expires,
+      // so re-filing here is a no-op once the office has been told.
+      await fileHeldPriceDriftAlerts(term, held, conn);
+      return 'held';
+    }
+  }
+
+  // Everything below runs in ONE transaction (a failure rolls the partial
+  // attach + stamp back; the next run starts clean) under, in order:
+  //   1. share lock on the prepay invoice — serializes against the payment /
+  //      dispute-reopen writers, which update the invoice row first;
+  //   2. the term row FOR UPDATE — cancelTermWithRestorations (refund / void /
+  //      lost dispute) updates this row first, so a cancel either commits
+  //      before this point (the paid-backing recheck below then skips the
+  //      term) or waits until we commit; it can never clear stamps mid-refresh
+  //      and then have us stamp a cancelled term;
+  //   3. the customer row FOR UPDATE NOWAIT — the cancel writers take term ->
+  //      customer -> scheduled_services, and the accept transaction takes
+  //      customer -> scheduled_services; taking the customer before our
+  //      scheduled_services writes (and before stampUnlessYearEnded's
+  //      customers UPDATE) keeps the same order as both. A credit reversal
+  //      (admin-invoices) takes customer -> invoice, the reverse of 1 -> 3,
+  //      so this lock never waits (#5453 terminal review P2): a busy customer
+  //      skips the term and the next hourly run retries it.
+  // Inside the refresh the only further cross-transaction waits are try-locks
+  // (occupancy date lock, customer-comms), so they cannot join a cycle. The
+  // per-customer ANNUAL_PREPAY_LOCK_NS is NOT taken: only mint / re-price
+  // paths hold it, and activation's own refresh does not, so it would fence
+  // nothing here.
+  const run = async (t) => {
+    if (term.prepay_invoice_id) {
+      await t('invoices').where({ id: term.prepay_invoice_id }).forShare().first('id');
+    }
+    await t('annual_prepay_terms').where({ id: term.id }).forUpdate().first('id');
+    const fresh = await coveredTermsAsOf(t, null)
+      .where('t.id', term.id)
+      .whereIn('t.status', ACTIVE_STATUSES)
+      .first('t.*');
+    if (!fresh) return 'skipped';
+    if (fresh.customer_id && !(await tryLockCustomerNoWait(t, fresh.customer_id))) return 'skipped';
+    if (ended) {
+      await stampOnly(fresh, t);
+    } else {
+      await refresh(fresh, t, { seedNotBefore: todayKey });
+    }
+    // The activation that threw before its stamp also never reached the
+    // billing-mode stamp (syncTermForInvoicePayment runs it right after the
+    // refresh): without 'annual_prepay' the completion gate does not read the
+    // customer as prepaid. Idempotent, first-stamp-wins, skips an ended year.
+    await stampUnlessYearEnded(fresh, t);
+    // attach / stamp swallow their own SQL errors and a failed statement
+    // aborts this transaction (its COMMIT would quietly roll back while we
+    // count the term restamped) — this probe fails in an aborted transaction
+    // instead.
+    await t.raw('select 1');
+    return 'restamped';
+  };
+  return conn.isTransaction ? run(conn) : conn.transaction(run);
+}
+
+// FOR UPDATE NOWAIT on the customer row inside a savepoint, so a lock
+// conflict (55P03) rolls back only the savepoint and the caller's
+// transaction stays usable. false = another transaction holds it.
+async function tryLockCustomerNoWait(t, customerId) {
+  try {
+    await t.transaction((sp) => sp('customers').where({ id: customerId }).forUpdate().noWait().first('id'));
+    return true;
+  } catch (err) {
+    if (err?.code === '55P03') return false;
+    throw err;
+  }
+}
+
+// "Activation never seeded" — see restampOneTerm. The marker is the one
+// ensureCoverageRowsForTerm itself uses for "already activated": NO
+// scheduled_services row, in ANY status, was ever linked to the term. `rows` is the canonical
+// coverage set already read.
+async function activationNeverSeeded(term, rows, conn) {
+  const sold = normalizeCoverageVisitCount(term.coverage_visit_count);
+  if (!sold || rows.length >= sold) return false;
+  // A renewal successor seeds like any first activation (its lineage scope
+  // and fixed window are handled inside ensureCoverageRowsForTerm), so a
+  // paid successor whose activation failed before seeding is recovered too
+  // (#5453 terminal review P1). Only a termite plan awaiting installation
+  // cannot seed yet.
+  if (coverageAwaitsInstallation(term)) return false;
+  const cols = await scheduledServiceColumns();
+  if (!cols.annual_prepay_term_id) return false;
+  const linked = await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id');
+  return !linked;
+}
+
+async function restampUnstampedActiveTerms({
+  today = etDateString(), conn = db, refresh = refreshTermSnapshot, stampOnly = stampTermCoverageOnly,
+} = {}) {
+  const summary = { scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 };
+  if (!(await annualPrepayTableExists())) return summary;
+  const todayKey = dateOnly(today) || etDateString();
+  let terms = [];
+  try {
+    const cols = await scheduledServiceColumns();
+    if (!cols.annual_prepay_term_id || !cols.prepaid_method || !cols.prepaid_amount) return summary;
+    const excluded = [...PREPAID_UPDATE_EXCLUDED_STATUSES];
+    // Cheap prefilter: paid-backed (coveredTermsAsOf — the one "which terms
+    // hold money" definition) LIVE terms (ended windows included: a pending in-window visit is still
+    // prepaid work) that
+    // have at least one non-terminal visit in their window not already
+    // stamped by this term. coverageRowsForTerm (the canonical selection)
+    // then runs only for those.
+    terms = await coveredTermsAsOf(conn, null)
+      .whereIn('t.status', ACTIVE_STATUSES)
+      .whereNotNull('t.coverage_service_type')
+      .where('t.coverage_visit_count', '>', 0)
+      .where('t.prepay_amount', '>', 0)
+      // Settle window: a term flipped active (or edited) in the last 15
+      // minutes may still have its own activation / edit refresh in flight —
+      // leave it to that run; the next tick covers it.
+      .whereRaw(`coalesce(t.updated_at, now() - interval '1 day') < now() - interval '15 minutes'`)
+      .whereRaw(
+        `(exists (
+          select 1 from scheduled_services ss
+          where ss.customer_id = t.customer_id
+            and ss.scheduled_date between t.term_start and t.term_end
+            and lower(coalesce(ss.status, '')) not in (${excluded.map(() => '?').join(', ')})
+            and not (
+              coalesce(ss.prepaid_method, '') = ?
+              and coalesce(ss.prepaid_amount, 0) > 0
+              and coalesce(ss.annual_prepay_term_id::text, '') = t.id::text
+            )
+        )
+        -- or a term no visit was EVER linked to (activation failed before
+        -- seeding) whose window is still open; restampOneTerm decides whether
+        -- it truly needs seeding. An ENDED term is admitted only by the
+        -- branch above (an unfinished in-window visit still owed its stamp).
+        or (t.term_end >= ? and not exists (
+          select 1 from scheduled_services lk
+          where lk.annual_prepay_term_id is not null and lk.annual_prepay_term_id::text = t.id::text
+        )))`,
+        [...excluded, ANNUAL_PREPAY_PREPAID_METHOD, todayKey],
+      )
+      .orderBy('t.term_end', 'asc')
+      .select('t.*');
+  } catch (err) {
+    logger.warn(`[annual-prepay] restamp sweep query failed: ${err.message}`);
+    return summary;
+  }
+
+  for (const row of terms) {
+    summary.scanned += 1;
+    try {
+      const term = { ...row, term_start: dateOnly(row.term_start), term_end: dateOnly(row.term_end) };
+      const outcome = await restampOneTerm(term, conn, refresh, todayKey, stampOnly);
+      if (outcome === 'restamped') {
+        summary.restamped += 1;
+        logger.info(`[annual-prepay] restamp sweep re-applied coverage for term ${row.id}`);
+      } else if (outcome === 'held') summary.held += 1;
+      else if (outcome === 'skipped') summary.skipped += 1;
+    } catch (err) {
+      summary.failed += 1;
+      logger.warn(`[annual-prepay] restamp sweep failed for term ${row.id}: ${err.message}`);
+      // After the rolled-back transaction, on the bare connection: a notice
+      // filed inside a rolled-back scope would outlive it. 7-day per-term
+      // dedupe (fileCoverageException's default) — no failure counter needed.
+      await fileCoverageException(row, RESTAMP_FAILED_REASON,
+        `This customer's paid annual prepay has visits that are not marked as covered, and the automatic re-check could not fix them (${err.message}). Until they are stamped, a visit that is completed can bill the customer on top of the prepay. Open the customer's schedule and save any visit to re-apply coverage, or check the term.`,
+        { title: 'Annual prepay: visits not marked as covered' });
+    }
+  }
+  if (summary.restamped || summary.failed) {
+    logger.info(`[annual-prepay] restamp sweep: ${JSON.stringify(summary)}`);
   }
   return summary;
 }
@@ -10410,6 +10805,7 @@ module.exports = {
   activatePaidPendingTerms,
   suspendActiveTermsForDisputedInvoice,
   reconcileCoveredTermsSweep,
+  restampUnstampedActiveTerms,
   getActivelyCoveredCustomerIds,
   getCardExpiryExemptCustomerIds,
   getCardExpiryExemptions,
@@ -10506,6 +10902,7 @@ module.exports = {
   // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
   annualPrepayColumns,
   _private: {
+    stampTermCoverageOnly,
     PARENT_DECISION_LOCK_SESSIONS,
     supersedeRenewWithCustomerCancel,
     declinePaymentPendingWithCustomerCancel,

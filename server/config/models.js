@@ -185,6 +185,11 @@ const DEFAULTS = Object.freeze({
   // only when Gemini and the Sol second opinion disagreed. Dark behind
   // GATE_LAWN_ASSESSMENT_REFEREE.
   LAWN_ASSESSMENT_REFEREE: 'claude-fable-5-1',
+  // Daily Google Ads campaign advisor (owner ruling 2026-10-01): Claude Fable
+  // 5.1 at high effort writes the daily report. requires:'deep' in
+  // MODEL_CATALOG; dispatched through services/llm/call.js, which floors
+  // max_tokens for always-thinking models and reads past thinking blocks.
+  ADS_ADVISOR: 'claude-fable-5-1',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
@@ -195,6 +200,10 @@ const DEFAULTS = Object.freeze({
   GEMINI_IMAGE_STABLE: 'gemini-2.5-flash-image',
   GEMINI_VIDEO_FAST: 'veo-3.1-fast-generate-preview',
   GEMINI_VIDEO_QUALITY: 'veo-3.1-generate-preview',
+  // TypeSafe Jev: a decision-only model (yes/no, choice, score answers; no
+  // free text). Production PINS a dated version: the `jev-latest` alias moves
+  // under us, so the adapter refuses any model that is not jev-N.N.N.
+  TYPESAFE_JEV: 'jev-1.13.0',
 });
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
@@ -242,11 +251,14 @@ const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
-const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini' });
+const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini', TYPESAFE: 'typesafe' });
 
 // Cross-provider model defaults (env-overridable; same convention as the #1834
 // lawn pipeline's LAWN_WRITER_MODEL / LAWN_VISION_MODEL). NOT Anthropic IDs, so
 // scripts/check-models.js intentionally skips them (it validates Anthropic only).
+// TypeSafe Jev typed-decision model (ROUTES.typedDecision). Pinned version.
+const TYPESAFE_JEV = process.env.MODEL_TYPESAFE_JEV || DEFAULTS.TYPESAFE_JEV;
+
 const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
   || process.env.MODEL_OPENAI_BEST
   || DEFAULTS.OPENAI_BALANCED;
@@ -288,6 +300,9 @@ const PLANT_ID_REFEREE     = process.env.MODEL_PLANT_ID_REFEREE    || DEFAULTS.P
 // Lawn visit assessment name referee (owner ruling 2026-09-29) — explicit
 // opt-in via GATE_LAWN_ASSESSMENT_REFEREE, never automatic.
 const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEFAULTS.LAWN_ASSESSMENT_REFEREE;
+// Daily ads advisor (owner ruling 2026-10-01) — its own selector so the
+// advisor moves independently of FLAGSHIP / the highStakes policy.
+const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -400,6 +415,10 @@ const MODEL_CATALOG = {
   'gemini-3.5-flash': { label: 'Gemini 3.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
   'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
   'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
+  // TypeSafe Jev answers typed questions only (noul / choice / score); it never
+  // writes text, so its only cap is 'decision' and no text/vision picker may
+  // offer it.
+  'jev-1.13.0': { label: 'TypeSafe Jev 1.13', provider: 'typesafe', caps: ['decision'], status: 'current' },
   'muse-spark-1.3': { label: 'Muse Spark 1.3', provider: 'unknown', caps: ['text'], status: 'unavailable' },
 };
 
@@ -430,6 +449,11 @@ const ROUTES = Object.freeze({
   // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
   // miss leaves Gemini's read exactly as it was.
   lawnAssessmentReferee: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: LAWN_ASSESSMENT_REFEREE, effort: 'high' }),
+  // Typed decisions (services/typed-decisions/jev.js): TypeSafe Jev answers
+  // yes/no, choice and score questions. Single-leg by design, no cross-provider
+  // fallback: nothing else answers typed questions, so callers fall back to
+  // their existing path on `ok:false`. Never a TEXT_POLICIES leg.
+  typedDecision: Object.freeze({ provider: PROVIDER.TYPESAFE, model: TYPESAFE_JEV }),
 });
 
 // Generated-text policies always cross providers. The shared LLM dispatcher
@@ -457,6 +481,14 @@ const TEXT_POLICIES = Object.freeze({
   highStakes: Object.freeze({
     name: 'highStakes',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
+  adsAdvisor: Object.freeze({
+    name: 'adsAdvisor',
+    // Daily Google Ads advisor (campaign-advisor.js) — owner ruling
+    // 2026-10-01: Claude Fable 5.1 at high effort, GPT (Sol) as the backup.
+    // `effort` reaches only the Anthropic leg (services/llm/call.js#dispatch).
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ADS_ADVISOR, effort: 'high' }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
   fastStructured: Object.freeze({
@@ -629,6 +661,8 @@ module.exports = {
   OPENAI_LAWN_ASSESSMENT,
   PLANT_ID_REFEREE,
   LAWN_ASSESSMENT_REFEREE,
+  ADS_ADVISOR,
+  TYPESAFE_JEV,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
   EMBEDDING_DIMS,

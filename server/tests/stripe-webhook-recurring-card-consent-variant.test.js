@@ -1,22 +1,25 @@
 /**
- * setup_intent.succeeded -> estimate_recurring_card recovery backstop records the
- * consent variant the ACCEPT rendered and persisted (estimate_data.
- * acceptedRecurringCardConsentVariant, Codex round 2 P1 on #5485): an after-visit
- * accept whose browser never returned must not be enrolled under the BASE consent.
+ * setup_intent.succeeded (purpose estimate_recurring_card) — durable recovery
+ * of the accept's card enrollment records the SAME consent variant the capture
+ * UI rendered (PR-B, GATE_PAF_EXISTING_CUSTOMERS). The accept stamps
+ * estimate_data.acceptedRecurringCardConsentVariant next to the accepted
+ * SetupIntent id; a crash between the accept commit and the inline enrollment
+ * must not downgrade the recorded consent to the base card text.
  */
 jest.mock('stripe', () => jest.fn(() => ({})));
+jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', webhookSecret: 'whsec_mock' }));
 jest.mock('../routes/stripe-webhook-helpers', () => ({
   classifyExistingWebhookEvent: jest.fn(),
   invoicePaymentIntentBlocksFallback: jest.fn(() => false),
+  lateSavedCardPaymentNeedsOrphan: jest.fn(() => false),
   savedCardAttemptMatchesPaymentIntent: jest.fn(() => false),
   savedCardCreditAdjustment: jest.fn(() => null),
   STALE_CLAIM_WINDOW_MS: 60000,
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
-jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+15550009999') }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));
 jest.mock('../services/stripe-invoice-state', () => ({
   isInvoiceCollectibleStatus: jest.fn(() => true),
@@ -25,25 +28,30 @@ jest.mock('../services/stripe-invoice-state', () => ({
   INVOICE_COLLECTIBLE_STATUSES: [],
 }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn() }));
-const mockGateEnabled = jest.fn(() => true);
-jest.mock('../config/feature-gates', () => ({ isEnabled: (...a) => mockGateEnabled(...a), gates: {} }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: {} }));
 jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES: ['void'], invoiceAmountDue: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
-
-
-jest.mock('../services/stripe', () => ({ savePaymentMethod: jest.fn(), retrievePaymentMethod: jest.fn() }));
-jest.mock('../services/payment-method-consents', () => ({}));
-jest.mock('../services/autopay-enrollment', () => ({}));
+jest.mock('../services/stripe', () => ({
+  retrievePaymentIntent: jest.fn(),
+  retrievePaymentMethod: jest.fn(),
+  savePaymentMethod: jest.fn(),
+  retrieveSetupIntent: jest.fn(),
+}));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
-const mockEnrollEstimateCard = jest.fn(async () => ({ enrolled: true }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({})),
+  notifyCustomer: jest.fn(async () => ({})),
+}));
+const mockCompleteEnrollment = jest.fn(async () => ({ enrolled: true }));
 jest.mock('../services/recurring-card-on-file', () => ({
   isRecurringCardOnFileEnabled: jest.fn(() => true),
-  completeRecurringCardEnrollment: (...a) => mockEnrollEstimateCard(...a),
+  ACCEPTED_NO_CAPTURE_MARKER: 'no_capture_at_accept',
   resolveRecurringCaptureTender: jest.fn(async () => 'card'),
+  completeRecurringCardEnrollment: (...a) => mockCompleteEnrollment(...a),
 }));
 jest.mock('../routes/estimate-public', () => ({
   isCommercialAutoAcceptEstimate: jest.fn(() => false),
@@ -51,45 +59,182 @@ jest.mock('../routes/estimate-public', () => ({
   isEstimateAcceptActive: jest.fn(() => false),
 }));
 
-let mockEstimateRow;
-jest.mock('../models/db', () => {
-  const db = jest.fn((table) => {
-    const q = {};
-    q.where = jest.fn(() => q);
-    q.whereNotNull = jest.fn(() => q);
-    q.whereNull = jest.fn(() => q);
-    q.orderBy = jest.fn(() => q);
-    q.first = jest.fn(async () => (table === 'estimates' ? mockEstimateRow : table === 'customers' ? { billing_mode: 'per_application' } : null));
-    return q;
-  });
-  db.schema = { hasTable: jest.fn(async () => false) };
-  db.transaction = jest.fn();
-  return db;
-});
-
+const db = require('../models/db');
 const { _handleSetupIntentSucceeded: handleSetupIntentSucceeded } = require('../routes/stripe-webhook');
 
-const intent = () => ({ id: 'seti_rec_1', status: 'succeeded', payment_method: 'pm_rec_1', metadata: { purpose: 'estimate_recurring_card', estimate_id: 'est-1' } });
-const accepted = (estimateData) => ({ id: 'est-1', status: 'accepted', customer_id: 'cust-1', bill_by_invoice: false, accepted_service_mode: null, estimate_data: estimateData });
+function estimateRow(estimateData) {
+  return {
+    id: 'est-1', status: 'accepted', customer_id: 'cust-1', accepted_service_mode: 'recurring',
+    bill_by_invoice: false, estimate_data: estimateData,
+  };
+}
 
-beforeEach(() => { jest.clearAllMocks(); });
+function wireDb(estimate) {
+  db.schema = { hasTable: jest.fn(async () => false) };
+  db.mockImplementation((table) => {
+    const q = {};
+    for (const m of ['where', 'whereNotNull', 'whereNull', 'orderBy']) q[m] = jest.fn(() => q);
+    q.first = jest.fn(async () => {
+      if (table === 'estimates') return estimate;
+      if (table === 'customers') return { billing_mode: 'per_application' };
+      return null;
+    });
+    return q;
+  });
+}
 
-test('an after-visit accept (variant persisted at accept): the recovery enrolls under the SAME after_visit_card consent', async () => {
-  mockEstimateRow = accepted(JSON.stringify({ acceptedRecurringCardSetupIntentId: 'seti_rec_1', acceptedRecurringCardConsentVariant: 'after_visit_card' }));
-  await handleSetupIntentSucceeded(intent());
-  expect(mockEnrollEstimateCard).toHaveBeenCalledTimes(1);
-  expect(mockEnrollEstimateCard.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', setupIntentId: 'seti_rec_1', consentVariant: 'after_visit_card' });
+const SETUP_INTENT = {
+  id: 'seti_1',
+  created: 1765000000,
+  payment_method: 'pm_stripe_1',
+  metadata: { purpose: 'estimate_recurring_card', estimate_id: 'est-1' },
+};
+
+describe('estimate_recurring_card recovery records the accepted consent variant', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('an accept stamped after_visit_card recovers with after_visit_card (not the base text)', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_1',
+      acceptedRecurringCardConsentVariant: 'after_visit_card',
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', stripePaymentMethodId: 'pm_stripe_1', setupIntentId: 'seti_1', consentVariant: 'after_visit_card',
+    }));
+  });
+
+  test('r5: the accept\'s persisted exact text + version is recorded verbatim on recovery (a later copy change never rewrites it)', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_1',
+      acceptedRecurringCardConsent: { variant: null, version: 'v11_2026-08-25', tender: 'us_bank_account', text: 'ACH TEXT AS SHOWN' },
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({
+      renderedConsent: { text: 'ACH TEXT AS SHOWN', version: 'v11_2026-08-25' },
+    }));
+  });
+
+  test('r7: recovery of the accepted intent carries the committed acceptance time (an opt-out after accepting is honored)', async () => {
+    const row = estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1', acceptedRecurringCardSkipEnrollment: true });
+    row.accepted_at = '2026-10-01T05:00:00.000Z';
+    wireDb(row);
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({
+      authorizedAt: new Date('2026-10-01T05:00:00.000Z'), skipEnrollment: true,
+    }));
+  });
+
+  test('r5: an unbound intent never borrows the accept\'s persisted text', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_OTHER',
+      acceptedRecurringCardConsent: { variant: null, version: 'v11_2026-08-25', tender: 'card', text: 'TEXT' },
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    for (const [args] of mockCompleteEnrollment.mock.calls) expect(args.renderedConsent).toBeUndefined();
+  });
+
+  test('no stamp (every accept that is not a moved existing customer): no variant, base consent exactly as before', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+    expect(mockCompleteEnrollment.mock.calls[0][0]).not.toHaveProperty('consentVariant');
+  });
+
+  test('only the accepted intent carries the variant, and only a known variant is honored', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_1',
+      acceptedRecurringCardConsentVariant: 'something_else',
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment.mock.calls[0][0]).not.toHaveProperty('consentVariant');
+
+    // A superseded intent is never enrolled at all.
+    mockCompleteEnrollment.mockClear();
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_other',
+      acceptedRecurringCardConsentVariant: 'after_visit_card',
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
 });
 
-test('an accept with no persisted variant: the recovery passes none (base consent, unchanged)', async () => {
-  mockEstimateRow = accepted({ acceptedRecurringCardSetupIntentId: 'seti_rec_1' });
-  await handleSetupIntentSucceeded(intent());
-  expect(mockEnrollEstimateCard).toHaveBeenCalledTimes(1);
-  expect(mockEnrollEstimateCard.mock.calls[0][0]).not.toHaveProperty('consentVariant');
+describe('estimate_recurring_card recovery never enrolls an intent the accept did not bind (PAF-B r2 pre-push P0)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('an accept that committed with NO verified capture (marker) never recovers a later-succeeding / discarded intent', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'no_capture_at_accept' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+    expect(require('../services/stripe').retrieveSetupIntent).not.toHaveBeenCalled();
+  });
 });
 
-test('an unknown persisted variant is never forwarded', async () => {
-  mockEstimateRow = accepted({ acceptedRecurringCardSetupIntentId: 'seti_rec_1', acceptedRecurringCardConsentVariant: 'made_up' });
-  await handleSetupIntentSucceeded(intent());
-  expect(mockEnrollEstimateCard.mock.calls[0][0]).not.toHaveProperty('consentVariant');
+describe('estimate_recurring_card recovery skips an orphaned capture the rejected accept retired (PAF-B r3 pre-push P0)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('capture -> gate off -> 409 (intent retired) -> reload/accept with NO marker -> the unbound intent live-reads retired and is never enrolled', async () => {
+    // Gate-off accept: no marker, estimate_data carries no intent stamp.
+    wireDb(estimateRow({}));
+    require('../services/stripe').retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_1', metadata: { retired: 'true' } });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(require('../services/stripe').retrieveSetupIntent).toHaveBeenCalledWith('seti_1');
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('capture -> ABANDON (no accept) -> gate off -> accept without an intent (no marker) -> webhook retry: the after-visit capture is never recovered', async () => {
+    wireDb(estimateRow({}));
+    require('../services/stripe').retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_1', metadata: { paf_after_visit: 'true' } });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('an after-visit capture the accept DID bind still recovers (bound path skips the live provenance read)', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1', acceptedRecurringCardConsentVariant: 'after_visit_card' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
+  });
+
+  test('control: a genuine legacy capture (not retired) on an unstamped accept still enrolls', async () => {
+    wireDb(estimateRow({}));
+    require('../services/stripe').retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_1', metadata: {} });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('estimate_recurring_card recovery honors an explicit Auto Pay opt-out (PR-B)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('an accept stamped acceptedRecurringCardSkipEnrollment recovers with skipEnrollment (card kept, never enrolled)', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_1',
+      acceptedRecurringCardSkipEnrollment: true,
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({ skipEnrollment: true }));
+  });
+
+  test('no stamp (or a non-true value): enrollment proceeds exactly as before', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment.mock.calls[0][0]).not.toHaveProperty('skipEnrollment');
+    mockCompleteEnrollment.mockClear();
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1', acceptedRecurringCardSkipEnrollment: 'yes' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment.mock.calls[0][0]).not.toHaveProperty('skipEnrollment');
+  });
+
+  test('only the accepted intent carries the opt-out stamp', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_other',
+      acceptedRecurringCardSkipEnrollment: true,
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
 });

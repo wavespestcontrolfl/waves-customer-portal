@@ -3532,9 +3532,251 @@ async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExem
   if (!holdRefusal) return null;
   if (fenced?.claim?.claimed) {
     const { previousStatus, consumedQueuedSendRows = [], invoice } = fenced.claim;
-    await restoreSendClaim(invoiceId, previousStatus, fenced.claim.claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+    const restored = await restoreSendClaim(invoiceId, previousStatus, fenced.claim.claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+    // Codex #5424 r15: a restore that did not land (database error, claim token no longer ours) leaves
+    // the invoice in 'sending' - ten minutes on, stale-claim recovery parks it with NO scheduled send
+    // time, so the ordinary "waits, then sends after the release" defer would be a lie. Never return
+    // it: surface a distinct held + manual-recovery outcome and raise a durable office alert.
+    if (!restored) {
+      // A false restore does not prove the claim is stuck (Codex #5459 r1 P2): a concurrent payment, void,
+      // delivery or other transition can legitimately have moved the row, and those writers do not keep this
+      // send claim. Re-read it; only a row STILL 'sending' under OUR claim token is stranded.
+      const lookupFailed = holdRefusal.lookupFailed === true;
+      let verdict = await classifyClaimAfterFailedRestore(invoiceId, invoice.send_claim_token);
+      if (verdict.kind === "stranded") {
+        // The marker's compare-and-set can lose the same race (Codex #5459 r5 P2): it reports whether the claim was
+        // still ours, and a zero-row result is re-classified before any alert goes out.
+        const marked = await alertHoldClaimStranded(invoiceId, row, invoice.send_claim_token, { lookupFailed });
+        if (marked && marked.kind !== "stranded") verdict = marked;
+      }
+      if (verdict.kind === "stranded") return holdClaimStrandedOutcome(lookupFailed);
+      // The claim is gone and the invoice is not stuck: nothing to recover, no alert.
+      if (verdict.kind === "delivered") return holdInvoiceAlreadyDeliveredOutcome(verdict.status);
+      if (verdict.kind === "settled") return holdInvoiceAlreadySettledOutcome(verdict.status);
+      // Handed back by someone else (draft / scheduled again): the ordinary hold refusal is accurate.
+    }
   }
   return holdRefusal;
+}
+
+const HOLD_CLAIM_STRANDED_CODE = "COLLECTION_HOLD_CLAIM_STRANDED";
+// Statuses a concurrent writer can move an invoice to while its send claim is being handed back (Codex #5459 r5 P2):
+// DELIVERED (a concurrent markDeliverySent finalized it - accepted, never "not sent": an automated caller that read
+// it as a failed delivery would resend the pay link after the release) versus paid / void terminal states.
+const DELIVERED_AFTER_HOLD_STATUSES = new Set(["sent", "viewed", "overdue"]);
+const TERMINAL_AFTER_HOLD_STATUSES = new Set(["paid", "prepaid", "void", "voided", "refunded", "canceled", "cancelled"]);
+// Re-reads the invoice after a failed claim restore and says what became of it:
+// stranded (still 'sending' under OUR token, or unreadable: fail toward telling the office) | delivered |
+// settled (paid / void / gone) | handed_back (draft / scheduled again, or another claimant's).
+async function classifyClaimAfterFailedRestore(invoiceId, claimToken) {
+  let current = null;
+  try {
+    current = await db("invoices").where({ id: invoiceId }).first("status", "send_claim_token", "scheduled_send_error");
+  } catch { return { kind: "stranded" }; }
+  if (current && current.status === "sending" && current.send_claim_token === claimToken) {
+    const marker = String(current.scheduled_send_error || "");
+    return { kind: "stranded", marked: marker.includes(HOLD_CLAIM_STRANDED_MARKER), lookupFailed: marker.includes(HOLD_CLAIM_LOOKUP_FAILED_MARKER) };
+  }
+  const status = String(current?.status || "").toLowerCase();
+  if (DELIVERED_AFTER_HOLD_STATUSES.has(status)) return { kind: "delivered", status };
+  if (!current || TERMINAL_AFTER_HOLD_STATUSES.has(status)) return { kind: "settled", status };
+  return { kind: "handed_back", status };
+}
+// The invoice was DELIVERED on its own while the hold refused this send: the delivery is accepted, nothing to resend.
+function holdInvoiceAlreadyDeliveredOutcome(status) {
+  return {
+    code: "INVOICE_ALREADY_DELIVERED",
+    reason: `The invoice was already delivered (${status || "sent"}); nothing more to send`,
+    alreadyDelivered: true,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "accepted",
+  };
+}
+// The invoice settled on its own (paid, voided, ...) while the hold refused the send: not stranded, not a wait.
+function holdInvoiceAlreadySettledOutcome(status) {
+  return {
+    code: "INVOICE_ALREADY_SETTLED",
+    reason: `The invoice is already ${status || "settled"}; nothing was sent`,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "not_sent",
+  };
+}
+// NOT the retryable hold defer: the invoice is stuck in 'sending' and will not be retried by the sender.
+function holdClaimStrandedOutcome(lookupFailed = false) {
+  return {
+    code: HOLD_CLAIM_STRANDED_CODE,
+    // A failed hold lookup is NOT a confirmed hold (Codex #5459 r6 P2): never tell staff to wait for a release.
+    reason: lookupFailed
+      ? "The hold lookup failed and the invoice's send claim could not be handed back; check whether a hold applies and whether the pay link was delivered"
+      : "Customer has an active collections hold, and the invoice's send claim could not be handed back; it needs manual recovery",
+    held: !lookupFailed,
+    ...(lookupFailed ? { lookupFailed: true } : {}),
+    manualRecovery: true,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "not_sent",
+  };
+}
+
+// Marker appended to the 'sending' row's scheduled_send_error when a hold refusal could not hand the claim back
+// (Codex #5459 r2 P2). It is the durable "this stranded claim is owed an office alert" record: the stale-claim
+// sweep reads it before parking the row (the park overwrites the error text) and raises the alert itself.
+const HOLD_CLAIM_STRANDED_MARKER = "HOLD_CLAIM_STRANDED";
+// The marker for a refusal whose hold lookup FAILED (no confirmed hold): same prefix, so every marker test still
+// matches, and the sweep's retry reads the suffix to word its alert neutrally.
+const HOLD_CLAIM_LOOKUP_FAILED_MARKER = `${HOLD_CLAIM_STRANDED_MARKER}:lookup_failed`;
+// The dedupe keys are per CLAIM (invoice + send claim token), not per invoice (Codex pre-push audit on #5459 r4):
+// notifyAdmin and the sweep both treat any standing notification with the key as the live alert, so an old
+// incident's row would otherwise swallow a later stranded claim on the same invoice.
+const holdClaimStrandedAlertKey = (invoiceId, claimToken) => `hold-claim-stranded:${invoiceId}:${claimToken || ""}`;
+const holdClaimMaybeStuckAlertKey = (invoiceId, claimToken) => `hold-claim-maybe-stuck:${invoiceId}:${claimToken || ""}`;
+
+// Raises the stranded / manual-recovery alert. THROWS on failure: callers decide how to retry. Its wording is only
+// true for a CONFIRMED pre-provider refusal (the marker records one), where re-queueing or resending is safe.
+async function raiseHoldClaimStrandedAlert(invoiceId, customerId, claimToken, { lookupFailed = false } = {}) {
+  // notifyAdmin reports a failed write as a null return rather than a throw: that is a failed alert too.
+  const raised = await require("./admin-alert-compose").raiseAdminAlert("alert", {
+    area: "Billing",
+    action: lookupFailed ? "recover an invoice stuck after a failed hold check" : "recover the invoice stuck behind a customer hold",
+    why: lookupFailed
+      ? "The hold check failed, so the send stopped and the invoice could not be handed back."
+      : "A hold stopped the send, and the invoice could not be handed back to the queue.",
+    severity: "needs-you",
+    link: `/admin/invoices?invoice=${invoiceId}`,
+    subject: { type: "invoice", id: String(invoiceId) },
+    doneWhen: "invoice_claim_recovered",
+    who: "person",
+  }, {
+    detail: lookupFailed
+      ? `Invoice ${invoiceId}: the send was stopped because the hold check failed, and its in-progress send claim could not be released. We could not confirm whether a hold applies, so do not assume one is pending: check the customer's hold status and whether the pay link was delivered, then re-queue or resend it if it was not.`
+      : `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
+    dedupeKey: holdClaimStrandedAlertKey(invoiceId, claimToken),
+    metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
+  });
+  if (!raised) throw new Error("the stranded-claim alert was not recorded");
+}
+
+// The NEUTRAL alert (Codex #5459 r4 P2): used where the claim cannot be tied to a confirmed pre-provider hold
+// refusal (the marker could not be written, or a stale claim of a held customer carries no marker). It never says
+// the send did not happen: a claim can also die AFTER the provider accepted the message, and a resend would then
+// duplicate the pay link. THROWS on failure.
+async function raiseHoldClaimMaybeStuckAlert(invoiceId, customerId, claimToken, { lookupFailed = false } = {}) {
+  const raised = await require("./admin-alert-compose").raiseAdminAlert("alert", {
+    area: "Billing",
+    action: "check a held invoice that may be stuck",
+    why: "An invoice send ran into a customer hold and the invoice may be stuck in sending.",
+    severity: "needs-you",
+    link: `/admin/invoices?invoice=${invoiceId}`,
+    subject: { type: "invoice", id: String(invoiceId) },
+    doneWhen: "invoice_delivery_checked",
+    who: "person",
+  }, {
+    detail: lookupFailed
+      ? `Invoice ${invoiceId}: its send claim was left in progress after a failed hold check. We could not confirm whether a hold applies; check the hold and whether the customer actually received the pay link before resending, so it is not sent twice.`
+      : `Invoice ${invoiceId}: its send claim was left in progress and the customer has a collections hold. Check whether the customer actually received the pay link before resending, so it is not sent twice.`,
+    dedupeKey: holdClaimMaybeStuckAlertKey(invoiceId, claimToken),
+    metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
+  });
+  if (!raised) throw new Error("the maybe-stuck alert was not recorded");
+}
+
+// At refusal time (the restore just failed): record the owed alert on the row (a durable marker once the database
+// answers), then raise the stranded alert; the stale-claim sweep (processScheduledSends) retries it until it lands.
+// If the marker cannot be written the stranded alert is NOT trusted to survive (the sweep could not tell this claim
+// from one that crashed after provider contact), so the failure is logged at error and the neutral alert goes out
+// instead, under its own dedupe key. Residual, accepted: if that alert fails too, three database writes (restore,
+// marker, alert) failed in one outage and nothing durable remains except the active-hold sweep below.
+async function alertHoldClaimStranded(invoiceId, row, claimToken = null, { lookupFailed = false } = {}) {
+  const marker = lookupFailed ? HOLD_CLAIM_LOOKUP_FAILED_MARKER : HOLD_CLAIM_STRANDED_MARKER;
+  let markerRecorded = false;
+  if (claimToken) {
+    try {
+      const marked = await db("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken })
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
+        .update({ scheduled_send_error: db.raw("CASE WHEN COALESCE(scheduled_send_error, '') = '' THEN ?::text ELSE scheduled_send_error || ' | ' || ?::text END", [marker, marker]) });
+      if (Number(marked) > 0) {
+        markerRecorded = true;
+      } else {
+        // Zero rows: the claim moved after the caller's re-read (paid / voided / delivered / restored), or it already
+        // carries the marker. Re-read; only a claim that is really still ours and 'sending' gets the alert, and its
+        // marker, if present, is the one an earlier attempt wrote.
+        const verdict = await classifyClaimAfterFailedRestore(invoiceId, claimToken);
+        if (verdict.kind !== "stranded") return verdict;
+        // Still ours: the marker an earlier attempt wrote makes it confirmed; without one (the write was lost) the
+        // claim cannot be tied to a pre-provider refusal, so the neutral alert goes out instead.
+        markerRecorded = verdict.marked === true;
+        lookupFailed = lookupFailed || verdict.lookupFailed === true;
+      }
+    } catch (err) {
+      logger.error(`[invoice] hold-claim-stranded marker NOT recorded for ${invoiceId}; raising the neutral maybe-stuck alert instead: ${err.message}`);
+    }
+  }
+  try {
+    if (markerRecorded) await raiseHoldClaimStrandedAlert(invoiceId, row?.customer_id, claimToken, { lookupFailed });
+    else await raiseHoldClaimMaybeStuckAlert(invoiceId, row?.customer_id, claimToken, { lookupFailed });
+  } catch (err) {
+    logger.error(`[invoice] hold-claim alert failed for ${invoiceId} (${markerRecorded ? "the stale-claim sweep retries it" : "no marker: only the sweep's active-hold check can still surface it"}): ${err.message}`);
+  }
+  return null;
+}
+
+// The stale-claim sweep's half (Codex #5459 r2/r4 P2). A stale 'sending' row is a hold-claim candidate when it
+// carries the marker (a confirmed hold refusal: the stranded alert), or it is a self-pay invoice whose customer has
+// an ACTIVE hold with no marker (the marker write can fail in the same outage; the neutral alert, since nothing
+// ties the claim to a pre-provider refusal). A hold that was merely released is not evidence for any claim. A
+// candidate is parked only once its alert has LANDED (the dedupe key's standing notification), so a failed alert
+// keeps being retried each tick and never duplicates.
+function strandedHoldClaimCandidate(q) {
+  return q.where((c) => c
+    .whereRaw("COALESCE(scheduled_send_error, '') LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
+    .orWhere((held) => held.whereNull("payer_id").whereNull("payer_statement_id").whereExists(function activeHold() {
+      require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
+    })));
+}
+function standingStrandedAlert() {
+  this.select(1).from("notifications as n").where("n.recipient_type", "admin")
+    .whereRaw("n.metadata->>'dedupeKey' = (CASE WHEN COALESCE(invoices.scheduled_send_error, '') LIKE ? THEN 'hold-claim-stranded:' ELSE 'hold-claim-maybe-stuck:' END) || invoices.id::text || ':' || COALESCE(invoices.send_claim_token::text, '')", [`%${HOLD_CLAIM_STRANDED_MARKER}%`]);
+}
+const STALE_SENDING_SQL = "NOW() - INTERVAL '10 minutes'";
+function stalePark() {
+  return {
+    status: "scheduled",
+    scheduled_send_at: null,
+    scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
+    send_claim_token: null,
+    updated_at: new Date(),
+  };
+}
+
+// Runs at the end of every sweep: raises the alert for each stale hold-claim candidate whose alert has not landed,
+// then parks that row. A failed alert leaves the row in 'sending' (the park above skips it), so the next tick
+// retries; an alert that landed is never raised twice.
+async function raiseStrandedHoldClaimAlerts() {
+  try {
+    const rows = await strandedHoldClaimCandidate(db("invoices").where({ status: "sending" })
+      .where("updated_at", "<", db.raw(STALE_SENDING_SQL)))
+      .whereNotExists(standingStrandedAlert)
+      .select("id", "customer_id", "send_claim_token", db.raw("COALESCE(scheduled_send_error, '') LIKE ? AS marked", [`%${HOLD_CLAIM_STRANDED_MARKER}%`]), db.raw("COALESCE(scheduled_send_error, '') LIKE ? AS lookup_failed", [`%${HOLD_CLAIM_LOOKUP_FAILED_MARKER}%`]));
+    for (const row of rows) {
+      try {
+        const opts = { lookupFailed: row.lookup_failed === true };
+        if (row.marked) await raiseHoldClaimStrandedAlert(row.id, row.customer_id, row.send_claim_token, opts);
+        else await raiseHoldClaimMaybeStuckAlert(row.id, row.customer_id, row.send_claim_token, opts);
+        // Park only the claim this sweep read, and only while it is still stale: during the alert await
+        // another sweep may park it and an operator may start a fresh send, whose live claim must survive.
+        await db("invoices").where({ id: row.id, status: "sending" })
+          .where((t) => (row.send_claim_token == null ? t.whereNull("send_claim_token") : t.where("send_claim_token", row.send_claim_token)))
+          .where("updated_at", "<", db.raw(STALE_SENDING_SQL))
+          .update(stalePark());
+      } catch (err) {
+        logger.error(`[invoice] stale hold-claim alert for ${row.id} failed - leaving it in 'sending' for the next sweep: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[invoice] stale hold-claim sweep failed: ${err.message}`);
+  }
 }
 
 // A renewal's own clearance (termite-annual-renewal-charge withRenewalSendClearance) parks a self-pay
@@ -6025,6 +6267,7 @@ const InvoiceService = {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
         const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, pre, packetClaim, holdExempt);
+        if (holdRefusal?.alreadyDelivered) return { sent: true, ...holdRefusal }; // accepted: delivered concurrently (Codex #5459 r5 P2)
         if (holdRefusal) return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
         claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
       } else {
@@ -6895,6 +7138,12 @@ const InvoiceService = {
     if (!allowClaimed) {
       const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, accrualPre, packetClaim, holdExempt);
       if (holdRefusal) {
+        // A concurrently DELIVERED invoice is an accepted result (Codex #5459 r5 P2): callers that read ok:false as a
+        // failed delivery would retry and resend the pay link after the hold is released.
+        if (holdRefusal.alreadyDelivered) {
+          return { ok: true, ...holdRefusal,
+            sms: { ok: true, code: holdRefusal.code, alreadyDelivered: true }, email: { ok: true, code: holdRefusal.code, alreadyDelivered: true } };
+        }
         return { ok: false, ...holdRefusal, error: holdRefusal.reason,
           sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
       }
@@ -7768,13 +8017,12 @@ const InvoiceService = {
     await db("invoices")
       .where({ status: "sending" })
       .where("updated_at", "<", db.raw("NOW() - INTERVAL '10 minutes'"))
-      .update({
-        status: "scheduled",
-        scheduled_send_at: null,
-        scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
-        send_claim_token: null,
-        updated_at: new Date(),
-      });
+      // A stranded hold claim whose office alert has not landed stays in 'sending' until it has (see
+      // raiseStrandedHoldClaimAlerts at the end of this sweep).
+      .where((outer) => outer.whereNot((stranded) => {
+        strandedHoldClaimCandidate(stranded).whereNotExists(standingStrandedAlert);
+      }))
+      .update(stalePark());
 
     const due = await db("invoices")
       .where({ status: "scheduled" })
@@ -8035,6 +8283,9 @@ const InvoiceService = {
         }
       }
       let claimed = null;
+      // True once claimPacketInvoiceForSend's Bill-To fence has run to completion and found the
+      // packet invoice still self-pay (Codex #5424 r15): the held-row stamp below needs this.
+      let packetFenceConfirmed = false;
       // A combined-visit invoice re-resolves live Bill-To ownership under
       // held rows before its queue claim; a payer means the homeowner send is
       // withdrawn for good, not retried.
@@ -8050,10 +8301,25 @@ const InvoiceService = {
         }
         if (fenced.error) {
           logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} left queued — Bill-To fence failed: ${fenced.error.message}`);
+          // A broken fence on a HELD customer's row must not re-occupy the page every tick (Codex #5424 r15
+          // review): stamp the same recheck interval a confirmed fence gets. Nothing can be sent to a held
+          // self-pay homeowner meanwhile, a hold release makes the row non-held (the stamp is ignored and
+          // the first tick after it sends), and a payer assigned since is picked up at the recheck. A hold
+          // lookup that cannot answer stamps nothing (retried next tick).
+          try {
+            const holdNow = await require("./collections/collection-hold").messagingHeldByCollectionHold(inv.customer_id);
+            if (holdNow.held && holdNow.reason !== "lookup_failed") {
+              await db("invoices").where({ id: inv.id, status: "scheduled" }).whereNull("payer_id")
+                .update({ hold_bill_to_checked_at: new Date(), updated_at: new Date() });
+            }
+          } catch (stampErr) {
+            logger.warn(`[invoice] Could not stamp the Bill-To recheck on ${inv.invoice_number} after its fence failed: ${stampErr.message}`);
+          }
           continue;
         }
         if (!fenced.claim?.claimed) continue;
         claimed = fenced.claim.invoice;
+        packetFenceConfirmed = true;
       } else {
         claimed = await claimDueScheduledInvoiceForSend(db, inv.id);
       }
@@ -8099,7 +8365,7 @@ const InvoiceService = {
           // The Bill-To fence has now CONFIRMED this held row is self-pay (a packet row's fence ran
           // above, a renewal's just now; a fence that errored leaves no stamp and retries next tick):
           // stamp it so the due query stops re-admitting it every tick (Codex #5424 r14).
-          const billToConfirmed = renewalFenceRan;
+          const billToConfirmed = renewalFenceRan || packetFenceConfirmed;
           const deferredRows = await restoreClaimedInvoice({
             status: "scheduled", scheduled_send_at: deferUntil, updated_at: new Date(),
             ...(billToConfirmed ? { hold_bill_to_checked_at: new Date() } : {}),
@@ -8344,6 +8610,7 @@ const InvoiceService = {
         );
       }
     }
+    await raiseStrandedHoldClaimAlerts();
     return { sent, failed, deferred };
   },
 

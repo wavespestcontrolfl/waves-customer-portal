@@ -527,12 +527,30 @@ describe('fee deferred to the first performed visit (series claim)', () => {
   // completion mint, so its stamp can never be consumed: that is a stranded
   // claim, not a deferral. The obligation reads owed and the stamp is reported
   // so the completion can park it for the office (never clear it to nothing).
-  test.each(['monthly_membership', 'annual_prepay'])('a stamp on a %s customer is NOT a deferral — owed, with the stranded stamp reported', async (lane) => {
-    mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 99 })], customers: { billing_mode: lane } });
-    const out = await run();
-    expect(out.owed).toBe(true);
-    expect(out.deferredToFirstVisit).toBeUndefined();
-    expect(out.unconsumableStamps).toEqual([{ parentId: 'ss-root', rawAmount: 99, amount: 99 }]);
+  // An annual-prepay customer's visit is dues-covered only while a live term
+  // covers it (judged on the completing visit by the canonical coverage read).
+  test.each([
+    ['monthly_membership', null],
+    ['annual_prepay', true],
+  ])('a stamp on a %s customer is NOT a deferral — owed, with the stranded stamp reported', async (lane, covered) => {
+    const coverage = covered == null ? null
+      : jest.spyOn(require('../services/annual-prepay-renewals'), 'annualPrepayCoversVisit').mockResolvedValue(covered);
+    try {
+      mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 99 })], customers: { billing_mode: lane } });
+      const out = await run();
+      expect(out.owed).toBe(true);
+      expect(out.deferredToFirstVisit).toBeUndefined();
+      expect(out.unconsumableStamps).toEqual([{ parentId: 'ss-root', rawAmount: 99, amount: 99 }]);
+    } finally { coverage?.mockRestore(); }
+  });
+
+  test('an annual_prepay customer whose completing visit NO term covers bills on its own completion: the stamp is a deferral', async () => {
+    const coverage = jest.spyOn(require('../services/annual-prepay-renewals'), 'annualPrepayCoversVisit').mockResolvedValue(false);
+    try {
+      mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 99 })], customers: { billing_mode: 'annual_prepay' } });
+      expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+      expect(coverage).toHaveBeenCalledWith(expect.anything(), expect.anything(), { throwOnError: true });
+    } finally { coverage.mockRestore(); }
   });
 
   test('a per_application / per_visit customer\'s stamp reports no stranded stamps', async () => {

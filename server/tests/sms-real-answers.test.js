@@ -92,7 +92,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers2_cf');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cfl');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -149,7 +149,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
   test('OPEN TIMES joins the FACT DISCIPLINE grounding sources', () => {
     const prompt = buildSystemPrompt();
     expect(prompt).toContain(
-      '(SERVICE HISTORY, UPCOMING SERVICES, OPEN TIMES, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, COMPANY FACTS, the thread)'
+      '(SERVICE HISTORY, UPCOMING SERVICES, OPEN TIMES, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, the thread)'
     );
     expect(prompt).toContain('UPCOMING SERVICES, OPEN TIMES, or the thread');
   });
@@ -238,7 +238,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     // Single-char tags (pre-push audit P1 round 3): prompt_version is
     // varchar(40) across message_drafts/agent_decisions/shadow_draft_
     // judgments/sms_pathology_entries/sms_sealed_eval_runs, and the bare
-    // REAL_ANSWERS_PROMPT_VERSION is already 28 chars — a full-word tag
+    // REAL_ANSWERS_PROMPT_VERSION is already 29 chars — a full-word tag
     // would overflow the column with just one category gate on.
     expect(complaintsOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+c`);
     expect(complaintsOnly.length).toBeLessThanOrEqual(40);
@@ -264,7 +264,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     for (const g of CATEGORY_GATES) process.env[g] = 'true';
     const allFour = currentPromptVersion();
     expect(allFour).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`);
-    expect(allFour.length).toBe(37);
+    expect(allFour.length).toBe(38);
     expect(allFour.length).toBeLessThanOrEqual(40);
   });
 
@@ -893,7 +893,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers2_cf');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers3_cfl');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1347,7 +1347,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers2_cf');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers3_cfl');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1356,7 +1356,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers2_cf'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers3_cfl'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 
@@ -3014,6 +3014,28 @@ describe('free re-service is an entitlement resolved through the existing mechan
         expect(owed("I'm angry, the ants are back")).toBe(false);
       });
 
+      // Codex round-44 P2: a cancel HAND-OFF is request / threat language; a past-tense description of someone else's cancellation is not.
+      test('only an actual cancellation request or threat suppresses the offer; a described past cancellation does not', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const owed = (m) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: m }).ok === false;
+        for (const m of ["the tech canceled yesterday's appointment and the ants are back", 'your office cancelled my visit last week, ants are back', 'the ants are back after the cancelled visit', 'thanks for rescheduling the canceled appointment, but the ants are back']) expect(owed(m)).toBe(true);
+        for (const m of ['ants are back, I want to cancel', 'ants are back, please cancel my plan', "ants are back and I'm cancelling", 'ants are back, we are going to cancel', 'ants are back. Cancel.', 'cancel! the roaches are back', 'ants are back - cancellation please', "ants are back, I'd like to cancel"]) expect(owed(m)).toBe(false);
+      });
+
+      // PR #5465 round 1 (C1 + R3): the cancel hand-off is INTENT — a date-modified request, a contracted future / threat — and a cancellation
+      // DESCRIBED as the tech's / the office's / a past act (even clause-final or dated) does not suppress the offer.
+      test('date-modified and contracted-future cancel requests hand off; a described cancellation (tech / you / they, past) does not', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const owed = (m) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: m }).ok === false;
+        for (const m of ["Cancel tomorrow's appointment; the ants are back", 'Can you cancel next week\u2019s service? The ants are back', 'ants are back, cancel on Friday', 'the ants are back, cancel next month', 'ants are back, cancel after this visit',
+          "I'll cancel if this happens again, the ants are back", "the ants are back and we'll cancel unless someone comes out", "ants are back, I'll be cancelling after this visit", 'ants are back, I will be cancelling',
+          // round 2: a second-person subject with an imperative / modal frame is a REQUEST, not a description
+          'The ants are back; you just cancel my plan, please', 'ants are back, can you just cancel my service', 'ants are back, you can cancel my service', 'ants are back, you just cancel it',
+          // round 3: passive-participle requests
+          'the ants are back, I want my service cancelled', 'ants are back, please have it cancelled', 'ants are back. Get my account canceled', 'roaches are back, I need my plan canceled', "ants are back, I'd like the visit cancelled", 'ants are back, can you get this cancelled', 'ants are back and my plan needs to be cancelled']) expect([m, owed(m)]).toEqual([m, false]);
+        for (const m of ['Your tech had to cancel, and now the ants are back', 'You called to cancel. Anyway, the ants are back.', 'The tech had to cancel on Friday and the ants are back', 'ants are back, they decided to cancel next week', 'the ants are back, I had to cancel last time', 'the ants are back, you already called to cancel', 'the ants are back, they just decided to cancel', 'the ants are back, thanks for rescheduling the cancelled visit', 'the ants are back and the tech cancelled my visit', 'ants are back, please reschedule the canceled appointment']) expect([m, owed(m)]).toEqual([m, true]);
+      });
+
       // Codex round-39 P2: an explicit, AFFIRMED refusal of a visit / callback / link suppresses the owed offer and forbids a promise.
       test('an explicit refusal of a visit / link suppresses the owed offer; a negated or third-party "refusal" does not', () => {
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
@@ -3986,6 +4008,41 @@ describe('free re-service is an entitlement resolved through the existing mechan
         }
         for (const bad of ['Your pest re-service is scheduled for Thursday from 1–3.', 'Your pest re-service is scheduled for Thursday between 1 and 3.', 'Your pest re-service is scheduled for Thursday from 9 to 10.', 'Your pest re-service is scheduled for Thursday from 10 to 12.', 'Your pest re-service is scheduled for Thursday, 2-4.']) {
           await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
+        }
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
+    // Codex round-44 P2: the FREE RE-SERVICE fact renders the callback date as ISO ("2026-10-08"), so a draft copies that form; a
+    // full date (ISO or M/D/YYYY) is compared year-and-all with the live callback, never read as a clock range or dropped.
+    test('ISO and M/D/YYYY dates in a callback claim are compared with the live callback (year included)', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        const send = async (body) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        for (const ok of ['Your pest re-service is scheduled for 2026-10-08.', 'Your pest re-service is scheduled for 2026-10-08, 9-11 AM.', 'Your pest re-service is scheduled for 10/8/2026.', 'Your pest re-service is scheduled for 10/08/26.',
+          // PR #5465 R4: an unpadded full date is still a DAY (not a "10-3" clock range)
+          'Your pest re-service is scheduled for 2026-10-8.']) {
+          await expect(send(ok)).resolves.toBeNull();
+        }
+        for (const bad of ['Your pest re-service is scheduled for 2027-10-08.', 'Your pest re-service is scheduled for 2026-10-09.', 'Your pest re-service is scheduled for 10/8/2027.', 'Your pest re-service is scheduled for 10/9/2026.', 'Your pest re-service is scheduled for 2026-10-08, 1-3 PM.',
+          // PR #5465 C3: an edited wrong full date with NO scheduled / booked marker still reaches the day comparison
+          'Your pest re-service is 2027-10-08.', 'Your pest re-service is 2026-10-09.', 'Your free pest re-service is on 10/9/2026.', 'Your pest re-service is 2026-10-3.']) {
+          await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
+        }
+        // round 3: a full date in HISTORICAL / unrelated wording is not a booked-callback claim (no stale / changed block)
+        for (const hist of ['Your last pest re-service was on 9/15/2026.', 'Your pest re-service was completed 2026-09-12.', 'Your free pest re-service invoice from 2026-09-12 is attached.', 'Your previous pest re-service on 2026-09-01 is done.']) {
+          expect(String(await send(hist))).not.toMatch(/reservice_booking_changed/);
         }
       } finally {
         dt.etDateString = realEt;
