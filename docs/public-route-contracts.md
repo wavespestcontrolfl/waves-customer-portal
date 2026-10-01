@@ -647,7 +647,10 @@ an `/update-amount` on one — whose stamp differs from the one it would write
 updating in place (the `replaced` response re-mounts Elements): the stale tab
 that minted it can confirm straight with Stripe (Express Checkout), and an
 in-place re-stamp would let the webhook record the newer version against
-text that tab never rendered. `/capture-setup` does the same and stamps the
+text that tab never rendered. A replacement carries a SUPERSET of the old
+intent's metadata (`waves_customer_id`, `save_card_opt_in`, the consent
+stamp, …) with the new values winning, so the webhook mirrors keyed on
+those stamps keep working across the swap. `/capture-setup` does the same and stamps the
 SetupIntent. `/consent` and `/setup-complete` record ONLY under the intent's
 own current stamp — never the posting bundle's constant, since a redirect
 return posts from a freshly loaded, possibly newer bundle — answering the
@@ -3137,7 +3140,11 @@ was open: that same recorded 'plan' drawer snapshot, or
 `RATE_REVIEW_TERMS_VERSION`, which the `/pdf` download (either renderer) and
 the legacy page's plan-terms card write when they print the disclosure
 (idempotent; never on a frozen estimate; never fatal to the download or the
-page). Plan eligibility alone never stamps: an accept from a tab that rendered
+page; written BEFORE the document or page is sent). The marker never moves
+`updated_at`, so an accept racing from another tab merges the row's current
+marker through its own `estimate_data` write and decides the stamp from the
+row under its lock, not from its pre-transaction snapshot — evidence
+persisted after that read is still honored. Plan eligibility alone never stamps: an accept from a tab that rendered
 no rate copy (a bundle that predates the line with the gate off, the
 terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
 document without the line rather than claiming a disclosure that was never

@@ -361,7 +361,10 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(result.paymentIntentId).toBe('pi_fresh');
     expect(result.clientSecret).toBe('pi_fresh_secret');
     const [params] = stripeClient.paymentIntents.create.mock.calls[0];
-    expect(params.metadata).toEqual(expect.objectContaining({ save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION }));
+    // The fresh mint is the full /setup block — the webhook mirrors' keys ride along.
+    expect(params.metadata).toEqual(expect.objectContaining({
+      save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION, waves_customer_id: 'cust_123', waves_invoice_id: invoiceRow.id,
+    }));
   });
 
   test('a PI minted before the consent stamp existed is replaced, not re-stamped, when a save-the-method tab reuses it', async () => {
@@ -1205,7 +1208,11 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     // never displayed. The stamp change must cancel/replace, like /setup.
     const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
     stripeClient.paymentIntents.retrieve.mockResolvedValue({
-      id: 'pi_invoice', status: 'requires_payment_method', payment_method_types: ['card'], metadata: { save_card_opt_in: 'true' },
+      id: 'pi_invoice',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      // What the /setup mint stamped (the webhook mirrors key on waves_customer_id).
+      metadata: { waves_invoice_id: 'inv_123', waves_customer_id: 'cust_123', save_card_opt_in: 'false', pay_session_touched_at: '1700000000', custom_mark: 'keep' },
     });
     const StripeService = require('../services/stripe');
     jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
@@ -1215,8 +1222,27 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_invoice');
     const [params] = stripeClient.paymentIntents.create.mock.calls[0];
-    expect(params.metadata).toEqual(expect.objectContaining({ consent_text_version: CONSENT_VERSION, save_card_opt_in: 'true', replaced_from: 'pi_invoice' }));
+    // A SUPERSET of the old PI's metadata (GH Codex r5 P1): everything the
+    // webhook mirrors read survives the swap, this update's values win.
+    expect(params.metadata).toEqual(expect.objectContaining({
+      waves_invoice_id: 'inv_123',
+      waves_customer_id: 'cust_123',
+      custom_mark: 'keep',
+      consent_text_version: CONSENT_VERSION,
+      save_card_opt_in: 'true',
+      replaced_from: 'pi_invoice',
+    }));
+    expect(params.customer).toBe('cus_test');
+    expect(params.setup_future_usage).toBe('off_session');
     expect(result).toMatchObject({ paymentIntentId: 'pi_replacement', replaced: true, clientSecret: 'cs_replacement' });
+  });
+
+  test('an in-place update-amount stamps waves_customer_id too (same block a replacement is minted from)', async () => {
+    const StripeService = require('../services/stripe');
+    await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_invoice', expect.objectContaining({
+      metadata: expect.objectContaining({ waves_customer_id: 'cust_123', waves_invoice_id: 'inv_123' }),
+    }));
   });
 
   test('update-amount with an UNCHANGED consent stamp still updates the PaymentIntent in place', async () => {

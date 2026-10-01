@@ -4609,6 +4609,10 @@ const StripeService = {
       payment_method_types: paymentMethodTypes,
       metadata: {
         waves_invoice_id: invoiceId,
+        // The webhook's saved-method mirror keys on waves_customer_id (GH
+        // Codex r5 P1): carried here so a consent-stamp REPLACEMENT minted
+        // from this block keeps it, exactly like the /setup mint.
+        waves_customer_id: invoice.customer_id,
         invoice_number: invoice.invoice_number,
         base_amount: String(base),
         card_surcharge: '0',
@@ -4887,8 +4891,11 @@ const StripeService = {
       // replaced_from stamps one generation of lineage so update-amount can
       // recognize a lost-response replay of THIS replacement (client retries
       // still carrying the canceled PI's id) without opening a blanket
-      // stale-id retarget.
-      metadata: { ...metadata, replaced_from: String(oldPaymentIntentId) },
+      // stale-id retarget. The replacement carries a SUPERSET of the old
+      // PI's metadata (GH Codex r5 P1): every stamp the webhook mirrors read
+      // (waves_customer_id, save_card_opt_in, consent_text_version, …)
+      // survives the swap, with this update's values winning.
+      metadata: { ...(oldIntent?.metadata || {}), ...metadata, replaced_from: String(oldPaymentIntentId) },
       payment_method_types: paymentMethodTypes,
     };
     if (customer) {

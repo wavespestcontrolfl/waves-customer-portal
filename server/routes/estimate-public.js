@@ -698,6 +698,23 @@ function parseEstimateDataSafe(estimate = {}) {
   return raw || {};
 }
 
+// A wholesale estimate_data write built from a pre-transaction snapshot must
+// never drop served-disclosure evidence persisted since that read (GH Codex
+// r5 P1 on #5434): the /pdf download and the legacy page write
+// estimate_data.rateReviewTermsServed without touching updated_at, so the
+// accept's updated_at guard does not catch them. Merge the ROW's current
+// marker over the snapshot in SQL (a NULL marker strips to nothing).
+function withServedDisclosurePreserved(trx, updates) {
+  if (typeof updates?.estimate_data !== 'string') return updates;
+  return {
+    ...updates,
+    estimate_data: trx.raw(
+      "?::jsonb || jsonb_strip_nulls(jsonb_build_object('rateReviewTermsServed', COALESCE(estimate_data, '{}'::jsonb)->'rateReviewTermsServed'))",
+      [updates.estimate_data],
+    ),
+  };
+}
+
 // Customer-facing fallback when scheduled_services.window_display is empty:
 // the 2-hour arrival window from window_start ("3:00 PM - 5:00 PM"), matching
 // the confirmation SMS — never the raw 24h window_start, and never window_end
@@ -8307,23 +8324,34 @@ ${shellQuestionsBar()}
 </body></html>`;
 }
 
-function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) {
+// The finished page HTML, built before anything is sent so the view
+// handler can persist what the render showed (served-disclosure evidence)
+// BEFORE the response goes out (GH Codex r5 P1).
+function renderEstimatePageHtml(token, estimate, estData, membership, opts = {}) {
+  // Scrub the SOURCE values before renderPage HTML-escapes them (an escaped
+  // `&amp;key=` is no longer a param boundary), then scrub the finished HTML
+  // (entity-aware) as a backstop: no Maps key in any SSR HTML, whatever blob
+  // it rode in on, and whether or not it matches the configured key.
+  return estimateMapImage.scrubMapsKeysFromString(renderPage(
+    token,
+    estimateMapImage.scrubMapsKeysDeep(estimate),
+    estimateMapImage.scrubMapsKeysDeep(estData),
+    estimateMapImage.scrubMapsKeysDeep(membership),
+    estimateMapImage.scrubMapsKeysDeep(opts),
+  ));
+}
+
+function sendEstimatePageHtml(res, html) {
   res
     .set('Cache-Control', 'no-cache, no-store, must-revalidate')
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
     .set('Content-Type', 'text/html; charset=utf-8')
-    // Scrub the SOURCE values before renderPage HTML-escapes them (an escaped
-    // `&amp;key=` is no longer a param boundary), then scrub the finished HTML
-    // (entity-aware) as a backstop: no Maps key in any SSR HTML, whatever blob
-    // it rode in on, and whether or not it matches the configured key.
-    .send(estimateMapImage.scrubMapsKeysFromString(renderPage(
-      token,
-      estimateMapImage.scrubMapsKeysDeep(estimate),
-      estimateMapImage.scrubMapsKeysDeep(estData),
-      estimateMapImage.scrubMapsKeysDeep(membership),
-      estimateMapImage.scrubMapsKeysDeep(opts),
-    )));
+    .send(html);
+}
+
+function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) {
+  sendEstimatePageHtml(res, renderEstimatePageHtml(token, estimate, estData, membership, opts));
 }
 
 // Existing-customer estimate treatment — waived WaveGuard setup fee and no
@@ -9039,7 +9067,7 @@ async function handleEstimateView(req, res, next) {
     }
 
     let rateReviewTermsRendered = false;
-    sendEstimatePage(res, req.params.token, {
+    const pageHtml = renderEstimatePageHtml(req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
       // React view reads (renderPage only sees this view and the data).
@@ -9107,10 +9135,12 @@ async function handleEstimateView(req, res, next) {
     });
     if (rateReviewTermsRendered) {
       // Served-disclosure evidence (pre-push Codex on #5434's merge head):
-      // the page just sent showed the customer the annual rate review item,
-      // so persist it — after the response, idempotent, never fatal.
+      // the page about to be sent shows the customer the annual rate review
+      // item, so persist it BEFORE the response (GH Codex r5 P1) —
+      // idempotent, never fatal.
       await require('../services/estimate-proposal-billing').recordRateReviewTermsServed(estimate);
     }
+    sendEstimatePageHtml(res, pageHtml);
   } catch (err) { next(err); }
 }
 
@@ -11145,7 +11175,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ));
           }
         })
-        .update(acceptedUpdates);
+        .update(withServedDisclosurePreserved(trx, acceptedUpdates));
       if (!acceptedCount) {
         const err = new Error('Estimate is no longer active');
         err.status = 409;
@@ -11535,9 +11565,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // line, the gate off) must not make its frozen document GAIN a line it
       // never showed. A rodent, one-time-only or one-time-toggle accept
       // carries no rate to review and gets no stamp either way.
+      // The served marker is read from the row THIS transaction holds
+      // locked (the guarded UPDATE above), never from the pre-transaction
+      // snapshot (GH Codex r5 P1): a /pdf download or legacy page view that
+      // persisted evidence after this accept read the row is still honored.
       const { rateReviewTermsServedIsCurrent } = require('../services/estimate-proposal-billing');
+      const lockedEstimateRow = await trx('estimates').where({ id: estimate.id }).first('estimate_data');
       const rateReviewDisclosureEvidence = (recordAcceptanceTerms && recordedTermsScope === 'plan')
-        || rateReviewTermsServedIsCurrent(rawEstData);
+        || rateReviewTermsServedIsCurrent(parseEstimateDataSafe(lockedEstimateRow || {}));
       if (acceptTermsScope === 'plan' && rateReviewDisclosureEvidence) {
         await trx('estimates').where({ id: estimate.id }).update({
           estimate_data: trx.raw(
@@ -26704,11 +26739,15 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // whichever renderer serves it, a document that prints the annual rate
     // review line for an OPEN estimate marks estimate_data.rateReviewTermsServed
     // — the accept's frozen-document stamp keys on that marker (or the
-    // recorded drawer snapshot), never on plan eligibility alone. Never
-    // throws; a missed marker never fails the download.
+    // recorded drawer snapshot), never on plan eligibility alone. Written
+    // BEFORE the bytes go out (GH Codex r5 P1): an accept racing from
+    // another tab re-reads the marker under its row lock and merges it
+    // through its own estimate_data write, so evidence persisted before the
+    // response can never be lost to that accept. Never throws; a missed
+    // marker never fails the download.
     const { recordRateReviewTermsServedByDocument, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
     if (featureGates.isEnabled('estimateDocPdf')) {
-      let browserDocumentSent = false;
+      let browserDocument = null;
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
         const { normalizeProposal } = require('../services/estimate-proposal');
@@ -26717,17 +26756,16 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
         // file is named identically whichever renderer served it.
         const preparedFor = normalizeProposal(estimate).preparedFor || estimate.id;
         const fileName = `proposal-${String(preparedFor).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves'}.pdf`;
-        res.set('Content-Type', 'application/pdf');
-        res.set('Content-Disposition', `inline; filename="${fileName}"`);
-        res.send(buffer);
-        browserDocumentSent = true;
+        browserDocument = { buffer, fileName };
       } catch (e) {
         const { sanitizeRenderError } = require('../services/pdf/estimate-doc-pdf');
         logger.warn(`[estimate-pdf] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
       }
-      if (browserDocumentSent) {
+      if (browserDocument) {
         await recordRateReviewTermsServedByDocument(estimate);
-        return;
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', `inline; filename="${browserDocument.fileName}"`);
+        return res.send(browserDocument.buffer);
       }
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.

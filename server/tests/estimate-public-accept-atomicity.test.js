@@ -162,6 +162,16 @@ jest.mock('../models/db', () => {
       hits.forEach((row) => {
         for (const [col, val] of Object.entries(obj)) {
           if (val && typeof val === 'object' && val.__raw && String(val.__raw).includes('jsonb_set(')) applyJsonbSet(row, col, val);
+          else if (val && typeof val === 'object' && val.__raw && String(val.__raw).startsWith("?::jsonb || jsonb_strip_nulls(jsonb_build_object('rateReviewTermsServed'")) {
+            // The accept's wholesale estimate_data write merges the ROW's
+            // current served marker over the snapshot it was built from.
+            const wasString = typeof row[col] === 'string';
+            let existing = row[col];
+            if (wasString) { try { existing = JSON.parse(existing); } catch { existing = {}; } }
+            const next = JSON.parse(val.bindings[0]);
+            if (existing && typeof existing === 'object' && existing.rateReviewTermsServed != null) next.rateReviewTermsServed = existing.rateReviewTermsServed;
+            row[col] = wasString ? JSON.stringify(next) : next;
+          }
           else row[col] = val;
         }
       });
@@ -192,7 +202,10 @@ jest.mock('../models/db', () => {
     return b;
   };
 
-  const dbFn = (table) => makeBuilder(table);
+  // state.onTable: a per-test hook fired on EVERY table access (root and
+  // transaction alike) so a test can interleave a concurrent write at a
+  // chosen point inside the accept transaction.
+  const dbFn = (table) => { if (typeof state.onTable === 'function') state.onTable(table); return makeBuilder(table); };
   dbFn.fn = { now: () => new Date() };
   dbFn.raw = (sql, bindings) => {
     // Advisory-lock statements (`pg_advisory_xact_lock`) flow through here —
@@ -394,6 +407,7 @@ function resetStore(estimateRow) {
   };
   db.__state.ops = [];
   db.__state.tryDepositLedgerBusy = false;
+  db.__state.onTable = null;
 }
 
 function storedEstimate() {
@@ -1700,6 +1714,36 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     conversionOk();
     expect((await putAccept('tok-stamp-r-x0123456789', {})).status).toBe(200);
     expect(stampOps()).toHaveLength(0);
+  });
+
+  test('served evidence persisted AFTER the accept read the row is still honored: merged through the wholesale write and read under the lock', async () => {
+    // GH Codex r5 P1: a /pdf download (or legacy page view) lands between
+    // the accept's unlocked read and its guarded UPDATE. The marker write
+    // does not move updated_at, so the accept's guard does not 409 — the
+    // accept must merge the row's marker through its own estimate_data write
+    // and decide the stamp from the row under its lock, not the snapshot.
+    mockGateState.acceptanceTerms = false;
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    seed({ id: 'est-stamp-race', token: 'tok-stamp-race-x0123456789' });
+    conversionOk();
+    let injected = false;
+    db.__state.onTable = (table) => {
+      // First transaction touch of the customers table = matchAcceptCustomerByPhone,
+      // which runs before the guarded estimates UPDATE.
+      if (table === 'customers' && !injected) {
+        injected = true;
+        const row = storedEstimate();
+        row.estimate_data = JSON.stringify({ ...JSON.parse(row.estimate_data), rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+      }
+    };
+    const res = await putAccept('tok-stamp-race-x0123456789', {});
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(injected).toBe(true);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    expect(stored.rateReviewDisclosedAtAccept).toBe(true);
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'))).toHaveLength(1);
   });
 
   test("gate on: the recorded 'plan' drawer snapshot is evidence on its own (no served marker)", async () => {
