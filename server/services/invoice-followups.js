@@ -51,6 +51,7 @@ const {
   billingEmailRecipient, operatorEmailRecipient, selfPayOnlyHandoff, billingEmailSendOutcome, billingEmailSendFailure,
 } = require('./billing-email-sender');
 const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
+const CustomerDunningKeys = require('./customer-dunning/constants');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_3_day',
@@ -882,6 +883,12 @@ async function runPending() {
     }
   }
 
+  // Customer-level overdue reminders (dunning consolidation §4): the kill
+  // switch releases every schedule that is dark BEFORE the batch below reads
+  // its members, then (live gate only) promotion takes customers with 2+
+  // active sequences onto one schedule. Neither ever sends in this run.
+  await prepareCustomerSchedules(now);
+
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
   // rather than staying armed and past-due until a restore fires a
@@ -917,6 +924,10 @@ async function runPending() {
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
+    // A customer on an open customer_dunning_schedules row: the schedule owns
+    // the cadence and these rows are membership state, never fired here.
+    // With no schedule rows this excludes nothing (pinned).
+    .where(notOwnedByCustomerSchedule)
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
@@ -952,35 +963,98 @@ async function runPending() {
         if (skip.updated && skip.nextAt
             && skip.nextAt.getTime() <= now.getTime()
             && !isStaleTouch(skip.nextAt, now)) {
-          await fireStep({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
-          sent++;
+          sent += await fireCounted({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
         }
         continue;
       }
-      await fireStep(row);
-      sent++;
+      const fired = await fireCounted(row);
+      sent += fired;
+      skipped += 1 - fired;
     } catch (err) {
       logger.error(`[invoice-followups] step fire failed for invoice ${row.invoice_id}: ${err.message}`);
       skipped++;
     }
   }
-  await runCustomerScheduleShadow(now);
+  await runCustomerScheduleEngine(now);
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
   return { sent, skipped };
 }
 
-// Customer-level overdue reminders, SHADOW only (dunning consolidation PR 2,
-// GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW): logs what the customer schedule
-// would do and writes NOTHING — no rows, mints, reservations, sends or credit.
-// The live path is wired in a later PR. A failure here never costs the run
-// its per-invoice result.
-async function runCustomerScheduleShadow(now) {
-  const shadowLive = require('../config/feature-gates').dunningCustomerScheduleShadowLive;
-  if (typeof shadowLive !== 'function' || !shadowLive()) return;
+// One batch row through fireStep, counted the way runPending always has (1 =
+// sent), except a row fireStep refused because its customer is on an open
+// customer-level schedule (0): nothing was claimed or sent.
+async function fireCounted(row) {
+  const out = await fireStep(row);
+  return out && out.ownedBy ? 0 : 1;
+}
+
+// ── customer-level overdue reminders (dunning consolidation) ─────────────
+//
+// Ownership is dynamic: an open customer_dunning_schedules row for the
+// customer. The schedule engine (services/customer-dunning/) takes the
+// customer's advisory key EXCLUSIVELY for promotion, its claim and every
+// close/release; the per-invoice paths below take the SAME key SHARED, always
+// BEFORE any invoice or sequence row lock (the engine's order: key -> schedule
+// row -> invoice rows -> sequence rows), and re-read ownership under it. The
+// key is a session-independent transaction lock, released at commit.
+
+const OPEN_SCHEDULE_SQL = `SELECT id FROM customer_dunning_schedules WHERE customer_id = ? AND status IN (${
+  CustomerDunningKeys.OPEN_STATUSES.map(() => '?').join(', ')}) LIMIT 1`;
+
+function notOwnedByCustomerSchedule() {
+  this.whereRaw(`NOT EXISTS (SELECT 1 FROM customer_dunning_schedules c WHERE c.customer_id = s.customer_id AND c.status IN (${
+    CustomerDunningKeys.OPEN_STATUSES.map(() => '?').join(', ')}))`, CustomerDunningKeys.OPEN_STATUSES);
+}
+
+const lockCustomerDunningShared = (trx, customerId) => trx.raw(
+  'SELECT pg_advisory_xact_lock_shared(hashtext(?))', [CustomerDunningKeys.lockKey(customerId)],
+);
+
+// Read AFTER the shared key is held, as its own statement: a promotion that
+// committed while this transaction waited for the key is then visible (a
+// READ COMMITTED statement snapshot is taken when the statement starts).
+async function openCustomerScheduleId(trx, customerId) {
+  const result = await trx.raw(OPEN_SCHEDULE_SQL, [customerId, ...CustomerDunningKeys.OPEN_STATUSES]);
+  return result?.rows?.[0]?.id || null;
+}
+
+// The engine's gate readers. Absent only where a suite stubs feature-gates
+// for the per-invoice engine alone; production always exports them.
+function customerDunningGates() {
+  const FeatureGates = require('../config/feature-gates');
+  return typeof FeatureGates.dunningCustomerScheduleLive === 'function'
+    && typeof FeatureGates.dunningCustomerScheduleShadowLive === 'function' ? FeatureGates : null;
+}
+
+// Before the batch: release whatever is dark (releaseIfDark logs and raises
+// its own read / release failures to the office), then promote under the live
+// gate. Promotion never sends in its own run (seed.js). Neither can cost the
+// run its per-invoice touches: an owned row stays out of the batch either way.
+async function prepareCustomerSchedules(now) {
+  const gatesModule = customerDunningGates();
+  if (!gatesModule) return;
   try {
-    await require('./customer-dunning/runner').shadowRun(now);
+    await require('./customer-dunning/wiring').releaseIfDark(now);
+    if (gatesModule.dunningCustomerScheduleLive()) await require('./customer-dunning/schedule').promote(now);
   } catch (err) {
-    logger.error(`[invoice-followups] customer-dunning shadow run failed: ${err.message}`);
+    logger.error(`[invoice-followups] customer-dunning release/promotion failed — per-invoice touches still run: ${err.message}`);
+  }
+}
+
+// After the per-invoice loop: the live schedules (GATE_DUNNING_CUSTOMER_SCHEDULE
+// and its prerequisites), else the shadow run, which writes NOTHING. A failure
+// here never costs the run its per-invoice result.
+async function runCustomerScheduleEngine(now) {
+  const gatesModule = customerDunningGates();
+  if (!gatesModule) return;
+  const live = gatesModule.dunningCustomerScheduleLive();
+  if (!live && !gatesModule.dunningCustomerScheduleShadowLive()) return;
+  try {
+    const Runner = require('./customer-dunning/runner');
+    if (live) await Runner.runCustomerSchedules(now);
+    else await Runner.shadowRun(now);
+  } catch (err) {
+    logger.error(`[invoice-followups] customer-dunning ${live ? 'run' : 'shadow run'} failed: ${err.message}`);
   }
 }
 
@@ -1377,6 +1451,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   const claimStamp = new Date();
   let claimedSeq = null;
   let claimedInvoice = null;
+  let ownedBy = null;
   try {
     // Claim inside a transaction that locks the INVOICE row first.
     // InvoiceService.update locks the same row before re-checking the claim,
@@ -1385,6 +1460,12 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
     // pre-commit snapshots of each other. The transaction holds no external
     // work: it commits before any rendering or sending.
     await db.transaction(async (trx) => {
+      // The customer's dunning key, SHARED, before the invoice row: the
+      // schedule engine takes it EXCLUSIVELY and then locks member invoice
+      // rows, so taking it after the invoice lock would invert that order and
+      // could deadlock. A promotion either commits first (seen below) or waits
+      // for this claim to commit and then refuses on its fresh stamp.
+      await lockCustomerDunningShared(trx, row.customer_id);
       const lockedInvoice = await trx('invoices')
         .where({ id: row.invoice_id })
         .forUpdate()
@@ -1432,6 +1513,10 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
         );
         return;
       }
+      // A customer on an open customer-level schedule: the schedule owns the
+      // cadence; this row is membership state and is never fired or claimed.
+      ownedBy = await openCustomerScheduleId(trx, row.customer_id);
+      if (ownedBy) return;
       const claimed = await trx('invoice_followup_sequences')
         .where({ id: row.id })
         .where(function () {
@@ -1454,6 +1539,10 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   } catch (err) {
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
     return;
+  }
+  if (ownedBy) {
+    logger.info(`[invoice-followups] sequence ${row.id} not fired — customer ${row.customer_id} is on customer reminder schedule ${ownedBy}`);
+    return { ownedBy };
   }
   if (!claimedSeq) {
     logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
@@ -2316,6 +2405,17 @@ async function releaseFromAutopayHold(invoiceId) {
  * Called per-customer when autopay fails — bumps the counter on every
  * active autopay-held sequence for that customer, and releases any whose
  * count has crossed the threshold.
+ *
+ * A customer-level schedule (dunning consolidation §8) is deliberately NOT
+ * written here. Its autopay hold is not parked: the engine revisits an
+ * `autopay_hold` schedule at every run and judges `customerOnAutopay` itself —
+ * resumed (and sent in that same run) once the customer is off autopay, closed
+ * once the balance is gone, held again while autopay still stands. Releasing
+ * it here would hand the members back to the per-invoice ladder only for the
+ * next run to promote them again; resuming it would be re-held at the next
+ * revisit. The member rows below are still counted and released as before:
+ * they are the schedule's membership state (a released member stops holding
+ * the set as `member_autopay_hold`).
  */
 async function handleAutopayFailure(customerId) {
   const rows = await db('invoice_followup_sequences')
@@ -2750,6 +2850,10 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
 /**
  * Send the next touch right now, even if it's not due yet. Virginia uses this
  * when a customer is dodging (e.g. "push them to day-14 language today").
+ *
+ * Returns undefined for a per-invoice send. For a customer on an open
+ * customer-level schedule it returns the schedule's send-now result
+ * ({ routedTo: 'customer_schedule', scheduleId, ... }, customer-dunning/wiring.js).
  */
 async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
@@ -2758,12 +2862,23 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
 
-  // Temporarily set next_touch_at in the past + status active, then fire
-  await db('invoice_followup_sequences').where({ id: seq.id }).update({
-    updated_at: db.fn.now(),
-    status: 'active',
-    next_touch_at: new Date(Date.now() - 1000),
+  // Temporarily set next_touch_at in the past + status active, then fire —
+  // unless the customer is on a customer-level schedule: then the click sends
+  // the schedule's CURRENT step instead, and this row (membership state) is
+  // left exactly as it is. Checked and written under the customer's dunning
+  // key (SHARED), so a promotion cannot commit between the check and the write.
+  let ownedBy = null;
+  await db.transaction(async (trx) => {
+    await lockCustomerDunningShared(trx, seq.customer_id);
+    ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
+    if (ownedBy) return;
+    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
+      updated_at: trx.fn.now(),
+      status: 'active',
+      next_touch_at: new Date(Date.now() - 1000),
+    });
   });
+  if (ownedBy) return require('./customer-dunning/wiring').sendNowForSchedule(ownedBy, seq.customer_id);
 
   const row = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
@@ -2776,7 +2891,11 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
     )
     .first();
 
-  if (row) await fireStep(row, { operatorInitiated });
+  // A promotion that committed after the re-arm above: fireStep refused under
+  // the key (nothing was claimed or sent), so the click goes to the schedule.
+  const fired = row ? await fireStep(row, { operatorInitiated }) : undefined;
+  if (fired?.ownedBy) return require('./customer-dunning/wiring').sendNowForSchedule(fired.ownedBy, seq.customer_id);
+  return undefined;
 }
 
 /**
@@ -2911,6 +3030,7 @@ module.exports = {
   markAtRiskForLongOverdue,
   latePaymentCheckerRetiredLive,
   adoptOrphanInvoicesLive,
-  // Pure predicates, exported for tests only.
-  _test: { canSystemResume, isSystemStopStamp, holdTouchUntilNextDay },
+  // Exported for tests only (fireStep + the batch ownership predicate: the
+  // customer-dunning PostgreSQL concurrency suite drives them directly).
+  _test: { canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule },
 };

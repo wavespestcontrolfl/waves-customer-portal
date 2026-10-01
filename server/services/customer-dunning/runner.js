@@ -1,11 +1,12 @@
 'use strict';
 
 /**
- * The customer-level reminder engine (dunning consolidation §5). PR 2: the
- * live path (`runCustomerSchedules`, `processSchedule`) is complete and tested
- * directly but is NOT called from cron or any route; only `shadowRun` is wired
- * (runPending, under GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW) and it writes
- * nothing.
+ * The customer-level reminder engine (dunning consolidation §5). runPending
+ * calls `runCustomerSchedules` after its per-invoice loop while the live gate
+ * is on (GATE_DUNNING_CUSTOMER_SCHEDULE + prerequisites, narrowed by the
+ * allowlist), else `shadowRun` under GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW,
+ * which writes nothing. `processSchedule` is also the office send-now
+ * (admin.sendNow, through wiring.js).
  *
  * processSchedule runs, in this order: CLAIM -> customer + prefs -> RECOVER
  * FIRST (the ledger, never the render) -> autopay -> SET -> stage

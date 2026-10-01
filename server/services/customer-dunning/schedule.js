@@ -2,10 +2,10 @@
 
 /**
  * customer_dunning_schedules — the state machine of one customer's overdue
- * reminder cadence (dunning consolidation §4-§7). PR 2: complete and directly
- * tested, but nothing on the cron or a route calls it yet (the live wiring is
- * PR 3); only shadow.js/runner.shadowRun reads through here, and it never
- * calls a writer.
+ * reminder cadence (dunning consolidation §4-§7). runPending reaches it under
+ * the live gate (promote, then runner.runCustomerSchedules) and through the
+ * kill switch (wiring.releaseIfDark); the admin controls through wiring.js.
+ * The shadow run (runner.shadowRun) reads through here and never calls a writer.
  *
  * Every function takes `database` (default: the db module) and uses ONLY that
  * handle; the engine's entry points never inject one, it exists so a transaction
@@ -13,8 +13,11 @@
  * convention) and is guarded on the state it read, so a concurrent writer
  * turns it into a no-op rather than an overwrite.
  *
- * Lock order everywhere: advisory key (lockKey) -> schedule row -> sequence
- * rows. The engine never locks invoice rows.
+ * Lock order everywhere: advisory key (lockKey, EXCLUSIVE here) -> schedule
+ * row -> member invoice rows (claim only, in id order) -> sequence rows. The
+ * per-invoice engine (invoice-followups.js fireStep / sendNextTouchNow) takes
+ * the same key SHARED before its own invoice row lock, so the two never
+ * acquire in opposite orders.
  */
 
 const db = require('../../models/db');

@@ -2,9 +2,9 @@
 
 /**
  * Staff controls for a customer's reminder schedule (dunning consolidation
- * §8): pause / resume / release / send-now. PR 2: nothing routes to these yet
- * (the routes and the send-now routing are PR 3); they are complete and tested
- * directly. Each is guarded on the state it read.
+ * §8): pause / resume / release / send-now. Reached through wiring.js (the
+ * POST /admin/customers/:id/dunning-schedule/* routes and the per-invoice
+ * send-now routing). Each is guarded on the state it read.
  */
 
 const db = require('../../models/db');
@@ -51,9 +51,21 @@ async function release(scheduleId, { now = new Date() } = {}) {
   return { ok: out.closed, released: out.landed.length };
 }
 
+// The claim refuses while the schedule, or one of its active member rows (a per-invoice send), carries a
+// fresh claim: that is a send in flight, and the admin is told so rather than "nothing happened".
+async function claimInFlight(scheduleId, now) {
+  const row = await openScheduleQuery(scheduleId).first();
+  if (!row) return false;
+  if (Schedule.claimIsFresh(row, now)) return true;
+  return (await Schedule.activeMemberRows(row.customer_id)).some((member) => Schedule.claimIsFresh(member, now));
+}
+
 /** Fires the CURRENT stage through the normal send path with operator channels. */
 async function sendNow(scheduleId, { now = new Date() } = {}) {
   const out = await Runner.processSchedule(scheduleId, now, { operatorInitiated: true, force: true });
+  if (out.outcome === 'skipped' && out.reason === 'not_claimable' && await claimInFlight(scheduleId, now)) {
+    return { routedTo: 'customer_schedule', scheduleId, ...IN_FLIGHT };
+  }
   return { routedTo: 'customer_schedule', scheduleId, ...out };
 }
 
