@@ -801,9 +801,12 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // gratitude handoff) LAST, so no other state can change after the final guard and before
     // the provider request; the repeatable parts re-run in the same order after the marker.
     providerPreSendCheck: (() => {
-      const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read here too, so a visit completed after the
+        // executor's own recheck cannot let the previous visit's timing through.
+        labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
         laneFields.providerPreSendCheck,
       );
     })(),

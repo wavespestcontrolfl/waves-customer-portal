@@ -30,7 +30,7 @@ const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
 const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
 const { labelFactsSendBlockReason } = require('../services/sms-label-facts');
-const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, scheduledLabelFactsBlock } = require('../services/agent-decision-send-checks');
+const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, scheduledLabelFactsBlock, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
 const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
@@ -353,7 +353,7 @@ describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provide
 
   test('the scheduler composes it AFTER the entry point\'s own predicate, for decision-linked sends only', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
-    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, composeProviderPreSendChecks }');
+    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks }');
     expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
   });
 });
@@ -467,5 +467,56 @@ describe('provider-boundary ETA predicates use the handoff connection (dbi)', ()
     await composed({ dbi: trx });
     expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
     expect(lane).toHaveBeenCalledWith({ dbi: trx });
+  });
+});
+
+describe('LABEL FACTS at the provider boundary (Codex #5416 P1)', () => {
+  const trxFor = (row) => jest.fn(() => ({ where: () => ({ first: async () => row }) }));
+  const SNAP = { customer_id: 'c1', visit_date: '2026-09-29', record_ids: ['r1'], sentences: ['S1'] };
+  const decision = { input_snapshot: { label_facts_snapshot: SNAP, sms: { body: 'Can the dogs go out?' } }, prompt_version: 'house_voice_v12_real_answers3_cfl' };
+  beforeEach(() => { labelFactsSendBlockReason.mockReset().mockResolvedValue(null); });
+
+  test('reads the decision and the latest visit through the handoff connection, and passes a current reply', async () => {
+    db.mockReset().mockImplementation(() => { throw new Error('root pool must not be touched'); });
+    const trx = trxFor(decision);
+    const check = labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'S1' });
+    await expect(check({ channel: 'sms', dbi: trx })).resolves.toEqual({ ok: true });
+    expect(trx).toHaveBeenCalledWith('agent_decisions');
+    expect(db).not.toHaveBeenCalled();
+    expect(labelFactsSendBlockReason).toHaveBeenCalledWith(expect.objectContaining({ snapshot: SNAP, body: 'S1', inbound: 'Can the dogs go out?', conn: trx }));
+    expect(check.afterMarker).toBe(check);
+  });
+  test('a newer visit refuses terminally; an unreadable visit or decision refuses retryably; a missing row never sends', async () => {
+    labelFactsSendBlockReason.mockResolvedValueOnce('label_facts_visit_changed');
+    await expect(labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'S1' })({ dbi: trxFor(decision) }))
+      .resolves.toEqual({ ok: false, code: 'LABEL_FACTS_STALE_AT_BOUNDARY', reason: 'label timing no longer current (label_facts_visit_changed)' });
+    labelFactsSendBlockReason.mockResolvedValueOnce('label_facts_recheck_failed');
+    await expect(labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'S1' })({ dbi: trxFor(decision) }))
+      .resolves.toMatchObject({ ok: false, code: 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    const broken = jest.fn(() => { throw new Error('db down'); });
+    await expect(labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'S1' })({ dbi: broken }))
+      .resolves.toMatchObject({ ok: false, code: 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    await expect(labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'S1' })({ dbi: trxFor(undefined) }))
+      .resolves.toMatchObject({ ok: false, code: 'LABEL_FACTS_STALE_AT_BOUNDARY' });
+  });
+  test('an older-prompt decision with no snapshot is untouched', async () => {
+    await expect(labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'Yes.' })({ dbi: trxFor({ input_snapshot: {}, prompt_version: 'house_voice_v8' }) })).resolves.toEqual({ ok: true });
+    expect(labelFactsSendBlockReason).not.toHaveBeenCalled();
+  });
+  test('the snapshot variant (auto-send claim) runs for real-answers drafts and snapshots only, through dbi', async () => {
+    expect(labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: null, promptVersion: 'house_voice_v8', getBody: () => 'x' })).toBeUndefined();
+    const trx = jest.fn();
+    const check = labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: SNAP, inboundMessage: 'dogs?', promptVersion: 'house_voice_v12_real_answers3_cfl', getBody: () => 'S1' });
+    await expect(check({ dbi: trx })).resolves.toEqual({ ok: true });
+    expect(labelFactsSendBlockReason).toHaveBeenCalledWith(expect.objectContaining({ snapshot: SNAP, inbound: 'dogs?', body: 'S1', conn: trx }));
+    labelFactsSendBlockReason.mockRejectedValueOnce(new Error('boom'));
+    await expect(check({ dbi: trx })).resolves.toMatchObject({ ok: false, retryable: true });
+    expect(typeof labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: null, promptVersion: 'house_voice_v12_real_answers3_cfl', getBody: () => 'x' })).toBe('function');
+  });
+  test('every decision-linked send path composes it at the boundary', () => {
+    const read = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    expect(read('../services/scheduler.js')).toContain('labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body })');
+    expect(read('../routes/admin-communications.js')).toContain('checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody })');
+    expect(read('../services/sms-auto-send.js')).toContain('labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply })');
   });
 });
