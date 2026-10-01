@@ -955,11 +955,12 @@ service line the request asked for (`inferServiceLine` per part of a composite
 such as `Lawn Care + Pest Control` or `Lawn & Pest`, on both sides); a request
 that named no service is answered by any booking, and one asking for a line the
 visit does not carry (a lawn + pest request, then a lawn-only booking) stays
-open for the office. It must also be for the same property: the request's house
-number + 5-digit zip against the visit's service address (its own stamp, else
-the customer's); a customer with two homes on one phone who asks at A and books
-at B keeps the A request open (when either side has no such key the close
-proceeds). The audit row and the FYI name the visit's service and day
+open for the office. It must also be for the same property, judged by /book's own address matcher
+(`addressMatchesCustomer`: normalized street with suffix variants, unit value,
+zip) against the visit's service address (its own stamp, else the customer's);
+a customer with two homes on one phone who asks at A and books at B, or at
+another unit of the same building, keeps the A request open (a side with no
+street does not block the close). The audit row and the FYI name the visit's service and day
 as read under the visit lock. A request staff attached an estimate
 to (`leads.estimate_id` set) is never closed and never converted by the
 booking: it stays open, as before this change, and converts the way any
@@ -978,7 +979,10 @@ touch keeps the credit (owner ruling 2026-10-01): when the request's row came
 in paid (`is_paid`: a paid click, or paid UTMs whose click id was stripped)
 and the booking's own row has no paid click id, the booking's
 row first takes the request's touch (source, detail, lead date, click ids,
-UTM campaign/term, `is_paid`; the earliest paid request wins; when the
+UTM campaign/term, `is_paid`; the earliest paid request by first-contact
+instant wins, and the transfer is recorded on that request's close audit
+(`touch_to`) so a close that runs in parts (a replay closing an older request
+later) still ends on the earliest contact; when the
 booking converted a genuine lead instead of writing its own row, that lead's
 booked row is the target, and it keeps its own touch when its first contact
 (`leads.first_contact_at`, the instant, not the row's calendar `lead_date`)

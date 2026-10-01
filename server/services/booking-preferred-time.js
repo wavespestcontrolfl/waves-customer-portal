@@ -479,22 +479,28 @@ function bookingAnswersRequest(requestedService, bookedService) {
   const booked = serviceLines(bookedService);
   return [...serviceLines(requestedService)].every((line) => booked.has(line));
 }
-// A booking settles only a request for the SAME property (terminal Codex pass 3):
-// a customer with two homes on one phone and name can ask for lawn at A and book
-// lawn at B. The visit's service address is its own stamp, else the customer's
-// (the COALESCE every dispatch reader uses). Keyed on house number + 5-digit zip,
-// so 'St' vs 'Street' and unit formatting never split one home; when either side
-// has no such key the property cannot be told apart and does not block the close.
-const propertyKey = (street, zip) => {
-  const number = String(street || '').trim().match(/^\d+[a-z]?/i);
-  const zip5 = String(zip || '').trim().slice(0, 5);
-  return number && /^\d{5}$/.test(zip5) ? `${number[0].toLowerCase()}|${zip5}` : null;
-};
+// A booking settles only a request for the SAME property (terminal Codex passes
+// 3-4): a customer with two homes on one phone and name can ask for lawn at A and
+// book lawn at B. Judged by /book's own address matcher (addressMatchesCustomer:
+// normalized street with suffix variants, unit value, zip), so 'St' vs 'Street'
+// never splits one home while a different street or unit never joins two. The
+// visit's service address is its own stamp, else the customer's (the COALESCE
+// every dispatch reader uses). A side with no street cannot be told apart and does
+// not block the close.
 function sameProperty(lead, visit, customer) {
-  const requested = propertyKey(lead.address, lead.zip);
-  const booked = propertyKey(visit.service_address_line1 || (customer && customer.address_line1),
-    visit.service_address_zip || (customer && customer.zip));
-  return !requested || !booked || requested === booked;
+  const meta = typeof lead.extracted_data === 'string'
+    ? (() => { try { return JSON.parse(lead.extracted_data); } catch { return {}; } })()
+    : (lead.extracted_data || {});
+  const requestedStreet = meta.address_line1;
+  const booked = {
+    address_line1: visit.service_address_line1 || (customer && customer.address_line1),
+    address_line2: visit.service_address_line1 ? visit.service_address_line2 : (customer && customer.address_line2),
+    zip: visit.service_address_zip || (customer && customer.zip),
+  };
+  if (!String(requestedStreet || '').trim() || !String(booked.address_line1 || '').trim()) return true;
+  // Lazy: routes/booking requires this module (the matcher is on its _internals).
+  const { addressMatchesCustomer } = require('../routes/booking')._internals;
+  return addressMatchesCustomer(booked, requestedStreet, lead.zip, meta.address_line2 || null);
 }
 // The words the audit row and the FYI name the visit by.
 const visitWords = (visit) => ({
@@ -639,9 +645,9 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         const owner = await trx('scheduled_services').where({ id: visit.id }).first('customer_id');
         const ownerId = (owner && owner.customer_id) || customerId;
         const liveCustomer = await trx('customers').where({ id: ownerId }).forShare()
-          .first('phone', 'first_name', 'last_name', 'email', 'address_line1', 'zip');
+          .first('phone', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'zip');
         const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate()
-          .first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id', 'service_address_line1', 'service_address_zip');
+          .first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id', 'service_address_line1', 'service_address_line2', 'service_address_zip');
         if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
         // A merge between the owner read and the lock: leave it to the next closer.
         if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) return null;
@@ -652,7 +658,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         // to close). The advisory lock only orders closers, so the lead's own
         // state, phone identity and request recency are re-proven right here.
         const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
-          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest', 'address', 'zip',
+          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest', 'extracted_data', 'zip',
           trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
         );
         const stillOurs = current
@@ -810,32 +816,49 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
         .forUpdate()
         .first('booked.*');
       const hasPaidClick = (row) => PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
-      if (target && !hasPaidClick(target)) {
+      const CONTACTED_AT = 'COALESCE(%s.first_contact_at, %s.created_at)';
+      const contactedAt = (alias) => CONTACTED_AT.replace(/%s/g, alias);
+      // Provenance (terminal Codex pass 4): the request whose touch an earlier cleanup
+      // already gave this target, recorded on that request's close audit (touch_to).
+      // A close that runs in parts (one request now, an older one on a replay) is then
+      // judged on the same earliest-contact rule whatever the order: an inherited click
+      // is not the target's own, and a later cleanup compares against its instant.
+      const inherited = target ? await trx('lead_activities as a')
+        .join('leads as il', 'il.id', 'a.lead_id')
+        .where('a.activity_type', 'status_change')
+        .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
+        .whereRaw("a.metadata->>'touch_to' = ?", [String(target.id)])
+        .orderByRaw(`${contactedAt('il')} ASC`)
+        .first(trx.raw(`${contactedAt('il')} AS contacted_at`)) : null;
+      if (target && (inherited || !hasPaidClick(target))) {
         // Earliest first contact wins: ordered by the requests' contact instants (the
         // calendar lead_date ties same-day, and the row id is not contact order).
         const requestRows = (await trx('ad_service_attribution as r')
           .join('leads as rl', 'rl.id', 'r.lead_id')
           .whereIn('r.lead_id', closedIds)
           .where((q) => q.whereNull('r.funnel_stage').orWhereNotIn('r.funnel_stage', ['booked', 'completed']))
-          .orderByRaw('COALESCE(rl.first_contact_at, rl.created_at) ASC NULLS LAST, r.lead_date ASC NULLS LAST, r.id ASC')
-          .select('r.*')) || [];
+          .orderByRaw(`${contactedAt('rl')} ASC NULLS LAST, r.lead_date ASC NULLS LAST, r.id ASC`)
+          .select('r.*', trx.raw(`${contactedAt('rl')} AS contacted_at`))) || [];
         const firstPaid = requestRows.find((row) => row.is_paid === true);
-        // A converted genuine lead keeps its own touch when it came first (codex
-        // #5477 r12): judged on the leads' first-contact instants, not the
-        // funnel rows' calendar lead_date (two contacts the same day tie there).
-        // A tie, or no instant to compare, keeps the genuine lead's own touch.
-        let targetFirst = false;
-        if (firstPaid && target.lead_id) {
-          const contacts = await trx('leads').whereIn('id', [target.lead_id, firstPaid.lead_id])
-            .select('id', trx.raw('COALESCE(first_contact_at, created_at) AS contacted_at'));
-          const at = (id) => contacts.find((c) => String(c.id) === String(id))?.contacted_at;
-          const targetAt = at(target.lead_id);
-          const requestAt = at(firstPaid.lead_id);
-          targetFirst = !targetAt || !requestAt || new Date(targetAt).getTime() <= new Date(requestAt).getTime();
+        // The touch the target holds now, and since when: one it inherited from an
+        // earlier request, else a converted genuine lead's own (codex #5477 r12: judged
+        // on first-contact instants, not the calendar lead_date). A booking's own row
+        // with no paid click holds nothing to defend. A tie, or no instant to compare,
+        // keeps what the target holds.
+        let held = null;
+        if (inherited) held = { at: inherited.contacted_at };
+        else if (target.lead_id) {
+          held = { at: (await trx('leads').where({ id: target.lead_id }).first(trx.raw(`${contactedAt('leads')} AS contacted_at`)))?.contacted_at };
         }
-        if (firstPaid && !targetFirst) {
+        const keepsHeld = !!held && (!held.at || !firstPaid?.contacted_at
+          || new Date(held.at).getTime() <= new Date(firstPaid.contacted_at).getTime());
+        if (firstPaid && !keepsHeld) {
           await trx('ad_service_attribution').where({ id: target.id })
             .update({ ...Object.fromEntries(touchColumns.map((col) => [col, firstPaid[col] ?? null])), updated_at: trx.fn.now() });
+          await trx('lead_activities')
+            .where({ lead_id: firstPaid.lead_id, activity_type: 'status_change' })
+            .whereRaw("metadata->>'reason' = ? AND metadata->>'booking_id' = ?", [CLOSE_REASON, String(booking.id)])
+            .update({ metadata: trx.raw("metadata || ?::jsonb", [JSON.stringify({ touch_to: String(target.id) })]) });
         }
       }
       return (await trx('ad_service_attribution')
