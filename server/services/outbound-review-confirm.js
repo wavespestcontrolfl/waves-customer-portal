@@ -19,7 +19,7 @@
  */
 
 const logger = require('./logger');
-const { findStreetLevelHoldCard, isStreetLevelHoldVisit, approvedAddressStillCurrent } = require('./street-level-hold');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit, approvedAddressStillCurrent, reopenHoldCardForRestoredVisit } = require('./street-level-hold');
 const db = require('../models/db');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -950,18 +950,60 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       logger.warn(`[${routeTag}] legacy outbound activation for ${serviceId}: a core hook leg failed — leaving unstamped so the next touch retries`);
       return false;
     }
-    const stamped = await db('scheduled_services')
-      .where({ id: serviceId, customer_confirmed: false })
-      // A rejection that committed during the hook window wins: never
-      // stamp a cancelled/skipped row confirmed (Codex #3361 r8 P1).
-      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
-      .update({ customer_confirmed: true, confirmed_at: new Date() });
+    // A rejection that committed during the hook window wins: never stamp a cancelled/skipped row
+    // confirmed (Codex #3361 r8 P1); a voice-agent row also stays pending if its address changed since
+    // the office approved it (stampCustomerConfirmed).
+    const stamped = await stampCustomerConfirmed(db, { id: serviceId }, {
+      bindAddress: row.source_action === 'voice_agent' && !(row.status === 'completed' && row.field_confirmed_at),
+    });
     if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(db, row);
     return stamped > 0;
   } catch (e) {
     logger.warn(`[${routeTag}] legacy outbound activation failed for ${serviceId}: ${e.message}`);
     return false;
   }
+}
+
+/**
+ * THE guarded customer_confirmed stamp (the receipt of a completed activation), shared by the office-confirm
+ * activation and the lazy / sweep activation. Returns the number of rows stamped.
+ *
+ * For a voice-agent booking the stamp is conditional on the address the office approved: the approval's
+ * address witness (street-level-hold.js recordApprovedAddressWitness) is compared with the visit's address
+ * read from the row LOCKED FOR UPDATE in the stamping transaction. Every writer of a visit's service address
+ * (appointment-address applyAppointmentAddress, the rebooker, update-details, the geocode-review visit moves)
+ * updates the scheduled_services row itself under that row's lock, so an address write either commits before
+ * this lock (and is seen: the stamp is refused, the hold stays pending for the office to re-confirm) or waits
+ * behind it (and lands on an already-released hold, as any later correction does). The visit's address for
+ * the confirm is its own stamped service_address_* columns, never the customer's profile address, so a
+ * customers-table edit is not a change to the confirmed address. A hold with no witness, every other
+ * source, and a visit confirmed ON SITE by its technician (field stamp / performed completion: the tech
+ * stood at the property) stamp exactly as before — the caller passes bindAddress for the office approvals.
+ */
+async function stampCustomerConfirmed(dbh, svc, { bindAddress = false } = {}) {
+  const stamp = (conn) => conn('scheduled_services')
+    .where({ id: svc.id, customer_confirmed: false })
+    // A rejection that committed during the hook window wins: never stamp a
+    // cancelled/skipped row confirmed (same guard as the lazy helper).
+    .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
+    .update({ customer_confirmed: true, confirmed_at: new Date() });
+  if (!bindAddress) return stamp(dbh);
+  let refused = false;
+  const stamped = await dbh.transaction(async (trx) => {
+    await trx('scheduled_services').where({ id: svc.id }).forUpdate().first('id');
+    if (!(await approvedAddressStillCurrent(trx, svc.id))) {
+      refused = true;
+      return 0;
+    }
+    return stamp(trx);
+  });
+  if (refused) {
+    logger.info(`[street-level-hold] stamp refused for ${svc.id}: the visit address changed after the office approval — the hold stays pending`);
+    // The hook (which ran before the stamp) resolved the hold's review card: bring it back so the office can
+    // confirm the new address. Best-effort; the hold itself (card + unconfirmed visit) already stands.
+    await reopenHoldCardForRestoredVisit(svc.id, dbh);
+  }
+  return stamped;
 }
 
 /**
@@ -1000,6 +1042,14 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
  */
 async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm', opts = {}) {
   let coreLegsOk = false;
+  // An address correction that landed between the approving transition and this activation voids the
+  // approval: run none of the legs (the stamp below re-checks under the row lock for the window that
+  // remains). A technician's own field confirm (skipCardRequest) is confirmed on site and not bound.
+  const bindAddress = svc.source_action === 'voice_agent' && !opts.skipCardRequest;
+  if (bindAddress && !(await approvedAddressStillCurrent(dbh, svc.id))) {
+    logger.info(`[${routeTag}] office-confirm activation skipped for ${svc.id}: the visit address changed after the approval`);
+    return false;
+  }
   try {
     coreLegsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag, opts);
   } catch (e) {
@@ -1013,12 +1063,7 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
     return false;
   }
   try {
-    const stamped = await dbh('scheduled_services')
-      .where({ id: svc.id, customer_confirmed: false })
-      // A rejection that committed during the hook window wins: never stamp a
-      // cancelled/skipped row confirmed (same guard as the lazy helper).
-      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
-      .update({ customer_confirmed: true, confirmed_at: new Date() });
+    const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress });
     if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(dbh, svc);
     if (stamped > 0) return true;
     // A zero-row stamp is not a failure when another activator (the stranded-activation sweep, a
@@ -1121,5 +1166,5 @@ module.exports = {
   activateLegacyOutboundReviewRowIfNeeded,
   sweepStrandedLegacyOutboundActivations,
   verifyReminderSlotAfterRegistration,
-  _test: { hasRecordedOfficeConfirm },
+  _test: { hasRecordedOfficeConfirm, stampCustomerConfirmed },
 };

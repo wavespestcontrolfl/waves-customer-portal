@@ -120,6 +120,25 @@ describe('the SMS send step holds a live street-level hold', () => {
     expect(isStreetLevelHoldVisit).not.toHaveBeenCalled();
   });
 
+  test('a LEAD-audience composer send (phone-only reschedule link, shared phone) is held on its linked visit too; a staff-facing audience is not', async () => {
+    isStreetLevelHoldVisit.mockImplementation(async (id) => id === 'visit-held');
+    const lead = (linked, extra = {}) => sendCustomerMessage({
+      to: '+19415550142', channel: 'sms', audience: 'lead', purpose: 'conversational', identityTrustLevel: 'phone_provided_unverified',
+      body: 'Here is your reschedule link.', metadata: { linked_scheduled_service_ids: linked }, ...extra,
+    });
+    expect(await lead(['visit-held'])).toMatchObject({ sent: false, blocked: true, code: 'STREET_LEVEL_HOLD', retryable: true });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+    expect((await lead(['visit-ok'])).sent).toBe(true);
+    // The same hold applies to an appointmentId / metadata.scheduled_service_id send classified as a lead.
+    expect(await lead([], { appointmentId: 'visit-held' })).toMatchObject({ blocked: true, code: 'STREET_LEVEL_HOLD' });
+    // Staff-facing briefings are never about a customer's held visit.
+    isStreetLevelHoldVisit.mockClear();
+    await sendCustomerMessage({
+      to: '+19415550142', channel: 'sms', audience: 'internal', purpose: 'internal_briefing', body: 'Ops note.', metadata: { linked_scheduled_service_ids: ['visit-held'] },
+    });
+    expect(isStreetLevelHoldVisit).not.toHaveBeenCalled();
+  });
+
   test('the office-confirm hook\'s own card invitation is part of the release and is not held; every other card-request trigger still is', async () => {
     isStreetLevelHoldVisit.mockResolvedValue(true);
     const send = (trigger) => sendCustomerMessage({

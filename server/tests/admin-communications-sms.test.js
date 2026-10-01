@@ -562,6 +562,9 @@ describe('admin communications SMS route', () => {
         const res = await postSms(baseUrl, { linkedVisitIds: [VISIT_A, 'not-a-uuid', VISIT_A.toUpperCase(), VISIT_B, 42] });
         expect(res.status).toBe(200);
         expect(sendCustomerMessage.mock.calls[0][0].metadata.linked_scheduled_service_ids).toEqual([VISIT_A, VISIT_B]);
+        // No customerId was posted (the phone-only flow): the send is classified a LEAD and still carries the ids,
+        // which the shared send step checks whatever the audience (street-level-hold-comms.test.js).
+        expect(sendCustomerMessage.mock.calls[0][0].audience).toBe('lead');
         sendCustomerMessage.mockClear();
         expect((await postSms(baseUrl, {})).status).toBe(200);
         expect(sendCustomerMessage.mock.calls[0][0].metadata).not.toHaveProperty('linked_scheduled_service_ids');

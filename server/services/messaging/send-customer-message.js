@@ -129,7 +129,11 @@ function heldVisitIdsOf(input) {
 }
 async function streetLevelHoldBlocksSend(input) {
   const visitIds = heldVisitIdsOf(input);
-  if (!visitIds.length || input.audience !== 'customer') return false;
+  // Visit-scoped content is held whatever the generic audience classification says: a phone-only
+  // composer send (a reschedule link inserted for a number whose owner was not adopted) and a shared-phone
+  // scheduled send classify as 'lead' yet still carry a customer's visit link. Only staff-facing
+  // audiences (internal briefings, admin, tech) are never about a customer's held visit.
+  if (!visitIds.length || ['internal', 'admin', 'tech'].includes(input.audience)) return false;
   // The card-on-file invitation the office-confirm hook itself sends (and its lazy-activation twin)
   // is part of releasing the hold: the hook runs before the confirmed stamp lands, and only after
   // the office approved the address (the activation guards refuse a hold otherwise).

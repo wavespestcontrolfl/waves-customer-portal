@@ -166,6 +166,33 @@ describe('finding 6: the office approval is bound to the address it was given fo
     });
   });
 
+  describe('the final stamp is bound to the approved address (Codex #5506 r1)', () => {
+    const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+    const witnessCard = (witness) => ({ id: 'card-1', status: 'open', payload: { street_level_address: true, scheduled_service_id: 'v1', approved_address: witness } });
+
+    test('an office approval whose address changed before the activation runs none of the legs and stamps nothing', async () => {
+      const changed = { source_action: 'voice_agent', source_call_log_id: 'call-1', ...ADDRESS, service_address_line1: '1240 Sample Newbuild Trl' };
+      const { conn, log } = makeConn({ visit: changed, card: witnessCard(NORM) });
+      expect(await runOfficeConfirmActivation(conn, { id: 'v1', source_action: 'voice_agent' }, 'admin-dispatch')).toBe(false);
+      expect(log.updates).toHaveLength(0);
+    });
+
+    test('a technician\'s own field confirm is not bound to the office witness', () => {
+      const s = read('../services/outbound-review-confirm.js');
+      expect(s).toContain("const bindAddress = svc.source_action === 'voice_agent' && !opts.skipCardRequest;");
+    });
+
+    test('both stamp sites go through the one locked, address-checked stamp (row FOR UPDATE, witness re-read from the locked row)', () => {
+      const s = read('../services/outbound-review-confirm.js');
+      expect(s.split('await stampCustomerConfirmed(').length - 1).toBe(2);
+      const fn = s.slice(s.indexOf('async function stampCustomerConfirmed'), s.indexOf('async function runOfficeConfirmActivation'));
+      expect(fn.indexOf(".forUpdate().first('id')")).toBeGreaterThan(0);
+      expect(fn.indexOf('approvedAddressStillCurrent(trx')).toBeGreaterThan(fn.indexOf('.forUpdate()'));
+      // The completed-and-field-confirmed visit (the tech stood at the property) is not bound.
+      expect(s).toContain("bindAddress: row.source_action === 'voice_agent' && !(row.status === 'completed' && row.field_confirmed_at),");
+    });
+  });
+
   test('both office-confirm routes record the witness in the approving transaction, before the transition', () => {
     for (const [file, before] of [['../routes/admin-dispatch.js', 'transition = await transitionJobStatus({'], ['../routes/admin-schedule.js', 'await transitionJobStatus({']]) {
       const s = read(file);

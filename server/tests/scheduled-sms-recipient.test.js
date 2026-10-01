@@ -120,10 +120,10 @@ test('a composer-queued text replays with its linked visits so the street-level 
   const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
   const start = source.indexOf('const sendReplay = () => {');
   const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
-  const run = async (claimMeta) => {
+  const run = async (claimMeta, customerId = 'cust-1') => {
     const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
     await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
-      msg: { id: 'queue-row', customer_id: 'cust-1', message_body: 'Your reschedule link', message_type: 'manual', admin_user_id: 'admin-1' },
+      msg: { id: 'queue-row', customer_id: customerId, message_body: 'Your reschedule link', message_type: 'manual', admin_user_id: 'admin-1' },
       claimMeta,
       toPhone: '+19415550101', purpose: 'conversational', replayConsentBasis: undefined,
       sendCustomerMessage,
@@ -136,6 +136,10 @@ test('a composer-queued text replays with its linked visits so the street-level 
   };
   const withLinks = await run({ human_authored: true, linked_scheduled_service_ids: ['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c'] });
   expect(withLinks.metadata.linked_scheduled_service_ids).toEqual(['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c']);
+  // A row with no resolved customer (a shared phone that matched several accounts) replays as a lead-shaped
+  // send and still carries the ids; the send step checks them whatever the audience.
+  expect((await run({ human_authored: true, linked_scheduled_service_ids: ['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c'] }, null)).metadata.linked_scheduled_service_ids)
+    .toEqual(['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c']);
   // Every other queued row replays exactly as before: no key at all.
   expect((await run({ human_authored: true })).metadata).not.toHaveProperty('linked_scheduled_service_ids');
 });

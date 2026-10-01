@@ -5050,6 +5050,34 @@ function initScheduledJobs() {
               `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
+          } else if (smsResult.code === 'STREET_LEVEL_HOLD') {
+            // A visit the text is about is a street-level address hold awaiting the office confirm
+            // (street-level-hold.js): a validator deferral that can last as long as the office takes, so it
+            // must not spend the bounded 3-attempt rail and end terminally blocked. Like the send-window
+            // hold above: no provider send was tried, the attempt is REFUNDED and the row waits (re-polled
+            // every 15 minutes, the generic retry spacing) until the office confirms and the text sends, or
+            // the visit leaves the hold. No expiry of its own, same as the other wait branches.
+            const holdRetryAt = smsResult.nextAllowedAt ? new Date(smsResult.nextAllowedAt) : new Date(completedAt.getTime() + 15 * 60 * 1000);
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: holdRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'street_level_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] ${msg.id} waiting on a street-level address hold — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
             // Another attempt holds this notice's billing Text claim
             // (messaging/billing-text-leg-dedupe.js), so no provider send
