@@ -5018,16 +5018,20 @@ const ReviewService = {
     // could render to three; send the step's fixed template instead and
     // record it as such (the template copy is short enough to absorb the
     // long link within the existing one-extra-segment trade below).
-    if (/_tech_voice$/.test(String(request.template_key || "")) && customBody && tpl && !isNoLink) {
+    if (/_tech_voice$/.test(String(request.template_key || "")) && customBody && !isNoLink) {
       const { countSegments } = require("./messaging/segment-counter");
       // Counted as delivered: sendCustomerMessage strips the URL scheme.
       const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
       const rendered = require("./messaging/gsm-normalize").normalizeGsmPunctuation(stripSmsUrlScheme(body));
       if (countSegments(rendered).segmentCount > 2) {
-        body = OUTREACH.renderOutreachBody(tpl.body, renderVars, { requireLink: requiresLink });
-        logger.info(`[review] tech-voice draft over two segments with the long link — template sent (requestId=${request.id} template=${templateId})`);
-        request.template_key = templateId;
-        await db("review_requests").where({ id: request.id }).update({ template_key: templateId, custom_body: null })
+        // The step's own template, else the standard ask when the plan named
+        // a key the registry does not have.
+        const fallbackId = tpl ? templateId : "friendly_ask";
+        const fallbackTpl = tpl || OUTREACH.getOutreachTemplate(fallbackId);
+        body = OUTREACH.renderOutreachBody(fallbackTpl.body, renderVars, { requireLink: true });
+        logger.info(`[review] tech-voice draft over two segments with the long link — template sent (requestId=${request.id} template=${fallbackId})`);
+        request.template_key = fallbackId;
+        await db("review_requests").where({ id: request.id }).update({ template_key: fallbackId, custom_body: null })
           .catch((err) => logger.warn(`[review] tech-voice long-link fallback stamp failed (requestId=${request.id}): ${err.message}`));
       }
     }

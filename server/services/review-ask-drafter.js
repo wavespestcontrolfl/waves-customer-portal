@@ -862,10 +862,11 @@ const GREETING_WORDS = new Set(`hi hey hello thanks thank you again so much a lo
 // A self-introduction ("It's Adam.", "This is Adam here") only counts when it
 // names the technician; "I'm here." alone is a claim, not a greeting.
 const SELF_INTRO_WORDS = new Set(["it's", "its", "it", "is", "this", "i'm", "i", "am", "here"]);
-function isGreetingOnlySentence(sentence, names) {
+function isGreetingOnlySentence(sentence, names, techNames = names) {
   const words = String(sentence).toLowerCase().match(/[a-z']+/g) || [];
   if (!words.length || !words.every((w) => GREETING_WORDS.has(w) || names.has(w))) return false;
-  return !words.some((w) => SELF_INTRO_WORDS.has(w)) || words.some((w) => names.has(w));
+  // The customer's name greets ("Hi Marta!"); only the technician's introduces.
+  return !words.some((w) => SELF_INTRO_WORDS.has(w)) || words.some((w) => techNames.has(w));
 }
 
 // dispatchWithFallback returns a copy of the winning leg's result, but the
@@ -879,7 +880,7 @@ function legCapture() {
 
 // One checker verdict against the sentence it names. Returns a reject reason
 // or null.
-function sentenceVerdictReject(j, sentence, names, normRecord) {
+function sentenceVerdictReject(j, sentence, { names, techNames }, normRecord) {
   // Each verdict must be about the sentence actually being sent.
   if (normalizeForMatch(j.sentence) !== normalizeForMatch(sentence)) return "fact_check_bad_answer";
   // Off-limits topics are judged as a class (health, money, products,
@@ -888,7 +889,7 @@ function sentenceVerdictReject(j, sentence, names, normRecord) {
   // A bare request or a bare greeting / thanks states nothing to back, so it
   // needs no quote; code confirms it really is only that.
   if (j.ask_only) return isAskOnlySentence(sentence, names) ? null : "fact_check_bad_answer";
-  if (j.greeting_only) return isGreetingOnlySentence(sentence, names) ? null : "fact_check_bad_answer";
+  if (j.greeting_only) return isGreetingOnlySentence(sentence, names, techNames) ? null : "fact_check_bad_answer";
   const quote = normalizeForMatch(j.quote);
   return j.supported && quote.length >= 3 && normRecord.includes(quote) ? null : "unsupported_sentence";
 }
@@ -906,7 +907,9 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
   if (timeoutMs < TECH_VOICE_MIN_STAGE_MS) return "out_of_time";
   const sentences = techVoiceSentences(body);
   // Split names the way sentences are split ("Mary-Jane" → mary, jane).
-  const names = new Set([firstName, techName].join(" ").toLowerCase().match(/[a-z']+/g) || []);
+  const wordsOf = (v) => new Set(String(v || "").toLowerCase().match(/[a-z']+/g) || []);
+  const names = wordsOf([firstName, techName].join(" "));
+  const techNames = wordsOf(techName);
   const leg = legCapture();
   const result = await dispatchWithFallback(factCheckPolicy(writerProvider), {
     laneId: "review_ask_fact_check",
@@ -923,7 +926,7 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
   const normRecord = normalizeForMatch(record);
   const reject = !judged || judged.length !== sentences.length
     ? "fact_check_bad_answer"
-    : sentences.map((sentence, i) => sentenceVerdictReject(judged[i] || {}, sentence, names, normRecord)).find(Boolean) || null;
+    : sentences.map((sentence, i) => sentenceVerdictReject(judged[i] || {}, sentence, { names, techNames }, normRecord)).find(Boolean) || null;
   // A malformed answer is the checker's failure, so its ledger row says so;
   // a well-formed "unsupported" verdict is the checker doing its job.
   if (reject === "fact_check_bad_answer") leg.reject(reject);

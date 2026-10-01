@@ -357,6 +357,9 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isGreetingOnlySentence("I'm here.", new Set(['adam']))).toBe(false);
     expect(isGreetingOnlySentence('This is Adam here.', new Set(['adam']))).toBe(true);
     expect(isGreetingOnlySentence('Hi Marta!', new Set(['marta']))).toBe(true);
+    // GitHub r4: the customer's name greets, it never introduces.
+    expect(isGreetingOnlySentence("It's Marta.", new Set(['marta', 'adam']), new Set(['adam']))).toBe(false);
+    expect(isGreetingOnlySentence("It's Adam.", new Set(['marta', 'adam']), new Set(['adam']))).toBe(true);
   });
 
   test("GitHub r1: the writer's answer is read from the dispatcher's tolerant parse", async () => {

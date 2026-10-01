@@ -4889,6 +4889,25 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(touch.custom_body == null).toBe(true);
     });
 
+    test('GitHub r4: an over-long tech-voice draft on a plan step with an unknown template key falls back to friendly_ask', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const body = `It's Christopher, thanks for waiting on me this morning when you had to get to work. ${'I checked the kitchen and the garage and the lanai and the beds. '.repeat(2)}A Google review would really help: {review_url}`;
+      mockDraftTechVoice.mockResolvedValue(body);
+      const mock = makeMock({
+        customers: [{ id: 'tv-5', first_name: 'Lena', last_name: 'K', phone: '+19410000097', nearest_location_id: 'bradenton' }],
+      });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'admin_custom_key', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv5', sequenceStep: 1,
+      });
+      expect(out.ok).toBe(true);
+      const sent = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sent).not.toContain('waiting on me this morning');
+      expect(sent).toContain('A quick Google review would help us a lot');
+      expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+    });
+
     test('tech voice on but no verified draft: the fixed Day-0 template sends', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({
