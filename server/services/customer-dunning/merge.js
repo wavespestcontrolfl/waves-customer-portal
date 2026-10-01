@@ -192,15 +192,17 @@ async function renumberLoserEpisodes(trx, rows, { winnerId, loserId }) {
 
 /**
  * Step 3 (after the merge committed): log each release and alert the office for any member released past its
- * final step. Never throws: the merge already happened.
+ * final step, on the surviving customer (`winnerId`). Never throws: the merge already happened.
  */
-async function afterMergeCommit(released = []) {
+async function afterMergeCommit(released = [], { winnerId = null } = {}) {
   if (!released.length) return;
   const Schedule = require('./schedule');
   for (const { schedule, landed } of released) {
     logger.info(`[customer-dunning] schedule ${schedule.id} (customer ${schedule.customer_id}) released for a customer merge; ${landed.length} invoice(s) back on their own reminders`);
     try {
-      await Schedule.alertPastFinal(schedule, landed);
+      // The invoices now belong to the WINNER: an alert keyed to the loser would link the office to the
+      // archived customer (Codex #5503 r3). The schedule id still names the released schedule.
+      await Schedule.alertPastFinal(winnerId ? { ...schedule, customer_id: winnerId } : schedule, landed);
     } catch (err) {
       logger.error(`[customer-dunning] past-final alert after a customer merge failed for schedule ${schedule.id}: ${redactContact(err.message)}`);
     }

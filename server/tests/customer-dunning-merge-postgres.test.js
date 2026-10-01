@@ -164,7 +164,11 @@ postgres('customer merge reconciles customer-level overdue reminder schedules (P
     await memberInvoice(winnerId);
     const loserInvoice = await memberInvoice(loserId);
 
+    const afterCommit = jest.spyOn(DunningMerge, 'afterMergeCommit');
     await dedupe.executeMerge({ winnerId, loserId, performedBy: 'test:dunning-merge' });
+    // post-commit alerts go to the surviving customer (Codex #5503 r3 P2), for both released schedules
+    expect(afterCommit).toHaveBeenCalledWith(expect.any(Array), { winnerId });
+    expect(afterCommit.mock.calls[0][0].map((r) => r.schedule.id).sort()).toEqual([winnerOpen.id, loserOpen.id].sort());
 
     const rows = await mockDatabase(TABLE).whereIn('id', [winnerOpen.id, loserOpen.id]).select('*');
     expect(rows.map((r) => [r.id, r.customer_id, r.episode, r.status, r.closed_reason]).sort()).toEqual([

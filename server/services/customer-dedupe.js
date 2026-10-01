@@ -3054,7 +3054,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   });
   // Released combined reminder schedules: the log line and any past-final
   // office alert, post-commit (never on the merge's transaction; never throws).
-  await DunningMerge.afterMergeCommit(dunningReleased);
+  await DunningMerge.afterMergeCommit(dunningReleased, { winnerId });
   // 360 timeline events for loser contacts appended onto the winner —
   // post-commit, best-effort, awaited (the recorder never throws; a failed
   // event only warns and never fails the merge). No-op when the backfills

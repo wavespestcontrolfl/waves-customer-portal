@@ -238,6 +238,15 @@ describe('lockInMergeTransaction + releaseInMergeTransaction: the releases run o
     expect(mockSchedule.activeMemberRows).not.toHaveBeenCalled();
   });
 
+  // Codex #5503 r3 P2: the alert was keyed to the pre-merge schedule's customer (the archived loser).
+  test('afterMergeCommit raises the past-final alert on the WINNER (the loser is archived), keeping the schedule id', async () => {
+    const loserSchedule = { id: 's-l', customer_id: LOSER, step_index: 5 };
+    const landed = [{ pausedPastFinal: true, invoiceId: 'inv-1' }];
+    await DunningMerge.afterMergeCommit([{ schedule: loserSchedule, landed }], { winnerId: WINNER });
+    expect(mockSchedule.alertPastFinal).toHaveBeenCalledWith({ id: 's-l', customer_id: WINNER, step_index: 5 }, landed);
+    expect(loserSchedule.customer_id).toBe(LOSER); // the caller's object is not mutated
+  });
+
   test('afterMergeCommit: the past-final alert per released schedule, post-commit; a failing alert never throws', async () => {
     const released = [{ schedule: { id: 's-1', customer_id: LOSER }, landed: [{ pausedPastFinal: true }] }, { schedule: { id: 's-2', customer_id: WINNER }, landed: [] }];
     mockSchedule.alertPastFinal.mockRejectedValueOnce(new Error('alerts down'));
