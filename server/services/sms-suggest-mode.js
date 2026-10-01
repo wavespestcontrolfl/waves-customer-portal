@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopPosition = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -691,6 +691,8 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // LOOPS lines named — agentDecisionSendBlockReason / the scheduler recheck
             // they are still open before the reviewed reply goes out.
             ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
+            // ...and the stop count its Tech position line showed (recounted when the reply mentions stops).
+            ...(visitLoopPosition ? { visit_loop_position: visitLoopPosition } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',

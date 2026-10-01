@@ -149,6 +149,30 @@ async function loadTodayRows(upcomingServices, conn) {
   }));
 }
 
+// Live stops on the tech's route today before this visit; null with no route order.
+async function countStopsAhead(conn, visit, now) {
+  const routeOrder = visit.route_order == null ? null : Number(visit.route_order);
+  if (!Number.isFinite(routeOrder)) return null;
+  const result = await conn('scheduled_services')
+    .where({ technician_id: visit.technician_id, scheduled_date: etDateString(now) })
+    .where('route_order', '<', routeOrder)
+    .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
+    .count('* as count').first();
+  const n = Number(result?.count);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Send-time recount (agent-decision-send-checks): the stops before `visitId` now,
+// or null when that claim no longer holds at all (visit gone, started, moved off
+// today, or reassigned). Throws on a read error — the caller fails closed.
+async function currentStopsAhead({ conn = db, visitId, techId, now = new Date() }) {
+  const visit = await conn('scheduled_services').where({ id: visitId })
+    .first('id', 'technician_id', 'route_order', 'scheduled_date', 'status');
+  if (!visit || !NOT_STARTED_STATUSES.includes(visit.status)) return null;
+  if (String(visit.technician_id) !== String(techId) || calendarDay(visit.scheduled_date) !== etDateString(now)) return null;
+  return countStopsAhead(conn, visit, now);
+}
+
 async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
   const visit = todayRows.find((r) => r.technician_id);
   if (!visit) return null;
@@ -160,17 +184,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
   // future (tech-status.js), so a small negative age is a fresh fix.
   const fresh = ageMs != null && ageMs >= -FUTURE_TIMESTAMP_TOLERANCE_MS && ageMs <= FRESH_LOCATION_MS;
 
-  let stopsAhead = null;
-  const routeOrder = visit.route_order == null ? null : Number(visit.route_order);
-  if (Number.isFinite(routeOrder)) {
-    const result = await conn('scheduled_services')
-      .where({ technician_id: visit.technician_id, scheduled_date: etDateString(now) })
-      .where('route_order', '<', routeOrder)
-      .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
-      .count('* as count').first();
-    const n = Number(result?.count);
-    stopsAhead = Number.isFinite(n) ? n : null;
-  }
+  const stopsAhead = await countStopsAhead(conn, visit, now);
   return {
     techName: firstName(visit.technician_name),
     status: fresh ? String(status.status) : 'stale',
@@ -182,6 +196,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
       && Boolean(status?.current_job_id) && String(status.current_job_id) === String(visit.id),
     // Which of today's visits this is about (a customer can have two today).
     visitId: String(visit.id),
+    techId: String(visit.technician_id),
     visitType: visit.service_type || null,
     windowDisplay: windowLabel(visit, deriveWindow),
   };
@@ -402,4 +417,4 @@ async function loadVisitLoops({ customerId, upcomingServices = [], now = new Dat
   return out;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, familyKey };
+module.exports = { loadVisitLoops, emptyVisitLoops, familyKey, currentStopsAhead };

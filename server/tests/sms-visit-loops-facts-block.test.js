@@ -10,6 +10,7 @@ const {
   currentPromptVersion,
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
+  visitLoopPosition,
   REAL_ANSWERS_PROMPT_VERSION,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
 } = require('../services/sms-shadow-drafter');
@@ -220,6 +221,18 @@ describe('visitLoopCommitmentIds', () => {
     expect(visitLoopCommitmentIds({ visitLoops: v })).toEqual(['w0', 'w1', 'w2', 'w3', 'w4', 'q1']);
     expect(visitLoopCommitmentIds(null)).toEqual([]);
     expect(visitLoopCommitmentIds({})).toEqual([]);
+  });
+});
+
+describe('visitLoopPosition', () => {
+  test('gate on + fresh position with a count: the send-time snapshot; otherwise null', () => {
+    const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', techId: 't1' };
+    expect(visitLoopPosition({ visitLoops: { techPosition: tp } })).toBeNull();
+    process.env[GATE] = 'true';
+    expect(visitLoopPosition({ visitLoops: { techPosition: tp } })).toEqual({ visitId: 'v1', techId: 't1', stopsAhead: 2 });
+    expect(visitLoopPosition({ visitLoops: { techPosition: { ...tp, status: 'stale' } } })).toBeNull();
+    expect(visitLoopPosition({ visitLoops: { techPosition: { ...tp, stopsAhead: null } } })).toBeNull();
+    expect(visitLoopPosition({})).toBeNull();
   });
 });
 

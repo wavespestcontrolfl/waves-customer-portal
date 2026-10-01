@@ -198,11 +198,13 @@ function markRepeatable(check) {
 // Open-loop commitments at the provider boundary, for a caller holding the ids in
 // memory (the auto-send executor's claim). Closed → refused; an unreadable recheck
 // → refused retryably (nothing is known to be stale). No ids → undefined (no check).
-function openLoopsProviderPreSendCheck({ commitmentIds }) {
+function openLoopsProviderPreSendCheck({ commitmentIds, position = null, getBody = null }) {
   const ids = Array.isArray(commitmentIds) ? commitmentIds.filter((id) => typeof id === 'string' && id) : [];
-  if (!ids.length) return undefined;
+  if (!ids.length && !position) return undefined;
   const check = async ({ dbi } = {}) => {
-    const reason = await openLoopsBlockReason({ decision: { input_snapshot: { visit_loop_commitment_ids: ids } }, dbh: dbi });
+    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
+    const snapshot = { visit_loop_commitment_ids: ids, ...(position ? { visit_loop_position: position } : {}) };
+    const reason = await openLoopsBlockReason({ decision: { input_snapshot: snapshot }, outgoingBody, dbh: dbi });
     if (reason == null) return { ok: true };
     const retryable = reason === 'open_loops_recheck_failed';
     return {
@@ -268,33 +270,47 @@ async function reserviceBlock({ decision, outgoingBody }) {
 // fulfilled or dismissed elsewhere (a call, an email, an internal action). The
 // draft persisted the call_commitments ids it rendered; every one must still be
 // open at send time. Fails closed on a read error. No ids = nothing to check.
-async function openLoopsBlockReason({ decision, dbh }) {
+// The same goes for the Tech position stop count (visit_loop_position): a reply
+// that mentions stops is recounted, and refused when the count moved or the
+// visit no longer qualifies (pre-push audit P1).
+const MENTIONS_STOPS_RE = /\bstops?\b/i;
+async function openLoopsBlockReason({ decision, outgoingBody = null, dbh }) {
   const snapshot = parseInputSnapshot(decision && decision.input_snapshot);
   const ids = Array.isArray(snapshot?.visit_loop_commitment_ids)
     ? [...new Set(snapshot.visit_loop_commitment_ids.filter((id) => typeof id === 'string' && id))]
     : [];
-  if (!ids.length) return null;
+  const position = snapshot?.visit_loop_position && typeof snapshot.visit_loop_position === 'object' ? snapshot.visit_loop_position : null;
+  const recount = Boolean(position) && MENTIONS_STOPS_RE.test(String(outgoingBody || ''));
+  if (!ids.length && !recount) return null;
   try {
     const conn = dbh || require('../models/db');
-    const rows = await conn('call_commitments').whereIn('id', ids).select('id', 'status');
-    const open = new Set((rows || []).filter((r) => r.status === 'open').map((r) => String(r.id)));
-    return ids.every((id) => open.has(id)) ? null : 'commitment_closed';
+    if (ids.length) {
+      const rows = await conn('call_commitments').whereIn('id', ids).select('id', 'status');
+      const open = new Set((rows || []).filter((r) => r.status === 'open').map((r) => String(r.id)));
+      if (!ids.every((id) => open.has(id))) return 'commitment_closed';
+    }
+    if (recount) {
+      const { currentStopsAhead } = require('./visit-loops-facts');
+      const now = await currentStopsAhead({ conn, visitId: position.visitId, techId: position.techId });
+      if (now == null || Number(now) !== Number(position.stopsAhead)) return 'stop_count_stale';
+    }
+    return null;
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);
     return 'open_loops_recheck_failed';
   }
 }
-async function openLoopsBlock({ decision }) {
-  const reason = await openLoopsBlockReason({ decision });
+async function openLoopsBlock({ decision, outgoingBody }) {
+  const reason = await openLoopsBlockReason({ decision, outgoingBody });
   return reason ? `open-loop facts stale (${reason})` : null;
 }
 // The scheduler's queued-send form: reads the decision row itself; fails closed.
-async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
+async function scheduledOpenLoopsBlockReason({ agentDecisionId, outgoingBody = null, dbh }) {
   try {
     const conn = dbh || require('../models/db');
     const row = await conn('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot');
     if (!row) throw new Error('agent decision row not found');
-    return await openLoopsBlockReason({ decision: row, dbh: conn });
+    return await openLoopsBlockReason({ decision: row, outgoingBody, dbh: conn });
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed for decision ${agentDecisionId}: ${err.message}; blocking send`);
     return 'open_loops_recheck_failed';
@@ -310,7 +326,7 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || followupBlock({ decision, outgoingBody })
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
-    || (await openLoopsBlock({ decision }))
+    || (await openLoopsBlock({ decision, outgoingBody }))
     || (await etaBlock({ decision, outgoingBody }));
 }
 

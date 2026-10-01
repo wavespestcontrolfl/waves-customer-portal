@@ -477,4 +477,39 @@ describe('open-loop commitments recheck', () => {
     await expect(check({ dbi: () => { throw new Error('down'); } }))
       .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true });
   });
+
+  describe('stop-count recount (visit_loop_position)', () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const today = etDateString(new Date());
+    const position = { visitId: 'v1', techId: 't1', stopsAhead: 2 };
+    const withPos = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_position: position }) });
+    const routeDb = ({ visit, ahead }) => (table) => {
+      const q = { where: () => q, whereNotIn: () => q, count: () => q, first: async (...cols) => (cols.includes('route_order') ? visit : { count: String(ahead) }) };
+      return table === 'scheduled_services' ? q : null;
+    };
+    const visit = (over = {}) => ({ id: 'v1', technician_id: 't1', route_order: 5, scheduled_date: today, status: 'confirmed', ...over });
+
+    test('a reply that does not mention stops is never recounted', async () => {
+      const dbh = jest.fn();
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: 'Sorry for the delay on today\'s visit.', dbh })).resolves.toBeNull();
+      expect(dbh).not.toHaveBeenCalled();
+    });
+
+    test('same count passes; a moved count, a started visit, or a reassignment refuses', async () => {
+      const body = 'Sorry for the delay. Sam has 2 stops before yours.';
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toBeNull();
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 1 }) })).resolves.toBe('stop_count_stale');
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ status: 'on_site' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ technician_id: 't2' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: null, ahead: 2 }) })).resolves.toBe('stop_count_stale');
+    });
+
+    test('the provider-boundary form recounts from the in-memory position', async () => {
+      const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, position, getBody: () => 'Two stops before yours now.' });
+      await expect(check({ dbi: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toEqual({ ok: true });
+      await expect(check({ dbi: routeDb({ visit: visit(), ahead: 1 }) }))
+        .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (stop_count_stale)' });
+    });
+  });
 });

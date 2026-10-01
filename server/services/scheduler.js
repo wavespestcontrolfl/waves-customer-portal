@@ -4547,7 +4547,7 @@ function initScheduledJobs() {
             let openLoopsReason = null;
             if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !reserviceStale) {
               const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
-              openLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, dbh: db });
+              openLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, dbh: db });
               openLoopsStale = openLoopsReason != null;
             }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');

@@ -104,7 +104,7 @@ describe('techPosition', () => {
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn, deriveWindow });
     expect(out.techPosition).toEqual({
       techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
-      visitId: 'visit-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
+      visitId: 'visit-1', techId: 'tech-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
     });
     const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'count'));
     expect(hasOp(count.ops, 'whereNotIn', (a) => a[0] === 'status' && ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].every((s) => a[1].includes(s)))).toBe(true);

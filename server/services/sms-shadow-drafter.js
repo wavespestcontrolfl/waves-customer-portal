@@ -4492,6 +4492,17 @@ function visitLoopCommitmentIds(context) {
     .map((i) => (i && i.id != null ? String(i.id) : '')).filter(Boolean);
   return [...new Set(ids)];
 }
+// The stop count a fresh Tech position line showed ({ visitId, techId, stopsAhead }),
+// persisted so a send that mentions stops recounts them first. null gate-off, stale,
+// or with no count.
+function visitLoopPosition(context) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  const tp = context && context.visitLoops && context.visitLoops.techPosition;
+  if (!tp || typeof tp !== 'object' || tp.status === 'stale' || tp.visitId == null || tp.techId == null) return null;
+  const stops = Number(tp.stopsAhead);
+  if (tp.stopsAhead == null || !Number.isFinite(stops) || stops < 0) return null;
+  return { visitId: String(tp.visitId), techId: String(tp.techId), stopsAhead: Math.round(stops) };
+}
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
 // header, then one line per present field, or the single line "- none". Pure.
@@ -5852,6 +5863,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           techNames,
           // PR #5499: open commitments the reply was grounded on — rechecked at the provider boundary.
           visitLoopCommitmentIds: visitLoopCommitmentIds(context),
+          visitLoopPosition: visitLoopPosition(context),
           // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
           reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });
@@ -5896,6 +5908,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               liveEtaSnapshot,
               techNames,
               visitLoopCommitmentIds: visitLoopCommitmentIds(context),
+              visitLoopPosition: visitLoopPosition(context),
               // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
               reserviceLanesSnapshot,
               reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -5954,6 +5967,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             liveEtaSnapshot,
             techNames,
             visitLoopCommitmentIds: visitLoopCommitmentIds(context),
+            visitLoopPosition: visitLoopPosition(context),
             // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
             reserviceLanesSnapshot,
             reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -6004,6 +6018,7 @@ module.exports = {
   buildFactsBlock,
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
+  visitLoopPosition,
   VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,

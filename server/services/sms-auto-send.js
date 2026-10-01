@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopPosition = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -265,6 +265,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
           // PR #5499: the open call_commitments ids the draft's VISIT STATUS & OPEN LOOPS lines named.
           ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
+          ...(visitLoopPosition ? { visit_loop_position: visitLoopPosition } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
@@ -316,6 +317,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       // through the row it just inserted.
       liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
       visitLoopCommitmentIds: Array.isArray(visitLoopCommitmentIds) ? visitLoopCommitmentIds : null,
+      visitLoopPosition: visitLoopPosition || null,
     };
   });
 }
@@ -806,7 +808,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       const { etaSnapshotProviderPreSendCheck, openLoopsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
-        openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds }),
+        openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, position: claim.visitLoopPosition, getBody: () => reply }),
         laneFields.providerPreSendCheck,
       );
     })(),
