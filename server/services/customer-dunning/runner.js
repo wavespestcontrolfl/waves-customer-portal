@@ -274,7 +274,10 @@ function decideUnreachableRecovery(event) {
 function recoveryComplete(event, channels) {
   if (!event) return false;
   const selected = Array.isArray(event.metadata?.selectedChannels) ? event.metadata.selectedChannels : null;
-  const legs = selected ? selected.filter((c) => channels.includes(c)) : channels;
+  // Today's enabled channels narrow the legs (a removal); when none of the selected legs is still enabled the
+  // touch is judged on what it selected (nothing was ever owed on the new channel), never re-sent on it.
+  const stillEnabled = selected ? selected.filter((c) => channels.includes(c)) : channels;
+  const legs = selected?.length && !stillEnabled.length ? selected : stillEnabled;
   if (!legs.length) return false;
   return legs.every((c) => event.delivered.has(c) || event.resolved.has(c) || (event.waived.has(c) && event.delivered.size > 0));
 }
@@ -665,7 +668,10 @@ async function decideShadowPolicy(run, set) {
   const denied = pending.filter((_c, i) => !verdictAllows(verdicts[i]));
   if (denied.length === pending.length) {
     const waivable = delivered.size > 0 && denied.every((channel) => verdictDurablyDenied(verdicts[pending.indexOf(channel)]));
-    return waivable ? decision('settle', 'policy_waived', { denied }) : decision('hold', 'COLLECTIONS_POLICY', { denied });
+    // The delivered legs' evidence rides along: a final notice settles only on readable named invoices (as live).
+    return waivable
+      ? decision('settle', 'policy_waived', { denied, facts: { event, delivered, deliveredNow: [] } })
+      : decision('hold', 'COLLECTIONS_POLICY', { denied });
   }
   // The keyed reservation of each owed leg, read by its key with NO time window (live recordContact /
   // claimAttempt find a reservation of any age; reminderProgress forgets rows past 90 days). Judged by
@@ -747,7 +753,7 @@ async function shadowStop(run, schedule, now) {
 
 // A final notice settles only on readable evidence of the invoices it named (finishDelivered holds otherwise).
 const shadowEvidenceUnreadable = (run, schedule, stop) => stop.kind === 'settle' && Schedule.isFinalIndex(schedule.step_index)
-  && !!stop.facts && namedForFinal(run, stop.facts).unreadable.length > 0;
+  && (!stop.facts || namedForFinal(run, stop.facts).unreadable.length > 0);
 
 async function judgeShadowSchedule(schedule, { now }) {
   const run = { schedule, now, operatorInitiated: false, claimStamp: null, readOnly: true };

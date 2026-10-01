@@ -12,6 +12,7 @@
  * and the leg retries at the next tick from a FRESH render (B-4).
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
@@ -25,7 +26,7 @@ const ContactLedger = require('../collections/contact-ledger');
 const { isTerminalEmailRefusal } = require('../billing-reminder-delivery');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../short-url');
 const { publicPortalUrl } = require('../../utils/portal-url');
-const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
+const { withCustomerCommsLock, lockCustomerEmail } = require('../../utils/customer-comms-lock');
 const Boundary = require('./boundary');
 const Render = require('./render');
 const { SOURCE, emailIdempotencyKey, triggerEventId } = require('./constants');
@@ -38,6 +39,13 @@ function linkChannelFor(channels = []) {
   return legs.length === 1 && (legs[0] === 'email' || legs[0] === 'sms') ? { channel: legs[0] } : {};
 }
 
+// The cached link's identity: the set digest, and - when the code records a channel - that channel too, so a
+// code minted for an email-only attempt is not reused for an SMS-only one (the recorded channel would be wrong).
+// link_digest is char(64): a channel-specific key is re-hashed to the same width; a neutral link keeps the bare digest.
+function linkCacheKey(digest, channel) {
+  return channel ? crypto.createHash('sha256').update(`${digest}|${channel}`).digest('hex') : digest;
+}
+
 /**
  * MINT ONCE (B-6, B-13): a short code is written only when the schedule's
  * cached link is for a different set digest. The cache lives on the schedule
@@ -47,7 +55,9 @@ function linkChannelFor(channels = []) {
 async function ensureLink(ctx) {
   if (ctx.link) return ctx.link;
   const { schedule, set, customer } = ctx;
-  if (schedule.link_url && schedule.link_digest === set.digest) {
+  const linkChannel = linkChannelFor(ctx.channels);
+  const cacheKey = linkCacheKey(set.digest, linkChannel.channel);
+  if (schedule.link_url && schedule.link_digest === cacheKey) {
     ctx.link = schedule.link_url;
     return ctx.link;
   }
@@ -58,13 +68,13 @@ async function ensureLink(ctx) {
     customerId: customer.id,
     // One shared link serves every leg of the touch: name its channel only when exactly one leg
     // (email or sms) will carry it; a touch on several legs, or an app push, stays neutral ('link' in the timeline).
-    ...linkChannelFor(ctx.channels),
+    ...linkChannel,
     purpose: 'customer_dunning',
     codePrefix: invoiceShortCodePrefix(set.anchor),
   });
   try {
     await db(TABLE).where({ id: schedule.id, touch_claimed_at: ctx.claimStamp })
-      .update({ link_url: ctx.link, link_digest: set.digest, updated_at: db.fn.now() });
+      .update({ link_url: ctx.link, link_digest: cacheKey, updated_at: db.fn.now() });
   } catch (err) {
     logger.warn(`[customer-dunning] could not cache the pay link for schedule ${schedule.id}: ${redactContact(err.message)}`);
   }
@@ -136,6 +146,10 @@ async function operatorRecipientBlock(trx, customerId, { to, templateKey }) {
   }
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey, trx);
   if (!loaded?.template) return { ok: false, code: 'BILLING_EMAIL_RECHECK_FAILED', reason: 'Billing email template is unavailable', retryable: true };
+  // The shared per-address lock the suppression WRITERS take (a SendGrid webhook, an admin suppression), acquired
+  // after the comms lock exactly as the billing email authority does, so a suppression cannot commit between this
+  // read and the provider request.
+  await lockCustomerEmail(trx, who.to);
   const suppression = await EmailTemplateLibrary.activeSuppressionFor(loaded.template, who.to, 'transactional_required', trx);
   if (!suppression) return null;
   return { ok: false, code: 'EMAIL_SUPPRESSED', reason: `Suppressed: ${suppression.suppression_type || 'active suppression'}`, retryable: false };
@@ -161,7 +175,14 @@ function boundaryOnlyHandoff(snapshot, state, recipient = null) {
   const check = async (opts) => {
     const verdict = await boundary(opts);
     if (verdict.ok !== true || !recipient) return verdict;
-    return (await operatorRecipientBlock(opts.database, snapshot.customerId, recipient)) || verdict;
+    try {
+      return (await operatorRecipientBlock(opts.database, snapshot.customerId, recipient)) || verdict;
+    } catch (err) {
+      // A thrown lookup must be a TAGGED refusal: untagged, the template library records the row as an ambiguous
+      // started handoff and the reservation stays unconfirmed for good (mirrors the authority's preSendBlock).
+      logger.warn(`[customer-dunning] operator email recipient check failed for customer ${snapshot.customerId}: ${redactContact(err.message)}`);
+      return { ok: false, code: 'BILLING_EMAIL_RECHECK_FAILED', reason: 'Billing email authority could not be verified', retryable: true };
+    }
   };
   const refuse = (verdict) => blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
   return async (dispatch) => {

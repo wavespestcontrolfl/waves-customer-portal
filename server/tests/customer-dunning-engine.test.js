@@ -30,7 +30,8 @@ const mockOnAutopay = jest.fn();
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: (...a) => mockOnAutopay(...a) }));
 const mockSendTemplate = jest.fn();
 const mockLoadTemplate = jest.fn();
-const mockActiveSuppression = jest.fn(async () => null); // the operator email's suppression re-check under the comms lock
+const defaultSuppression = async () => { mockLockOrder.push('suppression-read'); return null; };
+const mockActiveSuppression = jest.fn(defaultSuppression); // the operator email's suppression re-check under the comms lock
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: (...a) => mockSendTemplate(...a),
   loadTemplateByKey: (...a) => mockLoadTemplate(...a),
@@ -80,8 +81,10 @@ jest.mock('../services/billing-channel-email-authority', () => ({
     return { ok: true };
   }),
 }));
+const mockLockOrder = []; // the order the comms lock, the per-address lock and the suppression read ran in
 jest.mock('../utils/customer-comms-lock', () => ({
-  withCustomerCommsLock: jest.fn(async (_db, _id, fn) => fn(MOCK_TRX)),
+  withCustomerCommsLock: jest.fn(async (_db, _id, fn) => { mockLockOrder.push('comms'); return fn(MOCK_TRX); }),
+  lockCustomerEmail: jest.fn(async (_trx, email) => { mockLockOrder.push(`address:${email}`); }),
 }));
 // Default: no repair. The crash-recovery tests point this at the REAL repair over an in-memory email_messages.
 let mockRepairImpl = async () => new Set();
@@ -3352,7 +3355,7 @@ describe('follow-up 10: the operator email re-resolves its recipient and suppres
     const out = await run({ operatorInitiated: true, force: true });
     expect(out.outcome).toBe('paused');
     expect(mockEmailMessages).toHaveLength(0);
-    mockActiveSuppression.mockResolvedValue(null);
+    mockActiveSuppression.mockImplementation(defaultSuppression);
   });
 
   test('a scheduled (non-operator) email is untouched by this check (the billing authority owns it)', async () => {
@@ -3396,5 +3399,119 @@ describe('follow-up 12: an existing touch is judged against the legs it selected
     expect((await run()).outcome).toBe('advanced');
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
     expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+// ── #5475 review round 1 ──────────────────────────────────────────────────
+describe('#5475 r1: operator email locks the address before it reads suppressions, and a failed lookup is a tagged refusal', () => {
+  test('lock order: comms lock -> per-address lock -> suppression read, at the pre-handoff check and again at the final one', async () => {
+    customer.phone = null;
+    mockLockOrder.length = 0;
+    expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
+    expect(mockLockOrder).toEqual(['comms', 'address:pat@example.test', 'suppression-read', 'address:pat@example.test', 'suppression-read']);
+  });
+
+  test('the suppression lookup REJECTS at the provider boundary: a tagged retryable refusal (no email, the reservation reopened), and the next tick sends once', async () => {
+    customer.phone = null;
+    mockActiveSuppression.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('connection reset reading email_suppressions'));
+    const out = await run({ operatorInitiated: true, force: true });
+    expect(out).toMatchObject({ outcome: 'held', reason: 'BILLING_EMAIL_RECHECK_FAILED' });
+    expect(mockEmailMessages).toHaveLength(0);
+    expect(rowFor('email').metadata.send_failed).toBe(true); // a definite non-send, reopened - not an ambiguous started handoff
+    expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
+    expect(mockEmailMessages).toHaveLength(1);
+  });
+
+  test('a lookup that rejects BEFORE the handoff is the same tagged refusal', async () => {
+    customer.phone = null;
+    mockActiveSuppression.mockRejectedValueOnce(new Error('db down'));
+    expect(await run({ operatorInitiated: true, force: true })).toMatchObject({ outcome: 'held', reason: 'BILLING_EMAIL_RECHECK_FAILED' });
+    expect(mockEmailMessages).toHaveLength(0);
+  });
+});
+
+describe('#5475 r1: a touch whose selected channels are all gone is judged on what it selected', () => {
+  test('email-only touch delivered, prefs now sms-only => settles (advanced, recovered), nothing is sent on the new channel', async () => {
+    const key = `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`;
+    mockLedger.push({
+      id: 't-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.5),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: keyFor(key, 'email'),
+      metadata: { notificationEventKey: key, delivered: true, selectedChannels: ['email'] },
+    });
+    prefs = { invoice_channels: ['sms'] };
+    expect(await run()).toMatchObject({ outcome: 'advanced', recovered: true });
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a missing / empty selection is never complete', async () => {
+    const key = `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`;
+    mockLedger.push({
+      id: 't-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.5),
+      invoice_ids: ['inv-a'], idempotency_key: keyFor(key, 'email'), metadata: { notificationEventKey: key, delivered: true, selectedChannels: [] },
+    });
+    prefs = { invoice_channels: ['sms'] };
+    await run();
+    expect(mockSendMessage).toHaveBeenCalledTimes(1); // the empty selection did not settle the touch
+  });
+});
+
+describe('#5475 r1: shadow validates final evidence on the all-denied waiver path', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const key = 'customer-dunning:s-open:1:d90_final_notice';
+  const finalWithOneDelivered = (ids) => {
+    mockLedger.push({
+      id: 'f-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.5),
+      invoice_ids: ids, idempotency_key: keyFor(key, 'email'),
+      metadata: { notificationEventKey: key, delivered: true, selectedChannels: ['email', 'sms'] },
+    });
+    mockPolicy.mockImplementation(async ({ channel }) => (channel === 'sms' ? { allowed: false, durable: true } : { allowed: true }));
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 5, episode: 1, status: 'active' }]);
+  };
+
+  test('one delivered leg with unreadable invoices + every other leg durably denied: would-HOLD delivered_evidence_unreadable (as live)', async () => {
+    finalWithOneDelivered([]);
+    await Runner.shadowRun(NOW);
+    expect(lines()).toMatch(/SHADOW would hold .* step=d90_final_notice reason=delivered_evidence_unreadable/);
+    expect(lines()).not.toMatch(/would settle/);
+  });
+
+  test('the same with readable invoices settles on the waiver', async () => {
+    finalWithOneDelivered(['inv-a', 'inv-b']);
+    await Runner.shadowRun(NOW);
+    expect(lines()).toMatch(/SHADOW would settle .* step=d90_final_notice reason=policy_waived/);
+  });
+});
+
+describe('#5475 r1: the cached pay link is keyed by the channel it was minted for', () => {
+  const crypto = require('crypto');
+  const keyFor2 = (channel) => crypto.createHash('sha256').update(`${live.digest}|${channel}`).digest('hex');
+  const cachedAs = (digest) => Schedule.claim.mockResolvedValue({ schedule: { ...schedule, link_digest: digest, link_url: 'https://short.example.test/cached' }, claimStamp: NOW, memberSeqIds: [] });
+
+  test('a code minted (and cached) for an email-only attempt is NOT reused when the prefs became sms-only: mints fresh, recorded sms', async () => {
+    prefs = { invoice_channels: ['sms'] };
+    cachedAs(keyFor2('email'));
+    await run();
+    expect(mockShorten).toHaveBeenCalledTimes(1);
+    expect(mockShorten.mock.calls[0][1].channel).toBe('sms');
+    const cacheWrite = mockWrites.find(([op, table, patch]) => op === 'update' && table === 'customer_dunning_schedules' && patch?.link_url);
+    expect(cacheWrite[2].link_digest).toBe(keyFor2('sms'));
+    expect(cacheWrite[2].link_digest).toHaveLength(64);
+  });
+
+  test('the same channel reuses it; a neutral multi-leg link keeps the bare set digest', async () => {
+    prefs = { invoice_channels: ['sms'] };
+    cachedAs(keyFor2('sms'));
+    await run();
+    expect(mockShorten).not.toHaveBeenCalled();
+
+    mockShorten.mockClear();
+    setup();
+    prefs = { invoice_channels: ['email', 'sms'] };
+    cachedAs(live.digest);
+    await run();
+    expect(mockShorten).not.toHaveBeenCalled();
   });
 });
