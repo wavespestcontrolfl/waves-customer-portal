@@ -9,7 +9,8 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -5083,8 +5084,12 @@ async function loadLinkedProjectsByServiceId(serviceIds) {
   }
 }
 
-async function loadProjectCompletionContextByServiceId(services) {
+async function loadProjectCompletionContextByServiceId(services, { userId = null } = {}) {
   const rows = Array.isArray(services) ? services : [];
+  // GATE_TS_FAST_COMPLETE + the requesting user's `ts_fast_complete` flag:
+  // one read per request, not per service. A flag-read failure is "off".
+  const treeShrubFastCompleteEnabled = tsFastCompleteLive()
+    && await isUserFeatureEnabled(userId, 'ts_fast_complete').catch(() => false);
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
@@ -5108,6 +5113,12 @@ async function loadProjectCompletionContextByServiceId(services) {
       // Fast Complete sheet instead of ServiceRecapModal. Same "ride the
       // schedule payload, no new endpoint" pattern as inspectionCreditAvailable above.
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      // Tree & Shrub Fast Complete: gate AND the requesting tech's user flag.
+      treeShrubFastCompleteEnabled,
+      // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
+      // the Fast Complete sheet sends the customer completion text instead
+      // of pinning the send flags off. Only read while the gate above is on.
+      fastCompleteRecapEnabled: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -5706,6 +5717,9 @@ function recurringWithoutBillableAmount({
 // inside recurringWithoutBillableAmount.
 async function seriesExtensionUnbillable(conn, {
   parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc,
+  // The cancel-reseed's in-term placement selects add-ons by the replaced
+  // occurrence, not the visit's own day — the check reads the same set.
+  addonDate = null,
 }) {
   if (!dates.length) return null;
   const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
@@ -5727,7 +5741,7 @@ async function seriesExtensionUnbillable(conn, {
     : null;
   let floor = Infinity;
   for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
     const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
     floor = Math.min(floor, price);
   }
@@ -5831,7 +5845,7 @@ router.get('/', async (req, res, next) => {
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
-    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services, { userId: req.technicianId });
 
     // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
     // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
@@ -6225,6 +6239,9 @@ router.get('/', async (req, res, next) => {
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
         // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+        treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
+        // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
+        fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6529,7 +6546,7 @@ router.get('/week', async (req, res, next) => {
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
-      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services, { userId: req.technicianId });
       // Same trace-eligibility flag the day feed carries (codex P2 r2):
       // the mobile Week view opens the shared CompletionPanel straight off
       // these rows, so the tracer-gating verdict must ride here too. The
@@ -6814,6 +6831,8 @@ router.get('/week', async (req, res, next) => {
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
           // Same field as the day view above (PR C).
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+          treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
+          fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -18491,6 +18510,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // auto-dispatch due date honoured). Not compared against the broader
   // reader: its raw scheduled_date would let a dispatch shift win.
   cadenceFloorRow = null,
+  // Post-cancel reseed only (GATE_CANCEL_RESEED_IN_TERM): picks the ONE
+  // extend date itself, given this writer's own weekend / blackout / season
+  // shift and the series' occupied dates; null falls back to the cadence
+  // generator (the series-end append). Only honoured with extendByOne.
+  placementPicker = null,
+  // With a picked date: the plan position of the occurrence it replaces.
+  // Recurring add-ons follow that occurrence, not the off-cadence day the
+  // replacement lands on (a patterned add-on is due only on exact cadence
+  // dates, so the new day would silently drop it).
+  placementAddonDate = null,
 }) {
   const live = await liveUpcomingSeriesVisits(trx, parentId);
   const target = extendByOne
@@ -18613,16 +18642,24 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // Extend dates from the shared generator (update-details' pre-trx lock
   // plan runs the same one).
   const extendBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
-  const extendDates = planSeriesExtendDates({
+  const pickedDate = (extendByOne && need === 1 && placementPicker)
+    ? placementPicker({
+      shift: (d) => seasonalSafeShift(d, parent.recurring_pattern, skipParent, dirParent, extendBlackoutDates),
+      takenDates: seen,
+    })
+    : null;
+  result.placement = pickedDate ? 'in_term' : 'series_end';
+  const extendDates = pickedDate ? [pickedDate] : planSeriesExtendDates({
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
     blackoutDates: extendBlackoutDates,
   });
   // Billable-amount gate on the dates this writer will add (shared helper —
   // rationale on seriesExtensionUnbillable). Trims and unchanged counts never
   // reach here.
+  const pickedAddonDate = (pickedDate && placementAddonDate) ? placementAddonDate : null;
   const unbillableExtend = await seriesExtensionUnbillable(trx, {
     parent, dates: extendDates, cols, parentAddons, storedDiscountScope,
-    blackoutDates: extendBlackoutDates, skipParent, seriesCioc,
+    blackoutDates: extendBlackoutDates, skipParent, seriesCioc, addonDate: pickedAddonDate,
   });
   if (unbillableExtend) {
     throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
@@ -18664,6 +18701,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // carry the flag that would auto-extend past the count just set. The
     // ongoing top-up is the mirror case and stamps the flag on.
     if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
+    // An in-term reseed lands off-cadence: stamp it as a one-off exception
+    // holding the replaced occurrence's slot (rebooker.dateExceptionStamp's
+    // shape), so the extend anchor, the series sweep and a later replacement
+    // all read its cadence position, never the off-cadence day.
+    if (pickedAddonDate && cols.date_exception && cols.date_exception_cadence_date) {
+      data.date_exception = true;
+      data.date_exception_cadence_date = pickedAddonDate;
+      if (cols.date_exception_source) data.date_exception_source = 'cancel_reseed';
+      if (cols.date_exception_at) data.date_exception_at = new Date();
+    }
     if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
@@ -18678,7 +18725,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, pickedAddonDate || nd, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -20202,7 +20249,19 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
   const reductionIds = await readPlanReductionIds(trx, {
     customerId: parent.customer_id, parentId, candidateIds: laterCancelledPlanRowIds(seriesRows, cancelled.id),
   });
-  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds) };
+  return {
+    window,
+    counting,
+    expected,
+    upcomingPlanCount,
+    anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds),
+    seriesRows,
+    todayET,
+    // The occurrence an in-term replacement stands in for: its plan position
+    // (an earlier in-term replacement carries the slot it replaced as its
+    // date_exception_cadence_date).
+    replacedOccurrenceDate: planPositionDate(cancelled),
+  };
 }
 
 // Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
@@ -20231,7 +20290,9 @@ async function probeReseedOverlaps(trx, { parent, parentId, added }) {
 
 // Step 5 — the idempotency stamp, same trx as the insert, so a rolled-back
 // add leaves no stamp and a committed add can never be repeated.
-function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates }) {
+function stampReseed(trx, {
+  parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates, placement = 'series_end',
+}) {
   return trx('activity_log').insert({
     customer_id: parent.customer_id,
     action: 'recurring_cancel_reseed',
@@ -20241,7 +20302,7 @@ function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, add
       recurring_parent_id: String(parentId),
       added_service_ids: added.map((c) => String(c.id)),
       term_index: term.window.index, term_start: term.window.start, term_end: term.window.end,
-      counting: term.counting, expected: term.expected, overlap_dates: overlapDates,
+      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement,
     }),
   });
 }
@@ -20277,7 +20338,9 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // population (Codex r8 P1): 24 live rows of which some are callbacks /
 // included follow-ups would clamp live + 1 back to 24 and add nothing. The
 // cap is enforced here, on the plan-row population, instead.
-async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, anchorFloor }) {
+async function addOneReseedVisit(trx, {
+  parent, parentId, cols, upcomingPlanCount, anchorFloor, placementPicker = null, placementAddonDate = null,
+}) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
   const reconcileParent = normalizedWindow
@@ -20298,8 +20361,10 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
       // the only consumer of the claim token, is unreachable.
       claimToken: null,
       ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
+      placementPicker,
+      placementAddonDate,
     });
-    return { added: result.added, reconcileParent };
+    return { added: result.added, reconcileParent, placement: result.placement || 'series_end' };
   } catch (e) {
     // The unbillable-extension refusal fires before any write, so the trx is
     // intact; it is terminal (a retry would read the same template).
@@ -20345,14 +20410,33 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor });
+  // In-term placement (GATE_CANCEL_RESEED_IN_TERM, read live): the gap the
+  // cancel left inside this term, else the series-end append as before.
+  const { cancelReseedInTermLive } = require('../config/feature-gates');
+  const placementPicker = cancelReseedInTermLive()
+    ? ({ shift, takenDates }) => require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
+      rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates, cancelledDate: cancelled.scheduled_date,
+    })
+    : null;
+  const add = await addOneReseedVisit(trx, {
+    parent,
+    parentId,
+    cols,
+    upcomingPlanCount: term.upcomingPlanCount,
+    anchorFloor: term.anchorFloor,
+    placementPicker,
+    placementAddonDate: placementPicker ? term.replacedOccurrenceDate : null,
+  });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {
-    await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates });
+    await stampReseed(trx, {
+      parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates, placement: add.placement,
+    });
   }
   return {
     added: add.added,
+    placement: add.placement,
     skipped: add.added.length ? null : 'not_placed',
     counting: term.counting, expected: term.expected, parentId, customerId: parent.customer_id, overlapWarnings: overlapDates,
   };
@@ -20400,7 +20484,7 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
     // Same terminal re-check the auto-extend and the top-up run: a series
     // cancel can take the per-parent lock right after our commit.
     await cancelSpawnedReminderIfVisitTerminal(conn, child.id, 'recurring-cancel-reseed');
-    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (term had ${result.counting}/${result.expected})`);
+    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (${result.placement === 'in_term' ? 'inside the term' : 'at the series end'}; term had ${result.counting}/${result.expected})`);
   }
   return result;
 }
@@ -20788,12 +20872,28 @@ router.put('/:id/status', async (req, res, next) => {
       && svc.customer_confirmed !== true
       && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
+    // A street-level address hold is released ONLY by the office: a technician may neither
+    // confirm it nor run it day-of (the office must confirm the address with the customer first).
+    // For EVERY role the day-of advances are refused too (confirm first, then advance); only an
+    // unconfirmed voice_agent row can be a hold, so nothing else pays for the lookup.
+    const heldAdvance = DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
+      && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true;
+    const holdGuardApplies = (isTechnicianRequest(req) && (isOfficeReviewConfirm || isFieldLifecycleTakeover)) || heldAdvance;
+    if (holdGuardApplies && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+      return res.status(409).json({
+        error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
+        code: 'street_level_hold',
+      });
+    }
 
     // The transition's committed payload — the voice-confirm card below
     // must name the holder as WRITTEN, not as read.
     let transition = null;
     try {
       await db.transaction(async (trx) => {
+        // The hold guard again UNDER the row lock: a concurrent call pass may promote this booking to a
+        // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
+        if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
         // Re-validate technician ownership INSIDE the transaction, row-
         // locked: the predicate on the pre-transaction SELECT alone leaves
         // a window where dispatch reassigns the visit and the former
@@ -20892,13 +20992,7 @@ router.put('/:id/status', async (req, res, next) => {
     // name a technician the write-time guard then drops, leaving the real
     // holder with no card at all.
     const confirmedRow = transition?.adminPayload || null;
-    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
-      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
-      void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
-        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
-      });
-    }
+    let officeConfirmActivated = false;
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
@@ -20919,8 +21013,18 @@ router.put('/:id/status', async (req, res, next) => {
       // fire from a field status tap. Office confirms keep the full funnel.
       // (field_confirmed_at was stamped INSIDE the status transaction above —
       // atomic with the confirmation, never swallowed.)
-      await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
+      officeConfirmActivated = await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
         skipCardRequest: isTechnicianRequest(req),
+      });
+    }
+    // The tech's "new visit" card keys on a real approval — the pending -> confirmed flip OR a
+    // successful activation — so an office approval of a MOVED hold (confirmed -> confirmed)
+    // tells the technician too.
+    if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
       });
     }
 
@@ -23803,6 +23907,11 @@ async function generateReportCopyWithFallback({
   // the visit's own product records — codex r4). Returning a truthy reason
   // rejects the copy and drives the same retry/cross-provider machinery.
   extraRejection = null,
+  // The four-section report (writer rules) runs longer than the paragraph.
+  maxTokens = 800,
+  // Under the writer rules only the four-section report is accepted; the
+  // deterministic fallback keeps the two-section shape.
+  requireSections = false,
   providers = [
     {
       name: MODELS.TEXT_POLICIES.report.primary.provider,
@@ -23846,7 +23955,7 @@ async function generateReportCopyWithFallback({
           system: systemPrompt,
           text: userMessage,
           jsonMode: false,
-          maxTokens: 800,
+          maxTokens,
           timeoutMs: Math.min(remainingMs, REPORT_CALL_TIMEOUT_MS),
         });
       } catch (err) {
@@ -23870,8 +23979,9 @@ async function generateReportCopyWithFallback({
       // response can still trip its parser-only screens (bare 'infestation',
       // 'safe', …), which return { body: null }. Only parser-approved copy
       // may replace the notes (AGENTS.md report egress; codex r15).
+      const parsed = technicianReportCustomerCopy(report);
       const rejection = reportCopyRejection(report)
-        || (technicianReportCustomerCopy(report)?.body ? null : 'malformed_shape')
+        || (parsed?.body && (!requireSections || parsed.sections) ? null : 'malformed_shape')
         || (typeof extraRejection === 'function' ? extraRejection(report) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
@@ -24171,10 +24281,15 @@ const TYPED_SCORE_WORDS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4
 // (correctly) rejects any "N/5" as numeric_rating. The prompt block keeps the
 // number: it is model INPUT, and the system prompt already orders ratings to
 // be worded, never quoted.
-function typedActivityLine(findingsType, score, { words = false } = {}) {
+function typedActivityLine(findingsType, score, { words = false, gauge = false } = {}) {
   if (!Number.isInteger(score) || score < 0 || score > 5) return null;
   const indicator = ActivityIndicators.ACTIVITY_INDICATORS[findingsType];
   const label = indicator?.label || 'Recorded activity';
+  // Under the writer rules the form's score is a gauge the report prints,
+  // set from the recorded answers, not a severity the technician chose
+  // (outside review 2026-10-01: "active termites present" read as "rated
+  // high" beside "light feeding").
+  if (gauge) return `${label} gauge on the report, set by the form from the recorded answers (never restate it, and never call it high or low): ${score}/5`;
   return words
     ? `${label}: ${TYPED_SCORE_WORDS[score]}`
     : `${label}: ${score}/5 (${TYPED_SCORE_WORDS[score]})`;
@@ -24239,11 +24354,12 @@ function copyActivityScore(type, values, submitted) {
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, companionFindings = [],
   allowedCompanionTypes = [], activityScore = null, withholdProductRecord = false,
+  activityGauge = false,
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
     : { work: [], observations: [], products: [], advice: [], customer: [] };
-  const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
+  const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore, { gauge: activityGauge }) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
   const primaryParts = renderTypedGroupLines(primarySections, { withholdProductRecord });
   const allowed = new Set(allowedCompanionTypes);
@@ -24263,7 +24379,7 @@ function buildTypedFindingsPromptBlock({
       const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
         ? entry.values : {};
       const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
-      const activityLine = typedActivityLine(entry.type, entry?.activityScore);
+      const activityLine = typedActivityLine(entry.type, entry?.activityScore, { gauge: activityGauge });
       if (activityLine) sections.observations.push(activityLine);
       const parts = renderTypedGroupLines(sections, { withholdProductRecord });
       if (!parts.length) return null;
@@ -24750,7 +24866,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
         // (codex P2 r2).
-        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
+        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => 'lookup_failed');
       // A transient service-row lookup failure on a typed request would leave
       // typedFindingsBlock empty while primaryTypedInput still opens the
@@ -24848,6 +24964,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
             companions = [],
           } = completionProfile || {};
           const synthesizedGeneric = completionProfile?.synthesized === true && !serviceKey;
+          // 'one_time' is the explicit not-a-series marker (visit-prep.js),
+          // never recurring lineage (Codex #5500).
+          const recurringPattern = svc.recurring_pattern && svc.recurring_pattern !== 'one_time' ? svc.recurring_pattern : null;
           reportPromptContext = profileResolutionFailed
             ? { requireCanonical: false }
             : {
@@ -24857,6 +24976,22 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               serviceModel,
               isCallback: svc.is_callback === true,
               isBundled: customerFacingCompanionTypes(companions).length > 0,
+              // Writer rules: a re-service or callback, a one-time service
+              // (one-time billing and no recurring lineage), or a recurring
+              // plan visit. Decides the reach-out date (owner 2026-10-01:
+              // one-time services and re-services).
+              // Recurring only on positive evidence (a recurring billing
+              // type or recurring lineage); an unresolved or synthesized
+              // profile stays unknown (Codex #5500).
+              serviceKind: (serviceKey === 'pest_re_service' || svc.is_callback === true)
+                ? 're_service'
+                : (String(serviceModel || '').toLowerCase() === 'one_time'
+                  && svc.is_recurring !== true && !svc.recurring_parent_id && !recurringPattern)
+                  ? 'one_time'
+                  : (String(serviceModel || '').toLowerCase() === 'recurring'
+                    || svc.is_recurring === true || Boolean(svc.recurring_parent_id) || Boolean(recurringPattern))
+                    ? 'recurring'
+                    : null,
             };
           if (completionProfile) {
             fallbackServiceType = serviceName || (serviceKey ? 'scheduled service' : groundingServiceType);
@@ -24931,6 +25066,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               allowedCompanionTypes,
               activityScore: typedActivityScoreNum,
               withholdProductRecord: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
+              activityGauge: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
@@ -25015,6 +25151,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let contextText = '';
     let contextSignals = {};
     let deterministicApplications = [];
+    let writerAllowedPhrases = [];
+    let writerAllowedDates = [];
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -25034,8 +25172,12 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
         writerRules: writerRulesOn,
+        findingsType: reportPromptContext.findingsType || null,
+        serviceKind: reportPromptContext.serviceKind || null,
       });
       contextText = ctx.contextText || '';
+      writerAllowedPhrases = Array.isArray(ctx.writerAllowedPhrases) ? ctx.writerAllowedPhrases : [];
+      writerAllowedDates = Array.isArray(ctx.writerAllowedDates) ? ctx.writerAllowedDates : [];
       contextSignals = ctx.signals || {};
       deterministicApplications = Array.isArray(ctx.deterministicApplications)
         ? ctx.deterministicApplications : [];
@@ -25268,12 +25410,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
     }
     const writerRulesScreen = (text) => (writerRulesOn
-      ? writerRulesRejection(text, { activeIngredients: visitActiveIngredients })
+      ? writerRulesRejection(text, {
+        activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
+      })
       : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
+      ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
@@ -26868,3 +27013,6 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 // address resolver, so "same property" can never mean something different
 // in the duplicate guard than it does in the pest-rides-lawn preview.
 module.exports.topUpScopeInput = topUpScopeInput;
+// Test surface for the per-service completion payload fields (the T&S Fast
+// Complete flag needs the gate AND the requesting user's flag).
+module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;

@@ -88,6 +88,24 @@ test('the strategy tool reports unavailable evidence as unknown instead of a cit
   } finally { scan.mockRestore(); }
 });
 
+test('the strategy tool lists every company a new answer named as competitors, in its old {name, context} shape', async () => {
+  const monitor = require('../services/seo/backlink-monitor');
+  const scan = jest.spyOn(monitor, 'checkLLMMentions').mockResolvedValue({});
+  db.mockReturnValue({ orderBy: () => ({ limit: async () => [
+    measured({ companies_named: JSON.stringify([{ name: 'Example Bug Control' }, { name: 'Waves Pest Control' }, { name: 'Orkin' }]),
+      competitors_mentioned: JSON.stringify([{ name: 'orkin', context: 'then Orkin follows' }]) }),
+    measured({ companies_named: null, competitors_mentioned: JSON.stringify([{ name: 'turner pest', context: 'Turner Pest' }]) }),
+  ] }) });
+  try {
+    const { executeBacklinkTool } = require('../services/seo/backlink-strategy-tools');
+    const { checks } = await executeBacklinkTool('check_llm_mentions', {});
+    expect(checks[0].competitors_mentioned).toEqual([
+      { name: 'Example Bug Control', context: null }, { name: 'Orkin', context: 'then Orkin follows' },
+    ]);
+    expect(checks[1].competitors_mentioned).toEqual([{ name: 'Turner Pest Control', context: 'Turner Pest' }]);
+  } finally { scan.mockRestore(); }
+});
+
 test('the frozen benchmark excludes custom queries and does not blend provider model versions', () => {
   const rows = [measured({ waves_cited_urls: [WAVES] }), measured({ model_version: 'previous-search' }), measured({ query: 'custom question', waves_cited_urls: [WAVES] })];
   const dashboard = buildDashboard(rows, benchmark.questions);
@@ -299,12 +317,12 @@ test('an overview needs element attribution when only a possible source pool is 
 
 test('failed provider calls consume the attempt cap', async () => {
   const prober = new LLMMentionProber();
-  jest.spyOn(prober, 'getQueries').mockResolvedValue(Array.from({ length: 220 }, (_, i) => ({ query: `benchmark ${i}` })));
+  jest.spyOn(prober, 'getQueries').mockResolvedValue(Array.from({ length: 320 }, (_, i) => ({ query: `benchmark ${i}` })));
   const probe = jest.fn().mockResolvedValue(null);
   Object.defineProperty(prober, 'providers', { value: { chatgpt: probe } });
   db.mockReturnValue({ select: () => ({ max: () => ({ groupBy: async () => [] }) }), where: () => ({ select: async () => [] }) });
-  expect(await prober.runDaily()).toMatchObject({ attempted: 200, probed: 0, inserted: 0 });
-  expect(probe).toHaveBeenCalledTimes(200);
+  expect(await prober.runDaily()).toMatchObject({ attempted: 300, probed: 0, inserted: 0 });
+  expect(probe).toHaveBeenCalledTimes(300);
 });
 
 test('probe rotation honors same-day dedupe', async () => {
@@ -351,7 +369,7 @@ test('disabling all managed queries does not reactivate fallback probes', async 
 test('four failing engines cannot permanently starve a healthy engine under the run cap', async () => {
   jest.useFakeTimers();
   const prober = new LLMMentionProber();
-  const queries = Array.from({ length: 60 }, (_, i) => ({ query: `question ${i}` }));
+  const queries = Array.from({ length: 80 }, (_, i) => ({ query: `question ${i}` }));
   jest.spyOn(prober, 'getQueries').mockResolvedValue(queries);
   const healthyQuestions = new Set();
   const failed = jest.fn().mockResolvedValue(null);
@@ -365,7 +383,7 @@ test('four failing engines cannot permanently starve a healthy engine under the 
   });
   for (const day of ['2030-01-01T12:00:00Z', '2030-01-02T12:00:00Z']) {
     jest.setSystemTime(new Date(day));
-    expect((await prober.runDaily()).attempted).toBe(200);
+    expect((await prober.runDaily()).attempted).toBe(300);
   }
-  expect(healthyQuestions.size).toBe(60);
+  expect(healthyQuestions.size).toBe(80);
 });

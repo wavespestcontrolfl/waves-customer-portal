@@ -578,7 +578,7 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
  * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
  * (shared numbers) — lead-only estimate threads keep the template.
  */
-async function generateLlmReviewDraft({ customer, body, decision, estimate, estimateLinked = true }) {
+async function generateLlmReviewDraft({ customer, body, decision, estimate, estimateLinked = true, inboundPhone = null }) {
   if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
   if (!customer) return null;
   try {
@@ -595,11 +595,13 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt, factsBlock, reserviceBooked } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, labelFactsSnapshot, factsGeneratedAt, factsBlock, reserviceBooked } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
       inboundMessage: body,
+      // The sender's number: the drafter inherits earlier thread context (a label question, a visit) only from this phone.
+      inboundPhone,
       intent: { intent: decision.intent, confidence: decision.confidence },
       schedulingIntent: hasSchedulingIntent(body),
       // Real-answers OPEN TIMES (pre-push audit P1): without city,
@@ -677,7 +679,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       context,
     }).promisedLanes || null;
     return {
-      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
+      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null, labelFactsSnapshot: labelFactsSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
       // Independent review finding (PR #5334): same send-time freshness
@@ -739,7 +741,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
     // reply may be about, and the drafter's service identity step weighs it
     // against the customer's visits and the service they name.
     const estimateLinked = Boolean(shortCode);
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null, estimateLinked });
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null, estimateLinked, inboundPhone: from });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card when the LLM path is rejected or unavailable. The scheduling lane
     // offers no template at all (it used to echo raw inbound text); the
@@ -797,6 +799,8 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // at /sms and /schedule-sms time. Absent for template drafts and for
         // any llm draft whose reply never quoted an open-times window.
         ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
+        // LABEL FACTS source, re-verified at send (agent-decision-send-checks).
+        ...(llmDraft?.labelFactsSnapshot ? { label_facts_snapshot: llmDraft.labelFactsSnapshot } : {}),
         // Codex round-3 P2 — same shape/purpose as publishSuggestion's
         // reservice_lanes_snapshot (sms-suggest-mode.js).
         ...(Array.isArray(llmDraft?.reserviceLanesSnapshot) && llmDraft.reserviceLanesSnapshot.length

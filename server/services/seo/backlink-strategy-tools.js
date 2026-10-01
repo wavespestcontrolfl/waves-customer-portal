@@ -8,7 +8,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { claimProspectDomain, findPlacementRow } = require('./prospect-domain-lock');
-const { isMeasuredAnswer, ownedCitations, asJsonArray } = require('./aeo-measurement');
+const { isMeasuredAnswer, ownedCitations } = require('./aeo-measurement');
+const { rivalEntries } = require('./llm-mention-companies');
 
 function extractDomain(url) {
   try { return new URL(url).hostname.replace('www.', ''); } catch { return null; }
@@ -363,7 +364,8 @@ async function executeBacklinkTool(toolName, input) {
           waves_mentioned: isMeasuredAnswer(r) ? r.waves_mentioned : null,
           waves_cited: isMeasuredAnswer(r) ? ownedCitations(r).length > 0 : null,
           waves_cited_urls: ownedCitations(r),
-          competitors_mentioned: asJsonArray(r.competitors_mentioned),
+          // Every company the answer named (not only the known-list hits).
+          competitors_mentioned: rivalEntries(r),
           date: r.check_date,
         })),
       };

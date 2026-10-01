@@ -26,7 +26,7 @@ const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 const { normalizeLawnAftercare, renderedWeekPlan, resolveLawnAftercare } = require('./lawn-aftercare');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v10_rendered_plan'; // Ground the aftercare state + the weekly plan the card renders; actions and water copy stay deterministic under a product verdict.
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v11_no_dead_fields'; // v11: the model no longer writes mainWatch / treatmentSummary (no surface rendered them). v10: Ground the aftercare state + the weekly plan the card renders; actions and water copy stay deterministic under a product verdict.
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -108,12 +108,10 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 
 ## OUTPUT
 - statusHeadline: <=8 words, the one-line state for the hero.
-- mainWatch: one sentence, the main thing to watch (empty string if nothing).
 - customerAction: one sentence, the single next step for the customer (empty string if none).
 - categories: one short sentence per diagnosis category key you were given.
 - water: 2-3 sentences explaining the water picture for this visit (empty string when no water facts).
 - mowing: 1-2 sentences on mowing height (empty string unless mowing facts were given).
-- treatmentSummary: 1 sentence on what was applied and why (empty string unless products were given).
 - insights: MUST be the same length and order as the input insights. For each, fill customerAction OR nextVisitPlan to match which the input had (leave the other "").`;
 
 // Structured-output contract (llm/call.js jsonSchema), built per visit because
@@ -125,10 +123,9 @@ function narrativeSchema(facts) {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['statusHeadline', 'mainWatch', 'customerAction', 'categories', 'water', 'mowing', 'treatmentSummary', 'insights'],
+    required: ['statusHeadline', 'customerAction', 'categories', 'water', 'mowing', 'insights'],
     properties: {
       statusHeadline: { type: 'string' },
-      mainWatch: { type: 'string' },
       customerAction: { type: 'string' },
       categories: {
         type: 'object',
@@ -138,7 +135,6 @@ function narrativeSchema(facts) {
       },
       water: { type: 'string' },
       mowing: { type: 'string' },
-      treatmentSummary: { type: 'string' },
       insights: {
         type: 'array',
         items: {
@@ -199,8 +195,8 @@ const RAIN_TERMS = /\brain|\binch|\bprecipitation|\bwater/i;
 
 // Replace a deterministic string with the model's version only if it's a
 // non-empty, non-banned string that doesn't tie a rain/water amount to the
-// wrong window. The window check applies to EVERY merged field (mainWatch,
-// diagnosis explanations, insights — codex P1 r4), but only when the text
+// wrong window. The window check applies to EVERY merged field (hero
+// copy, diagnosis explanations, insights — codex P1 r4), but only when the text
 // also talks about rain/water: a trend claim like "weeds are down since the
 // last visit" is legitimate (the prior visit IS the trend anchor).
 function safeText(modelValue, fallback) {
@@ -236,7 +232,6 @@ function mergeNarrative(v2, out) {
 
   if (next.snapshot) {
     next.snapshot.statusHeadline = safeText(out.statusHeadline, next.snapshot.statusHeadline);
-    next.snapshot.mainWatch = next.snapshot.mainWatch ? safeText(out.mainWatch, next.snapshot.mainWatch) : next.snapshot.mainWatch;
     next.snapshot.customerAction = rewriteAction(out.customerAction, next.snapshot.customerAction);
   }
   const cats = out.categories || {};
@@ -247,10 +242,7 @@ function mergeNarrative(v2, out) {
   if (next.water && !verdictOwnsWatering) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
-  if (next.mowing && next.mowing.measuredHeightInches != null) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
-  if (next.treatment && typeof out.treatmentSummary === 'string') {
-    next.treatment.summary = safeText(out.treatmentSummary, next.treatment.summary || '');
-  }
+  if (next.mowing && next.mowing.measuredHeightInches != null && next.mowing.recommendation) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
   if (Array.isArray(out.insights) && Array.isArray(next.insights)) {
     next.insights = next.insights.map((ins, i) => {
       const m = out.insights[i] || {};
@@ -258,8 +250,10 @@ function mergeNarrative(v2, out) {
         ...ins,
         headline: safeText(m.headline, ins.headline),
         whatWeSaw: safeText(m.whatWeSaw, ins.whatWeSaw),
-        whyItMatters: safeText(m.whyItMatters, ins.whyItMatters),
-        wavesAction: safeText(m.wavesAction, ins.wavesAction),
+        // A line the builder left null (lead mode drops the stock sentences)
+        // stays null: the model never fills it back in.
+        whyItMatters: ins.whyItMatters ? safeText(m.whyItMatters, ins.whyItMatters) : ins.whyItMatters,
+        wavesAction: ins.wavesAction ? safeText(m.wavesAction, ins.wavesAction) : ins.wavesAction,
         customerAction: rewriteAction(m.customerAction, ins.customerAction),
         nextVisitPlan: ins.nextVisitPlan ? safeText(m.nextVisitPlan, ins.nextVisitPlan) : ins.nextVisitPlan,
       };
@@ -320,5 +314,5 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
 module.exports = {
   applyLawnReportNarrative,
   // exported for tests
-  _test: { groundingFacts, mergeNarrative, trendDirection, safeText, safeWaterText, SYSTEM_PROMPT, buildUserMessage, PROMPT_VERSION },
+  _test: { groundingFacts, mergeNarrative, narrativeSchema, trendDirection, safeText, safeWaterText, SYSTEM_PROMPT, buildUserMessage, PROMPT_VERSION },
 };

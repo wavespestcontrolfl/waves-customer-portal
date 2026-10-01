@@ -99,6 +99,10 @@ async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingI
     // rejected request must give its capacity back, exactly as a cancellation
     // does. Same inactive set the activation helper and the dedupe use.
     .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
+    // Owner ruling 2026-09-30: a street-level address hold (a call-booked visit
+    // still awaiting the office's address confirmation) is not a self-book and
+    // takes no daily-cap capacity until it is confirmed. One query still.
+    .whereNotExists(function () { require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services'); })
     .count('* as count')
     .first();
   return parseInt(row?.count || 0, 10) + parseInt(voiceRow?.count || 0, 10);

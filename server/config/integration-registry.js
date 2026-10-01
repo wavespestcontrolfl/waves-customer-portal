@@ -79,6 +79,16 @@ const ADMIN_INTEGRATIONS = [
     gates: [],
   },
   {
+    id: 'typesafe',
+    category: 'AI Providers',
+    name: 'TypeSafe Jev',
+    platform: 'TypeSafe',
+    description: 'Typed yes/no and choice decisions (shadow; dark behind GATE_TYPED_DECISIONS)',
+    env: { required: ['TYPESAFE_API_KEY'], supporting: ['MODEL_TYPESAFE_JEV'] },
+    health: { type: 'token-health', key: 'typesafe', primaryEnvKey: 'TYPESAFE_API_KEY' },
+    gates: [{ key: 'typedDecisions', label: 'Typed decisions' }],
+  },
+  {
     id: 'google_apis',
     category: 'Data & Research',
     name: 'Google APIs',

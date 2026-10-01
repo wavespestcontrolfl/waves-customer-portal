@@ -848,7 +848,16 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
       action: `${initial.sms_log_id ? 'sms' : 'email'}.commitment.${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { sms_log_id: initial.sms_log_id || null, email_id: initial.email_id || null, customer_id: customerId } });
     await trx('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [initial.sms_log_id ? `sms-commitment:${id}` : `email-commitment:${id}`]).update({ read_at: trx.fn.now() });
+      .whereRaw("metadata->>'dedupeKey' = ?", [initial.sms_log_id ? `sms-commitment:${id}` : `email-commitment:${id}`])
+      // Staff settled the promise (dismiss / fulfill): its bell is done, by that
+      // person. Any other staff update (an edit, a snooze) leaves the promise
+      // open, so the bell is only read.
+      .update(['dismiss', 'fulfill'].includes(action)
+        // done_by names the workflow and the person (`sms-commitments:<id>`),
+        // never a bare person id: the follow-up itself is closed, so the bell
+        // Done is not a person's to Reopen (PERSON_DONE_BY_SQL refuses it).
+        ? require('./notification-service')._private.doneColumns({ by: `${initial.sms_log_id ? 'sms' : 'email'}-commitments:${reviewedBy}`, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
+        : { read_at: trx.fn.now() });
     return updated;
   });
 }
@@ -1051,7 +1060,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
         status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
       });
       await trx('notifications').where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({ read_at: now });
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update(require('./notification-service')._private.doneColumns({ by: 'sms-commitments', resolution: 'The text follow-up was done', at: now, keepExisting: true, conn: trx }));
       closed = true;
       return;
     }

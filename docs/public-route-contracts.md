@@ -1528,6 +1528,21 @@ multi-property account's report can never list another property's visits.
 Gate off (default): the field is absent and the payload is byte-identical
 to today.
 
+Four-section report (owner "ok go" 2026-10-01, `GATE_REPORT_WRITER_RULES`,
+dark): on the same `/api/reports/:token/*` payload, a report whose summary is
+the technician-reviewed four-section report (`summarySource:
+'technician_report'`) also carries `reportSections: [{ key, title,
+paragraphs[] }]` — keys `whatWeFound` / `whatWeDid` / `whatToExpect` /
+`whatsNext` — the server's screened parse of that same text
+(`technician-report-copy.js`; the raw notes column never egresses), which the
+report page and PDF render with its titles wherever they would print exactly
+that text. Live view only, the same payload adds `nextSameServiceAppointment:
+{ serviceType, scheduledDate, windowStart }`, the next booked visit on the
+report's own service line (same statuses as `nextAppointment`, no cross-line
+fallback), for the "What's next" line; `stripLiveOnlyScheduleFields` removes it
+from the PDF, static and sms_preview renders like `nextAppointment`. Both keys
+are absent for every other report.
+
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the
@@ -1574,6 +1589,7 @@ whole-landscape reassurance. Public and queued PDFs share the tree-only `tsrevie
 cache revision so older PDFs cannot retain the substituted scores. Token, access,
 privacy, and rate-limit guards are unchanged.
 Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
+Lawn report payload cleanup (lawn report rebuild P6): the `/api/reports/:token/data` lawn `reportV2` no longer carries `snapshot.mainWatch` or the top-level `seasonalNote` (the web hero and PDF never rendered either; `snapshot.seasonalNote`, which the hero renders, and `trends.seasonalNote` are unchanged), and `reportV2.photoSummary` is `null` instead of the stock “No additional observations from the photo review.” placeholder so no empty-evidence sentence prints under the photos or in the PDF. The lawn narrative model no longer writes `mainWatch` or `treatmentSummary`; older frozen payloads and cached narratives that still carry those keys are tolerated (extra keys are ignored). No token, eligibility, privacy or rate-limit change; `LAWN_RENDER_STRATEGY` and `SERVICE_REPORT_PDF_STORAGE_VERSION` bumped so cached renders re-key.
 Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
 `moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
@@ -1673,6 +1689,46 @@ separate customer text right after the lawn completion text, rendered from the
 `lawn_watering_instruction` SMS template with the instruction's `lines` joined
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
+`GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
+key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` to
+LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
+(null falls back to the status label), `why` the root cause or score
+explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
+homeowner tasks (may be empty; never the stock "No action is needed" line) and
+`next` the follow-up reason when a follow-up is planned (never replaced by a
+different plan), otherwise the top finding's next-visit plan, else null. It is derived at the tail of
+`applyLawnReportReconciliation` from the final reconciled strings, so it carries
+the same wording as the rest of the report. When `reportV2.banner` carries
+watering lines the banner owns the watering task: `yourPart` is the top
+finding's own step (dropped when it restates the aftercare task), and
+`headline`, `why`, `yourPart` and `next` carry no watering or
+moisture wording (water, irrigation, sprinkler, moisture, dry, drought, damp,
+rain, coverage); such a field falls to its next source or null. That wording
+test is the whole rule: a non-watering string from a water or coverage finding
+(e.g. "Stable — watching thin areas") may lead. The lead region (banner lines, lead fields and the joined next-visit
+date) is held to 250 visible words at derive time: a field over its own word cap
+(headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
+out, then `why` and `applied` are nulled in that order
+until it fits. The web report mounts the lead card right under the watering
+banner (above the plan, nearby and review cards); the lawn section then drops
+the snapshot hero and opens with the photo strip; the follow-up card shows
+(without its "Your part" line) only when a planned follow-up's reason could
+not be carried as `lead.next`. While the gate is on the lawn payload also
+drops stock copy (lawn only; every field keeps its key): the unverifiable
+past-tense `insights[].wavesAction` lines and four stock `whyItMatters` lines
+become null (product-grounded `wavesAction` and every watering
+`customerAction` / `nextVisitPlan` are unchanged), and `mowing.recommendation`
+is null for a too-short / too-tall reading when the mowing finding is among the
+three findings the web card shows. The sprinkler-coverage water finding
+carries `kind: 'coverage_watch'` (lead mode only) so the water card knows the
+finding owns that guidance even after a narrative headline rewrite. The web report folds secondary finding,
+water and photo-note detail into expanders that print open. The lawn PDF, when
+`lead` is present, prints `lead.why` as the status detail, finding bullets as
+headline + what we saw (+ why it matters only for needs_attention) with no
+"What Waves did" line, and skips the follow-up's stock "No action is needed"
+line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
+stamp while the gate is on, so gate-off PDFs are never served after the flip
+(or the reverse on rollback).
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -1959,7 +2015,16 @@ feedback/:token/:reaction, e/:token/:eventId (event click-through:
 records one deduped analytics row then 302s to the DB-locked event
 URL; unknown token = untracked redirect, never blocks the reader)
 — rate-limited, read-only for posts/rss,
-double-opt-in for subscribe; the quiz and feedback tokens are the same
+double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
+and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`
+strings (newer sites; they win) and the optional `tags` array (older sites send only
+`["out_of_area_waitlist", "zip:NNNNN", "city:slug"]`), keeping at most one `zip:` tag that is exactly 5 digits and one `city:` tag normalized to a
+lowercase hyphen slug capped at 40 chars, plus the fixed `out_of_area_waitlist` tag; every
+other posted tag is dropped, and every other source ignores `tags`/`zip`/`city` entirely. The write goes
+to the existing `newsletter_subscribers.tags` jsonb, replaces that row's earlier `zip:`/`city:`
+tags, and only touches the signup's own `pending` row (a new or re-armed double-opt-in), so an
+anonymous post cannot retag an already-confirmed subscriber. It is best-effort: a failure
+never fails the signup, and the zip/city values are never logged); the quiz and feedback tokens are the same
 per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
 renders a confirm page only and the delivery-row write happens on a
 deliberate POST form submission (scanner-safe, mirrors confirm), answer/

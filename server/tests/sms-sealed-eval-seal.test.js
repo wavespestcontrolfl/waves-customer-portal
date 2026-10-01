@@ -66,28 +66,23 @@ const cand = (id, intent, createdAt) => ({
 // BILLING: line (Codex #5392 r3 P2), not a header LIKE, so its clause binds
 // the delimiter + exact suffixes; SLA and FREE RE-SERVICE stay LIKE markers.
 const {
-  BILLING_DELIMITER: D_, exactSectionSuffix: exactSuffix_,
+  BILLING_DELIMITER: D_, exactStructureRegexSource,
 } = require('../services/sms-company-facts');
-const EXACT = exactSuffix_();
-// FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
+// SLA line (substring), COMPANY FACTS + LABEL FACTS (exact-structure regex twins of hasExactCompanyFacts / hasExactLabelFacts), and
+// FREE RE-SERVICE at its rendered position too (round-24 P2): the text before the first BILLING: line minus the exact company (+ label)
+// structure must end with the SLA line + the re-service line.
 const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
-const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
-// 'vl' (VISIT STATUS & OPEN LOOPS, SMS facts-gap PR 1) is matched at its rendered position
-// (PR #5499 r1): the header line between UPCOMING SERVICES and the first BILLING: line. Contract
-// order is SLA, COMPANY FACTS, VL, FREE RE-SERVICE: required markers bind first, then forbidden ones.
+const RS_BINDINGS = [D_, D_, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source];
+// VISIT STATUS & OPEN LOOPS ('_cflv', SMS facts-gap PR 1) is matched at its rendered position: the
+// header line between UPCOMING SERVICES and the first BILLING: line. Contract order is SLA, COMPANY
+// FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, FREE RE-SERVICE.
 const VL_BINDINGS = ['\nVISIT STATUS & OPEN LOOPS:\n', D_, '\nUPCOMING SERVICES:\n'];
 const CONTRACT_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
-  D_, D_, EXACT.length, EXACT,
+  D_, D_, exactStructureRegexSource('optional'),
+  D_, D_, exactStructureRegexSource('required'),
   ...VL_BINDINGS,
   ...RS_BINDINGS,
-];
-// _cf+c (company facts + complaints, no 'vl'): SLA, CF, RS required, then VL forbidden.
-const CF_C_BINDINGS = [
-  '%FOLLOW-UP SLA RIGHT NOW:%',
-  D_, D_, EXACT.length, EXACT,
-  ...RS_BINDINGS,
-  ...VL_BINDINGS,
 ];
 
 describe('sealEvalItems — selection contract', () => {
@@ -256,18 +251,32 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers_cf+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers3_cflv+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
+    // the current identity (3_cflv) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS,
+    // LABEL FACTS, VISIT STATUS & OPEN LOOPS (header at its rendered position)
+    const CURRENT_BINDINGS = ['%FOLLOW-UP SLA RIGHT NOW:%', ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required'), ...VL_BINDINGS];
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(CF_C_BINDINGS);
-      // _cf+c: every fact the version carries is required; only 'vl' (VISIT STATUS & OPEN LOOPS) is forbidden, at its position
-      expect(String(args[0]).match(/NOT LIKE/g) || []).toHaveLength(0);
-      expect(String(args[0]).match(/NOT \(position\(\?::text in split_part\(split_part\(/g) || []).toHaveLength(1);
+      expect(args[1]).toEqual(CURRENT_BINDINGS);
+      expect(String(args[0])).not.toMatch(/NOT LIKE/); // 3_cflv+c: every fact the version carries is required, none forbidden
+      expect(String(args[0])).not.toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
+  });
+
+  test('the shipped 3_cfl identity forbids VISIT STATUS & OPEN LOOPS at its rendered position', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers3_cfl+c');
+    const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
+    await sealEvalItems({ target: 100, dbi });
+    const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
+    expect(likeRaws.length).toBeGreaterThanOrEqual(2);
+    for (const [, args] of likeRaws) {
+      expect(String(args[0])).toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
+      expect(args[1].slice(-VL_BINDINGS.length)).toEqual(VL_BINDINGS);
+    }
   });
 
   // Codex #5194 r7 P1: v11 has a contract too — a rollback must not keep
@@ -360,7 +369,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 
 // #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
 // freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
-test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS, VISIT STATUS & OPEN LOOPS and FREE RE-SERVICE lines', async () => {
+test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS and FREE RE-SERVICE lines', async () => {
   const drafter = require('../services/sms-shadow-drafter');
   const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
   try {
@@ -377,7 +386,7 @@ test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND for
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
-    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in split_part\(split_part\(.*\) AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
+    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*regexp_replace\(split_part\(.*~ \?::text\)$/);
     expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
   } finally {
     spy.mockRestore();

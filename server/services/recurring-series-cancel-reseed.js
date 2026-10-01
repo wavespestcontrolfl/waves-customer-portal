@@ -279,6 +279,92 @@ function laterCancelledPlanRowIds(rows, cancelledId) {
   return cancelledRows.filter((row) => row.pos > floor).map((row) => row.id);
 }
 
+// In-term placement (owner ruling 2026-09-30, GATE_CANCEL_RESEED_IN_TERM):
+// the added visit goes back INSIDE the plan year that lost one, not past the
+// series end. On an ongoing plan the end is a year or more out (two live
+// replacements landed 15 months after the cancel), so the term stayed short
+// and the "replacement" was just one more visit at the tail.
+//
+// Picks the spot in the rest of the term [a week out or term start, term
+// end) that sits farthest from its nearer live visit — the middle of a gap,
+// or as close to it as the lead time allows — keeping at least
+// `minSpacingDays` from every live visit. `shift` applies the series'
+// weekend / blackout / season rules and may return null (no placeable day);
+// `takenDates` are dates the series already occupies. Returns null when no
+// gap fits — the caller then appends at the series end as before.
+const RESEED_IN_TERM_MIN_SPACING_DAYS = 14;
+// Never auto-book a replacement sooner than a week out — the office and the
+// route need notice; the reseed runs unattended.
+const RESEED_IN_TERM_LEAD_DAYS = 7;
+// The cancelled visit's own day (and the days around it) are what the
+// customer or office just turned down — never re-book onto them.
+const RESEED_IN_TERM_AVOID_CANCELLED_DAYS = 3;
+
+function addDays(dateStr, days) {
+  const [y, m, d] = String(dateStr).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+function daysBetween(fromStr, toStr) {
+  return Math.round((Date.parse(`${toStr}T00:00:00Z`) - Date.parse(`${fromStr}T00:00:00Z`)) / 86400000);
+}
+
+function pickInTermReseedDate({
+  rows, window, todayStr, shift = (d) => d, takenDates = null, cancelledDate = null,
+  minSpacingDays = RESEED_IN_TERM_MIN_SPACING_DAYS, leadDays = RESEED_IN_TERM_LEAD_DAYS,
+  avoidCancelledDays = RESEED_IN_TERM_AVOID_CANCELLED_DAYS,
+}) {
+  const avoid = dateOnly(cancelledDate);
+  const tooNearCancelled = (d) => !!avoid && Math.abs(daysBetween(avoid, d)) <= avoidCancelledDays;
+  if (!window?.start || !window?.end || !todayStr) return null;
+  const lower = [addDays(todayStr, leadDays), dateOnly(window.start)].sort()[1];
+  const upper = addDays(dateOnly(window.end), -1);
+  if (lower > upper) return null;
+  // Spacing is about when the customer is actually visited, so the ACTUAL
+  // scheduled dates of every counting plan row (completed included), not
+  // cadence positions.
+  const live = [...new Set((rows || [])
+    .filter((row) => isPlanSeriesRow(row) && !NON_COUNTING_STATUSES.includes(String(row.status)))
+    .map((row) => dateOnly(row.scheduled_date))
+    .filter(Boolean))].sort();
+  const before = live.filter((d) => d < lower).pop() || null;
+  const after = live.find((d) => d > upper) || null;
+  const points = [before, ...live.filter((d) => d >= lower && d <= upper), after];
+  const gaps = [];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const left = points[i];
+    const right = points[i + 1];
+    const lo = [left ? addDays(left, minSpacingDays) : lower, lower].sort()[1];
+    const hi = [right ? addDays(right, -minSpacingDays) : upper, upper].sort()[0];
+    if (lo > hi) continue;
+    // The gap's middle, pulled into the bookable range; ranked by how far
+    // the visit ends up from its nearer real neighbour. Earlier wins a tie,
+    // so the short term is made whole sooner.
+    const leftEdge = left || lower;
+    const rightEdge = right || upper;
+    const mid = addDays(leftEdge, Math.floor(daysBetween(leftEdge, rightEdge) / 2));
+    // With no visit before the gap (the plan's first visits were all
+    // cancelled) the soonest bookable day leaves the most room.
+    const ideal = left ? [[mid, lo].sort()[1], hi].sort()[0] : lo;
+    const room = Math.min(left ? daysBetween(left, ideal) : Infinity, right ? daysBetween(ideal, right) : Infinity);
+    gaps.push({ lo, hi, ideal, room });
+  }
+  gaps.sort((a, b) => b.room - a.room || a.ideal.localeCompare(b.ideal));
+  // The ideal day first, then outward from it, so a weekend / blackout shift
+  // that pushes one candidate out of range never discards the whole gap.
+  for (const gap of gaps) {
+    const span = daysBetween(gap.lo, gap.hi);
+    for (let step = 0; step <= span * 2; step += 1) {
+      const offset = step % 2 ? Math.ceil(step / 2) : -(step / 2);
+      const candidate = addDays(gap.ideal, offset);
+      if (candidate < gap.lo || candidate > gap.hi) continue;
+      const placed = shift(candidate);
+      if (placed && placed >= gap.lo && placed <= gap.hi && !(takenDates && takenDates.has(placed)) && !tooNearCancelled(placed)) return placed;
+    }
+  }
+  return null;
+}
+
 // The visit-count trim's own audit note (reconcileRecurringSeriesVisitCount
 // writes it verbatim on every row it cancels) — recognises a trim made
 // before the plan-reduction ledger existed.
@@ -420,6 +506,10 @@ module.exports = {
   standingPlanReductions,
   hasUpcomingPlanRow,
   countUpcomingPlanRows,
+  pickInTermReseedDate,
+  RESEED_IN_TERM_MIN_SPACING_DAYS,
+  RESEED_IN_TERM_LEAD_DAYS,
+  RESEED_IN_TERM_AVOID_CANCELLED_DAYS,
   NON_COUNTING_STATUSES,
   COUNTING_SOURCE_STATUSES,
   UPCOMING_STATUSES,

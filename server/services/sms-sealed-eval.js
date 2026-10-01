@@ -41,8 +41,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const {
-  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffix, hasExactCompanyFacts,
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
 } = require('./sms-company-facts');
+const { LABEL_FACTS_MARKER } = require('./sms-label-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -150,22 +151,32 @@ function isV12PromptVersion(promptVersion) {
 const CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
 // Version-SUFFIX fact contract (Codex #5392 r1 P1): the real-answers base
 // identity carries a suffix token for every per-draft fact section a later
-// revision added ('_cf' = COMPANY FACTS; a numeric token >= 2 = the
-// unconditional FREE RE-SERVICE line). A suffix token REQUIRES its marker,
-// and — since the contract is exact — versions without the token FORBID it,
-// so items frozen before the section existed never grade a suffixed version
-// and suffixed items never grade an older one. A future fact section is one
-// more row here plus its suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
-// 'vl' = the VISIT STATUS & OPEN LOOPS section (SMS facts-gap PR 1; the drafter renders it,
-// with its fixed header, in EVERY gate-on block right after UPCOMING SERVICES — never in the
-// COMPANY FACTS / FREE RE-SERVICE tail, whose positions factPresent trusts). Position-aware
-// like those two: see hasRenderedVisitLoops.
+// revision added ('_cf' = COMPANY FACTS, '_cfl' = COMPANY FACTS + LABEL FACTS; a
+// numeric token >= 2 = the unconditional FREE RE-SERVICE line). A suffix token
+// REQUIRES its marker, and — since the contract is exact — versions without the
+// token FORBID it, so items frozen before the section existed never grade a
+// suffixed version and suffixed items never grade an older one. A future fact
+// section is one more row here plus its suffix in the drafter's
+// REAL_ANSWERS_PROMPT_VERSION. A suffix is CUMULATIVE: '_cfl' (LABEL FACTS)
+// carries the COMPANY FACTS section too. LABEL FACTS can be a required marker
+// because the drafter ALWAYS renders its header gate-on ("none on file" when
+// the last visit has no verified label timing), so its absence always means
+// "frozen before the section existed".
+// '_cflv' (SMS facts-gap PR 1, #5499) adds VISIT STATUS & OPEN LOOPS, also always
+// rendered gate-on ("- none" when empty) right after UPCOMING SERVICES — never in
+// the COMPANY FACTS / LABEL FACTS / FREE RE-SERVICE tail. Position-aware: see
+// hasRenderedVisitLoops.
 const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
 const VISIT_LOOPS_MARKER = 'VISIT STATUS & OPEN LOOPS:';
-const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER, vl: VISIT_LOOPS_MARKER });
-function suffixTokenMarker(token) {
-  if (/^\d+$/.test(token)) return Number(token) >= 2 ? RESERVICE_FACTS_MARKER : null;
-  return VERSION_SUFFIX_FACT_MARKERS[token] || null;
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
+  cf: [COMPANY_FACTS_HEADER],
+  cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER],
+  cflv: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
+});
+// the markers one suffix token requires (a list)
+function suffixTokenMarkers(token) {
+  if (/^\d+$/.test(token)) return Number(token) >= 2 ? [RESERVICE_FACTS_MARKER] : [];
+  return VERSION_SUFFIX_FACT_MARKERS[token] || [];
 }
 function versionSuffixTokens(promptVersion) {
   const base = String(promptVersion).split('+')[0];
@@ -178,15 +189,18 @@ function requiredFactMarkers(promptVersion) {
   const tags = String(promptVersion).split('+')[1] || '';
   return [...new Set([
     V12_FACTS_MARKER,
-    ...versionSuffixTokens(promptVersion).map(suffixTokenMarker).filter(Boolean),
+    ...versionSuffixTokens(promptVersion).flatMap(suffixTokenMarkers),
     ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
   ])];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
-// carry must be ABSENT too. Every version has one (Codex #5194 r7 P1): a v11
-// exam after the gate is rolled back must not replay items frozen with the
-// v12 SLA, re-service or company-facts lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([...new Set([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS), ...Object.values(CATEGORY_FACT_MARKERS)])]);
+// carry must be ABSENT too — an item frozen while complaints were on carries
+// FREE RE-SERVICE, which live gate-off drafts never receive, so it must not
+// grade the plain v12 prompt after a rollback or switch. Every version has
+// one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
+// replay items frozen with the v12 SLA, re-service, company-facts or label
+// lines either.
+const CONTRACT_FACT_MARKERS = Object.freeze([...new Set([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS).flat(), RESERVICE_FACTS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)])]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));
@@ -199,11 +213,11 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
-// Does a frozen facts block carry this marker? COMPANY FACTS and FREE RE-SERVICE are TRUSTED only at their
-// fixed rendered position (Codex #5392 r3 P2; #5336 round-24 P2): buildFactsBlock renders
-// "...FOLLOW-UP SLA RIGHT NOW: <phrase>\nFREE RE-SERVICE: <fact>\n[COMPANY FACTS section]BILLING:", so the text
-// before the FIRST "BILLING:" line must end with the exact company render (when that section is claimed) and,
-// beneath it, the SLA line followed directly by the re-service line. A header or marker typed into a
+// Does a frozen facts block carry this marker? COMPANY FACTS, LABEL FACTS and FREE RE-SERVICE are TRUSTED only at
+// their fixed rendered position (Codex #5392 r3 P2; #5336 round-24 P2): buildFactsBlock renders
+// "...FOLLOW-UP SLA RIGHT NOW: <phrase>\nFREE RE-SERVICE: <fact>\n[COMPANY FACTS section][LABEL FACTS section]BILLING:", so
+// the text before the FIRST "BILLING:" line must end with the exact company (+ label) structure (when those sections are
+// claimed) and, beneath it, the SLA line followed directly by the re-service line. A header or marker typed into a
 // multi-line SMS (the thread rides later in the block, verbatim) proves nothing. Every other marker is a
 // server-rendered line and stays a substring check.
 const RESERVICE_SECTION_RE = /(?:^|\n)FOLLOW-UP SLA RIGHT NOW:[^\n]*\nFREE RE-SERVICE:[^\n]*$/;
@@ -211,9 +225,9 @@ function hasRenderedReserviceFact(factsBlock) {
   const facts = String(factsBlock || '');
   const at = facts.indexOf(BILLING_DELIMITER);
   if (at < 0) return false;
-  const before = facts.slice(0, at);
-  const exact = exactSectionSuffix();
-  return RESERVICE_SECTION_RE.test(before.endsWith(exact) ? before.slice(0, -exact.length) : before);
+  // the exact company (+ label) structure, when the block ends with it, is peeled off; the re-service line sits directly above it
+  const before = facts.slice(0, at).replace(new RegExp(exactStructureRegexSource('optional')), '');
+  return RESERVICE_SECTION_RE.test(before);
 }
 // The rendered VISIT STATUS & OPEN LOOPS header (PR #5499 r1): on its own line,
 // after UPCOMING SERVICES and before the first BILLING: line. A thread or call
@@ -229,6 +243,7 @@ function hasRenderedVisitLoops(facts) {
 function factPresent(facts, marker) {
   if (marker === VISIT_LOOPS_MARKER) return hasRenderedVisitLoops(facts);
   if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
+  if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
   if (marker === RESERVICE_FACTS_MARKER) return hasRenderedReserviceFact(facts);
   return facts.includes(marker);
 }
@@ -252,17 +267,16 @@ function compatibleWhereRaw(markers, forbidden = []) {
       // UPCOMING SERVICES line and the first BILLING: line
       clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in split_part(split_part(${col}, ?::text, 1), ?::text, 2)) > 0)`);
       bindings.push(VISIT_LOOPS_LINE, BILLING_DELIMITER, UPCOMING_DELIMITER);
-    } else if (marker === COMPANY_FACTS_HEADER) {
-      const exact = exactSectionSuffix();
-      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
-      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);
+    } else if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
+      // Exact-structure twin of hasExactCompanyFacts / hasExactLabelFacts: the
+      // text before the first BILLING: line matches the same regex source.
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND split_part(${col}, ?::text, 1) ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource(marker === LABEL_FACTS_MARKER ? 'required' : 'optional'));
     } else if (marker === RESERVICE_FACTS_MARKER) {
-      // the twin of hasRenderedReserviceFact: text before the first BILLING: line, minus the exact company
-      // render when it ends with it, must end with the SLA line + the re-service line
-      const exact = exactSectionSuffix();
-      const head = `split_part(${col}, ?::text, 1)`;
-      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND (CASE WHEN right(${head}, ?::int) = ?::text THEN left(${head}, length(${head}) - ?::int) ELSE ${head} END) ~ ?::text)`);
-      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact, BILLING_DELIMITER, BILLING_DELIMITER, exact.length, BILLING_DELIMITER, RESERVICE_SECTION_RE.source);
+      // the twin of hasRenderedReserviceFact: text before the first BILLING: line, minus the exact company (+ label)
+      // structure when it ends with it, must end with the SLA line + the re-service line
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND regexp_replace(split_part(${col}, ?::text, 1), ?::text, '') ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source);
     } else {
       clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
       bindings.push(`%${marker}%`);

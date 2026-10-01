@@ -250,6 +250,11 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
       if (job) {
         customerId = job.customer_id;
         serviceType = job.service_type;
+        // A live street-level address hold cannot be worked yet: refuse before any timer is created
+        // (the same 409 the status routes give). Re-read under the row lock just taken.
+        if (await require('./street-level-hold').isStreetLevelHoldVisit(jobId, trx)) {
+          throw Object.assign(new Error(require('./street-level-hold').HOLD_REFUSAL), { status: 409, code: 'street_level_hold' });
+        }
       }
     }
 

@@ -17,7 +17,6 @@ const {
   REAL_ANSWERS_HANDOFF_CATEGORIES,
 } = require('../services/sms-shadow-drafter');
 const { requiredFactMarkers, forbiddenFactMarkers, itemCompatibleWith } = require('../services/sms-sealed-eval');
-const { renderCompanyFactsSection } = require('../services/sms-company-facts');
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 const HEADER = 'VISIT STATUS & OPEN LOOPS:';
@@ -146,9 +145,12 @@ describe('buildFactsBlock', () => {
     expect(at).toBeGreaterThan(facts.indexOf('UPCOMING SERVICES:'));
     expect(at).toBeLessThan(facts.indexOf('FOLLOW-UP SLA RIGHT NOW:'));
     expect(at).toBeLessThan(facts.indexOf('BILLING:'));
-    // the positional contract sealed-eval trusts: ...SLA\nFREE RE-SERVICE\n[COMPANY FACTS]BILLING:
-    const before = facts.slice(0, facts.indexOf('\nBILLING:\n') + 1);
-    expect(before.endsWith(renderCompanyFactsSection())).toBe(true);
+    // the positional contract sealed-eval trusts: ...SLA\nFREE RE-SERVICE\n[COMPANY FACTS][LABEL FACTS]BILLING:
+    // stays exact with the section above it
+    const { hasExactCompanyFacts, hasExactLabelFacts } = require('../services/sms-company-facts');
+    expect(hasExactCompanyFacts(facts)).toBe(true);
+    expect(hasExactLabelFacts(facts)).toBe(true);
+    expect(at).toBeLessThan(facts.indexOf('COMPANY FACTS'));
   });
 
   test('a real gate-on block with loops satisfies the live identity contract (and the pre-vl one forbids it)', () => {
@@ -157,7 +159,7 @@ describe('buildFactsBlock', () => {
     const empty = buildFactsBlock(baseContext, { now: NOW });
     expect(itemCompatibleWith(withLoops, currentPromptVersion())).toBe(true);
     expect(itemCompatibleWith(empty, currentPromptVersion())).toBe(true);
-    expect(itemCompatibleWith(withLoops, 'house_voice_v12_real_answers3_cf')).toBe(false);
+    expect(itemCompatibleWith(withLoops, 'house_voice_v12_real_answers3_cfl')).toBe(false);
   });
 
   test('the header quoted in the SMS thread (after BILLING) neither satisfies nor violates the contract', () => {
@@ -166,7 +168,7 @@ describe('buildFactsBlock', () => {
       .replace(`\n${HEADER}\n- none\n`, '\n');
     expect(pre).toContain(HEADER); // only in the thread now
     expect(itemCompatibleWith(pre, currentPromptVersion())).toBe(false);
-    expect(itemCompatibleWith(pre, 'house_voice_v12_real_answers3_cf')).toBe(true);
+    expect(itemCompatibleWith(pre, 'house_voice_v12_real_answers3_cfl')).toBe(true);
   });
 });
 
@@ -178,7 +180,7 @@ describe('system prompt', () => {
     expect(off).not.toContain('Totally fine');
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
-    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, VISIT STATUS & OPEN LOOPS, the thread');
+    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
     expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
     expect(on).toContain('A reply of "" is allowed ONLY when none of those lines is listed.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
@@ -284,21 +286,21 @@ describe('visitLoopStatus', () => {
 });
 
 describe('identity + sealed-eval marker', () => {
-  test('the identity carries _vl and fits the column even with all four category tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cf_vl');
+  test('the identity carries cumulative _cflv and fits the column even with all four category tags', () => {
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflv');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     expect(currentPromptVersion()).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`);
   });
 
-  test('3_cf_vl requires the marker; every older identity forbids it', () => {
-    expect(requiredFactMarkers('house_voice_v12_real_answers3_cf_vl')).toContain(HEADER);
-    expect(requiredFactMarkers('house_voice_v12_real_answers3_cf_vl+bclm')).toContain(HEADER);
-    for (const old of ['house_voice_v12_real_answers3_cf', 'house_voice_v12_real_answers2_cf', 'house_voice_v12_real_answers_cf', 'house_voice_v12_real_answers', 'house_voice_v11']) {
+  test('3_cflv requires the marker; every older identity (incl. the shipped 3_cfl) forbids it', () => {
+    expect(requiredFactMarkers('house_voice_v12_real_answers3_cflv')).toContain(HEADER);
+    expect(requiredFactMarkers('house_voice_v12_real_answers3_cflv+bclm')).toContain(HEADER);
+    for (const old of ['house_voice_v12_real_answers3_cfl', 'house_voice_v12_real_answers3_cf', 'house_voice_v12_real_answers2_cf', 'house_voice_v12_real_answers_cf', 'house_voice_v12_real_answers', 'house_voice_v11']) {
       expect(requiredFactMarkers(old)).not.toContain(HEADER);
       expect(forbiddenFactMarkers(old)).toContain(HEADER);
     }
-    expect(forbiddenFactMarkers('house_voice_v12_real_answers3_cf_vl')).not.toContain(HEADER);
+    expect(forbiddenFactMarkers('house_voice_v12_real_answers3_cflv')).not.toContain(HEADER);
   });
 });

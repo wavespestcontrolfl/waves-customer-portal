@@ -75,13 +75,25 @@ async function persistPolicyWaivers(rowIds, waived) {
   }
 }
 
+async function addKeyedReservations(rows, customerId, eventKey) {
+  const keys = ['email', 'push', 'sms'].map((channel) => reminderReservationKey(customerId, eventKey, channel));
+  const keyed = await db('collections_contact_ledger').whereIn('idempotency_key', keys);
+  const known = new Set(rows.map((row) => String(row.id)));
+  for (const row of keyed) if (!known.has(String(row.id))) rows.push(row);
+}
+
 // `repair: false` is a read-only view for a caller that must not write (the
 // customer-dunning shadow run): accepted Email evidence still counts as
 // delivered in the returned events, but no reservation is stamped, resolved or
 // released. Every existing caller keeps the default (repair).
-async function reminderProgress(customerId, source, channels, { repair = true } = {}) {
+// `eventKey` (optional): the episode the caller is judging. Its keyed reservations are loaded by their
+// idempotency keys WITH NO TIME WINDOW and repaired like any other row, so an accepted email whose stamp
+// was lost is recovered however long the schedule sat paused (a reservation past the 90-day window would
+// otherwise stay unconfirmed for good). Callers that pass nothing keep exactly the windowed view.
+async function reminderProgress(customerId, source, channels, { repair = true, eventKey = null } = {}) {
   const rows = await db('collections_contact_ledger').where({ customer_id: customerId, source })
     .where('occurred_at', '>', new Date(Date.now() - 90 * 86400000));
+  if (eventKey) await addKeyedReservations(rows, customerId, eventKey);
   const repaired = await BillingEmailReservation.repairAcceptedBillingEmailReservations(
     rows, db, repair ? undefined : { readOnly: true },
   );
@@ -137,11 +149,14 @@ function reminderReservationKey(customerId, eventKey, channel) {
 async function findReminderReservation(customerId, eventKey, channel) {
   const row = await db('collections_contact_ledger')
     .where({ idempotency_key: reminderReservationKey(customerId, eventKey, channel) })
-    .first('id', 'metadata');
+    .first('id', 'metadata', 'invoice_ids');
   if (!row) return null;
   let metadata = row.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
-  return { id: row.id, metadata: metadata || {} };
+  // The invoices the reservation quoted (what a delivered notice named), for a read-only judge of delivery evidence.
+  let invoiceIds = row.invoice_ids;
+  if (typeof invoiceIds === 'string') { try { invoiceIds = JSON.parse(invoiceIds); } catch { invoiceIds = null; } }
+  return { id: row.id, metadata: metadata || {}, invoiceIds: Array.isArray(invoiceIds) ? invoiceIds : null };
 }
 
 // The legs an episode still owes, and the collections-policy verdict for each. Both
@@ -166,10 +181,12 @@ function reminderPolicyVerdicts({
 }
 
 // `send` receives the leg's reservation so a producer can hand its ledger id
-// to a deferred replay that must re-check the collections rail.
-async function sendLeg(send, channel, entry) {
+// to a deferred replay that must re-check the collections rail. Its optional third argument names the legs
+// this attempt may dispatch (the pending ones the collections policy permitted), for a sender that attributes
+// something shared between them (the customer-dunning pay link's channel). Existing senders ignore it.
+async function sendLeg(send, channel, entry, dispatchable) {
   try {
-    return await send(channel, entry);
+    return await send(channel, entry, dispatchable);
   } catch (err) {
     return err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: 'REMINDER_OUTCOME_UNCONFIRMED' };
   }
@@ -235,15 +252,30 @@ async function restoreSettledLeg(claim, entry, channel, { delivered, resolved, r
   return false;
 }
 
+// Attribution only (no query, no claim): of the policy-permitted legs, those whose standing keyed reservation (already
+// loaded, repaired, in the episode's entries) would still be claimed. A leg that reuses an ambiguous reservation - or is
+// already delivered / resolved - will not dispatch, so it must not count among the legs that carry a shared link. A leg
+// with no standing reservation proceeds. The send loop itself is unchanged.
+function proceedingLegs(customerId, eventKey, legs, entries) {
+  return legs.filter((channel) => {
+    const key = reminderReservationKey(customerId, eventKey, channel);
+    const row = entries.find((entry) => entry.idempotency_key === key);
+    return !row || ContactLedger.claimVerdict({ id: row.id, reused: true, metadata: metadataOf(row) }).allowed === true;
+  });
+}
+
+async function episodeProgress(customerId, source, channels, eventKey, unwindowed) {
+  const progress = await reminderProgress(customerId, source, channels, unwindowed ? { eventKey } : undefined);
+  return progress.find((event) => event.metadata.notificationEventKey === eventKey)
+    || { entries: [], delivered: new Set(), resolved: new Set(), waived: new Set() };
+}
+
 async function sendReminderChannels({
-  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents, holdExempt,
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents, holdExempt, unwindowed,
 }) {
-  const progress = await reminderProgress(customerId, source, channels);
   // A missing episode has the same shape as restored progress. These sets
   // are private to this progress read, so delivery can update them directly.
-  const { entries, delivered, resolved, waived: restoredWaived } = progress
-    .find((event) => event.metadata.notificationEventKey === eventKey)
-    || { entries: [], delivered: new Set(), resolved: new Set(), waived: new Set() };
+  const { entries, delivered, resolved, waived: restoredWaived } = await episodeProgress(customerId, source, channels, eventKey, unwindowed);
   const deliveredNow = [];
   const restored = []; // legs found already delivered by the keyed reservation, with what it recorded
   const results = {};
@@ -278,6 +310,9 @@ async function sendReminderChannels({
     }
     return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
+  const dispatchable = unwindowed
+    ? proceedingLegs(customerId, eventKey, pending.filter((_channel, index) => verdictAllows(permitted[index])), entries)
+    : pending.filter((_channel, index) => verdictAllows(permitted[index]));
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
     const reservation = {
@@ -294,7 +329,7 @@ async function sendReminderChannels({
     const claim = await ContactLedger.claimAttempt(entry, reservation);
     if (await restoreSettledLeg(claim, entry, channel, { delivered, resolved, restored })) continue;
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
-    const result = await sendLeg(send, channel, entry);
+    const result = await sendLeg(send, channel, entry, dispatchable);
     results[channel] = result;
     const state = await recordLegOutcome(entry, channel, result, results);
     if (state === 'resolved') resolved.add(channel);
