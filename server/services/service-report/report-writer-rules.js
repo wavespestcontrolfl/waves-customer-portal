@@ -275,9 +275,14 @@ const TIMEFRAME_RE = new RegExp(
 // dishwasher") passes. Each quoted span is found once and its words counted
 // in code, so a long unclosed quote costs one linear scan.
 const ATTRIBUTED_QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b[^.!?]{0,30}?(?:[:,]\s*|\s+)["“‘']\w/i;
-const QUOTED_SPAN_RE = /["“]([^"”\n]*)["”]/g;
+// The same attribution after a quotation ("‘Roaches again by the sink,’ you
+// said"); an apostrophe between letters ("it's") stays inside the quote.
+const REVERSE_ATTRIBUTED_QUOTE_RE = /[‘'"“]\w(?:[^"”’'\n]|(?<=\w)['’](?=\w)){2,200}?[’'"”]\s*,?\s*(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b/i;
+// A span ends at the next opening quote too, so many unclosed quotes still
+// cost one linear pass.
+const QUOTED_SPAN_RE = /["“]([^"“”\n]*)["”]/g;
 function quotesCustomer(copy) {
-  if (ATTRIBUTED_QUOTE_RE.test(copy)) return true;
+  if (ATTRIBUTED_QUOTE_RE.test(copy) || REVERSE_ATTRIBUTED_QUOTE_RE.test(copy)) return true;
   return [...copy.matchAll(QUOTED_SPAN_RE)].some((match) => match[1].trim().split(/\s+/).length >= 3);
 }
 // The activity gauge's number or scale (rule 12) in any form: "the rating
