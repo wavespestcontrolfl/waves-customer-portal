@@ -419,6 +419,23 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('a VOIDED first-visit invoice (never collected) puts the setup fee back; the next visit bills it (a refund would not)', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId)).toMatchObject({ status: 200 });
+      const [inv] = await mockPg('invoices').where({ customer_id: f.customerId });
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'void' });
+      const voided = await mockPg('invoices').where({ id: inv.id }).first();
+      expect(await require('../services/invoice').restoreRodentSetupObligationForReversedInvoice(mockPg, voided))
+        .toEqual({ scheduledServiceId: f.parentId, amount: SETUP_FEE });
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+      await makeDue(f.childIds[0]);
+      expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
+      const live = (await mockPg('invoices').where({ customer_id: f.customerId })).filter((row) => row.status !== 'void');
+      expect(live.flatMap(setupLines)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
   // Terminal Codex pass 1 (P2): a NON-recurring booster/add-on under the plan
   // parent is not a plan application, so its completion never takes (or parks)
   // the plan's queued first-visit fee.
