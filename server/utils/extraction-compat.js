@@ -133,10 +133,10 @@ function flatView(extraction) {
     secondary_wants_appointment_texts: secondary?.wants_appointment_texts === true,
     secondary_on_site: secondary?.on_site === true,
     // Order-stable per-contact signature over the whole secondary_contacts[]
-    // (role:text-intent:on-site, '|'-joined, '' when none) so a flag flipping
+    // (identity:role:text-intent:on-site, '|'-joined, '' when none) so a flag flipping
     // on entries 2+ shows in replay variance too (FIELD_GROUPS high).
     secondary_contacts_consent_signature: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null)
-      .map((c) => `${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`)
+      .map((c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`)
       .join('|'),
 
     appointment_confirmed: sched.status === 'confirmed',
@@ -217,6 +217,18 @@ function sameV2Person(a, b) {
   if (a.email && b.email && norm(a.email) === norm(b.email)) return true;
   const an = nameOf(a); const bn = nameOf(b);
   return !!an && an === bn && an.includes(' ');
+}
+
+// Stable identity of a secondary contact for replay signatures: phone last-10,
+// else lowercased email, else normalized full name, else ''. Binds each
+// consent entry to WHO it is about, so two runs that swap flags between two
+// people (or reorder them) read as variance.
+function secondaryIdentityKey(c) {
+  const phone = String(c?.phone || '').replace(/\D/g, '').slice(-10);
+  if (phone) return phone;
+  const email = String(c?.email || '').trim().toLowerCase();
+  if (email) return email;
+  return [c?.first_name, c?.last_name].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean).join(' ').replace(/\s+/g, ' ');
 }
 
 function secondaryEvidencePrefixes(index, shareWithCounterpart = false) {

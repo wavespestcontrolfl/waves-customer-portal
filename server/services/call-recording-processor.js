@@ -2899,7 +2899,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 // treats a rowless phone as grandfathered-consented, so the claim must exist
 // before any stamp can, never after (pre-push codex P1s). A throw aborts the
 // write before anything lands (fail closed).
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request', beforeStamp = null } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request', beforeStamp = null, onPrimaryOptOutEligible = null } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
@@ -3104,14 +3104,17 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // receiving them (appointment_notify_primary FALSE). Their own same-call
   // booking confirmation is a separate primary send and is unchanged. Every
   // other first slot phone keeps the default: the caller stays in the loop.
-  // ORDER differs by direction: the TRUE flip lands before the slot write
-  // (a crash between the two must leave the caller receiving texts); the
-  // FALSE flip lands only AFTER the slot write succeeds — suppressing the
-  // caller on a 0-row slot race would leave the account with NO recipient
-  // (pre-push codex P1). See suppressPrimaryAfterWrite below.
+  // The opt-out itself is NOT written here: persistence runs BEFORE
+  // scheduling, so an unbooked or held call would silently cut the account
+  // holder off from texts for unrelated appointments (pre-push codex P1). The
+  // caller keeps the default TRUE flip below, and when the on-site contact's
+  // slot has committed this function only REPORTS eligibility
+  // (onPrimaryOptOutEligible); processRecording writes
+  // appointment_notify_primary=false once a booking actually lands on this
+  // call.
   const onSiteOwnsTexts = smsConsentExplicit && smsConsentSource === 'call_pipeline_onsite_contact';
-  const suppressPrimaryAfterWrite = !!effectivePhone && !hadSlotPhone && onSiteOwnsTexts;
-  if (effectivePhone && !hadSlotPhone && !onSiteOwnsTexts) prefsToSet.appointment_notify_primary = true;
+  const primaryOptOutEligible = !!effectivePhone && !hadSlotPhone && onSiteOwnsTexts;
+  if (effectivePhone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
   if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
     await db('notification_prefs')
@@ -3189,15 +3192,10 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // timestamp, keeping timeline order.
   const slotWriteAt = new Date();
   if (!updated) return 'skipped_slot_race';
-  if (suppressPrimaryAfterWrite) {
-    // The on-site contact is now the texting recipient; the caller becomes a
-    // contact (owner ruling 2026-09-30). Written only once the slot is proven
-    // committed, so the account can never end up with nobody to text.
-    await db('notification_prefs')
-      .insert({ customer_id: customerId, appointment_notify_primary: false })
-      .onConflict('customer_id')
-      .merge({ appointment_notify_primary: false });
-  }
+  // The on-site contact is now the texting recipient; the caller becomes a
+  // contact (owner ruling 2026-09-30) — but only once a booking lands, so the
+  // opt-out is reported, not written (see primaryOptOutEligible above).
+  if (primaryOptOutEligible && typeof onPrimaryOptOutEligible === 'function') onPrimaryOptOutEligible();
   // 360 timeline event — post-write, best-effort, awaited (the recorder
   // never throws). The conditional WHERE proved the slot was still empty at
   // write time, so merging slotWrite over the read snapshot diffs to exactly
@@ -3209,7 +3207,11 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     source: 'call',
     occurredAt: slotWriteAt,
   });
-  return 'written';
+  // A consented phone landed but the account-wide stamp was omitted (another
+  // unconsented slot phone is on the unstamped row): say so, so the office
+  // card shows why no texts will go to them yet.
+  const stampOmitted = !!effectivePhone && smsConsentExplicit && !('service_contacts_consent_at' in slotWrite);
+  return stampOmitted ? 'written_consent_withheld' : 'written';
 }
 
 // A lead is "qualified" only once we've actually captured the contact info the
@@ -3436,17 +3438,49 @@ function onSiteNotifyConsent(contact) {
 // reschedule applier's: a quote under three words must be the whole turn, so
 // a bare "Yeah." grounds only when it is that turn). An unlabeled transcript
 // fails closed. Pure; applied once where the call's contacts are resolved.
+// A bare affirmation ("Yeah.", "Yes", "Okay", "Sure") proves nothing on its
+// own: it only counts when the IMMEDIATELY preceding agent turn asked about
+// THAT field, so a stray "Yeah." after "What's the zip code?" cannot ground
+// consent. Substantive quotes (3+ words that are not all filler) keep the
+// plain caller-turn rule.
+const ON_SITE_FILLER_WORDS = new Set([
+  'yeah', 'yes', 'yep', 'yup', 'ok', 'okay', 'sure', 'right', 'alright', 'absolutely', 'definitely',
+  'please', 'that', 'works', 'fine', 'sounds', 'good', 'great', 'thanks', 'thank', 'you', 'uh', 'huh', 'mm', 'hmm', 'mhm', 'it', 'is', 'would', 'be', 'so',
+]);
+const ON_SITE_PROMPT_PATTERNS = {
+  wants_appointment_texts: /\b(text|texts|texting|reminder|reminders|tracking|on the way|notification|notifications|message|messages)\b/i,
+  on_site: /\b(there|on site|on-site|at the (house|property|home)|meet|lives?|living|be home|present)\b/i,
+};
 function verifyOnSiteGrounding(contact, transcript) {
   if (!contact || typeof contact !== 'object') return contact;
   const { parseTurns, turnsHolding } = require('./call-reschedule-agreement');
   const turns = parseTurns(transcript);
-  const verified = (flag, quote) => flag === true && !!turns
-    && typeof quote === 'string' && quote.trim().length > 0
-    && turnsHolding(turns, quote, 'caller').length > 0;
+  const isGenericAffirmation = (quote) => {
+    const words = String(quote).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+    return words.length < 3 || words.every((w) => ON_SITE_FILLER_WORDS.has(w));
+  };
+  // The agent turn right before this caller turn (empty turns skipped).
+  const promptingAgentTurn = (turn) => {
+    for (let i = turns.indexOf(turn) - 1; i >= 0; i -= 1) {
+      if (!turns[i].ns) continue;
+      return turns[i].agent ? turns[i] : null;
+    }
+    return null;
+  };
+  const verified = (field, flag, quote) => {
+    if (flag !== true || !turns || typeof quote !== 'string' || !quote.trim()) return false;
+    const holding = turnsHolding(turns, quote, 'caller');
+    if (!holding.length) return false;
+    if (!isGenericAffirmation(quote)) return true;
+    return holding.some((turn) => {
+      const prompt = promptingAgentTurn(turn);
+      return !!prompt && ON_SITE_PROMPT_PATTERNS[field].test(prompt.raw);
+    });
+  };
   return {
     ...contact,
-    wants_appointment_texts: verified(contact.wants_appointment_texts, contact.wants_appointment_texts_quote),
-    on_site: verified(contact.on_site, contact.on_site_quote),
+    wants_appointment_texts: verified('wants_appointment_texts', contact.wants_appointment_texts, contact.wants_appointment_texts_quote),
+    on_site: verified('on_site', contact.on_site, contact.on_site_quote),
   };
 }
 // Per-contact consent decision for the persistence loop: explicit V2 consent
@@ -13276,6 +13310,10 @@ const CallRecordingProcessor = {
     // fan-out must exclude them — no row means grandfathered, and a claim
     // failure must fail CLOSED for that phone, not text it (#2956 r13).
     const optinClaimFailedPhones = new Set();
+    // Set when an on-site contact became the account's first texting slot
+    // phone: the primary's appointment texts are switched off only once a
+    // booking succeeds on THIS call (applied where scheduledServiceId lands).
+    let deferPrimaryOptOutCustomerId = null;
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
@@ -13330,6 +13368,7 @@ const CallRecordingProcessor = {
             smsConsentExplicit: entryConsent,
             smsConsentSource,
             beforeStamp: claimOptinBeforeStamp,
+            onPrimaryOptOutEligible: () => { deferPrimaryOptOutCustomerId = customerId; },
           });
         } catch (persistErr) {
           // A claim failure aborts BEFORE the stamp (fail closed); the slot is
@@ -13352,7 +13391,7 @@ const CallRecordingProcessor = {
           continue;
         }
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
-        if (result === 'skipped_phone_on_record_consent_withheld') {
+        if (result === 'skipped_phone_on_record_consent_withheld' || result === 'written_consent_withheld') {
           // The call grounded this person's consent but the account-wide stamp
           // can't describe another unconsented slot phone on the row — say so
           // on the review card so the office sees why no texts will go.
@@ -13374,7 +13413,7 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if (['written', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow) {
+        if (['written', 'written_consent_withheld', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow) {
           const { dispatchRecipientOptins } = require('./recipient-optin');
           void dispatchRecipientOptins(claimedOptins, claimedCustRow)
             .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
@@ -18075,6 +18114,22 @@ const CallRecordingProcessor = {
                     visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: null,
                     snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
                   });
+                }
+              }
+              // Deferred caller opt-out (owner 2026-09-30, "the caller is a
+              // contact, not the recipient"): the on-site contact became the
+              // first slot phone and a booking has now landed on this call, so
+              // the account holder stops receiving the appointment texts. Their
+              // own booking confirmation is a separate primary send. An
+              // unbooked or held call never reaches this line.
+              if (deferPrimaryOptOutCustomerId) {
+                try {
+                  await db('notification_prefs')
+                    .insert({ customer_id: deferPrimaryOptOutCustomerId, appointment_notify_primary: false })
+                    .onConflict('customer_id')
+                    .merge({ appointment_notify_primary: false });
+                } catch (prefsErr) {
+                  logger.warn(`[call-proc] deferred primary opt-out failed for ${maskSid(callSid)}: ${safeErrorToken(prefsErr)}`);
                 }
               }
               if (scheduleWasReused && !disputeHeldReuse) {

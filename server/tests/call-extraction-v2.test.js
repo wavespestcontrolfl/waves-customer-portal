@@ -1346,16 +1346,29 @@ describe('extraction compat adapter', () => {
   test('flatView secondary_contacts_consent_signature is order-stable over every entry (schema 1.21.0)', () => {
     const v2 = validPersisted();
     expect(flatView(v2).secondary_contacts_consent_signature).toBe('');
-    const entry = (role, texts, onSite, name) => ({
-      name_full: name, first_name: name, last_name: null, phone_e164: '+15550100123', email: null,
+    const entry = (role, texts, onSite, name, phone = null, email = null) => ({
+      name_full: name, first_name: name, last_name: null, phone_e164: phone, email,
       role, wants_notifications: true, wants_appointment_texts: texts, on_site: onSite,
     });
-    v2.secondary_contacts = [entry('spouse_partner', true, true, 'Sample'), entry('tenant', true, false, 'Other'), entry('lender', false, false, 'Third')];
-    expect(flatView(v2).secondary_contacts_consent_signature).toBe('spouse_partner:1:1|tenant:1:0|lender:0:0');
+    // Each entry is keyed by WHO it is: phone last-10, else lowercased email, else normalized name.
+    v2.secondary_contacts = [
+      entry('spouse_partner', true, true, 'Sample', '+15550100123'),
+      entry('tenant', true, false, 'Other', null, 'Other@Example.com'),
+      entry('lender', false, false, 'Third Person'),
+    ];
+    expect(flatView(v2).secondary_contacts_consent_signature)
+      .toBe('5550100123:spouse_partner:1:1|other@example.com:tenant:1:0|third person:lender:0:0');
     // Absent flags (older rows) read as 0.
     delete v2.secondary_contacts[1].on_site;
     delete v2.secondary_contacts[1].wants_appointment_texts;
-    expect(flatView(v2).secondary_contacts_consent_signature).toBe('spouse_partner:1:1|tenant:0:0|lender:0:0');
+    expect(flatView(v2).secondary_contacts_consent_signature)
+      .toBe('5550100123:spouse_partner:1:1|other@example.com:tenant:0:0|third person:lender:0:0');
+    // Swapping the flags between two people changes the signature (flags are bound to identity, not position).
+    const swapped = validPersisted();
+    swapped.secondary_contacts = [entry('spouse_partner', false, false, 'Sample', '+15550100123'), entry('tenant', true, true, 'Other', null, 'other@example.com')];
+    const original = validPersisted();
+    original.secondary_contacts = [entry('spouse_partner', true, true, 'Sample', '+15550100123'), entry('tenant', false, false, 'Other', null, 'other@example.com')];
+    expect(flatView(swapped).secondary_contacts_consent_signature).not.toBe(flatView(original).secondary_contacts_consent_signature);
     // Flat singleton mirrors.
     v2.secondary_contact = v2.secondary_contacts[0];
     expect(flatView(v2)).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });

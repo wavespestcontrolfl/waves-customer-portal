@@ -919,8 +919,8 @@ describe('call extraction replay variance reporting', () => {
       expect(normalizeField(field, null)).toBe('');
       expect(normalizeField(field, '')).toBe('');
       // A flip on entry 2 (invisible to the singleton fields) is a high-severity variance.
-      const before = 'spouse_partner:1:1|tenant:0:0';
-      const after = 'spouse_partner:1:1|tenant:1:1';
+      const before = '5550100123:spouse_partner:1:1|other@example.com:tenant:0:0';
+      const after = '5550100123:spouse_partner:1:1|other@example.com:tenant:1:1';
       expect(compareFlatFields({ [field]: before }, { [field]: after }, true).find((v) => v.field === field).severity).toBe('high');
       expect(compareFlatFields({ [field]: before }, { [field]: before }, true).filter((v) => v.field === field)).toEqual([]);
     });

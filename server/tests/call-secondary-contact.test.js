@@ -458,18 +458,28 @@ describe('persistCallSecondaryContact', () => {
     });
   });
 
-  test('the caller opt-out is written only AFTER the slot write commits — a 0-row slot race leaves the caller on (pre-push codex P1)', async () => {
+  test('persist never writes the caller opt-out; it only REPORTS eligibility once the slot commits (booking may not land)', async () => {
     const spouseContact = { first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true };
+    const onSiteOpts = { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' };
+    // 0-row slot race: not eligible, nothing written.
+    let eligible = 0;
     const raced = makeDb({ customer: bareCustomer, updateRows: 0 });
-    expect(await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe('skipped_slot_race');
-    expect(raced.prefsMerges.map((m) => m.mergePayload)).toEqual([]);
+    expect(await persistCallSecondaryContact('cust-1', spouseContact, { ...onSiteOpts, onPrimaryOptOutEligible: () => { eligible += 1; } })).toBe('skipped_slot_race');
+    expect(eligible).toBe(0);
+    // Landed: eligible, and the caller KEEPS the default TRUE flip (no false is ever written here).
     const landed = makeDb({ customer: bareCustomer });
-    expect(await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe('written');
-    expect(landed.prefsMerges.map((m) => m.mergePayload)).toEqual([{ appointment_notify_primary: false }]);
-    // The TRUE flip for an ordinary first phone still precedes the slot write.
-    const ordinary = makeDb({ customer: bareCustomer, updateRows: 0 });
-    await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' });
+    expect(await persistCallSecondaryContact('cust-1', spouseContact, { ...onSiteOpts, onPrimaryOptOutEligible: () => { eligible += 1; } })).toBe('written');
+    expect(eligible).toBe(1);
+    expect(landed.prefsMerges.map((m) => m.mergePayload)).toEqual([{ appointment_notify_primary: true }]);
+    // An ordinary (non-on-site) first phone is never eligible.
+    const ordinary = makeDb({ customer: bareCustomer });
+    await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request', onPrimaryOptOutEligible: () => { eligible += 1; } });
+    expect(eligible).toBe(1);
     expect(ordinary.prefsMerges.map((m) => m.mergePayload)).toEqual([{ appointment_notify_primary: true }]);
+    // Not the FIRST slot phone: never eligible.
+    makeDb({ customer: { ...bareCustomer, service_contact_name: 'Other', service_contact_phone: '+15550100777', service_contacts_consent_at: '2026-07-22T00:00:00Z' } });
+    await persistCallSecondaryContact('cust-1', spouseContact, { ...onSiteOpts, onPrimaryOptOutEligible: () => { eligible += 1; } });
+    expect(eligible).toBe(1);
   });
 
   test('a lost race (slot filled between read and write) is a no-op, not an overwrite', async () => {
@@ -678,7 +688,9 @@ describe('persistCallSecondaryContact', () => {
     const writes = makeDb({
       customer: { ...bareCustomer, service_contact_name: 'Property Manager', service_contact_phone: '+19415557777' },
     });
-    expect(await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true })).toBe('written');
+    // Consented phone landed but the account-wide stamp is omitted (the
+    // unstamped row already holds another phone): the distinct status says so.
+    expect(await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true })).toBe('written_consent_withheld');
     // Slot 1 already held an UNSTAMPED phone contact — the call only spoke
     // for the buyer, so no row-level stamp is minted (#2955 r3).
     expect(writes.updates).toEqual([{
@@ -1204,9 +1216,29 @@ describe('consent upgrade for a phone already on record (#5467)', () => {
     expect(state.updates).toEqual([]);
   });
 
+  test('a fresh write whose stamp is withheld returns written_consent_withheld and the card is marked', async () => {
+    const state = statefulDb({ ...spouseRow, service_contact_name: 'Other Lender', service_contact_phone: '+15550100777', service_contact_role: 'lender' });
+    expect(await persistCallSecondaryContact('cust-1', { ...spouse, phone: '+15550100555' }, onSite)).toBe('written_consent_withheld');
+    expect(state.updates.some((u) => u.service_contact2_phone === '+15550100555')).toBe(true);
+    expect(state.updates.some((u) => 'service_contacts_consent_at' in u)).toBe(false);
+    // Stamp present on the write -> plain 'written'.
+    const clean = statefulDb({ ...spouseRow, service_contact_name: null, service_contact_phone: null });
+    expect(await persistCallSecondaryContact('cust-1', spouse, onSite)).toBe('written');
+    expect(clean.updates[0]).toHaveProperty('service_contacts_consent_at');
+    // Unconsented write is never "consent withheld" (nothing was grounded).
+    statefulDb({ ...spouseRow, service_contact_name: null, service_contact_phone: null });
+    expect(await persistCallSecondaryContact('cust-1', spouse)).toBe('written');
+  });
+
+  test('the loop marks the card for BOTH withheld statuses and dispatches the opt-in for the fresh one', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain("result === 'skipped_phone_on_record_consent_withheld' || result === 'written_consent_withheld'");
+    expect(src).toContain("'written', 'written_consent_withheld', 'consent_upgraded_phone_on_record'");
+  });
+
   test('the loop claims the opt-in on an upgrade as well as a fresh write', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("['written', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow");
+    expect(src).toContain("['written', 'written_consent_withheld', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow");
   });
 });
 
@@ -1230,6 +1262,30 @@ describe('on-site grounding must be pinned to a CALLER quote that is in the tran
     expect(v.on_site).toBe(true);
     expect(onSiteNotifyConsent(v)).toBe(true);
     expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'YEAH', on_site_quote: 'Yes, HE will be at the house' }, transcript).on_site).toBe(true);
+  });
+
+  test('a short affirmation counts only after an agent turn that asked about THAT field', () => {
+    // Motivating call: agent offers reminders/tracking link, caller "Yeah." -> texts grounded.
+    const motivating = ['Agent: Would you like us to text him the reminders and the tracking link?', 'Caller: Yeah.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, on_site: false }, motivating).wants_appointment_texts).toBe(true);
+    // The same "Yeah." after an unrelated question does not.
+    const unrelated = ["Agent: What's the zip code?", 'Caller: Yeah.'].join('\n');
+    expect(verifyOnSiteGrounding(grounded, unrelated).wants_appointment_texts).toBe(false);
+    // No preceding agent turn at all (opening caller turn), or a caller turn before it.
+    expect(verifyOnSiteGrounding(grounded, 'Caller: Yeah.').wants_appointment_texts).toBe(false);
+    expect(verifyOnSiteGrounding(grounded, ['Caller: Hello.', 'Caller: Yeah.'].join('\n')).wants_appointment_texts).toBe(false);
+    // The prompt must be about the SAME field: a texts question does not ground on_site, and vice versa.
+    const textsQuestion = ['Agent: Should we text him the reminders?', 'Caller: Yeah.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, on_site_quote: 'Yeah.' }, textsQuestion).on_site).toBe(false);
+    const presenceQuestion = ['Agent: Will he be there that day?', 'Caller: Yeah.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Yeah.' }, presenceQuestion).wants_appointment_texts).toBe(false);
+    expect(verifyOnSiteGrounding({ ...grounded, on_site_quote: 'Yeah.' }, presenceQuestion).on_site).toBe(true);
+    // Filler-only phrases of 3+ words are still generic ("Yeah, that works").
+    const filler = ["Agent: What's the zip code?", 'Caller: Yeah, that works.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Yeah, that works' }, filler).wants_appointment_texts).toBe(false);
+    // Substantive quotes keep the plain caller-turn rule (no prompt needed).
+    const substantive = ["Agent: What's the zip code?", 'Caller: Please text him the reminders on the day.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Please text him the reminders on the day' }, substantive).wants_appointment_texts).toBe(true);
   });
 
   test('missing quote -> that flag is forced false (both are required)', () => {
@@ -1344,38 +1400,35 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
     expect(src).toContain('{ doNotContact: v2DoNotContact }');
   });
 
-  test('on-site contact as the first slot phone turns appointment_notify_primary OFF; any other source keeps it ON', async () => {
+  test('on-site first slot phone reports opt-out eligibility (the write itself is deferred to the booking site); any other source does not', async () => {
     const bare = { id: 'cust-1', phone: '+15550100999', email: null,
       service_contact_name: null, service_contact_phone: null, service_contact_email: null,
       service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
       service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null };
-    const merges = [];
-    const withPrefsCapture = () => {
-      const base = db.getMockImplementation();
-      db.mockImplementation((table) => {
-        if (table === 'notification_prefs') {
-          const b = {
-            where: jest.fn(() => b),
-            first: jest.fn(async () => undefined),
-            insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ merge: jest.fn(async (m) => { merges.push(m); return 1; }) })) })),
-          };
-          return b;
-        }
-        return base(table);
-      });
+    const eligibleFor = async (opts) => {
+      statefulDb(bare);
+      let fired = 0;
+      await persistCallSecondaryContact('cust-1', spouse, { ...opts, onPrimaryOptOutEligible: () => { fired += 1; } });
+      return fired;
     };
-    statefulDb(bare); withPrefsCapture();
-    await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' });
-    expect(merges[0].appointment_notify_primary).toBe(false);
-    merges.length = 0;
-    statefulDb(bare); withPrefsCapture();
-    await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' });
-    expect(merges[0].appointment_notify_primary).toBe(true);
-    // The loop passes the on-site SOURCE even when consent is false (non-grounded contact): still ON.
-    merges.length = 0;
-    statefulDb(bare); withPrefsCapture();
-    await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: false, smsConsentSource: 'call_pipeline_onsite_contact' });
-    expect(merges[0].appointment_notify_primary).toBe(true);
+    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe(1);
+    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' })).toBe(0);
+    // The loop passes the on-site SOURCE even when consent is false (non-grounded contact): not eligible.
+    expect(await eligibleFor({ smsConsentExplicit: false, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe(0);
+  });
+
+  test('the booking site applies the deferred opt-out only after scheduledServiceId lands; persistence never writes false', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('onPrimaryOptOutEligible: () => { deferPrimaryOptOutCustomerId = customerId; }');
+    const landed = src.indexOf('scheduledServiceId = svc.id;');
+    const applied = src.indexOf('appointment_notify_primary: false }', landed);
+    expect(landed).toBeGreaterThan(-1);
+    expect(applied).toBeGreaterThan(landed);
+    expect(applied - landed).toBeLessThan(3500);
+    expect(src.slice(landed, applied)).toContain('if (deferPrimaryOptOutCustomerId)');
+    // The ONLY false write in the file is that one statement (insert + merge).
+    expect(src.split('appointment_notify_primary: false').length - 1).toBe(2);
+    expect(src.lastIndexOf('appointment_notify_primary: false') - landed).toBeLessThan(3500);
   });
 
   test('phone on record + another unconsented slot phone: distinct withheld status (the card says why)', async () => {
@@ -1502,7 +1555,7 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
     const state = statefulDb({ ...emptyRow, service_contact_name: 'Other Lender', service_contact_phone: '+15550100777' });
     let called = 0;
     const res = await persistCallSecondaryContact('cust-1', spouse, { ...onSite, beforeStamp: async () => { called += 1; } });
-    expect(res).toBe('written');
+    expect(res).toBe('written_consent_withheld');
     expect(called).toBe(1);
     expect(state.updates.some((u) => u.service_contacts_consent_at)).toBe(false);
   });
@@ -1557,6 +1610,6 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
   test('the loop claims the opt-in inside beforeStamp and dispatches only after a committed write', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('beforeStamp: claimOptinBeforeStamp');
-    expect(src).toContain("['written', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow");
+    expect(src).toContain("['written', 'written_consent_withheld', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow");
   });
 });
