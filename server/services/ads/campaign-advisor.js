@@ -188,11 +188,10 @@ async function loadGbpSummary(d30) {
 const numOrNull = (v) => (v == null ? null : Number(v));
 
 // Fallback advice may carry a one-click Apply only for an active Google
-// campaign the route can push to, and never for one changed in the last 7 days.
-function isFallbackControllable(c, adsConfigured, recentlyChanged) {
+// campaign the route can push to.
+function isFallbackControllable(c, adsConfigured) {
   return c.platform === 'google_ads' && c.status === 'active'
-    && !(c.linked && !adsConfigured)
-    && !recentlyChanged.has(String(c.id));
+    && !(c.linked && !adsConfigured);
 }
 
 function budgetChangesSection(budgetLog) {
@@ -539,8 +538,8 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
   generateFallbackAdvice(summaries, targets, budgetLog = []) {
     const recommendations = [];
     // Same no-repeat/no-reversal rule as the model prompt: a campaign whose
-    // budget or mode changed in the last 7 days gets advisory text only, never
-    // a one-click Apply, while the rules below can't see why it changed.
+    // budget or mode changed in the last 7 days gets no fallback advice at all
+    // (not even manual prose) — the rules below can't see why it changed.
     const recentlyChanged = new Set(budgetLog.map((b) => String(b.campaign_id)));
     const minRoas = parseFloat(targets?.min_roas || 4.0);
 
@@ -557,7 +556,8 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
       // Mirrors /advisor/apply: only active Google campaigns take one-click
       // changes (a paused campaign's apply would 422), and a LINKED campaign
       // needs a configured client for its live push.
-      const controllable = isFallbackControllable(c, adsConfigured, recentlyChanged);
+      if (recentlyChanged.has(String(c.id))) continue;
+      const controllable = isFallbackControllable(c, adsConfigured);
       if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
         recommendations.push({
           priority: 'high', campaign: c.name,

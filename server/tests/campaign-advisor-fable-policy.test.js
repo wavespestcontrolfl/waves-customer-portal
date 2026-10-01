@@ -184,7 +184,7 @@ describe('Codex r4 on #5486', () => {
     expect(mockDispatch.mock.calls[0][2].reserveFallbackBudget).toBe(true);
   });
 
-  test('fallback advice never offers Apply on a campaign changed in the last 7 days', () => {
+  test('fallback advice says nothing about a campaign changed in the last 7 days (no Apply, no manual prose)', () => {
     const summary = {
       id: 'c-1', name: 'Synthetic Search', platform: 'google_ads', status: 'active', linked: false,
       budgetMode: 'base', dailyBudgetBase: 20, dailyBudgetCurrent: 20,
@@ -193,9 +193,11 @@ describe('Codex r4 on #5486', () => {
     const fresh = advisor.generateFallbackAdvice([summary], { min_roas: 4 });
     expect(fresh.recommendations[0].apply_action).toBe('change_mode');
     const changed = advisor.generateFallbackAdvice([summary], { min_roas: 4 }, [{ campaign_id: 'c-1' }]);
-    expect(changed.recommendations).toHaveLength(1);
-    expect(changed.recommendations[0].apply_action).toBeUndefined();
-    expect(changed.recommendations[0].campaign_id).toBeUndefined();
+    expect(changed.recommendations).toEqual([]);
+    // An unchanged campaign in the same run is still advised on.
+    const mixed = advisor.generateFallbackAdvice([summary, { ...summary, id: 'c-2' }], { min_roas: 4 }, [{ campaign_id: 'c-1' }]);
+    expect(mixed.recommendations).toHaveLength(1);
+    expect(mixed.recommendations[0].campaign_id).toBe('c-2');
   });
 });
 
