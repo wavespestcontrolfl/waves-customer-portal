@@ -601,6 +601,23 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(Object.keys(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly' }).services).sort()).toEqual(['lawn', 'mosquito', 'pest']);
     expect(sold.services.lawn).toBeDefined();
   });
+  test('a standalone palm program never injects tree_shrub as a prior qualifying service (pest + palm stays Bronze, as the engine prices it)', () => {
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: ['palm_injection_semiannual'] })).toBeNull();
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program'] })).toBe('tree_shrub');
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program', 'palm_injection_semiannual'] })).toBe('tree_shrub');
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: [] })).toBe('tree_shrub'); // unknown keys: a real program
+    expect(P.qualifyingKeyForLine({ familyKey: 'rodent', serviceKeys: ['rodent_bait'] })).toBe('rodent_bait');
+    expect(P.qualifyingKeyForLine({ familyKey: 'other', serviceKeys: ['x'] })).toBeNull();
+    const sold = { homeSqFt: 2100, services: { pest: { frequency: 'quarterly' } } };
+    const pestPlusPalm = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [{ familyKey: 'pest_control', serviceKeys: ['pest_control_quarterly'] }, { familyKey: 'tree_shrub', serviceKeys: ['palm_injection_semiannual'] }] });
+    expect(pestPlusPalm.services.pest).toBeDefined();
+    expect(pestPlusPalm.priorQualifyingServices).toEqual([]);
+    expect(pestPlusPalm.recurringCustomer).toBeUndefined();
+    const pestPlusTrees = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [{ familyKey: 'pest_control', serviceKeys: ['pest_control_quarterly'] }, { familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program'] }] });
+    expect(pestPlusTrees.priorQualifyingServices).toEqual(['tree_shrub']);
+    // bare family strings still work as before
+    expect(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'rodent'] }).priorQualifyingServices).toEqual(['rodent_bait']);
+  });
   test('the ORIGINAL-mix replay restores the server-stamped prior qualifying services; the client-posted copy never survives', () => {
     const inputs = { lotSqFt: 8000, priorQualifyingServices: ['pest_control', 'mosquito'], recurringCustomer: true, services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } };
     // original mix with the server-stamped evidence → priors restored (sold as a Silver add-on)

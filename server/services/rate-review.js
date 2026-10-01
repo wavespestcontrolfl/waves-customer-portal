@@ -829,6 +829,18 @@ const ENGINE_INPUT_SERVICE_FAMILY = Object.freeze({
 const QUALIFYING_KEY_FOR_FAMILY = Object.freeze({
   pest_control: 'pest_control', lawn_care: 'lawn_care', tree_shrub: 'tree_shrub', mosquito: 'mosquito', termite: 'termite_bait', rodent: 'rodent_bait',
 });
+// The engine qualifying key an ACTIVE plan line contributes as a prior
+// service — from its catalog service keys, not its family: a palm-only
+// tree_shrub line (palm_injection*) qualifies for nothing.
+function qualifyingKeyForLine(line) {
+  const keys = (line && Array.isArray(line.serviceKeys) ? line.serviceKeys : []).map((k) => String(k || '').toLowerCase());
+  if (line.familyKey === 'tree_shrub') {
+    if (keys.length && keys.every((k) => /palm/.test(k))) return null; // standalone palm program
+    return 'tree_shrub';
+  }
+  return QUALIFYING_KEY_FOR_FAMILY[line.familyKey] || null;
+}
+
 const PEST_FREQUENCY_FOR_CADENCE = Object.freeze({ quarterly: 'quarterly', bimonthly: 'bimonthly', monthly: 'monthly' });
 const LAWN_TIER_FOR_CADENCE = Object.freeze({ every_6_weeks: 'enhanced', monthly: 'premium', bimonthly: 'standard' });
 const MOSQUITO_TIER_FOR_CADENCE = Object.freeze({ seasonal: 'seasonal', monthly: 'monthly' });
@@ -844,12 +856,18 @@ const REPLAY_PIN_KEYS = ['manualDiscount', 'serviceSpecificDiscounts', 'serviceS
   'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs'];
 const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersion'], lawn: ['programMinimumMonthly', 'useLawnCostFloor'] });
 
-// `activeFamilies`: the customer's plan lines TODAY. The engine derives the
-// WaveGuard tier from the services it prices plus priorQualifyingServices,
-// so the replay's bundle is reconciled to the current plan — a program the
-// customer has since cancelled comes out of the estimate's services, one
-// added since (on another estimate) goes in as a prior qualifying service —
-// and the list carries today's tier, not the one the old quote was sold at.
+// `activeFamilies`: the customer's plan lines TODAY, as
+// { familyKey, serviceKeys } (a bare family string is read as a line whose
+// catalog keys are unknown). The engine derives the WaveGuard tier from the
+// services it prices plus priorQualifyingServices, so the replay's bundle
+// is reconciled to the current plan — a program the customer has since
+// cancelled comes out of the estimate's services, one added since (on
+// another estimate) goes in as a prior qualifying service — and the list
+// carries today's tier, not the one the old quote was sold at. The prior
+// key is derived from the line's SERVICE keys, never its family alone: a
+// palm-only program sits in the tree_shrub family but does not qualify
+// (estimate-engine.js counts palm_injection toward no tier), so it adds
+// nothing — a pest + palm account stays Bronze, as the engine prices it.
 // `savedPriorQualifying`: the SERVER-stamped prior-qualifying services on
 // estimate_data (admin-estimate-persistence writes the top-level key only
 // when it repriced at the server) — restored for the ORIGINAL-mix replay
@@ -876,7 +894,8 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFami
     clean.recurringCustomer = true;
   }
   if (Array.isArray(activeFamilies) && clean.services && typeof clean.services === 'object') {
-    const active = new Set(activeFamilies);
+    const lines = activeFamilies.map((f) => (typeof f === 'string' ? { familyKey: f, serviceKeys: [] } : f));
+    const active = new Set(lines.map((l) => l.familyKey));
     const present = new Set();
     for (const [service, value] of Object.entries(clean.services)) {
       const family = ENGINE_INPUT_SERVICE_FAMILY[service];
@@ -885,7 +904,7 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFami
       if (active.has(family)) present.add(family);
       else delete clean.services[service]; // cancelled since the quote
     }
-    const priors = [...active].filter((family) => !present.has(family)).map((family) => QUALIFYING_KEY_FOR_FAMILY[family]).filter(Boolean);
+    const priors = [...new Set(lines.filter((l) => !present.has(l.familyKey)).map(qualifyingKeyForLine).filter(Boolean))];
     clean.priorQualifyingServices = priors;
     if (priors.length) clean.recurringCustomer = true;
   }
@@ -1650,8 +1669,10 @@ async function assembleBookEntry(inputs, planLine, { config, replayCache, deps }
     for (const estimate of replayCandidates) {
       const inputs = engineInputsFromEstimate(estimate, deps);
       if (!hasSizeInput(inputs, familyKey)) continue;
-      const activeFamilies = planLines.filter((p) => p.customer_id === customer.id).map((p) => p.family_key).sort();
-      const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.join(',')}`;
+      const activeFamilies = planLines.filter((p) => p.customer_id === customer.id)
+        .map((p) => ({ familyKey: p.family_key, serviceKeys: p.service_keys || [] }))
+        .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
+      const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.map((l) => `${l.familyKey}:${(l.serviceKeys || []).join('+')}`).join(',')}`;
       if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
       const replay = replayCache.get(cacheKey);
       if (replay && replay.unavailable) { engineUnavailable = replay.unavailable; continue; }
@@ -2182,7 +2203,7 @@ module.exports = {
   composeBatchEmail,
   _private: {
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
-    isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd,
+    isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
     PLAN_ROW_SQL, LIVE_STATUS_SQL,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
