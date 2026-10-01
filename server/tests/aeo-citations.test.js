@@ -317,12 +317,12 @@ test('an overview needs element attribution when only a possible source pool is 
 
 test('failed provider calls consume the attempt cap', async () => {
   const prober = new LLMMentionProber();
-  jest.spyOn(prober, 'getQueries').mockResolvedValue(Array.from({ length: 260 }, (_, i) => ({ query: `benchmark ${i}` })));
+  jest.spyOn(prober, 'getQueries').mockResolvedValue(Array.from({ length: 320 }, (_, i) => ({ query: `benchmark ${i}` })));
   const probe = jest.fn().mockResolvedValue(null);
   Object.defineProperty(prober, 'providers', { value: { chatgpt: probe } });
   db.mockReturnValue({ select: () => ({ max: () => ({ groupBy: async () => [] }) }), where: () => ({ select: async () => [] }) });
-  expect(await prober.runDaily()).toMatchObject({ attempted: 240, probed: 0, inserted: 0 });
-  expect(probe).toHaveBeenCalledTimes(240);
+  expect(await prober.runDaily()).toMatchObject({ attempted: 300, probed: 0, inserted: 0 });
+  expect(probe).toHaveBeenCalledTimes(300);
 });
 
 test('probe rotation honors same-day dedupe', async () => {
@@ -369,7 +369,7 @@ test('disabling all managed queries does not reactivate fallback probes', async 
 test('four failing engines cannot permanently starve a healthy engine under the run cap', async () => {
   jest.useFakeTimers();
   const prober = new LLMMentionProber();
-  const queries = Array.from({ length: 60 }, (_, i) => ({ query: `question ${i}` }));
+  const queries = Array.from({ length: 80 }, (_, i) => ({ query: `question ${i}` }));
   jest.spyOn(prober, 'getQueries').mockResolvedValue(queries);
   const healthyQuestions = new Set();
   const failed = jest.fn().mockResolvedValue(null);
@@ -383,7 +383,7 @@ test('four failing engines cannot permanently starve a healthy engine under the 
   });
   for (const day of ['2030-01-01T12:00:00Z', '2030-01-02T12:00:00Z']) {
     jest.setSystemTime(new Date(day));
-    expect((await prober.runDaily()).attempted).toBe(240);
+    expect((await prober.runDaily()).attempted).toBe(300);
   }
-  expect(healthyQuestions.size).toBe(60);
+  expect(healthyQuestions.size).toBe(80);
 });

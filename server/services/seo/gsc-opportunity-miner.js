@@ -81,6 +81,13 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const { observationDate, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage } = require('./aeo-measurement');
 const { rivalsOf } = require('./llm-mention-companies');
+const dataforseo = require('./dataforseo');
+const { currentSurfaces, onCurrentSurface } = require('./llm-app-scraper');
+
+// ChatGPT and Gemini have two surfaces (API probe, consumer app); only the one
+// measured now is evidence, so a retired cohort in the lookback window can
+// neither raise a gap nor suppress one (same switch the prober reads).
+const activeSurfaces = () => currentSurfaces(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured);
 const aeoBenchmark = require('../../data/aeo-benchmark-v1.json');
 const { routeIdentitySql, pinnedArticlePathSql } = require('../content/opportunity-route-sql');
 const { isEntityQuestion } = require('./aeo-entity-facts');
@@ -3216,7 +3223,8 @@ class GscOpportunityMiner {
     // than for a provider in a city; their misses are identity gaps, not
     // page-coverage gaps, so they never seed a city×service opportunity.
     const groups = new Map();
-    for (const r of rows.filter(r => isMeasuredAnswer(r) && !isEntityQuestion(r.query))) {
+    const surfaces = activeSurfaces();
+    for (const r of rows.filter(r => isMeasuredAnswer(r) && !isEntityQuestion(r.query) && onCurrentSurface(r, surfaces))) {
       const city = normalizeCity(r.q_city) || inferCityFromQuery(r.query);
       const service = aeoServiceFor(r.q_service, r.query);
       if (!city || !service) continue;
@@ -3563,7 +3571,8 @@ class GscOpportunityMiner {
   // admin toggle on seo_llm_mention_queries stops a question's work.
   async _loadAeoQuestionObservations(since, queries = []) {
     if (!queries.length) return [];
-    return db('seo_llm_mentions as m')
+    const surfaces = activeSurfaces();
+    const rows = await db('seo_llm_mentions as m')
       .join('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
       .where('q.active', true)
       .where('m.check_date', '>=', since)
@@ -3573,6 +3582,7 @@ class GscOpportunityMiner {
         'm.waves_cited_urls', 'm.cited_urls', 'm.competitors_mentioned', 'm.companies_named',
         'm.measurement_version', 'm.answer_available', 'm.citations_complete'
       );
+    return rows.filter(r => onCurrentSurface(r, surfaces));
   }
 
   // Hub route identity → live sitemap URL (sitemap-manager caches it, and

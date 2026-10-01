@@ -3646,6 +3646,8 @@ describe('aeo_question_gap bucket', () => {
 
   describe('mineAeoGaps rivals', () => {
     const OLD = { ...process.env };
+    const dataforseo = require('../services/seo/dataforseo');
+    beforeEach(() => { jest.spyOn(dataforseo, 'configured', 'get').mockReturnValue(true); });
     afterEach(() => { process.env = { ...OLD }; jest.restoreAllMocks(); });
 
     test('the city x service gap counts every named rival, not only the known-list hits, so real local rivals strengthen it', async () => {
@@ -3666,6 +3668,40 @@ describe('aeo_question_gap bucket', () => {
       expect(out).toHaveLength(1);
       expect(out[0].signal_metadata.competitors_mentioned.sort()).toEqual(['Example Bug Control', 'Orkin', 'Sample Pest Solutions']);
       expect(out[0].signal_metadata.gap_strength).toBe(1);
+    });
+
+    // Codex r3 on #5491: a retired API cohort in the lookback window must
+    // neither raise a gap nor suppress one once the app is the measured surface.
+    test('only the current ChatGPT/Gemini surface is gap evidence', async () => {
+      const db = require('../models/db');
+      const base = { query: 'best pest control in Bradenton, Florida', q_city: 'Bradenton', q_service: 'pest control', llm_platform: 'chatgpt',
+        measurement_version: 2, answer_available: true, citations_complete: true, waves_cited_urls: '[]', competitors_mentioned: '[]' };
+      const apiMisses = [1, 2, 3].map((n) => ({ ...base, check_date: `2026-09-0${n}`, model_version: 'gpt-5-search-api' }));
+      const chain = { leftJoin: () => chain, where: () => chain, select: async () => apiMisses };
+      db.mockImplementation(() => chain);
+      const miner = new GscOpportunityMiner();
+      jest.spyOn(miner, '_gscDemandByServiceCity').mockImplementation(async () => new Map([[ownPageKey('pest', 'Bradenton'), 100000]]));
+      expect(await miner.mineAeoGaps('2026-08-30')).toEqual([]);
+      process.env.LLM_MENTIONS_APP_SCRAPER = 'false';
+      expect(await miner.mineAeoGaps('2026-08-30')).toHaveLength(1);
+    });
+
+    test('question-gap observations drop the retired surface, keep single-surface engines', async () => {
+      const db = require('../models/db');
+      const rows = [
+        { query: 'q', llm_platform: 'chatgpt', model_version: 'gpt-5-search-api' },
+        { query: 'q', llm_platform: 'chatgpt', model_version: 'dataforseo:chatgpt_app:m' },
+        { query: 'q', llm_platform: 'gemini', model_version: 'gemini-2.5-flash' },
+        { query: 'q', llm_platform: 'claude', model_version: 'claude-x' },
+      ];
+      const chain = { join: () => chain, where: () => chain, whereIn: () => chain, select: async () => rows };
+      db.mockImplementation(() => chain);
+      const miner = new GscOpportunityMiner();
+      expect((await miner._loadAeoQuestionObservations('2026-08-30', ['q'])).map((r) => r.model_version))
+        .toEqual(['dataforseo:chatgpt_app:m', 'claude-x']);
+      process.env.LLM_MENTIONS_APP_SCRAPER = 'off';
+      expect((await miner._loadAeoQuestionObservations('2026-08-30', ['q'])).map((r) => r.model_version))
+        .toEqual(['gpt-5-search-api', 'gemini-2.5-flash', 'claude-x']);
     });
   });
 });

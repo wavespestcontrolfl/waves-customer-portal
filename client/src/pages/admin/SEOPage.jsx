@@ -2212,7 +2212,7 @@ function BacklinksTab() {
                   ? " (older answers ranked against a fixed competitor list, so this rate mixes both until they age out)"
                   : ""}
                 {(llmDash.benchmark.rankMethods || []).includes("all_named_text_v2")
-                  ? " (ChatGPT ranks come from the app's own company list; other engines' ranks are read from the answer text and are conservative, never better than the true rank)"
+                  ? " (some ranks are read from the answer text, so they are conservative and never better than the true rank)"
                   : ""}
                 {llmDash.benchmark.unclassified > 0
                   ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`

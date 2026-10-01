@@ -86,6 +86,24 @@ function appScraperEnabled(env, dataforseoConfigured) {
   return !/^(?:false|0|off|no|disabled?)$/i.test(String(env ?? '').trim());
 }
 
+// App-scraper rows carry a `dataforseo:` model label; everything else is an API row.
+const surfaceOf = row => (String(row.model_version || '').startsWith('dataforseo:') ? 'app' : 'api');
+
+/**
+ * Which surface each two-surface platform (ChatGPT, Gemini: API probe or
+ * consumer app) is measured on right now, from the same switch the prober reads.
+ */
+function currentSurfaces(env, dataforseoConfigured) {
+  const surface = appScraperEnabled(env, dataforseoConfigured) ? 'app' : 'api';
+  return { chatgpt: surface, gemini: surface };
+}
+
+/** True unless the row is a two-surface platform's retired surface. */
+function onCurrentSurface(row, surfaces) {
+  const wanted = surfaces?.[row.llm_platform];
+  return !wanted || surfaceOf(row) === wanted;
+}
+
 function urlsOf(list) {
   return (Array.isArray(list) ? list : []).map(entry => entry?.url).filter(u => typeof u === 'string' && u);
 }
@@ -173,6 +191,7 @@ function geminiRequestBody(query, city) {
 
 module.exports = {
   CHATGPT_PATH, GEMINI_PATH, AI_MODE_PATH, US_LOCATION_CODE, GEMINI_CITY_LOCATIONS, DEFAULT_GEMINI_LOCATION,
-  geminiLocationCode, aiModeLocation, normalizeCity, appScraperEnabled, parseChatGPTScraper, parseGeminiScraper,
+  geminiLocationCode, aiModeLocation, normalizeCity, appScraperEnabled, surfaceOf, currentSurfaces, onCurrentSurface,
+  parseChatGPTScraper, parseGeminiScraper,
   chatGPTRequestBody, geminiRequestBody, aiModeRequestBody,
 };

@@ -535,12 +535,15 @@ describe('rivalsOf', () => {
 describe('benchmark pairs run first under the probe cap', () => {
   const benchmark = require('../data/aeo-benchmark-v1.json');
 
-  test('with more than 240 pairs every benchmark pair is attempted, whatever the day', async () => {
+  // Codex r3 on #5491: 40 questions x 6 platforms fill 240 exactly, so the
+  // ceiling holds a reserve that only ancillary pairs can use.
+  test('every benchmark pair is attempted daily and ancillary pairs rotate through the reserve', async () => {
     jest.useFakeTimers();
     try {
       const platforms = ['chatgpt', 'gemini', 'claude', 'google_ai_overview', 'google_ai_mode', 'perplexity'];
       const extra = Array.from({ length: 50 }, (_, i) => ({ query: `ancillary question ${i}` }));
-      for (const day of ['2030-01-01T12:00:00Z', '2030-01-02T12:00:00Z', '2030-01-03T12:00:00Z']) {
+      const ancillarySeen = new Set();
+      for (const day of ['2030-01-01T12:00:00Z', '2030-01-02T12:00:00Z', '2030-01-03T12:00:00Z', '2030-01-04T12:00:00Z', '2030-01-05T12:00:00Z']) {
         jest.setSystemTime(new Date(day));
         const prober = new LLMMentionProber();
         jest.spyOn(prober, 'getQueries').mockResolvedValue([...extra, ...benchmark.questions.map(q => ({ query: q.query }))]);
@@ -548,9 +551,13 @@ describe('benchmark pairs run first under the probe cap', () => {
         const probes = Object.fromEntries(platforms.map(p => [p, async q => { attempted.add(`${q}::${p}`); return null; }]));
         Object.defineProperty(prober, 'providers', { value: probes });
         db.mockReturnValue({ where: () => ({ select: async () => [] }) });
-        expect((await prober.runDaily()).attempted).toBe(240);
+        expect((await prober.runDaily()).attempted).toBe(300);
         for (const q of benchmark.questions) for (const p of platforms) expect(attempted.has(`${q.query}::${p}`)).toBe(true);
+        const ancillary = [...attempted].filter(k => k.startsWith('ancillary'));
+        expect(ancillary).toHaveLength(60);
+        ancillary.forEach(k => ancillarySeen.add(k));
       }
+      expect(ancillarySeen.size).toBe(300);
     } finally { jest.useRealTimers(); }
   });
 });

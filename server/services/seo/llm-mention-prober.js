@@ -52,10 +52,13 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some 
 // WAVES_RE, COMPETITORS and the all-companies ranking live in
 // llm-mention-companies.js.
 // Cost guard — hard ceiling on probes per run regardless of query × platform math.
-// 240 = six platforms × the 40 benchmark questions: the benchmark is observed
-// daily (its pairs run first); ancillary queries rotate through what is left.
-const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 240);
-const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 240;
+// 300 = six platforms × the 40 benchmark questions (240, observed daily) plus
+// the ancillary reserve below (60, rotating).
+const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 300);
+const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 300;
+// A fifth of the ceiling is held for ancillary queries (custom, entity cohort)
+// so a benchmark that fills the ceiling can never starve them outright.
+const ANCILLARY_RESERVE_SHARE = 0.2;
 
 // The sentiment reply must be ONE allowlisted label, unambiguously: its first
 // word is a label and no other label appears anywhere in it. A substring
@@ -92,9 +95,6 @@ function observationGroups(rows, keyFor) {
   }));
 }
 
-// App-scraper rows carry a `dataforseo:` model label; everything else is an API row.
-const surfaceOf = row => (String(row.model_version || '').startsWith('dataforseo:') ? 'app' : 'api');
-
 // Headline rows: for a platform that has a current surface (ChatGPT and Gemini
 // have two, the API probe and the consumer app), only that surface's newest
 // row per question counts, so the 30-day overlap after a switch never counts a
@@ -105,9 +105,8 @@ function headlineRows(grid, currentSurfaces) {
   if (!currentSurfaces) return grid;
   const seen = new Set();
   return grid.filter(row => {
-    const wanted = currentSurfaces[row.llm_platform];
-    if (!wanted) return true;
-    if (surfaceOf(row) !== wanted) return false;
+    if (!currentSurfaces[row.llm_platform]) return true;
+    if (!appScraper.onCurrentSurface(row, currentSurfaces)) return false;
     const key = `${row.query}::${row.llm_platform}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -512,8 +511,7 @@ class LLMMentionProber {
    * count only that surface's rows.
    */
   get currentSurfaces() {
-    const surface = appScraper.appScraperEnabled(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured) ? 'app' : 'api';
-    return { chatgpt: surface, gemini: surface };
+    return appScraper.currentSurfaces(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured);
   }
 
   /** Map platform key → probe fn. */
@@ -627,9 +625,10 @@ class LLMMentionProber {
     // Advance one attempt window each ET calendar day, including failed pairs.
     // Successful-observation timestamps cannot rotate failures: enough broken
     // pairs would remain perpetually oldest and monopolize the run ceiling.
-    // The fixed benchmark's pairs run first, every day; ancillary queries
-    // (custom, entity cohort) rotate through whatever budget is left, so a
-    // larger managed list can never push a benchmark pair out of the ceiling.
+    // The fixed benchmark's pairs run first, every day, within the ceiling
+    // minus the ancillary reserve; ancillary queries (custom, entity cohort)
+    // rotate through the reserve plus anything the benchmark left unused, so
+    // neither cohort can push the other out of the ceiling.
     const benchmarkQueries = new Set(benchmark.questions.map(q => q.query));
     const pairs = queries.flatMap(qrow => platforms.map(platform => ({ qrow, platform, key: `${qrow.query}::${platform}` })))
       .sort((a, b) => a.key.localeCompare(b.key));
@@ -640,9 +639,11 @@ class LLMMentionProber {
     };
     const benchmarkPairs = pairs.filter(pair => benchmarkQueries.has(pair.qrow.query));
     const ancillaryPairs = pairs.filter(pair => !benchmarkQueries.has(pair.qrow.query));
+    const ancillaryReserve = Math.min(ancillaryPairs.length, Math.floor(MAX_PROBES_PER_RUN * ANCILLARY_RESERVE_SHARE));
+    const benchmarkBudget = MAX_PROBES_PER_RUN - ancillaryReserve;
     const pending = [
-      ...rotate(benchmarkPairs, MAX_PROBES_PER_RUN),
-      ...rotate(ancillaryPairs, Math.max(0, MAX_PROBES_PER_RUN - benchmarkPairs.length)),
+      ...rotate(benchmarkPairs, benchmarkBudget).map(pair => ({ ...pair, benchmark: true })),
+      ...rotate(ancillaryPairs, MAX_PROBES_PER_RUN - Math.min(benchmarkPairs.length, benchmarkBudget)),
     ];
 
     // Today's already-recorded (query, platform) pairs → idempotency set.
@@ -651,15 +652,18 @@ class LLMMentionProber {
       .select('query', 'llm_platform');
     const done = new Set(existing.map(r => `${r.query}::${r.llm_platform}`));
 
-    let attempted = 0, probed = 0, inserted = 0, wavesHits = 0, scraperCostUsd = 0;
-    for (const { qrow, platform } of pending) {
+    let attempted = 0, benchmarkAttempted = 0, probed = 0, inserted = 0, wavesHits = 0, scraperCostUsd = 0;
+    for (const { qrow, platform, benchmark: isBenchmark } of pending) {
       if (attempted >= MAX_PROBES_PER_RUN) {
         logger.warn(`[llm-mentions] Hit MAX_PROBES_PER_RUN (${MAX_PROBES_PER_RUN}); stopping early`);
         break;
       }
       if (done.has(`${qrow.query}::${platform}`)) continue;
+      // Benchmark pairs stop at their budget; the reserve is ancillary-only.
+      if (isBenchmark && benchmarkAttempted >= benchmarkBudget) continue;
 
       attempted++; // a failed request may still have incurred provider cost
+      if (isBenchmark) benchmarkAttempted++;
       const probe = await providers[platform](qrow.query, qrow);
       if (!probe) continue;
       probed++;
