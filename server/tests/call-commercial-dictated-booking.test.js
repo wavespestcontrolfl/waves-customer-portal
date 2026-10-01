@@ -349,6 +349,14 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
     // the compound states 150.50, not 150 or 50
     expect(at('one hundred fifty dollars and fifty cents', 150).reason).toBe('price_not_stated_by_staff');
     expect(at('one hundred fifty dollars and fifty cents', 50).reason).toBe('price_not_stated_by_staff');
+    // cents below twenty (spokenFiguresIn skips them) — codex #5377 pre-push P1
+    expect(at('one hundred fifty dollars and five cents', 150.05).ok).toBe(true);
+    expect(at('one hundred fifty dollars and fifteen cents', 150.15).ok).toBe(true);
+    expect(at('150 dollars and 5 cents', 150.05).ok).toBe(true);
+    expect(at('one hundred fifty dollars and five cents', 150).reason).toBe('price_not_stated_by_staff');
+    expect(at('one hundred fifty dollars and fifteen cents', 150).reason).toBe('price_not_stated_by_staff');
+    // an unreadable compound fails closed
+    expect(at('one hundred fifty dollars and a few cents', 150).reason).toBe('price_not_stated_by_staff');
   });
 
   test('a multi-term accepted price ("$150 to start plus $50/month") goes to the office (codex #5377 r3 P1)', () => {

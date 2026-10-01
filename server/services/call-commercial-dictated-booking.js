@@ -67,21 +67,38 @@ function amountsIn(text) {
     .map((m) => Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
   return [...digits, ...spokenFiguresIn(str)];
 }
+// Cents spoken after "dollars and": 0–99 as digits or words ("five", "fifteen",
+// "ninety-nine"). spokenFiguresIn skips values below 20, so cents get their own reader.
+const CENT_ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+  'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+const CENT_TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+function centsIn(phrase) {
+  const p = String(phrase || '').trim().toLowerCase();
+  if (/^\d{1,2}$/.test(p)) return Number(p);
+  const words = p.split(/[\s-]+/).filter(Boolean);
+  if (words.length === 1 && CENT_ONES.includes(words[0])) return CENT_ONES.indexOf(words[0]);
+  const tens = CENT_TENS.indexOf(words[0]);
+  if (tens < 2) return null;
+  if (words.length === 1) return tens * 10;
+  const ones = CENT_ONES.indexOf(words[1]);
+  return words.length === 2 && ones >= 1 && ones <= 9 ? tens * 10 + ones : null;
+}
 function statesAmount(text, amount) {
   const str = String(text || '');
   const amounts = amountsIn(str);
-  // A dollars-and-cents compound ("one hundred fifty dollars and fifty cents", "150 dollars
+  // A dollars-and-cents compound ("one hundred fifty dollars and five cents", "150 dollars
   // and 50 cents") reads as two figures: the last figure before "dollars and" and the cents
-  // figure after it become ONE amount (150.5), and neither part counts on its own.
+  // after it become ONE amount (150.05), and neither part counts on its own. A compound
+  // that cannot be read fails closed: the quote does not state the amount.
   for (const m of str.matchAll(/\bdollars?\s+and\s+([a-z0-9 -]+?)\s+cents?\b/gi)) {
     const dollars = amountsIn(str.slice(0, m.index)).at(-1);
-    const cents = amountsIn(m[1]);
-    if (dollars == null || cents.length !== 1 || !(cents[0] < 100)) continue;
-    for (const part of [dollars, cents[0]]) {
+    const cents = centsIn(m[1]);
+    if (dollars == null || cents == null) return false;
+    for (const part of [dollars, ...amountsIn(m[1])]) {
       const i = amounts.indexOf(part);
       if (i >= 0) amounts.splice(i, 1);
     }
-    amounts.push(Math.round(dollars * 100 + cents[0]) / 100);
+    amounts.push(Math.round(dollars * 100 + cents) / 100);
   }
   return amounts.includes(amount);
 }
