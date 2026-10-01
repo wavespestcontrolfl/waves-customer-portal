@@ -395,6 +395,9 @@ const SATISFACTION_CONDITION_RE = /\b(?:if|unless|provided)\b[^.!?]*\b(?:happy|p
 // across sentences: "If anything still looks off, just reply. Otherwise a
 // quick review...", "Text me if something's not right", "Otherwise ... review".
 const REPLY_ROUTE_RE = /\bif (?:anything|something|there(?:'s| is| are)|you (?:have|see|notice|need|spot))\b[^.!?]*\b(?:reply|text|call|let (?:me|us) know|reach out|email)\b|\b(?:reply|text me|call me|call us|let (?:me|us) know|reach out)\b[^.!?]*\bif (?:anything|something|there|you|it)\b|\botherwise\b[^.!?]*\breviews?\b/i;
+// Never suggest what the review should say: an adjective on the review itself
+// ("a great Google review", "5-star review"). "It would be great" is fine.
+const COACHED_REVIEW_RE = /\b(?:great|good|nice|positive|glowing|awesome|excellent|amazing|stellar|perfect|top|5[- ]star|five[- ]star|stars?)\s+(?:google\s+)?reviews?\b/i;
 const TERMITE_RE = /\btermites?\b|\bwdo\b/i;
 const COMPANY_NAME_RE = /\b(?:llc|inc|corp|ltd|co|rentals?|propert(?:y|ies)|management|realty|group|vacation|homes|hoa|association|trust|partners)\b/i;
 const CAPITAL_ALLOW = new Set([
@@ -729,6 +732,7 @@ const CONTENT_CHECKS = [
   ["steers_from_review", (b) => STEER_RE.test(b) || REPLY_ROUTE_RE.test(b)],
   ["satisfaction_condition", (b) => b.split(/(?<=[.!?])\s+/).some((s) => /review/i.test(s) && SATISFACTION_CONDITION_RE.test(s))],
   ["termite_off_service", (b, c) => !c.termite && TERMITE_RE.test(b)],
+  ["coached_review", (b) => COACHED_REVIEW_RE.test(b)],
 ];
 const withoutLink = (b) => b.replace(/\{review_url\}/g, "");
 const SMS_SHAPE_CHECKS = [
@@ -847,7 +851,7 @@ function techVoiceSentences(body) {
 // A sentence that only asks for the review: says "Google review" and nothing
 // else beyond request words, the link and a name.
 function isAskOnlySentence(sentence, names) {
-  if (!/google review/i.test(sentence)) return false;
+  if (!/google review/i.test(sentence) || COACHED_REVIEW_RE.test(sentence)) return false;
   const words = String(sentence).replace(/\{review_url\}/g, " ").toLowerCase().match(/[a-z']+/g) || [];
   return words.every((w) => ASK_WORDS.has(w.replace(/'s$/, "")) || names.has(w));
 }
@@ -855,9 +859,22 @@ function isAskOnlySentence(sentence, names) {
 const GREETING_WORDS = new Set(`hi hey hello thanks thank you again so much a lot it's its it is this i'm i am here`.split(/\s+/));
 
 // Nothing but greeting / thanks words and names ("Thanks again.", "It's Adam.").
+// A self-introduction ("It's Adam.", "This is Adam here") only counts when it
+// names the technician; "I'm here." alone is a claim, not a greeting.
+const SELF_INTRO_WORDS = new Set(["it's", "its", "it", "is", "this", "i'm", "i", "am", "here"]);
 function isGreetingOnlySentence(sentence, names) {
   const words = String(sentence).toLowerCase().match(/[a-z']+/g) || [];
-  return words.length > 0 && words.every((w) => GREETING_WORDS.has(w) || names.has(w));
+  if (!words.length || !words.every((w) => GREETING_WORDS.has(w) || names.has(w))) return false;
+  return !words.some((w) => SELF_INTRO_WORDS.has(w)) || words.some((w) => names.has(w));
+}
+
+// dispatchWithFallback returns a copy of the winning leg's result, but the
+// call ledger keys a row on the adapter's own result object. The validate
+// hook receives that object, so capture it there; rejectCall on it then marks
+// the right ledger row when a local check refuses the answer later.
+function legCapture() {
+  const leg = {};
+  return { validate: (result) => { leg.result = result; return null; }, reject: (reason) => rejectCall(leg.result, reason) };
 }
 
 // One checker verdict against the sentence it names. Returns a reject reason
@@ -890,6 +907,7 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
   const sentences = techVoiceSentences(body);
   // Split names the way sentences are split ("Mary-Jane" → mary, jane).
   const names = new Set([firstName, techName].join(" ").toLowerCase().match(/[a-z']+/g) || []);
+  const leg = legCapture();
   const result = await dispatchWithFallback(factCheckPolicy(writerProvider), {
     laneId: "review_ask_fact_check",
     // Rules ride the system channel; the user message is data only, so a
@@ -899,7 +917,7 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
     jsonSchema: FACT_CHECK_SCHEMA,
     maxTokens: 2048,
     timeoutMs,
-  }, { reserveFallbackBudget: true, hardDeadline: true });
+  }, { reserveFallbackBudget: true, hardDeadline: true, validate: leg.validate });
   if (!result.ok) return "fact_check_unavailable";
   const judged = Array.isArray(result.json?.sentences) ? result.json.sentences : null;
   const normRecord = normalizeForMatch(record);
@@ -908,7 +926,7 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
     : sentences.map((sentence, i) => sentenceVerdictReject(judged[i] || {}, sentence, names, normRecord)).find(Boolean) || null;
   // A malformed answer is the checker's failure, so its ledger row says so;
   // a well-formed "unsupported" verdict is the checker doing its job.
-  if (reject === "fact_check_bad_answer") rejectCall(result, reject);
+  if (reject === "fact_check_bad_answer") leg.reject(reject);
   return reject;
 }
 
@@ -917,6 +935,7 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
 async function techVoiceAttempt({ system, facts, channel, check, record }, note, deadline) {
   const timeoutMs = deadline - Date.now();
   if (timeoutMs < TECH_VOICE_MIN_STAGE_MS) return { reject: "out_of_time" };
+  const leg = legCapture();
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: "review_ask",
     system,
@@ -924,13 +943,13 @@ async function techVoiceAttempt({ system, facts, channel, check, record }, note,
     jsonMode: true,
     maxTokens: 700,
     timeoutMs,
-  }, { reserveFallbackBudget: true, hardDeadline: true });
+  }, { reserveFallbackBudget: true, hardDeadline: true, validate: leg.validate });
   if (!result.ok) return { reject: "provider_unavailable" };
   // The dispatcher's tolerant parse (fences, preambles, trailing commas)
   // first; the raw text only when it produced nothing.
   const draft = result.json && typeof result.json === "object" ? { ...result.json } : parseTechVoiceJson(result.text);
   if (!draft || typeof draft.body !== "string") {
-    rejectCall(result, "bad_json");
+    leg.reject("bad_json");
     return { reject: "bad_json" };
   }
   const flat = normalizeSmsPunctuation(draft.body);
@@ -940,7 +959,7 @@ async function techVoiceAttempt({ system, facts, channel, check, record }, note,
   // A draft the checks refused is a failed writer call on the ledger, so the
   // lane's success rate shows systematic bad output; an unavailable checker
   // or an exhausted budget says nothing about the draft.
-  if (reject && !["fact_check_unavailable", "out_of_time"].includes(reject)) rejectCall(result, reject);
+  if (reject && !["fact_check_unavailable", "out_of_time"].includes(reject)) leg.reject(reject);
   return reject ? { reject } : { body: draft.body };
 }
 
@@ -1117,7 +1136,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;

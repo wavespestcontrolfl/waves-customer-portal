@@ -315,12 +315,48 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
     mockDispatch.mockResolvedValue(reply(ungrounded));
     await Drafter.draftTechVoice(INPUT);
-    expect(mockRejectCall).toHaveBeenCalledWith(expect.anything(), 'ungrounded_detail');
+    expect(mockRejectCall.mock.calls[0][1]).toBe('ungrounded_detail');
     mockRejectCall.mockClear();
     mockDispatch.mockReset().mockResolvedValue(reply(GOOD));
     mockFactCheck.mockReset().mockResolvedValue({ ok: false });
     await Drafter.draftTechVoice(INPUT);
     expect(mockRejectCall).not.toHaveBeenCalled();
+  });
+
+  test('GitHub r3: the ledger row marked failed is the adapter result the validate hook saw, not the dispatcher copy', async () => {
+    const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
+    const adapterResults = [];
+    // Like dispatchWithFallback: hand the adapter's own object to validate, return a spread copy.
+    mockDispatch.mockImplementation(async (_policy, _payload, opts) => {
+      const adapter = { ...reply(ungrounded), provider: 'anthropic' };
+      adapterResults.push(adapter);
+      expect(opts.validate(adapter)).toBeNull();
+      return { ...adapter };
+    });
+    await Drafter.draftTechVoice(INPUT);
+    expect(mockRejectCall).toHaveBeenCalledTimes(2);
+    expect(mockRejectCall.mock.calls[0][0]).toBe(adapterResults[0]);
+    expect(mockRejectCall.mock.calls[1][0]).toBe(adapterResults[1]);
+  });
+
+  test('GitHub r3: a review request that coaches the sentiment is refused', () => {
+    const rec = 'I need to go to work.';
+    const verify = ({ body }) => Drafter.verifyTechVoiceDraft(
+      { body, details: [{ text: 'had to get to work', source_quote: 'I need to go to work' }] },
+      { channel: 'sms', firstName: 'Marta', techName: 'Adam Benetti', termite: false, corpus: rec, ownWords: rec },
+    );
+    expect(verify({ body: 'I know you had to get to work. Please give me a great Google review: {review_url}' })).toBe('coached_review');
+    expect(verify({ body: 'I know you had to get to work. A glowing Google review would help: {review_url}' })).toBe('coached_review');
+    expect(Drafter.__private.isAskOnlySentence('Please give me a great Google review: {review_url}', new Set())).toBe(false);
+    // "It would be great" is not an adjective on the review.
+    expect(verify({ body: 'I know you had to get to work. A Google review would be great: {review_url}' })).toBeNull();
+  });
+
+  test('GitHub r3: a self-introduction counts as a greeting only when it names the technician', () => {
+    const { isGreetingOnlySentence } = Drafter.__private;
+    expect(isGreetingOnlySentence("I'm here.", new Set(['adam']))).toBe(false);
+    expect(isGreetingOnlySentence('This is Adam here.', new Set(['adam']))).toBe(true);
+    expect(isGreetingOnlySentence('Hi Marta!', new Set(['marta']))).toBe(true);
   });
 
   test("GitHub r1: the writer's answer is read from the dispatcher's tolerant parse", async () => {
