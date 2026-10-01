@@ -2,6 +2,8 @@ const check = require('../services/combined-booking-check');
 const { evaluateCombinedBooking, composeAlert, postAlert, ringOnNewProblem, markPrepaidCoverage } = check;
 
 const DAY0 = '2026-10-04';
+const { composeAdminAlert } = require('../services/admin-alert-compose');
+const ALERT_IDS = { customerName: 'J. Sample', customerId: 'customer-1', estimateId: 'estimate-1' };
 const TECH = 'tech-1';
 const PEST = { service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly', annual: 600, mo: 50 };
 const LAWN = { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6, frequency: 'bimonthly', annual: 600, mo: 50 };
@@ -43,7 +45,6 @@ function run(lines, rows, extra = {}) {
   return evaluateCombinedBooking({
     estimate: estimate(lines), rows,
     invoices: new Map([['inv-1', extra.invoice || goodInvoice()]]),
-    technicians: new Map([[TECH, 'Casey Synthetic']]),
     customerName: 'J. Sample', excludedFamilies: extra.excludedFamilies, scheduleGaps: extra.scheduleGaps,
     scheduleSkippedFamilies: extra.scheduleSkippedFamilies, scheduleUnjudged: extra.scheduleUnjudged,
   });
@@ -51,14 +52,11 @@ function run(lines, rows, extra = {}) {
 const codes = (verdict) => verdict.problems.map((problem) => problem.code);
 
 describe('evaluateCombinedBooking', () => {
-  test('a clean pest + lawn accept is OK and reads like the house format', () => {
+  test('a clean pest + lawn accept is OK', () => {
     const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()]);
     expect(verdict.ok).toBe(true);
     expect(verdict.problems).toEqual([]);
-    const text = composeAlert(verdict, { customerName: 'J. Sample' });
-    expect(text.headline).toBe('Combined booking OK');
-    expect(text.summary).toBe('J. Sample — Pest + Lawn · Sun Oct 4 10:00 · Casey · $250.00 first visit');
-    expect(text.summary.length).toBeLessThanOrEqual(110);
+    expect(verdict.labels).toEqual(['Pest', 'Lawn']);
   });
 
   test('a clean pest + lawn + tree & shrub accept is OK', () => {
@@ -66,7 +64,7 @@ describe('evaluateCombinedBooking', () => {
     const verdict = run([PEST, LAWN, { ...TREE }], [...pestRows(), ...lawnRows(), ...treeRows()], { invoice: treeInvoice });
     expect(verdict.problems).toEqual([]);
     expect(verdict.ok).toBe(true);
-    expect(verdict.facts.labels).toEqual(['Pest', 'Lawn', 'Tree & Shrub']);
+    expect(verdict.labels).toEqual(['Pest', 'Lawn', 'Tree & Shrub']);
   });
 
   test('companion visits with no time or technician are counted per service', () => {
@@ -74,9 +72,10 @@ describe('evaluateCombinedBooking', () => {
     const verdict = run([PEST, LAWN], [...pestRows(), ...lawn]);
     expect(verdict.ok).toBe(false);
     expect(verdict.problems.find((p) => p.code === 'missing_time_tech').text).toBe('5 lawn visits missing time/tech');
-    const text = composeAlert(verdict, { customerName: 'J. Sample' });
-    expect(text.headline).toBe('Combined booking needs a look');
-    expect(text.summary).toBe('J. Sample — 5 lawn visits missing time/tech');
+    const spec = composeAlert(verdict, ALERT_IDS);
+    const composed = composeAdminAlert(spec);
+    expect(composed.headline).toBe("Schedule — fix J. Sample's combined booking");
+    expect(composed.why).toBe('5 lawn visits missing time/tech.');
   });
 
   test('a visit with a time but no technician still fails', () => {
@@ -132,7 +131,6 @@ describe('evaluateCombinedBooking', () => {
       ...lawnRows({ invoiceId: null, parentOverrides: { estimated_price: 100 } }),
     ]);
     expect(verdict.ok).toBe(true);
-    expect(verdict.facts.firstVisitTotal).toBe(250);
   });
 
   test('one row carrying the combined same-day price covers its unpriced sibling', () => {
@@ -159,7 +157,7 @@ describe('evaluateCombinedBooking', () => {
     const verdict = run([PEST, LAWN, TREE], [...pestRows(), ...lawnRows(), ...tree.map((row) => ({ ...row, technician_id: null }))],
       { scheduleSkippedFamilies: new Set(['tree_shrub']) });
     expect(verdict.ok).toBe(true);
-    expect(verdict.facts.labels).toEqual(['Pest', 'Lawn']);
+    expect(verdict.labels).toEqual(['Pest', 'Lawn']);
     expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
   });
 
@@ -168,6 +166,42 @@ describe('evaluateCombinedBooking', () => {
     est.estimate_data.result.recurring.rodentBaitMo = 35;
     const accepted = check.acceptedPrograms(est);
     expect([...accepted.programs.keys()]).toEqual(['pest_control', 'rodent_bait']);
+  });
+
+  test('a legacy rodent program is billed as monthly dues: its visits are expected unpriced, the booking can be OK', () => {
+    const est = estimate([PEST], { monthly_total: 90, annual_total: 1080 });
+    est.estimate_data.result.recurring.rodentBaitMo = 40;
+    const accepted = check.acceptedPrograms(est);
+    expect(accepted.programs.get('pest_control').perVisit).toBe(150);
+    expect(accepted.programs.get('rodent_bait')).toMatchObject({ dues: true, perVisit: 0 });
+    const rodent = series({ key: 'rodent_bait_quarterly', type: 'Rodent Bait Stations', visits: 4, price: null, spacing: 91,
+      invoiceId: null });
+    const verdict = evaluateCombinedBooking({ estimate: est, rows: [...pestRows({ invoiceId: null,
+      parentOverrides: { estimated_price: 150 } }), ...rodent], invoices: new Map() });
+    expect(verdict.problems).toEqual([]);
+    expect(verdict.ok).toBe(true);
+    // The rodent visits are judged (not dropped): one with no technician is reported.
+    const untimed = rodent.map((row, i) => (i === 1 ? { ...row, technician_id: null } : row));
+    const late = evaluateCombinedBooking({ estimate: est, rows: [...pestRows({ invoiceId: null,
+      parentOverrides: { estimated_price: 150 } }), ...untimed], invoices: new Map() });
+    expect(late.problems.map((p) => p.text)).toEqual(['1 rodent visits missing time/tech']);
+  });
+
+  test('rodent bait stored as a legacy line AND as rodentBaitMo is billed once when reconciling', () => {
+    const RODENT = { service: 'rodent_bait', name: 'Rodent Bait Stations', visitsPerYear: 4, frequency: 'quarterly', annual: 600, mo: 50 };
+    const est = estimate([PEST, RODENT]);
+    est.estimate_data.result.recurring.rodentBaitMo = 50;
+    expect(check.acceptedPrograms(est).programs.get('pest_control').perVisit).toBe(150);
+  });
+
+  test('a discount scoped to an add-on line does not reduce the first-application total', () => {
+    const items = [firstApp(150, 'Quarterly Pest Control'), firstApp(100, 'Lawn Care'),
+      { description: 'Fire ant add-on', quantity: 1, unit_price: 50, amount: 50, client_id: 'addon_1' },
+      { description: 'Add-on discount', quantity: 1, unit_price: -10, amount: -10, discount_for: 'addon_1' }];
+    expect(check.firstApplicationAmount({ id: 'inv-1', status: 'sent', line_items: items })).toBe(250);
+    const scoped = [...items.slice(0, 3), { description: 'Pest discount', quantity: 1, unit_price: -10, amount: -10,
+      discount_for: items[0].client_id }];
+    expect(check.firstApplicationAmount({ id: 'inv-1', status: 'sent', line_items: scoped })).toBe(240);
   });
 
   test('an invoice-mode combined invoice is read from its recurring first-visit line', () => {
@@ -286,9 +320,9 @@ describe('evaluateCombinedBooking', () => {
     const lawn = lawnRows({ price: 0, childOverrides: { window_start: null, technician_id: null, estimated_price: 0 } });
     const verdict = run([PEST, LAWN], [...pestRows(), ...lawn]);
     expect(codes(verdict)).toEqual(['missing_time_tech', 'price_missing']);
-    const text = composeAlert(verdict, { customerName: 'J. Sample' });
-    expect(text.summary).toBe('J. Sample — 5 lawn visits missing time/tech; lawn priced $0 on 5 visits');
-    expect(text.detail).toContain('- 5 lawn visits missing time/tech');
+    const spec = composeAlert(verdict, ALERT_IDS);
+    expect(composeAdminAlert(spec).why).toBe('5 lawn visits missing time/tech; lawn priced $0 on 5 visits.');
+    expect(spec.detail).toContain('- 5 lawn visits missing time/tech');
   });
 
   test('a single-service accept is not checked at all', () => {
@@ -310,7 +344,7 @@ describe('evaluateCombinedBooking', () => {
     const off = evaluateCombinedBooking({
       estimate: estimate(lines, { annual_total: 1000 }),
       rows: [...pestRows(), ...lawnRows({ price: 90 })],
-      invoices: new Map([['inv-1', invoice([firstApp(999)])]]), technicians: new Map(),
+      invoices: new Map([['inv-1', invoice([firstApp(999)])]]),
     });
     expect(off.ok).toBe(false);
     expect(off.deferred).toBe(true);
@@ -318,7 +352,7 @@ describe('evaluateCombinedBooking', () => {
     const zero = evaluateCombinedBooking({
       estimate: estimate(lines, { annual_total: 1000 }),
       rows: [...pestRows(), ...lawnRows({ price: 0 })],
-      invoices: new Map([['inv-1', invoice([firstApp(999)])]]), technicians: new Map(),
+      invoices: new Map([['inv-1', invoice([firstApp(999)])]]),
     });
     expect(codes(zero)).toEqual(['price_missing']);
   });
@@ -372,60 +406,46 @@ describe('evaluateCombinedBooking', () => {
   });
 });
 
-describe('composeAlert length', () => {
-  test('headline stays within 60 and summary within 110 characters', () => {
+describe('composeAlert', () => {
+  test('every problem shape composes under the notification rule: headline <= 60, one-sentence why <= 110', () => {
     const verdict = {
-      ok: false, facts: { labels: ['Pest', 'Lawn'] },
+      ok: false, labels: ['Pest', 'Lawn'],
       problems: [1, 2, 3].map((n) => ({ code: `c${n}`, text: `a fairly long problem statement number ${n} about lawn visits` })),
     };
-    const text = composeAlert(verdict, { customerName: 'J. Sample' });
-    expect(text.headline.length).toBeLessThanOrEqual(60);
-    expect(text.summary.length).toBeLessThanOrEqual(110);
+    const composed = composeAdminAlert(composeAlert(verdict, { ...ALERT_IDS, customerName: 'A. Very-Long-Hyphenated-Surname-Indeed' }));
+    expect(composed.headline.length).toBeLessThanOrEqual(60);
+    expect(composed.why.length).toBeLessThanOrEqual(110);
+    for (const text of ['first invoice $250.00 \u2260 $310.00', 'split first invoice lawn $1.00 vs $100.00',
+      'first invoice is missing, void or refunded', 'T&S priced $0 on 8 visits', 'first visit lawn $50.00 vs $100.00']) {
+      expect(() => composeAdminAlert(composeAlert({ ok: false, labels: ['Pest'], problems: [{ code: 'x', text }] }, ALERT_IDS))).not.toThrow();
+    }
   });
 });
 
 describe('postAlert', () => {
   const estimateRow = { id: 'estimate-1', customer_id: 'customer-1' };
-  const ctx = { customerName: 'J. Sample' };
-  const okVerdict = { ok: true, problems: [], facts: { labels: ['Pest', 'Lawn'], firstDate: DAY0, firstTime: '10:00', tech: 'Casey', firstVisitTotal: 250 } };
-  const badVerdict = { ok: false, problems: [{ code: 'price_missing', text: 'lawn priced $0 on 3 visits' }], facts: { labels: ['Pest', 'Lawn'] } };
+  const badVerdict = { ok: false, labels: ['Pest', 'Lawn'], problems: [{ code: 'price_missing', text: 'lawn priced $0 on 3 visits' }] };
 
-  async function post(verdict) {
-    const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: false }));
-    await postAlert({}, estimateRow, verdict, ctx, { notifier: { notifyAdmin } });
-    return notifyAdmin.mock.calls[0];
-  }
-
-  test('a problem is an ACT row that always rings, deduped per estimate, linked to the customer', async () => {
-    const [category, title, body, opts] = await post(badVerdict);
-    expect(category).toBe('ops_digest');
-    expect(title).toBe('Combined booking needs a look');
-    expect(body).toBe('J. Sample — lawn priced $0 on 3 visits');
-    expect(opts).toMatchObject({
-      link: '/admin/customers?customerId=customer-1', dedupeKey: 'combined-booking-check:estimate-1', refreshOnDedupe: true, bell: true,
+  test('a problem is a needs-you Schedule bell on the estimate, deduped per estimate, linked to the customer', async () => {
+    const raise = jest.fn(async () => ({ id: 'n1', deduped: false }));
+    await postAlert(estimateRow, badVerdict, { customerName: 'J. Sample' }, { raise });
+    const [category, spec, opts] = raise.mock.calls[0];
+    expect(category).toBe('alert');
+    expect(spec).toMatchObject({
+      area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'combined_booking_verified',
+      subject: { type: 'estimate', id: 'estimate-1' }, link: '/admin/customers?customerId=customer-1',
+      why: 'Lawn priced $0 on 3 visits.',
     });
-    expect(opts.metadata).toMatchObject({ checkResult: 'problem', kind: 'ACT', audience: 'owner', feed: null, quiet: false, problemCodes: ['price_missing'] });
-    expect(await opts.ringGate({})).toBe(true);
+    expect(spec.detail).toBeUndefined();
+    expect(opts).toMatchObject({ dedupeKey: 'combined-booking-check:estimate-1', refreshOnDedupe: true });
+    expect(opts.detail).toContain('- lawn priced $0 on 3 visits');
+    expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', problemCodes: ['price_missing'] });
   });
 
   test('a standing problem row re-rings only for a problem it did not carry', () => {
-    const ring = ringOnNewProblem(['price_missing', 'missing_time_tech']);
-    const meta = (extra) => ({ checkResult: 'problem', problemCodes: ['price_missing'], ...extra });
-    expect(ring({}, meta())).toBe(true); // a new code appeared
-    expect(ringOnNewProblem(['price_missing'])({}, meta())).toBe(false); // same problem, refreshed quietly
-    expect(ringOnNewProblem(['price_missing'])({}, meta({ resolved: true }))).toBe(true); // came back after clearing
-    expect(ringOnNewProblem(['price_missing'])({}, { checkResult: 'ok' })).toBe(true);
-  });
-
-  test('an OK row is an FYI whose first ring is decided against prior OK rows only', async () => {
-    const [, title, body, opts] = await post(okVerdict);
-    expect(title).toBe('Combined booking OK');
-    expect(body).toBe('J. Sample — Pest + Lawn · Sun Oct 4 10:00 · Casey · $250.00 first visit');
-    expect(opts.metadata).toMatchObject({ checkResult: 'ok', kind: 'FYI', problemCodes: [] });
-    expect(opts.ringOnRefresh()).toBe(false);
-    const conn = (found) => () => ({ where: () => ({ whereRaw: () => ({ whereRaw: () => ({ first: async () => found }) }) }) });
-    expect(await opts.ringGate(conn({ id: 'earlier' }))).toBe(false); // an OK already exists: quiet
-    expect(await opts.ringGate(conn(undefined))).toBe(true); // the first OK ever rings once
+    const meta = { problemCodes: ['price_missing'] };
+    expect(ringOnNewProblem(['price_missing', 'missing_time_tech'])({}, meta)).toBe(true); // a new code appeared
+    expect(ringOnNewProblem(['price_missing'])({}, meta)).toBe(false); // same problem, refreshed quietly
   });
 });
 

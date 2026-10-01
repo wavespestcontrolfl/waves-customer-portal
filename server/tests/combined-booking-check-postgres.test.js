@@ -61,7 +61,7 @@ async function acceptedEstimate(trx, selected) {
 const rowsOf = (trx, estimateId) => trx('scheduled_services').where({ source_estimate_id: estimateId })
   .orWhereIn('recurring_parent_id', trx('scheduled_services').select('id').where({ source_estimate_id: estimateId }));
 const alertsOf = (trx, estimateId) => trx('notifications')
-  .where({ recipient_type: 'admin', category: 'ops_digest' }).whereRaw("metadata->>'estimateId' = ?", [estimateId]);
+  .where({ recipient_type: 'admin', category: 'alert' }).whereRaw("metadata->>'estimateId' = ?", [estimateId]);
 
 const dayOf = (row) => String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10);
 
@@ -95,7 +95,7 @@ postgres('combined-booking check through the real conversion', () => {
   });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
 
-  test('a pest + lawn accept with unassigned companions rings once, stays quiet on re-check, and clears when fixed', async () => {
+  test('a pest + lawn accept with unassigned companions rings once, stays quiet on re-check, and closes as done when fixed', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
@@ -107,12 +107,14 @@ postgres('combined-booking check through the real conversion', () => {
       const first = await runCombinedBookingCheck({ conn: trx });
       expect(first).toMatchObject({ checked: 1, problems: 1, ok: 0, failed: 0 });
       const [alert] = await alertsOf(trx, estimateId);
-      expect(alert.title).toBe('Combined booking needs a look');
-      expect(alert.body).toMatch(/^J\. Sample — .*missing time\/tech/);
+      expect(alert.title).toBe("Schedule — fix J. Sample's combined booking");
+      expect(alert.body).toMatch(/missing time\/tech/);
       expect(alert.body.length).toBeLessThanOrEqual(110);
       expect(alert.link).toBe(`/admin/customers?customerId=${customerId}`);
       expect(alert.read_at).toBeNull();
-      expect(alert.metadata).toMatchObject({ checkResult: 'problem', quiet: false, feed: null });
+      expect(alert.done_at).toBeNull();
+      expect(alert.metadata).toMatchObject({ area: 'Schedule', severity: 'needs-you', who: 'person',
+        doneWhen: 'combined_booking_verified', subject: { type: 'estimate', id: estimateId } });
       expect(alert.metadata.problemCodes).toContain('missing_time_tech');
 
       // Same state again: still one row, not re-rung.
@@ -125,16 +127,18 @@ postgres('combined-booking check through the real conversion', () => {
 
       await repair(trx, { customerId, estimateId });
       const third = await runCombinedBookingCheck({ conn: trx });
-      expect(third).toMatchObject({ checked: 1, ok: 1, problems: 0, failed: 0 });
-      const [cleared] = await alertsOf(trx, estimateId);
-      expect(cleared.id).toBe(alert.id);
-      expect(cleared.title).toBe('Combined booking OK');
-      expect(cleared.read_at).not.toBeNull();
-      expect(cleared.metadata).toMatchObject({ checkResult: 'ok', resolved: true });
+      expect(third).toMatchObject({ checked: 0, ok: 1, problems: 0, closed: 1, failed: 0 });
+      const closed = await alertsOf(trx, estimateId);
+      expect(closed).toHaveLength(1); // an OK writes no row of its own
+      expect(closed[0].id).toBe(alert.id);
+      expect(closed[0].done_at).not.toBeNull();
+      expect(closed[0].done_by).toBe('combined-booking-check');
+      expect(closed[0].read_at).not.toBeNull();
+      expect(closed[0].metadata.dedupeKey).toBeUndefined();
 
-      // An OK verdict is final: the next sweep does not look at it again.
-      const fourth = await runCombinedBookingCheck({ conn: trx });
-      expect(fourth.checked).toBe(0);
+      // Still OK next run: nothing new is written, nothing reopens.
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ ok: 1, problems: 0, closed: 0 });
+      expect(await alertsOf(trx, estimateId)).toHaveLength(1);
     } finally {
       mockPg = pool;
       await trx.rollback();
@@ -166,10 +170,11 @@ postgres('combined-booking check through the real conversion', () => {
       const [rung] = await alertsOf(trx, estimateId);
       expect(rung.read_at).toBeNull();
       await trx('scheduled_services').whereIn('id', (await rowsOf(trx, estimateId)).map((row) => row.id)).update({ status: 'cancelled' });
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, skipped: 1, problems: 0, failed: 0 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, skipped: 1, problems: 0, closed: 1, failed: 0 });
       const rows = await alertsOf(trx, estimateId);
       expect(rows).toHaveLength(1);
       expect(rows[0].read_at).not.toBeNull();
+      expect(rows[0].done_at).not.toBeNull();
       expect(rows[0].metadata.resolved).toBe(true);
       expect(rows[0].metadata.dedupeKey).toBeUndefined();
 
@@ -180,6 +185,7 @@ postgres('combined-booking check through the real conversion', () => {
       expect(again).toHaveLength(2);
       const fresh = again.find((row) => row.id !== rung.id);
       expect(fresh.read_at).toBeNull();
+      expect(fresh.done_at).toBeNull();
       expect(fresh.metadata.resolved).toBeUndefined();
 
       const churned = await acceptedEstimate(trx, lines);
@@ -253,32 +259,42 @@ postgres('combined-booking check through the real conversion', () => {
         title: 'First Service Application', lineItems: [{ description: 'First service application', quantity: 1, unit_price: 250 }],
         dueDate: '2026-10-04' });
       await trx('invoices').where({ id: replacement.id }).update({ scheduled_service_id: anchor.id });
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 1, ok: 1, problems: 0, failed: 0 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, ok: 1, problems: 0, failed: 0 });
     } finally {
       mockPg = pool;
       await trx.rollback();
     }
   });
 
-  test('OK results: the first rings once, later ones go to the Activity feed quietly', async () => {
+  test('an OK result writes no row (an fyi fact)', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
     try {
-      const first = await acceptedEstimate(trx, lines);
-      await repair(trx, first);
-      const second = await acceptedEstimate(trx, lines);
-      await repair(trx, second);
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 2, ok: 2, problems: 0, failed: 0 });
-      const rows = await trx('notifications').where({ recipient_type: 'admin', category: 'ops_digest' })
-        .whereRaw("metadata->>'alertClass' = 'combined-booking-check'").orderBy('created_at').orderBy('id');
-      expect(rows).toHaveLength(2);
-      const rang = rows.filter((row) => row.metadata.feed == null && row.metadata.quiet === false);
-      const quiet = rows.filter((row) => row.metadata.feed === 'activity' && row.metadata.quiet === true);
-      expect(rang).toHaveLength(1);
-      expect(quiet).toHaveLength(1);
-      expect(rang[0].title).toBe('Combined booking OK');
-      expect(rang[0].body).toMatch(/^J\. Sample \u2014 Pest \+ Lawn \u00b7 \w{3} \w{3} \d+ 10:00 \u00b7 Synthetic \u00b7 \$250\.00 first visit$/);
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, ok: 1, problems: 0, failed: 0 });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a customer deactivated after a problem rang closes its bell as done', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      await trx('customers').where({ id: est.customerId }).update({ active: false });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0, closed: 1, failed: 0 });
+      const [row] = await alertsOf(trx, est.estimateId);
+      expect(row.done_at).not.toBeNull();
+      expect(row.resolution).toMatch(/no longer active/);
+      // Closed once: the next run finds nothing standing.
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ closed: 0 });
     } finally {
       mockPg = pool;
       await trx.rollback();

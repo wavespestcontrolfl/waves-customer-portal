@@ -14,8 +14,8 @@
  * fail it, and is lost if the process dies right after the commit) and not a
  * second sweep beside the watchdog's own accepted-plan check. The sweep derives
  * everything from committed rows: a crash just means the next run checks the
- * estimate. No state is stored beyond the notification row itself (its
- * dedupeKey is the "already checked" marker).
+ * estimate. No state is stored beyond a problem's bell; every accept inside
+ * the lookback is judged again each run.
  *
  * ONE CLASSIFIER FOR THE SCHEDULE SHAPE: whether the right number of visits
  * exist is decided by recurring-schedule-audit's acceptedScheduleFindings (via
@@ -43,22 +43,26 @@
  * stopped series) is left out the same way the duplicate-series guard's
  * retained family is, and an estimate it did not judge at all is never OK.
  *
- * ALERTS reuse the admin ops_digest seam (notifyAdmin + the row shape
- * services/ops-digest.js writes): a <=60 char headline, a <=110 char summary,
- * the whole finding in `detail`, a deep link to the customer, dedupeKey per
- * estimate, ring-only-on-news. OK results go to the Activity feed quietly,
- * except the first OK ever, which rings once.
+ * ALERTS follow docs/admin-notifications.md through raiseAdminAlert: a problem
+ * is one needs-you Schedule bell per estimate ("Schedule — fix <name>'s
+ * combined booking", a one-sentence why, the customer link, subject = the
+ * estimate, done when combined_booking_verified), the whole finding in
+ * `detail`, ringing again only when a new problem joins. A fixed problem, a
+ * cancelled plan, or a customer / estimate that left for good closes the bell
+ * as DONE. An OK result is an `fyi` fact and writes no row.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { parseETDateTime } = require('../utils/datetime-et');
 
 const OPS_KEY = 'combined-booking-check';
-const CATEGORY = 'ops_digest';
-const HEADLINE_OK = 'Combined booking OK';
-const HEADLINE_PROBLEM = 'Combined booking needs a look';
-const MAX_SUMMARY_CHARS = 110;
+// needs-you bells ring under the emitter's own category; 'alert' is the one the
+// schedule-integrity watchdog's own bells use.
+const CATEGORY = 'alert';
+const AREA = 'Schedule';
+const DONE_WHEN = 'combined_booking_verified';
+const RESOLVED_FIXED = 'Fixed: the combined booking now checks out';
+const RESOLVED_GONE = 'Closed: the plan was cancelled, or the estimate or customer is no longer active';
 
 // Let the accept transaction and its follow-on writes settle before judging.
 const SETTLE_MINUTES = 3;
@@ -106,9 +110,6 @@ function parseJson(value, fallback = {}) {
   if (typeof value === 'object') return value;
   try { return JSON.parse(value) || fallback; } catch { return fallback; }
 }
-function truncateAtWord(text, max) {
-  return require('./ops-digest').truncateAtWord(text, max);
-}
 
 // The visit's own price exactly as completion bills it (billing-lane.js
 // completionInvoiceAmount's first rule): estimated_price, nothing else. A
@@ -148,44 +149,56 @@ function acceptedPrograms(estimate) {
   })) return null;
   const acceptedFrequency = data.customerSelection?.frequency || null;
   const fallback = acceptedFrequency || inferFrequencyKeyFromEstimateData(data);
-  // The converter's own scheduling units (combineRecurringServicesForScheduling,
-  // the same call recurring-schedule-audit's classifier makes): a legacy
-  // rodent program dropped from the lines above rides back in as a supplement
-  // unit, exactly as conversion schedules it.
+  // WHICH programs are scheduled comes from the converter's own scheduling
+  // units (combineRecurringServicesForScheduling, the same call the
+  // accepted-plan classifier makes): a legacy rodent program dropped from the
+  // lines above rides back in as a supplement unit, exactly as conversion
+  // schedules it. Their PRICES come from the accepted billing lines, never the
+  // units (a standalone unit is a scheduling-only rewrite with no price); a
+  // supplement counts only for a family no line already bills, the same
+  // de-duplication the combiner applies.
+  const family = (line) => converter.seedingFamilyKey(line);
   const supplements = converter.supplementalCompanionLines(data);
   const { remaining, combos, standalone } = converter.combineRecurringServicesForScheduling(lines, {
     acceptFrequency: acceptedFrequency, supplementalCompanions: supplements,
   });
-  const units = [
-    ...[...remaining, ...standalone.map((unit) => unit.service)].map((service) => ({ service, sources: [service] })),
-    ...combos.map((combo) => ({ service: combo.service, sources: combo.combinedFrom })),
-  ];
-
-  const programs = new Map();
-  for (const { service, sources } of units) {
+  const scheduled = new Set([
+    ...[...remaining, ...standalone.map((unit) => unit.service)].map((service) => [service, [service]]),
+    ...combos.map((combo) => [combo.service, combo.combinedFrom]),
+  ]
     // Commercial lines, billing riders and contradictory terms are scheduled
     // by the office; they have no auto-seeded cadence to verify here.
-    if (!converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency)) continue;
-    for (const line of sources) {
-      const family = converter.seedingFamilyKey(line);
-      const program = programs.get(family) || { family, perVisit: 0, visits: null, priced: true };
-      const perVisit = converter.lineAnnualPerVisitAmount(line, acceptedFrequency);
-      if (perVisit > 0) program.perVisit += perVisit; else program.priced = false;
-      const visits = converter.acceptedPestSelectionVisits(line, acceptedFrequency)
-        ?? converter.visitsPerYearForRecurringService(line);
-      if (visits > 0) program.visits = Math.max(program.visits || 0, visits);
-      programs.set(family, program);
-    }
+    .filter(([service]) => converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency))
+    .flatMap(([, sources]) => sources.map(family)));
+  const lineFamilies = new Set(lines.map(family));
+  // A supplement is the legacy rodent plan, billed as MONTHLY DUES that cover
+  // its visits (estimate-converter.js isPinnedLegacyRodentOnlyPlan): its
+  // visits carry no per-visit price of their own, so it is expected at $0.
+  const dues = new Set(supplements.map(family).filter((key) => !lineFamilies.has(key)));
+  const billed = [...lines, ...supplements.filter((line) => dues.has(family(line)))];
+
+  const programs = new Map();
+  for (const key of scheduled) {
+    if (dues.has(key)) { programs.set(key, { family: key, perVisit: 0, visits: null, dues: true }); continue; }
+    const sources = billed.filter((line) => family(line) === key);
+    const perVisits = sources.map((line) => converter.lineAnnualPerVisitAmount(line, acceptedFrequency));
+    const visits = Math.max(0, ...sources.map((line) => converter.acceptedPestSelectionVisits(line, acceptedFrequency)
+      ?? converter.visitsPerYearForRecurringService(line) ?? 0));
+    programs.set(key, {
+      family: key,
+      perVisit: perVisits.length && perVisits.every((amount) => amount > 0) ? perVisits.reduce((a, b) => a + b, 0) : null,
+      visits: visits || null,
+    });
   }
-  // Dollar comparison only when the lines demonstrably add up to what the
-  // customer accepted (a manual discount / plan credit / cadence change breaks
-  // the equality, and a guessed price would page falsely).
-  const annualFromLines = [...lines, ...supplements].reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0);
+  // Dollar comparison only when the billed lines demonstrably add up to what
+  // the customer accepted (a manual discount / plan credit / cadence change
+  // breaks the equality, and a guessed price would page falsely).
+  const annualFromLines = billed.reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0);
   const reconciles = Number(estimate.annual_total) > 0
     && Math.abs(annualFromLines - Number(estimate.annual_total)) <= 1;
   for (const program of programs.values()) {
-    if (!reconciles || !program.priced) program.perVisit = null;
-    else program.perVisit = Math.round(program.perVisit * 100) / 100;
+    if (program.dues) continue;
+    program.perVisit = reconciles && program.perVisit != null ? Math.round(program.perVisit * 100) / 100 : null;
   }
   return { programs, acceptedFrequency };
 }
@@ -225,7 +238,12 @@ function firstApplicationAmount(invoice) {
     : (item) => InvoiceService.lineIsBaseApplication(item);
   const base = items.filter((item) => isBase(item) && amountOf(item) > 0);
   if (!base.length) return null;
-  const discounts = items.filter((item) => item?.category !== 'deposit_credit' && amountOf(item) < 0);
+  // A discount scoped to one line (discount_for = that line's client_id)
+  // counts only when that line is a base application; an add-on's discount
+  // is the add-on's. Unscoped discounts ride the whole invoice.
+  const baseIds = new Set(base.map((item) => item?.client_id).filter(Boolean).map(String));
+  const discounts = items.filter((item) => item?.category !== 'deposit_credit' && amountOf(item) < 0
+    && (!item?.discount_for || baseIds.has(String(item.discount_for))));
   return Math.round([...base, ...discounts].reduce((sum, item) => sum + amountOf(item), 0) * 100) / 100;
 }
 
@@ -250,6 +268,8 @@ function toleranceFor(row, programs) {
   return PRICE_TOLERANCE + Math.max(...rowFamilies(row).map((f) => programs.get(f)?.visits || 1)) * 0.005;
 }
 const programRowFamilies = (row, programs) => rowFamilies(row).filter((f) => programs.has(f));
+// A row whose every program is billed as monthly dues has no visit price to check.
+const duesOnly = (row, programs) => programRowFamilies(row, programs).every((f) => programs.get(f).dues);
 function expectedTotal(list, programs) {
   let total = 0;
   for (const row of list) {
@@ -280,7 +300,7 @@ function checkLaterPrices(dated, programs, firstDay) {
   const off = new Map();
   const offDetail = [];
   for (const row of dated.filter((r) => r.recurring_parent_id || r.day > firstDay)) {
-    if (isPrepaid(row)) continue;
+    if (isPrepaid(row) || duesOnly(row, programs)) continue;
     // A parent stamped into a combined first-application invoice is covered
     // by it (the converter leaves such companions unpriced on purpose).
     if (row.first_application_invoice_id && !row.recurring_parent_id) continue;
@@ -313,7 +333,7 @@ function checkLaterPrices(dated, programs, firstDay) {
 }
 
 // 3a. first-day rows stamped into a combined first-application invoice.
-function checkStampedFirstDay(stamped, programs, invoices, facts) {
+function checkStampedFirstDay(stamped, programs, invoices) {
   const invoiceIds = new Set(stamped.map((row) => String(row.first_application_invoice_id)));
   if (invoiceIds.size > 1) {
     return [{ code: 'first_invoice_split', text: `covered services are on ${invoiceIds.size} different invoices` }];
@@ -328,7 +348,6 @@ function checkStampedFirstDay(stamped, programs, invoices, facts) {
     return [{ code: 'first_invoice_malformed', text: 'first invoice has no readable service lines' }];
   }
   const expected = expectedTotal(stamped, programs);
-  facts.firstVisitTotal = expected ?? billed;
   if (expected != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
     return [{ code: 'first_invoice_mismatch', text: `first invoice ${money(billed)} \u2260 ${money(expected)}` }];
   }
@@ -351,13 +370,12 @@ function checkSplitInvoices(split, programs) {
 
 // 3b. first-day rows with no invoice stamp: priced themselves, or one row
 // carrying the combined same-day total.
-function checkUnstampedFirstDay(unstamped, programs, facts) {
+function checkUnstampedFirstDay(unstamped, programs) {
   const priced = unstamped.filter((row) => rowPrice(row) > 0);
   const expected = expectedTotal(unstamped, programs);
   const paid = Math.round(unstamped.reduce((sum, row) => sum + rowPrice(row), 0) * 100) / 100;
   const sumTolerance = PRICE_TOLERANCE + 0.005 * 12;
   const sumMatches = expected != null && paid > 0 && Math.abs(paid - expected) <= sumTolerance;
-  facts.firstVisitTotal = facts.firstVisitTotal ?? expected ?? (paid > 0 ? paid : null);
   if (priced.length < unstamped.length && !sumMatches) {
     const bare = new Set();
     for (const row of unstamped.filter((r) => !(rowPrice(r) > 0))) {
@@ -378,85 +396,79 @@ function checkUnstampedFirstDay(unstamped, programs, facts) {
 
 /**
  * Pure verdict for one accepted estimate.
- *   ctx: { estimate, rows, invoices: Map(id -> invoice), technicians: Map(id -> name),
- *          customerName, excludedFamilies: Set, scheduleGaps, scheduleSkippedFamilies: Set,
+ *   ctx: { estimate, rows, invoices: Map(id -> invoice), customerName,
+ *          excludedFamilies: Set, scheduleGaps, scheduleSkippedFamilies: Set,
  *          scheduleUnjudged: bool }
  * Returns null when the accept is not a multi-service recurring accept (no
- * alert at all), else { ok, problems: [{ code, text }], facts }.
+ * alert at all), else { ok, deferred, problems: [{ code, text }], labels }.
  */
 function evaluateCombinedBooking(ctx) {
-  const { estimate, invoices = new Map(), technicians = new Map(), excludedFamilies = new Set() } = ctx;
+  const {
+    estimate, rows: allRows = [], invoices = new Map(), excludedFamilies = new Set(),
+    scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleUnjudged = false,
+  } = ctx;
   const accepted = acceptedPrograms(estimate);
   if (!accepted) return null;
   // Families the shared classifier skipped (active plan hold, stopped series)
   // have no schedule evidence behind them: they leave the check entirely.
-  const skipped = ctx.scheduleSkippedFamilies || new Set();
   const programs = new Map([...accepted.programs]
-    .filter(([family]) => !excludedFamilies.has(family) && !skipped.has(family)));
+    .filter(([family]) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
   if (programs.size < 2) return null;
 
   const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
     && rowFamilies(row).some((family) => scope.has(family));
-  const planRows = (ctx.rows || []).filter((row) => isPlanRow(row, programs));
+  const planRows = allRows.filter((row) => isPlanRow(row, programs));
   const rows = planRows.filter((row) => !NOT_LIVE.has(row.status));
+  // Rows were created and every one was cancelled: the customer or office
+  // cancelled the plan. Nothing left to verify, so nothing to say.
+  if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
+  const labels = [...programs.keys()].map(familyLabel);
+  // No live rows: the schedule shape is the accepted-schedule alert's.
+  if (!rows.length) return { ok: false, deferred: true, problems: [], labels };
+
   // A combined first-application invoice still bills a family left out above
   // (a held tree program's first visit stays on it), so the invoice is judged
   // against every accepted family it covers, not only the ones still checked.
   // A member the office has since split off onto its own invoice (the
   // sibling-split workflow's resolution evidence, has_own_live_invoice) is
   // covered by that invoice, not the combined one.
-  const stamped = (ctx.rows || []).filter((row) => isPlanRow(row, accepted.programs) && !NOT_LIVE.has(row.status)
-    && !row.recurring_parent_id && row.first_application_invoice_id && !row.has_own_live_invoice);
-  const split = (ctx.rows || []).filter((row) => isPlanRow(row, programs) && !NOT_LIVE.has(row.status)
-    && !row.recurring_parent_id && row.has_own_live_invoice);
+  const topLevel = allRows.filter((row) => !row.recurring_parent_id && !NOT_LIVE.has(row.status));
+  const stamped = topLevel.filter((row) => isPlanRow(row, accepted.programs)
+    && row.first_application_invoice_id && !row.has_own_live_invoice);
+  const split = topLevel.filter((row) => isPlanRow(row, programs) && row.has_own_live_invoice);
   // Prices are judged against the WHOLE accepted plan: a combined row (lawn +
   // tree) still bills a left-out family's share, and so does the shared
   // invoice. `programs` above scopes only which rows are checked.
   const priced = accepted.programs;
-  const pricedFamilies = new Set([...rows, ...stamped].flatMap((row) => rowFamilies(row)).filter((family) => priced.has(family)));
-  // Rows were created and every one was cancelled: the customer or office
-  // cancelled the plan. Nothing left to verify, so nothing to say.
-  if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
-  const facts = {
-    labels: [...programs.keys()].map(familyLabel),
-    customerName: ctx.customerName || null,
-    firstDate: null, firstTime: null, tech: null, firstVisitTotal: null,
-  };
+  const pricesUnverifiable = [...rows, ...stamped].flatMap(rowFamilies)
+    .some((family) => priced.has(family) && priced.get(family).perVisit == null);
   // Whether the right visits exist at all is the shared accepted-plan
-  // classifier's call (ctx.scheduleGaps, from findAcceptedRecurringScheduleGaps
-  // — the source of the watchdog's accepted-schedule alerts). A gap there, or
-  // no live rows to inspect, means this check says nothing about the schedule
-  // shape and never declares the booking OK. Neither does an estimate the
-  // classifier did not judge, nor one with no accepted per-visit price to
-  // compare against (its problems below are still reported).
-  const pricesUnverifiable = [...pricedFamilies].some((family) => priced.get(family).perVisit == null);
-  const deferred = !rows.length || (ctx.scheduleGaps || []).length > 0 || ctx.scheduleUnjudged === true
-    || pricesUnverifiable;
-  if (!rows.length) return { ok: false, deferred, problems: [], facts };
+  // classifier's call (scheduleGaps, from findAcceptedRecurringScheduleGaps —
+  // the source of the watchdog's accepted-schedule alerts). A gap there means
+  // this check says nothing about the schedule shape and never declares the
+  // booking OK. Neither does an estimate the classifier did not judge, nor one
+  // with no accepted per-visit price to compare against (its problems below
+  // are still reported).
+  const deferred = scheduleGaps.length > 0 || scheduleUnjudged || pricesUnverifiable;
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
     a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
   const firstDay = dated[0].day;
-  const firstDayRows = dated.filter((row) => row.day === firstDay && !row.recurring_parent_id);
-  const anchor = firstDayRows.find((row) => row.window_start) || firstDayRows[0] || dated[0];
-  facts.firstDate = firstDay;
-  facts.firstTime = anchor.window_start ? String(anchor.window_start).slice(0, 5) : null;
-  facts.tech = anchor.technician_id ? technicians.get(anchor.technician_id) || null : null;
-
   // The converter stamps EVERY program a combined first-application invoice
   // covers, even a seasonal companion whose first visit lands on a later date,
   // so the invoice is judged against all live top-level rows carrying a stamp
   // (`stamped`, above).
-  const unstamped = firstDayRows.filter((row) => !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row));
+  const unstamped = dated.filter((row) => row.day === firstDay && !row.recurring_parent_id
+    && !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row) && !duesOnly(row, priced));
   const problems = [
     ...checkTimeAndTech(dated, programs),
     ...checkLaterPrices(dated, priced, firstDay),
-    ...(stamped.length ? checkStampedFirstDay(stamped, priced, invoices, facts) : []),
-    ...(unstamped.length ? checkUnstampedFirstDay(unstamped, priced, facts) : []),
+    ...(stamped.length ? checkStampedFirstDay(stamped, priced, invoices) : []),
+    ...(unstamped.length ? checkUnstampedFirstDay(unstamped, priced) : []),
     ...checkSplitInvoices(split, priced),
   ];
-  return { ok: problems.length === 0 && !deferred, deferred, problems, facts };
+  return { ok: problems.length === 0 && !deferred, deferred, problems, labels };
 }
 
 function shortName(customer) {
@@ -466,32 +478,25 @@ function shortName(customer) {
   return last || first || 'Customer';
 }
 
-function formatDay(day) {
-  const date = parseETDateTime(`${day}T12:00`);
-  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' })
-    .format(date).replace(',', '');
-}
-
-/** Headline / summary / detail text for a verdict. Pure. */
-function composeAlert(verdict, { customerName }) {
-  const name = customerName || 'Customer';
-  const { facts } = verdict;
-  if (verdict.ok) {
-    const parts = [facts.labels.join(' + ')];
-    if (facts.firstDate) parts.push([formatDay(facts.firstDate), facts.firstTime].filter(Boolean).join(' '));
-    if (facts.tech) parts.push(String(facts.tech).split(/\s+/)[0]);
-    if (facts.firstVisitTotal > 0) parts.push(`${money(facts.firstVisitTotal)} first visit`);
-    return {
-      headline: HEADLINE_OK,
-      summary: truncateAtWord(`${name} — ${parts.join(' · ')}`, MAX_SUMMARY_CHARS),
-      detail: `${name}: ${facts.labels.join(' + ')} booking verified. Every visit has a time and technician, prices match the accepted plan, the first day is covered and visit counts match the plan.`,
-    };
-  }
+/**
+ * The raiseAdminAlert spec for a verdict with problems (docs/admin-notifications.md:
+ * Area, headline <= 60 "Area — what to do", one-sentence why <= 110, a record link,
+ * subject, done-when, who). An OK result is an `fyi` fact and writes no row. Pure.
+ */
+function composeAlert(verdict, { customerName, customerId, estimateId }) {
+  const { cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
   const texts = verdict.problems.map((problem) => problem.text);
+  const why = `${texts.slice(0, 2).join('; ')}${texts.length > 2 ? ` (+${texts.length - 2} more)` : ''}`;
   return {
-    headline: HEADLINE_PROBLEM,
-    summary: truncateAtWord(`${name} — ${texts.slice(0, 2).join('; ')}${texts.length > 2 ? ` (+${texts.length - 2} more)` : ''}`, MAX_SUMMARY_CHARS),
-    detail: [`${name}: ${facts.labels.join(' + ')} booking needs a look.`,
+    area: AREA,
+    action: cutAtWord(`fix ${customerName || 'Customer'}'s combined booking`, MAX_HEADLINE_CHARS - `${AREA} — `.length),
+    why: cutAtWord(`${why.charAt(0).toUpperCase()}${why.slice(1)}.`, MAX_WHY_CHARS),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+    subject: { type: 'estimate', id: String(estimateId) },
+    doneWhen: DONE_WHEN,
+    who: 'person',
+    detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a look.`,
       ...verdict.problems.map((problem) => `- ${problem.text}${problem.detail ? ` (${problem.detail})` : ''}`)].join('\n'),
   };
 }
@@ -588,16 +593,11 @@ async function loadContext(conn, estimate) {
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   await markPrepaidCoverage(conn, rows);
   const invoices = await loadFirstInvoices(conn, rows);
-  const techIds = [...new Set(rows.map((row) => row.technician_id).filter(Boolean))];
-  const technicians = new Map();
-  if (techIds.length) {
-    for (const tech of await conn('technicians').whereIn('id', techIds).select('id', 'name')) technicians.set(tech.id, tech.name);
-  }
   const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name');
   return {
     estimate,
     rows: rows.filter((row) => row.catalog_billing_type !== 'one_time'),
-    invoices, technicians, excludedFamilies, customerName: shortName(customer),
+    invoices, excludedFamilies, customerName: shortName(customer),
   };
 }
 
@@ -611,104 +611,85 @@ function dedupeKeyFor(estimateId) {
   return `${OPS_KEY}:${estimateId}`;
 }
 
-// A fresh OK result rings only if no OK was ever posted before: the first one
-// after deploy shows the owner it is working, every later one is a quiet
-// Activity-feed row.
-function okRingGate() {
-  return async (conn) => {
-    const prior = await conn('notifications')
-      .where({ recipient_type: 'admin', category: CATEGORY })
-      .whereRaw("metadata->>'alertClass' = ?", [OPS_KEY])
-      .whereRaw("metadata->>'checkResult' = 'ok'")
-      .first('id');
-    return !prior;
-  };
-}
-
 // A refresh rings only when a problem is new: one the standing row did not
-// already carry, or a problem coming back after the row had cleared.
+// already carry.
 function ringOnNewProblem(codes) {
   return (existing, existingMeta) => {
-    if (existingMeta?.resolved === true || existingMeta?.checkResult !== 'problem') return true;
-    const known = new Set(Array.isArray(existingMeta.problemCodes) ? existingMeta.problemCodes : []);
+    const known = new Set(Array.isArray(existingMeta?.problemCodes) ? existingMeta.problemCodes : []);
     return codes.some((code) => !known.has(code));
   };
 }
 
-// Retires a bell the way resolveOpsDigest retires a cleared finding: read plus
-// a resolved stamp; the row stays in the Activity feed as history.
-function resolvedPatch(conn, { dropDedupeKey = false } = {}) {
-  const base = dropDedupeKey ? "(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey')" : "COALESCE(metadata, '{}'::jsonb)";
-  return {
-    read_at: conn.raw('COALESCE(read_at, NOW())'),
-    metadata: conn.raw(`${base} || ?::jsonb`, [JSON.stringify({
+// Closes the standing bells for these estimates as DONE (docs/admin-notifications.md
+// section 4: read is not done; a system close spreads doneColumns and selects
+// openToCloser's rows). The dedupeKey is dropped, like resolveOpsDigest does, so a
+// problem that comes back posts a fresh bell that rings instead of refreshing a
+// closed one in silence.
+async function retireStanding(conn, estimateIds, resolution) {
+  if (!estimateIds.length) return 0;
+  const { doneColumns, openToCloser } = require('./notification-service')._private;
+  const query = conn('notifications').where({ recipient_type: 'admin', category: CATEGORY })
+    .whereRaw("metadata->>'dedupeKey' = ANY(?)", [estimateIds.map(dedupeKeyFor)]);
+  return openToCloser(query, OPS_KEY).update({
+    ...doneColumns({ by: OPS_KEY, resolution, keepExisting: true, conn }),
+    metadata: conn.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({
       resolved: true, resolvedAt: new Date().toISOString(), resolvedBy: OPS_KEY,
     })]),
-  };
+  });
 }
-// An OK row keeps its dedupeKey: it is the "already checked" marker.
-const retireRow = (conn, id) => conn('notifications').where({ id }).update(resolvedPatch(conn));
-// A problem retired WITHOUT an OK (plan cancelled, or nothing of this check's
-// own left to say) drops its dedupeKey like resolveOpsDigest does, so the
-// same problem coming back posts a fresh bell that rings instead of
-// refreshing this read, resolved row in silence.
-const retireStanding = (conn, estimateId) => conn('notifications')
-  .where({ recipient_type: 'admin', category: CATEGORY })
-  .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKeyFor(estimateId)])
-  .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-  .update(resolvedPatch(conn, { dropDedupeKey: true }));
 
-async function postAlert(conn, estimate, verdict, ctx, { notifier } = {}) {
-  const notificationService = notifier || require('./notification-service');
-  const { digestRowFields } = require('./ops-digest');
-  const text = composeAlert(verdict, { customerName: ctx.customerName });
-  const fields = digestRowFields({
-    subject: `${verdict.ok ? 'FYI' : 'ACT'}: ${text.headline}`,
-    text: text.detail, headline: text.headline, summary: text.summary, audience: 'owner',
+async function postAlert(estimate, verdict, ctx, { raise } = {}) {
+  const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
+  const { detail, ...spec } = composeAlert(verdict, {
+    customerName: ctx.customerName, customerId: estimate.customer_id, estimateId: estimate.id,
   });
   const codes = verdict.problems.map((problem) => problem.code);
-  const row = await notificationService.notifyAdmin(CATEGORY, fields.title, fields.body, {
-    link: `/admin/customers?customerId=${encodeURIComponent(estimate.customer_id)}`,
-    // Persist tag for GATE_ADMIN_BELL_POLICY, not a ring: bell visibility is
-    // metadata.feed / quiet below (same as ops-digest.js's deliverOpsDigest).
-    bell: true,
-    detail: fields.detail,
+  return raiseAdminAlert(CATEGORY, spec, {
+    detail,
     dedupeKey: dedupeKeyFor(estimate.id),
     refreshOnDedupe: true,
-    ringGate: verdict.ok ? okRingGate() : async () => true,
-    ringOnRefresh: verdict.ok ? () => false : ringOnNewProblem(codes),
+    ringOnRefresh: ringOnNewProblem(codes),
     metadata: {
       opsKey: OPS_KEY,
-      subject: `${verdict.ok ? 'FYI' : 'ACT'}: ${text.headline}`,
       alertClass: OPS_KEY,
       estimateId: estimate.id,
       customerId: estimate.customer_id,
-      checkResult: verdict.ok ? 'ok' : 'problem',
       problemCodes: codes,
       // count + itemKeys are the ring-stamps notifyAdmin compares on a
       // refresh, so a changed problem set is treated as a real change.
       count: codes.length,
       itemKeys: codes,
-      kind: fields.kind,
-      audience: fields.audience,
-      feed: fields.feed,
-      quiet: false,
     },
   });
-  // A problem that has since been fixed: the standing bell is retired the way
-  // resolveOpsDigest retires a cleared finding (read + resolved stamp; the row
-  // stays in the Activity feed as history).
-  if (row && verdict.ok && row.refreshed) await retireRow(conn, row.id);
-  return row;
+}
+
+// Standing bells whose estimate has left the sweep for good (the customer was
+// deactivated or deleted, the estimate archived or no longer accepted): nothing
+// is left to act on, so they close. A bell that only aged past the lookback
+// stays open for a person.
+async function retireAbandoned(conn) {
+  const gone = await conn('notifications as n')
+    .leftJoin('estimates as e', conn.raw("e.id::text = n.metadata->>'estimateId'"))
+    .leftJoin('customers as c', 'c.id', 'e.customer_id')
+    .where({ 'n.recipient_type': 'admin', 'n.category': CATEGORY })
+    .whereRaw("starts_with(n.metadata->>'dedupeKey', ?)", [`${OPS_KEY}:`])
+    .where(function goneForGood() {
+      this.whereNull('e.id').orWhereNot('e.status', 'accepted').orWhereNotNull('e.archived_at')
+        .orWhereNot('c.active', true).orWhereNotNull('c.deleted_at');
+    })
+    .select(conn.raw("n.metadata->>'estimateId' as estimate_id"));
+  return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
 }
 
 /**
  * One sweep. Returns counts; never throws for a single bad estimate.
- * `conn` and `notifier` are injectable for tests.
+ * `conn` and `raise` are injectable for tests.
  */
-async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier, maxNew = MAX_NEW_PER_RUN } = {}) {
+async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, maxNew = MAX_NEW_PER_RUN } = {}) {
   const settled = new Date(now.getTime() - SETTLE_MINUTES * 60 * 1000);
   const since = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
+  const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0 };
+  result.closed += await retireAbandoned(conn);
   const candidates = await conn('estimates as e')
     .join('customers as c', 'c.id', 'e.customer_id')
     .where('e.status', 'accepted').whereNull('e.archived_at')
@@ -720,35 +701,26 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier, 
     .select('e.id', 'e.customer_id', 'e.property_id', 'e.estimate_data', 'e.accepted_service_mode', 'e.accepted_at',
       'e.monthly_total', 'e.annual_total', 'e.onetime_total')
     .orderBy('e.accepted_at', 'asc');
-  const result = { candidates: candidates.length, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0 };
-  if (!candidates.length) return result;
+  result.candidates = candidates.length;
 
-  // An OK verdict is final; a posted problem is re-checked each run (inside the
-  // lookback window) so a fix clears the bell.
-  const keys = candidates.map((estimate) => dedupeKeyFor(estimate.id));
-  const standing = await conn('notifications')
+  // Multi-service accepts to judge. An OK verdict writes nothing (an `fyi`
+  // fact), so every accept inside the lookback is judged each run; standing
+  // problems go last so the cap below, which counts only newly posted bells,
+  // can never let an old problem starve a newer accept.
+  const standing = new Set((await conn('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
-    .whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys])
-    .select(conn.raw("metadata->>'dedupeKey' as dedupe_key"), conn.raw("metadata->>'checkResult' as check_result"));
-  const finished = new Set(standing.filter((row) => row.check_result === 'ok').map((row) => row.dedupe_key));
-  const standingProblems = new Set(standing.filter((row) => row.check_result === 'problem').map((row) => row.dedupe_key));
-
-  // Multi-service accepts still to judge. Fresh accepts first (oldest first),
-  // then standing problems: the cap below counts only rows newly posted, so
-  // an old unresolved problem can never starve a newer accept.
-  const work = [];
-  for (const estimate of candidates) {
-    if (finished.has(dedupeKeyFor(estimate.id))) continue;
+    .whereRaw("metadata->>'dedupeKey' = ANY(?)", [candidates.map((estimate) => dedupeKeyFor(estimate.id))])
+    .select(conn.raw("metadata->>'estimateId' as estimate_id"))).map((row) => String(row.estimate_id)));
+  const work = candidates.filter((estimate) => {
     try {
-      const accepted = acceptedPrograms(estimate);
-      if (accepted && accepted.programs.size >= 2) work.push(estimate);
-      else result.skipped += 1;
+      if ((acceptedPrograms(estimate)?.programs.size || 0) >= 2) return true;
+      result.skipped += 1;
     } catch (err) {
       result.failed += 1;
       logger.warn(`[combined-booking-check] estimate ${estimate.id} could not be read: ${err.message}`);
     }
-  }
-  work.sort((a, b) => Number(standingProblems.has(dedupeKeyFor(a.id))) - Number(standingProblems.has(dedupeKeyFor(b.id))));
+    return false;
+  }).sort((a, b) => Number(standing.has(String(a.id))) - Number(standing.has(String(b.id))));
   if (!work.length) return result;
 
   // The shared accepted-plan classifier, with no 24h wait: the same findings
@@ -757,45 +729,36 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier, 
   const coverage = new Map();
   const gaps = await require('./recurring-schedule-audit')
     .findAcceptedRecurringScheduleGaps({ now, settleMs: 0, estimateIds: work.map((estimate) => estimate.id), coverage }, conn);
-  const gapsByEstimate = new Map();
-  for (const gap of gaps) gapsByEstimate.set(String(gap.estimateId), [...(gapsByEstimate.get(String(gap.estimateId)) || []), gap]);
 
   let posted = 0;
   for (const estimate of work) {
-    const key = dedupeKeyFor(estimate.id);
-    const isNew = !standingProblems.has(key);
+    const id = String(estimate.id);
+    const isNew = !standing.has(id);
     if (isNew && posted >= maxNew) continue; // the rest post next run
     try {
-      const judged = coverage.get(String(estimate.id));
+      const judged = coverage.get(id);
       const checked = await checkEstimate(conn, estimate, {
-        scheduleGaps: gapsByEstimate.get(String(estimate.id)) || [],
+        scheduleGaps: gaps.filter((gap) => String(gap.estimateId) === id),
         scheduleSkippedFamilies: judged || new Set(),
         scheduleUnjudged: !judged,
       });
-      if (!checked) {
-        result.skipped += 1;
-        // A standing problem bell for a plan that has since been cancelled has
-        // nothing left to act on: retire it the way a fixed problem is.
-        if (!isNew) await retireStanding(conn, estimate.id);
-        continue;
-      }
-      const { verdict } = checked;
-      if (!verdict.ok && !verdict.problems.length) {
-        // Nothing of this check's own to say (the schedule shape belongs to the
-        // accepted-schedule alert). A bell rung earlier for problems that have
-        // since been fixed is retired.
-        result.deferred += 1;
-        if (!isNew) await retireStanding(conn, estimate.id);
+      const verdict = checked?.verdict;
+      if (!verdict?.problems.length) {
+        // Not a combined booking any more (the plan was cancelled), OK, or
+        // nothing of this check's own to say (the schedule shape belongs to the
+        // accepted-schedule alert): a bell rung earlier is closed as done.
+        if (!verdict) result.skipped += 1; else if (verdict.ok) result.ok += 1; else result.deferred += 1;
+        if (!isNew) result.closed += await retireStanding(conn, [id], verdict ? RESOLVED_FIXED : RESOLVED_GONE);
         continue;
       }
       result.checked += 1;
-      const row = await postAlert(conn, estimate, verdict, checked.ctx, { notifier });
-      if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${estimate.id}`); continue; }
+      const row = await postAlert(estimate, verdict, checked.ctx, { raise });
+      if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
       if (isNew) posted += 1;
-      if (verdict.ok) result.ok += 1; else result.problems += 1;
+      result.problems += 1;
     } catch (err) {
       result.failed += 1;
-      logger.warn(`[combined-booking-check] estimate ${estimate.id} check failed: ${err.message}`);
+      logger.warn(`[combined-booking-check] estimate ${id} check failed: ${err.message}`);
     }
   }
   return result;
@@ -813,6 +776,5 @@ module.exports = {
   firstApplicationAmount,
   shortName,
   OPS_KEY,
-  HEADLINE_OK,
-  HEADLINE_PROBLEM,
+  DONE_WHEN,
 };
