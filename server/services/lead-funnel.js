@@ -145,9 +145,11 @@ const BREAKDOWN_LABELS = {
 };
 
 // Group keys for the other views, as SQL over the route's aliases (asa =
-// ad_service_attribution, l = leads, c = customers).
+// ad_service_attribution, l = leads, c = customers, sba =
+// self_booked_appointments).
 // Landing page: the lead's own captured page (lead webhook attribution.landingUrl
-// / pageUrl, lawn assessment attribution.landing_url, quote wizard landing_url),
+// / pageUrl, lawn assessment attribution.landing_url, quote wizard landing_url, a
+// self-booking's attribution.landing_url),
 // else (web leads only) the customer's first landing page; host + path, lower-cased, no
 // scheme / www / query / fragment / trailing slash. Calls and tools that record
 // no page stay '(unknown)'. heard: the visitor's self-reported answer, kept
@@ -166,6 +168,7 @@ const FUNNEL_URL_SQL = `NULLIF(regexp_replace(regexp_replace(regexp_replace(spli
   NULLIF(l.extracted_data->'attribution'->>'pageUrl', ''),
   NULLIF(l.extracted_data->'attribution'->>'landing_url', ''),
   NULLIF(l.extracted_data->>'landing_url', ''),
+  NULLIF(sba.attribution->>'landing_url', ''),
   CASE WHEN l.first_contact_channel IN (${WEB_CHANNELS_SQL}) THEN NULLIF(c.landing_page_url, '') END,
   ''))), chr(63), 1), '#', 1), '^[a-z][a-z0-9+.-]*://', ''), '^www\\.', ''), '(.)/$', '\\1'), '')`;
 const FUNNEL_BREAKDOWN_SQL = {

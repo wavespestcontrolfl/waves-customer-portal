@@ -12,13 +12,14 @@ describeDb('lead funnel breakdown keys', () => {
   beforeAll(() => { knex = knexLib({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } }); });
   afterAll(async () => { if (knex) await knex.destroy(); });
 
-  const keysFor = async ({ extracted = null, leadCity = null, heard = null, landing = null, customerCity = null, service = null, channel = 'form' }) => {
+  const keysFor = async ({ extracted = null, leadCity = null, heard = null, landing = null, customerCity = null, service = null, channel = 'form', booking = null }) => {
     const { rows } = await knex.raw(
       `SELECT ${B.page} AS page, ${B.service} AS service, ${B.city} AS city, ${B.heard} AS heard
          FROM (SELECT CAST(? AS jsonb) AS extracted_data, CAST(? AS text) AS city, CAST(? AS text) AS heard_about, CAST(? AS text) AS first_contact_channel) l,
               (SELECT CAST(? AS text) AS landing_page_url, CAST(? AS text) AS city) c,
-              (SELECT CAST(? AS text) AS service_line) asa`,
-      [extracted == null ? null : JSON.stringify(extracted), leadCity, heard, channel, landing, customerCity, service],
+              (SELECT CAST(? AS text) AS service_line) asa,
+              (SELECT CAST(? AS jsonb) AS attribution) sba`,
+      [extracted == null ? null : JSON.stringify(extracted), leadCity, heard, channel, landing, customerCity, service, booking == null ? null : JSON.stringify(booking)],
     );
     return rows[0];
   };
@@ -46,6 +47,9 @@ describeDb('lead funnel breakdown keys', () => {
     // a call (or a row with no lead) never inherits the customer's earlier page
     expect((await keysFor({ channel: 'call', landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
     expect((await keysFor({ channel: null, landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
+    // a self-booking (no lead) uses the page captured on the booking itself
+    expect((await keysFor({ channel: null, booking: { landing_url: 'https://www.wavespestcontrol.com/book/?gclid=x' }, landing: 'https://wavespestcontrol.com/old' })).page)
+      .toBe('wavespestcontrol.com/book');
     expect(await keysFor({})).toEqual({ page: '(unknown)', service: '(unknown)', city: '(unknown)', heard: '(unknown)' });
   });
 

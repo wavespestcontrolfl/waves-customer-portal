@@ -1915,6 +1915,9 @@ router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
       const qb = db('ad_service_attribution as asa')
         .leftJoin('leads as l', 'l.id', 'asa.lead_id')
         .leftJoin('customers as c', 'c.id', 'asa.customer_id')
+        // A self-booking's row has no lead; its captured page lives on the
+        // booking (one row per id, so the join never multiplies counts).
+        .leftJoin('self_booked_appointments as sba', 'sba.id', 'asa.self_booked_appointment_id')
         .where('asa.lead_date', '>=', win.from)
         .where('asa.lead_date', '<=', win.to)
         .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)');
