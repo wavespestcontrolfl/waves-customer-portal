@@ -933,6 +933,9 @@ async function sendCustomerMessageCore(input) {
       ...(blockedBy.retryable ? { retryable: true } : {}),
       ...(blockedBy.deferred ? { deferred: true } : {}),
       ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
+      // A deferred hold is requeued by its caller: hand back the transformed
+      // body (link wrap included) so the queued row is the text that goes out.
+      ...(blockedBy.deferred ? { sentBody: sendInput.body } : {}),
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
@@ -1451,6 +1454,8 @@ async function sendCustomerMessageCore(input) {
     });
   } catch (auditErr) {
     auditErr.providerOutcome = providerOutcome;
+    // Accepted-but-unaudited callers still need the body that went out.
+    auditErr.sentBody = sendInput.body;
     throw auditErr;
   }
 
@@ -1538,6 +1543,9 @@ async function sendCustomerMessageCore(input) {
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
+    // The audited body after every transform above (withheld-link rewrite,
+    // GATE_SMS_LINK_WRAP short links): what the provider was handed.
+    sentBody: sendInput.body,
     ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
       ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
       : {}),
