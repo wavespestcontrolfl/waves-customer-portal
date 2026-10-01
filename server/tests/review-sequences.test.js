@@ -4854,6 +4854,22 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toBe(body.replace('{review_url}', `https://portal.test/rate/${touch.token}`));
     });
 
+    test('Codex r2: tech voice on, a pre-change plan still naming friendly_ask at step 0 falls back to day0_ask', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-3', first_name: 'Ravi', last_name: 'P', phone: '+19410000095', nearest_location_id: 'venice' }],
+      });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv3', sequenceStep: 0,
+      });
+      expect(out.ok).toBe(true);
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+    });
+
     test('tech voice on but no verified draft: the fixed Day-0 template sends', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({

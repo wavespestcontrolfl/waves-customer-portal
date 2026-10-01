@@ -4636,12 +4636,15 @@ const ReviewService = {
     // Tech voice (GATE_REVIEW_ASK_TECH_VOICE, owner rulings 2026-09-30/10-01):
     // no general texts, so the Day-0 touch is drafted like every other touch.
     const techVoice = sequenceId != null && require("../config/feature-gates").isEnabled("reviewAskTechVoice");
-    const day0Controlled = actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null
-      && !canonicalTemplate && !techVoice
+    // The Day-0 template stays the fallback either way; tech voice only
+    // means the touch is drafted first (a failed draft still sends day0_ask).
+    const day0Template = actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null
+      && !canonicalTemplate
       && OUTREACH.isDay0ControlledAsk({ sequenceStep, channel: actualChannel, templateId });
+    const day0Controlled = day0Template && !techVoice;
     const smsTemplateId = canonicalTemplate
       ? null
-      : day0Controlled
+      : day0Template
         ? OUTREACH.DAY0_ASK_TEMPLATE_KEY
         : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     let recordedTemplateKey = actualChannel === "email"

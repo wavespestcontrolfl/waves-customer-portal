@@ -90,8 +90,8 @@ const approveAll = (req) => ({
   ok: true,
   json: {
     sentences: factInput(req).sentences.map((sentence) => (/google review/i.test(sentence) && !/work|sink/i.test(sentence)
-      ? { sentence, ask_only: true, supported: false, quote: null }
-      : { sentence, ask_only: false, supported: true, quote: 'I need to go to work' })),
+      ? { sentence, ask_only: true, off_limits: false, supported: false, quote: null }
+      : { sentence, ask_only: false, off_limits: false, supported: true, quote: 'I need to go to work' })),
   },
 });
 
@@ -158,7 +158,7 @@ describe('draftTechVoice', () => {
 describe('fact check — every sentence backed by the record (owner ruling 2026-10-01)', () => {
   const judge = (verdicts) => mockFactCheck.mockImplementation(async (_p, req) => ({
     ok: true,
-    json: { sentences: factInput(req).sentences.map((sentence, i) => ({ sentence, ...verdicts[i] })) },
+    json: { sentences: factInput(req).sentences.map((sentence, i) => ({ sentence, off_limits: false, ...verdicts[i] })) },
   }));
 
   test('runs on the fast verifier lane, sees the record but not what Waves already sent', async () => {
@@ -207,9 +207,20 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     mockFactCheck.mockImplementation(async (_p, req) => ({
       ok: true,
       json: { sentences: factInput(req).sentences.map((sentence, i) => (i === 1
-        ? { sentence: 'I need to go to work.', ask_only: false, supported: true, quote: 'I need to go to work' }
+        ? { sentence: 'I need to go to work.', ask_only: false, off_limits: false, supported: true, quote: 'I need to go to work' }
         : approveAll(req).json.sentences[i])) },
     }));
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+  });
+
+  test('Codex r2: a record-backed but off-limits sentence (household, health, product) is refused by the checker verdict', async () => {
+    mockDispatch.mockResolvedValue(reply(GOOD));
+    judge([{ ask_only: false, off_limits: true, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: true, quote: 'Moisture under the kitchen sink' }, { ask_only: true, supported: false, quote: null }]);
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    expect(mockDispatch.mock.calls[1][1].text).toContain('REJECTED (off limits topic)');
+    // A missing off_limits verdict counts as off limits (fail closed).
+    mockDispatch.mockReset().mockResolvedValue(reply(GOOD));
+    mockFactCheck.mockReset().mockImplementation(async (_p, req) => ({ ok: true, json: { sentences: approveAll(req).json.sentences.map(({ off_limits: _o, ...rest }) => rest) } }));
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
   });
 
@@ -317,6 +328,17 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     const c = { corpus: `${corpus} Back from surgery last week. Rent is due.`, ownWords: `${corpus} Back from surgery last week. Rent is due.` };
     expect(verify({ body: 'I know you had to get to work so soon after surgery. Google review: {review_url}' }, c)).toBe('sensitive_topic');
     expect(verify({ body: 'I know you had to get to work with rent due. Google review: {review_url}' }, c)).toBe('sensitive_topic');
+  });
+
+  test('Codex r2: the deterministic floor also covers common conditions, products and household members', () => {
+    for (const phrase of ['your asthma', 'the dialysis', 'the Talstar you asked about', 'your son let me in', 'the tenant was home']) {
+      expect(verify({ body: `I know you had to get to work, and ${phrase}. Google review: {review_url}` })).toBe('sensitive_topic');
+    }
+  });
+
+  test('Codex r2: an email intro must name a Google review too', () => {
+    const e = { channel: 'email' };
+    expect(verify({ body: 'Marta, I know you had to get to work. A review would help us a lot.' }, e)).toBe('missing_google_review');
   });
 
   test('Codex r1: outcome wording is a result claim even when the report says it', () => {
