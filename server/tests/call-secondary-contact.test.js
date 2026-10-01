@@ -857,8 +857,10 @@ describe('on-site contact opt-in ask', () => {
     // Explicit V2 consent keeps the original claim path (fresh slot only).
     // ...but never for an entry queued for the booking site; that phone is also
     // kept out of the same-call fan-out until it has an opt-in row.
-    expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {");
-    expect(src).toContain('optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
+    expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact) {");
+    expect(src).toContain('if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
+    // A re-added phone that already confirmed here gets the account stamp back.
+    expect(src).toContain("await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));");
     // A phone NEW to the account is durably blocked (ask_failed, reclaimable)
     // BEFORE the slot write, so the account's existing consent stamp stays; a
     // phone already on record is left alone.

@@ -13780,6 +13780,12 @@ const CallRecordingProcessor = {
           holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,
         });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        // Re-added phone that already confirmed its own opt-in here: restore
+        // the account stamp a contact edit may have cleared (same coverage
+        // rule as its YES).
+        if (onSiteAlreadyConfirmed && result === 'written') {
+          await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));
+        }
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
         // ask (dark template = nothing pends; gate off = no-op). The CLAIM
@@ -13794,11 +13800,15 @@ const CallRecordingProcessor = {
           // Queued for the booking site: excluded from the same-call fan-out
           // (no opt-in row yet must not read as grandfathered) and from the
           // explicit-consent claim below, so nobody is asked before a visit lands.
-          optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));
+          // (A phone that already confirmed on this account is a consented
+          // recipient: not excluded.)
+          if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));
           // (Durably blocked before the slot write — see onSiteBlockedBeforeWrite.)
         }
         const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
-        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {
+        // Either extractor's do-not-contact request suppresses every opt-in
+        // dispatch, this legacy explicit-consent path included.
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();

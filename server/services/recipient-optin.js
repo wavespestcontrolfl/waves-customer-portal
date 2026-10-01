@@ -123,33 +123,65 @@ async function updateCaptureCard(h, phoneKey, patch, customerId = null) {
     });
 }
 
-// A YES confirmed this phone. For each customer with a confirmed row for it
+// A nonessential step (a review-card breadcrumb) in its own savepoint: its
+// failure is logged and never rolls back the opt-in / opt-out transition it
+// rides on.
+async function bestEffort(dbh, fn) {
+  try {
+    if (dbh && typeof dbh.transaction === 'function') await dbh.transaction(fn);
+    else await fn(dbh);
+  } catch (err) {
+    logger.warn(`[recipient-optin] review-card breadcrumb failed (${err.code || err.name || 'error'})`);
+  }
+}
+
+// One customer's consent follow-up for a phone that has confirmed its opt-in
 // (under that customer's row lock, so two recipients answering at once
-// serialize): the phone leaves the account's unconsented list, the account
-// consent artifact is stamped when the whole row is covered, and that
-// customer's review card records the outcome.
+// serialize): the phone leaves the account's unconsented list and the account
+// consent artifact is stamped when the whole row is covered.
+async function applyConfirmedPhone(h, customerId, phoneKey) {
+  const customer = await h('customers').where({ id: customerId }).forUpdate().first();
+  if (!customer) return null;
+  await h('customers').where({ id: customerId })
+    .whereRaw("COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) @> to_jsonb(ARRAY[?::text])", [phoneKey])
+    .update({ service_preferences: h.raw("jsonb_set(service_preferences, '{unconsented_slot_phone_keys}', COALESCE((SELECT jsonb_agg(k) FROM jsonb_array_elements(service_preferences -> 'unconsented_slot_phone_keys') k WHERE k <> to_jsonb(?::text)), '[]'::jsonb))", [phoneKey]) });
+  return stampConsentOnConfirm(h, customerId, phoneKey, customer);
+}
+
+// A YES confirmed this phone: for each customer with a confirmed row for it,
+// apply the consent follow-up (durable: on the webhook's transaction a
+// failure fails the transition), then record the outcome on that customer's
+// review card (best-effort).
 async function onRecipientConfirmed(phoneKey, { dbh = db } = {}) {
+  const outcomes = [];
   await withSavepoint(dbh, async (h) => {
     const rows = await h('recipient_optin').where({ phone_key: phoneKey, status: 'confirmed' }).whereNotNull('customer_id').select('customer_id');
     for (const { customer_id: customerId } of rows || []) {
-      const customer = await h('customers').where({ id: customerId }).forUpdate().first();
-      if (!customer) continue;
-      await h('customers').where({ id: customerId })
-        .whereRaw("COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) @> to_jsonb(ARRAY[?::text])", [phoneKey])
-        .update({ service_preferences: h.raw("jsonb_set(service_preferences, '{unconsented_slot_phone_keys}', COALESCE((SELECT jsonb_agg(k) FROM jsonb_array_elements(service_preferences -> 'unconsented_slot_phone_keys') k WHERE k <> to_jsonb(?::text)), '[]'::jsonb))", [phoneKey]) });
-      const stamp = await stampConsentOnConfirm(h, customerId, phoneKey, customer);
-      await updateCaptureCard(h, phoneKey, {
-        optin_result: 'confirmed',
-        ...(stamp.stamped ? {} : { consent_stamp: `held:${stamp.reason}` }),
-      }, customerId);
+      const stamp = await applyConfirmedPhone(h, customerId, phoneKey);
+      if (stamp) outcomes.push({ customerId, stamp });
     }
   });
+  for (const { customerId, stamp } of outcomes) {
+    await bestEffort(dbh, (h) => updateCaptureCard(h, phoneKey, {
+      optin_result: 'confirmed',
+      ...(stamp.stamped ? {} : { consent_stamp: `held:${stamp.reason}` }),
+    }, customerId));
+  }
 }
 
-// A NO / STOP declined this phone: the review card says so. The phone stays on
-// any unconsented list (it never consented).
+// A phone that already confirmed its opt-in on this account was filed again
+// (removed, then re-added by a later call): the same consent follow-up as its
+// YES, so the account stamp an intervening contact edit cleared is restored
+// when the whole row is covered. Best-effort.
+async function restoreConfirmedPhone(customerId, phoneKey) {
+  await bestEffort(db, (h) => applyConfirmedPhone(h, customerId, phoneKey));
+}
+
+// A NO / STOP declined this phone: the review card says so (best-effort — a
+// card outage must never roll back an opt-out). The phone stays on any
+// unconsented list (it never consented).
 async function onRecipientDeclined(phoneKey, { dbh = db } = {}) {
-  await withSavepoint(dbh, (h) => updateCaptureCard(h, phoneKey, { optin_result: 'declined' }));
+  await bestEffort(dbh, (h) => updateCaptureCard(h, phoneKey, { optin_result: 'declined' }));
 }
 
 // Same last-10 convention as the webhook's phoneLookupKey.
@@ -570,7 +602,10 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
         })
         .orderBy('created_at', 'desc')
         .first('id', 'twilio_sid', 'status')
-        .catch(() => null);
+        .catch(() => ({ readFailed: true }));
+      // An unreadable reconcile is not proof nothing was sent: leave the row
+      // pending for the next sweep (never re-send or release on a guess).
+      if (priorSendRow && priorSendRow.readFailed) continue;
       // Full failure set (mirrors the status webhook's isFailureStatus):
       // a busy/no-answer/canceled ask is NOT proof of delivery.
       const { isFailureStatus } = require('./twilio-failure-alerts');
@@ -654,6 +689,7 @@ module.exports = {
   isOptinRailLive,
   onRecipientConfirmed,
   onRecipientDeclined,
+  restoreConfirmedPhone,
   recipientPhoneKey,
   optinBlocksSend,
   getRecipientOptin,

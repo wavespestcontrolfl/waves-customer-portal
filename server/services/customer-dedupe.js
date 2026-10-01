@@ -1263,8 +1263,9 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   // Per-phone consent boundary (#5467, service_preferences): a loser contact
   // phone the call pipeline held out of texting until its own YES
   // (unconsented_slot_phone_keys), or one the loser's cleared stamp covered
-  // (consent_covered_phone_keys), keeps that standing on the winner when its
-  // slot moves. The winner's prior blob is journaled so an undo restores it.
+  // (consent_covered_phone_keys), keeps that standing on the winner when the
+  // phone ends up in the winner's slots. The winner's prior blob is journaled
+  // so an undo restores it.
   const prefsObj = (row) => {
     const raw = row.service_preferences;
     if (raw && typeof raw === 'object') return raw;
@@ -1272,9 +1273,17 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   };
   const loserPrefs = prefsObj(loser);
   const winnerPrefs = prefsObj(winner);
+  // Every phone in the winner's FINAL slot set (its own slots plus the ones
+  // moving in): a held loser phone the winner already carries keeps its hold
+  // too (the loser's recipient_optin row is repointed to the winner).
+  const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const finalSlotKeys = new Set([
+    ...CONTACT_SLOTS.map((slot) => ten(winner[slot[1]])).filter(Boolean),
+    ...movedPhoneKeys,
+  ]);
   const carried = {};
   for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys']) {
-    const moving = (Array.isArray(loserPrefs[key]) ? loserPrefs[key] : []).filter((k) => movedPhoneKeys.has(k));
+    const moving = (Array.isArray(loserPrefs[key]) ? loserPrefs[key] : []).filter((k) => finalSlotKeys.has(k));
     if (moving.length) carried[key] = [...new Set([...(Array.isArray(winnerPrefs[key]) ? winnerPrefs[key] : []), ...moving])];
   }
   if (Object.keys(carried).length) {

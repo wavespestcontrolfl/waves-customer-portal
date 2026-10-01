@@ -240,6 +240,20 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     await expect(onRecipientConfirmed(KEY, { dbh })).rejects.toThrow('row lock failed');
   });
 
+  test('a review-card outage never rolls back the transition: the YES still applies, and a STOP on a transaction does not throw', async () => {
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: { unconsented_slot_phone_keys: [KEY] } }), optinRows: confirmed() });
+    const inner = dbh.getMockImplementation();
+    dbh.mockImplementation((table) => {
+      if (table === 'triage_items') throw new Error('card table down');
+      return inner(table);
+    });
+    dbh.isTransaction = true;
+    await expect(onRecipientConfirmed(KEY, { dbh })).resolves.toBeUndefined();
+    expect(state.customer.service_preferences.unconsented_slot_phone_keys).toEqual([]);
+    expect(state.customer.service_contacts_consent_source).toBe('recipient_optin_confirmed');
+    await expect(onRecipientDeclined(KEY, { dbh })).resolves.toBeUndefined();
+  });
+
   test('NO / STOP records declined on the card', async () => {
     const { dbh, state } = fakeDb({ customer: spouseRow(), optinRows: [{ phone_key: KEY, customer_id: 'c1', status: 'declined' }] });
     await onRecipientDeclined(KEY, { dbh });
@@ -260,6 +274,8 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     // dispatched (the YES can confirm it), never released.
     const sweepSrc = src.slice(src.indexOf('async function sweepUndispatchedOptins'));
     expect(sweepSrc.indexOf("if (row.requested_by === ON_SITE_VISIT_ASK) {")).toBeGreaterThan(sweepSrc.indexOf('const priorSend = priorSendRow'));
+    // An unreadable reconcile leaves the row pending (never released or re-sent on a guess).
+    expect(sweepSrc).toContain('if (priorSendRow && priorSendRow.readFailed) continue;');
   });
 });
 

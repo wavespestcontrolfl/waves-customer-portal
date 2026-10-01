@@ -3740,6 +3740,13 @@ describe('merge carries the per-phone consent boundary (service_preferences)', (
     expect(winnerPriorValues.service_preferences).toEqual({ interior_spray: true });
   });
 
+  test('a held loser phone the winner ALREADY carries keeps its hold (no slot moves, the opt-in row is repointed)', () => {
+    const w = { ...winner, service_contact_name: 'Sample Spouse', service_contact_phone: '(555) 010-0123' };
+    const { backfills } = dedupe.predictWinnerBackfills(w, loser);
+    expect(backfills.service_contact_phone).toBeUndefined();
+    expect(backfills.service_preferences).toEqual({ interior_spray: true, unconsented_slot_phone_keys: ['5550100123'] });
+  });
+
   test('no held phone moving = no service_preferences backfill', () => {
     const { backfills } = dedupe.predictWinnerBackfills(winner, { ...loser, service_preferences: {} });
     expect(backfills).not.toHaveProperty('service_preferences');
