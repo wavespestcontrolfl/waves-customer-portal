@@ -265,6 +265,24 @@ postgres('PAF setup fee — claim consumption is atomic across concurrent visits
     } finally { await cleanup(f); }
   });
 
+  // Codex P1 on #5485: a claim whose prepay-coverage read fails is never
+  // minted fee-less — the completion releases for a retry (503) and the stamp
+  // waits; the retry bills the fee with the visit.
+  test('an unverifiable setup-fee claim (coverage lookup fails) releases for retry instead of minting the visit without the fee', async () => {
+    const f = await seed();
+    const Obligation = require('../services/setup-fee-obligation');
+    const spy = jest.spyOn(Obligation, 'prepayWaivesDeferredSetupFee').mockRejectedValue(new Error('coverage read failed'));
+    try {
+      const out = await complete(f, f.parentId);
+      expect(out).toMatchObject({ status: 503, body: { code: 'setup_fee_claim_in_flight' } });
+      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+      spy.mockRestore();
+      expect(await complete(f, f.parentId)).toMatchObject({ status: 200 });
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(1);
+    } finally { spy.mockRestore(); await cleanup(f); }
+  });
+
   test('a STALE negative marker (a dead worker) is still adopted exactly once, so a crash cannot strand the fee', async () => {
     const f = await seed({ stamp: -SETUP_FEE });
     try {

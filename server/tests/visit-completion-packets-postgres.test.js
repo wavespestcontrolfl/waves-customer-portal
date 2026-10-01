@@ -538,7 +538,20 @@ postgres('visit completion packet records on PostgreSQL', () => {
   const officeFeeAlertsOf = () => mockPg('dispatch_alerts').where({ type: 'setup_fee_office_billing' }).whereIn('job_id', fixture.serviceIds);
   const markPlanMembers = () => mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
 
-  test.each([['positive', 99], ['negative in-progress marker', -99]])('a grouped closeout whose series carries a live %s setup-fee stamp goes to the office, never minting the visit without the fee (gates off)', async (kind, stamp) => {
+  // A NEGATIVE stamp is another completion mid-claim: the grouped closeout is
+  // a retryable busy (Codex P1 on #5485), never a frozen office hold, and
+  // nothing is minted, parked or cleared.
+  test('a grouped closeout whose series carries a negative in-progress setup-fee marker is retryable busy: nothing minted, parked or cleared', async () => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: -99 });
+    await expect(saveVisitCompletionPacket(submission())).rejects.toMatchObject({ code: 'visit_busy', statusCode: 409 });
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee)).toBe(-99);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await officeFeeAlertsOf()).toHaveLength(0);
+  });
+
+  test.each([['positive', 99]])('a grouped closeout whose series carries a live %s setup-fee stamp goes to the office, never minting the visit without the fee (gates off)', async (kind, stamp) => {
     await linkFixtureEstimate();
     await markPlanMembers();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: stamp });

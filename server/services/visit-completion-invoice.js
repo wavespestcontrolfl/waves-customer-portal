@@ -330,7 +330,11 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
     // every other office-required exit.)
     // A non-recurring booster / add-on is not a plan application: it bills its
     // own work normally and the plan's fee waits for a performed plan visit.
-    if (isPlanApplicationRow(member) && await liveSetupClaim(trx, member)) return office('setup_fee_deferred_claim', member.id);
+    // A NEGATIVE stamp is another completion mid-claim (its mint in flight):
+    // that is a retryable busy, never a frozen office hold.
+    const planClaim = isPlanApplicationRow(member) ? await liveSetupClaim(trx, member) : null;
+    if (planClaim && !planClaim.queued) visitBusy(null);
+    if (planClaim) return office('setup_fee_deferred_claim', member.id);
     // A canceled fee is treated as covered with completing-visit context only
     // because the billed application's prior-invoice lane parks that case.
     // A zero-price member skips that lane, so its canceled fee remains owed.

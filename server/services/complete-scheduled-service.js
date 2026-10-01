@@ -10645,13 +10645,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (claimed === 1) {
               secureSetupFee = { parentId: setupParentId, amount };
               logger.info(`[dispatch] setup-fee claim consumed for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+            } else {
+              // Lost the CAS: another visit of this series just took the
+              // claim (its mint is in flight) or the stamp moved. Never mint
+              // fee-less beside it — release for a retry, which re-reads.
+              setupFeeClaimInFlight = true;
             }
           }
         }
       } catch (e) {
-        // Unreadable stamp mints the plain visit invoice — the fee stays
-        // stamped for the next completion rather than risking a double line.
-        logger.warn(`[dispatch] setup-fee claim failed for visit ${svc.id}: ${e.message}`);
+        // The claim (or the prepay-coverage read that decides it) could not
+        // be verified: never mint a fee-less visit invoice the customer was
+        // promised would carry the fee — release for a retry instead.
+        logger.warn(`[dispatch] setup-fee claim could not be verified for visit ${svc.id}: ${e.message} — releasing for retry`);
+        setupFeeClaimInFlight = true;
       }
     }
     if (shouldInvoice) {
