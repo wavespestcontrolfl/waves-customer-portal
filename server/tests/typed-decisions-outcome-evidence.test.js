@@ -80,6 +80,16 @@ describe('callEvidence', () => {
     expect(out.appointment_agreed.value).toBe(true);
   });
 
+  test('reschedule_log counts only rows with a new date (a missed appointment has none)', async () => {
+    mockCallEndFor.mockReturnValue(ago(5));
+    const conn = fakeConn({ first: { scheduled_services: [undefined], job_status_history: [undefined], reschedule_log: [undefined] } });
+    await callEvidence(call(), { now: NOW, conn });
+    await smsEvidence({ id: 'sms-1', customer_id: 'cust-1', created_at: ago(30) }, { now: NOW, conn });
+    const logs = conn.log.filter((q) => q.table === 'reschedule_log');
+    expect(logs.length).toBe(2);
+    for (const q of logs) expect(q.calls).toContainEqual(['whereNotNull', ['new_date']]);
+  });
+
   test('a visit RESCHEDULED in the window counts when nothing was created', async () => {
     mockCallEndFor.mockReturnValue(ago(5));
     const out = await callEvidence(call(), { now: NOW, conn: fakeConn({ first: { scheduled_services: [undefined], job_status_history: [{ id: 'h1' }] } }) });

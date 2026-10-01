@@ -83,6 +83,15 @@ async function callContext(conn, call) {
   return { key, lead, customerId };
 }
 
+// A visit MOVED to a new date in (after, until], from reschedule_log. A missed
+// appointment is logged there too (workflows/missed-appointment.js, reason
+// customer_noshow) but carries no new_date: it is neither a booking nor a
+// change the customer asked for, so only rows with a new date count.
+function movedTo(conn, customerId, after, until) {
+  return conn('reschedule_log').where('customer_id', customerId).whereNotNull('new_date')
+    .where('created_at', '>', after).where('created_at', '<=', until);
+}
+
 async function appointmentEvidence(conn, call, ctx, end, now) {
   const source = 'scheduled_services';
   const window = OUTCOME_SOURCES[source];
@@ -95,8 +104,7 @@ async function appointmentEvidence(conn, call, ctx, end, now) {
     .where('h.to_status', 'rescheduled').where('h.transitioned_at', '>', end).where('h.transitioned_at', '<=', until), 's.id');
   // reschedule_log is the canonical record of a move (the same table the text
   // evidence reads); a move logged there without a status row still counts.
-  const filed = created || rescheduled ? true : await seen(conn('reschedule_log')
-    .where('customer_id', ctx.customerId).where('created_at', '>', end).where('created_at', '<=', until));
+  const filed = created || rescheduled ? true : await seen(movedTo(conn, ctx.customerId, end, until));
   return settle({ source, window, found: created || rescheduled || filed, end, now });
 }
 
@@ -169,8 +177,7 @@ async function visitChangeEvidence(conn, sms, at, now) {
   const logged = await seen(services()
     .join('job_status_history as h', 'h.job_id', 's.id')
     .whereIn('h.to_status', MOVE_STATUSES).where('h.transitioned_at', '>', at).where('h.transitioned_at', '<=', until), 's.id');
-  const filed = logged ? true : await seen(conn('reschedule_log')
-    .where('customer_id', sms.customer_id).where('created_at', '>', at).where('created_at', '<=', until));
+  const filed = logged ? true : await seen(movedTo(conn, sms.customer_id, at, until));
   return settle({ source, window, found: logged || filed, end: at, now });
 }
 
