@@ -159,7 +159,7 @@ describe('LawnReportV2Section lead mode', () => {
     expect(embed.firstElementChild).toHaveTextContent('A few thin tan patches along the driveway edge.');
     expect(screen.getByText('Thin edge by the driveway')).toBeInTheDocument();
     const text = embed.textContent;
-    expect(text.indexOf('A few thin tan patches')).toBeLessThan(text.indexOf('Priority Findings'));
+    expect(text.indexOf('A few thin tan patches')).toBeLessThan(text.indexOf('Priority findings'));
   });
 
   it('the top card hides its step the lead shows and its next-visit plan whenever the lead has one', () => {
@@ -196,7 +196,7 @@ describe('LawnReportV2Section lead mode', () => {
     // Between the photo strip and the findings.
     const text = container.textContent;
     expect(text.indexOf('A few thin tan patches')).toBeLessThan(text.indexOf('Follow-up already planned'));
-    expect(text.indexOf('Follow-up already planned')).toBeLessThan(text.indexOf('Priority Findings'));
+    expect(text.indexOf('Follow-up already planned')).toBeLessThan(text.indexOf('Priority findings'));
   });
 
   it('does not mount the follow-up card when the lead carries a next line, or when it has no reason or is not scheduled', () => {
@@ -232,7 +232,9 @@ describe('LawnReportV2Section lead mode', () => {
     const second = { ...INSIGHT, priority: 2, headline: 'Second finding', whatWeSaw: 'Another thing.' };
     render(<LawnReportV2Section data={payload({ insights: [INSIGHT, second] })} />);
     expect(screen.getAllByText(INSIGHT.customerAction)).toHaveLength(1);
-    expect(screen.queryAllByText(INSIGHT.nextVisitPlan, { exact: false })).toHaveLength(0);
+    // The top card's plan is the lead's "Next visit" line; the second card's own plan sits in its expander.
+    expect(screen.queryAllByText(INSIGHT.nextVisitPlan, { exact: false })).toHaveLength(1);
+    expect(screen.getByText(INSIGHT.nextVisitPlan, { exact: false }).closest('details')).not.toBeNull();
   });
 
   it('LawnInsightCards without a lead prop keeps every row (default behavior unchanged)', () => {
@@ -246,7 +248,7 @@ describe('LawnReportV2Section lead mode', () => {
       diagnosis: [{ key: 'turf_density', label: 'Turf Density', score: 73, status: 'watch' }],
     })} />);
     const text = container.textContent;
-    expect(text.indexOf('Water This Week')).toBeGreaterThan(text.indexOf('Priority Findings'));
+    expect(text.indexOf('Water This Week')).toBeGreaterThan(text.indexOf('Priority findings'));
     expect(text.indexOf('Turf Density')).toBeGreaterThan(text.indexOf('Water This Week'));
   });
 });
