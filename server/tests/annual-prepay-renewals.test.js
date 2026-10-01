@@ -179,6 +179,9 @@ function setDbQueues(queues) {
       // Concurrent-seed recheck under the comms lock: default = no visit
       // appeared since the seeder read its gaps.
       if (table === 'scheduled_services as seed_recheck') return query({ rows: [] });
+      // The recheck's canonical coverage read also does the palm identity
+      // lookups (services) AFTER the main flow drained that queue: nothing found.
+      if (table === 'services') return query({ first: undefined });
       if (table === 'annual_prepay_terms as apt_owner_probe') {
         return query({ first: { customer_id: 'owner-unchanged' } });
       }
@@ -4005,7 +4008,9 @@ describe('annual prepay renewal helpers', () => {
   // successorCoverageScope). Each ensureCoverageRowsForTerm pass resolves it
   // twice (the seeding refusal check, then the candidate-row selection):
   // one parent hop + one root-estimate read per resolution.
-  const successorLineageQueues = (resolutions = 2) => ({
+  // +1 over the pre-recheck count: the seed recheck under the comms lock re-resolves
+  // the lineage through coverageRowsForTerm.
+  const successorLineageQueues = (resolutions = 3) => ({
     annual_prepay_terms: Array.from({ length: resolutions }, () => query({
       first: { id: 'term-prior', customer_id: 'customer-termite', source_estimate_id: 'est-termite', renewed_from_term_id: null },
     })),
@@ -4035,7 +4040,7 @@ describe('annual prepay renewal helpers', () => {
       scheduled_services: [
         query({ columnInfo: { ...TERMITE_COVERAGE_COLUMNS, property_id: {} } }), query({ rows: [] }), query({ first: undefined }), insertQuery,
       ],
-      ...successorLineageQueues(3),
+      ...successorLineageQueues(4),
     });
     await expect(_private.ensureCoverageRowsForTerm(
       termiteTerm({ renewed_from_term_id: 'term-prior', source_estimate_id: null, term_start: '2026-10-01', term_end: '2027-10-01' }),
@@ -8181,6 +8186,67 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2026-01-01' });
 
       expect(result.createdCount).toBe(0);
+    });
+
+    test('a concurrent visit of ANOTHER service (a lawn visit) never suppresses a sold seed', async () => {
+      const lawn = (id, scheduled_date) => ({ ...other(id, scheduled_date), service_type: 'Lawn Care', annual_prepay_term_id: null });
+      const inserts = [inserted('s1', '2026-06-15'), inserted('s2', '2026-09-15'), inserted('s3', '2026-12-15'), inserted('s4', '2027-03-15')];
+      const lawns = [lawn('l1', '2026-06-15'), lawn('l2', '2026-09-15'), lawn('l3', '2026-12-15'), lawn('l4', '2027-03-15')];
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts],
+        'scheduled_services as seed_recheck': [query({ rows: lawns }), query({ rows: lawns }), query({ rows: lawns }), query({ rows: lawns })],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(4);
+    });
+
+    describe('renewal scope: only a visit THIS successor would count can fill its slot', () => {
+      const SUCCESSOR = {
+        id: 'term-termite', customer_id: 'customer-termite', source_estimate_id: null, renewed_from_term_id: 'term-prior',
+        term_start: '2026-10-01', term_end: '2027-10-01', coverage_service_type: 'Termite Bait',
+        coverage_visit_count: 1, coverage_cadence: 'annual', annual_plan_version: 'v3', installation_anchored_at: null,
+      };
+      const COLS = { ...SS_COLS, property_id: {} };
+      const lineage = () => ({
+        annual_prepay_terms: Array.from({ length: 8 }, () => query({
+          first: { id: 'term-prior', customer_id: 'customer-termite', source_estimate_id: 'est-termite', renewed_from_term_id: null },
+        })),
+        estimates: Array.from({ length: 8 }, () => query({ first: { property_id: 'prop-termite' } })),
+      });
+      const concurrentVisit = (property_id) => ({
+        id: 'c1', customer_id: 'customer-termite', scheduled_date: '2026-10-01', status: 'pending',
+        service_type: 'Termite Bait', property_id, annual_prepay_term_id: null, source_estimate_id: null,
+      });
+
+      test('a concurrent visit at ANOTHER property does not suppress the seed', async () => {
+        _private.resetCachesForTests();
+        const insert = inserted('seeded', '2026-10-01');
+        setDbQueues({
+          scheduled_services: [query({ columnInfo: COLS }), query({ rows: [] }), query({ first: undefined }), insert],
+          'scheduled_services as seed_recheck': [query({ rows: [concurrentVisit('prop-other')] })],
+          ...lineage(),
+        });
+
+        const result = await _private.ensureCoverageRowsForTerm({ ...SUCCESSOR }, undefined, { today: '2026-10-01' });
+
+        expect(result.createdCount).toBe(1);
+        expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({ annual_prepay_term_id: 'term-termite' }));
+      });
+
+      test('a concurrent visit in the SAME scope still suppresses it (no duplicate)', async () => {
+        _private.resetCachesForTests();
+        setDbQueues({
+          scheduled_services: [query({ columnInfo: COLS }), query({ rows: [] }), query({ first: undefined })],
+          'scheduled_services as seed_recheck': [query({ rows: [concurrentVisit('prop-termite')] })],
+          ...lineage(),
+        });
+
+        const result = await _private.ensureCoverageRowsForTerm({ ...SUCCESSOR }, undefined, { today: '2026-10-01' });
+
+        expect(result.createdCount).toBe(0);
+      });
     });
 
     test('inside a caller transaction the same recheck runs under the held comms lock', async () => {

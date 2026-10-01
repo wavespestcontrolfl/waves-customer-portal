@@ -1942,19 +1942,23 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // fills the sold count, or sits within the slot tolerance of this date
   // (exactly on the date for the promised slot), means the slot is taken.
   const seedStillNeeded = async (t, scheduledDate) => {
-    // Distinct alias: a presence probe of its own, not a second coverage
-    // selection — adoptableCoverageRow is the SAME predicate the same-day
-    // adoption under the occupancy lock uses.
-    const fresh = await t('scheduled_services as seed_recheck')
-      .where({ customer_id: term.customer_id })
-      .whereBetween('scheduled_date', [termStart, effectiveTermEnd])
-      .where((q) => q.whereNull('status').orWhereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES)))
-      .select('*');
+    // The canonical coverage selection itself, re-read under the lock: only a
+    // row THIS term would count (same service family, renewal property
+    // scope, foreign-term exclusion) can fill one of its slots — a lawn visit
+    // or another property's visit must never suppress a sold seed.
+    // The scheduled_services read goes through a distinct alias — a presence
+    // probe of its own — so it is its own statement to anything that
+    // distinguishes it from the seeder's reads and inserts (same device as the
+    // owner probe above).
+    const probe = (table, ...rest) => t(table === 'scheduled_services' ? 'scheduled_services as seed_recheck' : table, ...rest);
+    const fresh = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: effectiveTermEnd }, probe);
     const known = new Set([...existingRows, ...createdRows].map((row) => String(row.id)));
     const concurrent = (fresh || []).filter((row) => !known.has(String(row.id))
       && dateOnly(row.scheduled_date) && adoptableCoverageRow(row));
     if (!concurrent.length) return true;
-    if (existingRows.length + createdRows.length + concurrent.length >= coverageVisitCount) return false;
+    // fresh is the canonical set (capped at the sold count, known rows
+    // included), so a full set means every slot is taken.
+    if (fresh.length >= coverageVisitCount) return false;
     return !concurrent.some((row) => {
       const existingDate = dateOnly(row.scheduled_date);
       if (scheduledDate === promisedTarget) return existingDate === scheduledDate;
