@@ -7,10 +7,17 @@
  *   GET  /api/admin/rate-review/batches             every batch with counts
  *   GET  /api/admin/rate-review/batches/:key        rows + summary + the batch's references
  *   POST /api/admin/rate-review/batches/:key/build  recompute (refused 409 once any row was sent)
+ *   POST /api/admin/rate-review/batches/:key/schedule  draft notice rows for the batch's
+ *        approved rows (services/rate-review-apply.js scheduleNoticeRows —
+ *        NOTHING is sent; 409 when nothing is approved); body
+ *        { plannedSendDate?: 'YYYY-MM-DD' } (default today) — the 30-day
+ *        rule is measured from it
+ *   GET  /api/admin/rate-review/apply-holds         rate-review notices the nightly
+ *        apply refused, with the reason
  *
- * No sends, no rate writes, no approval parsing here — the reply-APPROVE
- * path, the apply job and the notices are later PRs. The admin screen
- * (Pricing hub → Rate review) is waiting on the owner's mockup approval.
+ * No sends and no approval parsing here — approval is the admin screen's
+ * POST (UI PR), the notices are sent by the comms PR, and the nightly apply
+ * lives in services/rate-review-apply.js (scheduler 3:10 AM ET).
  */
 const express = require('express');
 const router = express.Router();
@@ -18,6 +25,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { rateReviewLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const rateReview = require('../services/rate-review');
+const rateReviewApply = require('../services/rate-review-apply');
 
 const BATCH_KEY_RE = /^\d{4}-\d{2}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -77,6 +85,42 @@ router.post('/batches/:key/build', async (req, res) => {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] build failed for ${key}: ${err.message}`);
     return res.status(500).json({ error: 'Could not build the rate review batch' });
+  }
+});
+
+// Draft notice rows for the batch's approved rows. Nothing is sent here —
+// the comms PR sends and marks them sent; the nightly apply writes rates.
+router.post('/batches/:key/schedule', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  const plannedSendDate = req.body && req.body.plannedSendDate != null ? String(req.body.plannedSendDate) : null;
+  if (plannedSendDate && !DATE_RE.test(plannedSendDate)) {
+    return res.status(400).json({ error: 'plannedSendDate must be YYYY-MM-DD' });
+  }
+  try {
+    const result = await rateReviewApply.scheduleNoticeRows(key, { plannedSendDate, actorId: req.technicianId || null });
+    if (!result.ok && (result.reason === 'nothing_approved' || result.reason === 'no_positive_delta')) {
+      return res.status(409).json({ error: 'No approved rate changes to schedule in this batch', reason: result.reason, approved: result.approved || 0 });
+    }
+    if (!result.ok) return res.status(409).json({ error: 'Notice rows could not be scheduled', reason: result.reason });
+    return res.json({
+      ok: true, batchKey: key, batchId: result.batchId, plannedSendDate: result.plannedSendDate,
+      created: result.created, alreadyScheduled: result.alreadyScheduled, held: result.held,
+      firstEffectiveDate: result.firstEffectiveDate, lastEffectiveDate: result.lastEffectiveDate, notices: result.notices,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] schedule failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not schedule the rate review notices' });
+  }
+});
+
+router.get('/apply-holds', async (req, res) => {
+  try {
+    res.json({ enabled: true, holds: await rateReviewApply.listApplyHolds() });
+  } catch (err) {
+    logger.error(`[admin-rate-review] apply-holds read failed: ${err.message}`);
+    res.status(500).json({ error: 'Could not list the rate review apply holds' });
   }
 });
 

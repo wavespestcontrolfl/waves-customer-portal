@@ -1659,6 +1659,10 @@ function mapAnnualPrepayTerm(term) {
     planLabel: term.plan_label,
     monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
     prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+    // The successor term's amount the annual rate review noticed the customer
+    // for (services/rate-review-apply.js); NULL until a review applies. Read-
+    // only here — the renewal records it when the next term is created.
+    nextTermPrepayAmount: term.next_term_prepay_amount != null ? Number(term.next_term_prepay_amount) : null,
     coverageServiceType: term.coverage_service_type || null,
     coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
     coverageCadence: term.coverage_cadence || null,

@@ -1826,6 +1826,15 @@ async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null,
 module.exports = {
   DEFAULT_CONFIG,
   EXCEPTION_FLAGS,
+  // The plan-line classification (line, cadence, recurring) and the
+  // anniversary / coverage helpers, shared with the apply lane
+  // (services/rate-review-apply.js) so a notice targets exactly the visits
+  // this ranking priced.
+  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, RECURRING_SQL },
+  LEDGER_FAMILIES_FOR_LINE,
+  anniversaryInWindow,
+  familyOfCoverage,
+  visitsPerYearFor,
   buildBatch,
   summarizeBatch,
   getBatch,
