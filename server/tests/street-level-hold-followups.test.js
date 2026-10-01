@@ -207,14 +207,21 @@ describe('finding 6: the office approval is bound to the address it was given fo
       expect(s).toContain("const bindAddress = svc.source_action === 'voice_agent' && !opts.skipCardRequest;");
     });
 
-    test('both stamp sites go through the one locked, address-checked stamp (row FOR UPDATE, witness re-read from the locked row)', () => {
+    test('an approved hold is activated lock + verify + STAMP first, then the legs; every other row keeps hook-first (Codex #5506 r3)', () => {
       const s = read('../services/outbound-review-confirm.js');
-      expect(s.split('await stampCustomerConfirmed(').length - 1).toBe(2);
-      const fn = s.slice(s.indexOf('async function stampCustomerConfirmed'), s.indexOf('async function runOfficeConfirmActivation'));
-      expect(fn.indexOf(".forUpdate().first('id')")).toBeGreaterThan(0);
-      expect(fn.indexOf('approvedAddressStillCurrent(trx')).toBeGreaterThan(fn.indexOf('.forUpdate()'));
+      // Both rails route an office-approved hold through the one fenced function.
+      expect(s).toContain("return activateHoldFencedByAddress(dbh, svc, routeTag, opts);");
+      expect(s).toContain('return await activateHoldFencedByAddress(db, row, routeTag, {');
+      const fence = s.slice(s.indexOf('async function activateHoldFencedByAddress'), s.indexOf('async function runOfficeConfirmActivation'));
+      // Order inside it: the locked, address-checked stamp, then the hook legs, then (on failure) the un-stamp.
+      expect(fence.indexOf('await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt })'))
+        .toBeLessThan(fence.indexOf('await runOutboundReviewConfirmHook(dbh, svc, routeTag, hookOpts)'));
+      expect(fence.indexOf('await runOutboundReviewConfirmHook')).toBeLessThan(fence.indexOf('.update({ customer_confirmed: false, confirmed_at: null })'));
+      const stampFn = s.slice(s.indexOf('async function stampCustomerConfirmed'), s.indexOf('async function activateHoldFencedByAddress'));
+      expect(stampFn.indexOf(".forUpdate().first('id')")).toBeGreaterThan(0);
+      expect(stampFn.indexOf('approvedAddressStillCurrent(trx')).toBeGreaterThan(stampFn.indexOf('.forUpdate()'));
       // The completed-and-field-confirmed visit (the tech stood at the property) is not bound.
-      expect(s).toContain("bindAddress: row.source_action === 'voice_agent' && !(row.status === 'completed' && row.field_confirmed_at),");
+      expect(s).toContain('officeApprovedHold = officeApproved;');
     });
   });
 

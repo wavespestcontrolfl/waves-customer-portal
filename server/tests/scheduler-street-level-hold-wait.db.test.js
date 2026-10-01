@@ -133,6 +133,21 @@ postgres('scheduled composer text held by a street-level address hold (real Post
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(6);
   });
 
+  test('a linked visit that ended while the text waited (LINKED_VISIT_ENDED) ends the row blocked, with its reason, and is never retried', async () => {
+    const queued = await queue(0);
+    mockSendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'LINKED_VISIT_ENDED',
+      reason: 'The visit this reschedule link points at is no longer reschedulable (cancelled, skipped or completed)',
+    });
+    await tick();
+    const row = await fixture.knex('sms_log').where({ id: queued.id }).first();
+    expect(row.status).toBe('blocked');
+    expect(row.metadata).toMatchObject({ blocked_code: 'LINKED_VISIT_ENDED', blocked_reason: expect.stringMatching(/no longer reschedulable/) });
+    await fixture.knex('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    await tick();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('another retryable refusal still spends the bounded ladder (the hold branch is not a general wait)', async () => {
     const queued = await queue(2);
     mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'SOME_OTHER_BLOCK', retryable: false });

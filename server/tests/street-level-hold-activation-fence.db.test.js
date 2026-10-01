@@ -1,0 +1,148 @@
+/**
+ * Codex #5506 r3 P1: the address witness must fence the hook's irreversible legs (lead conversion, review-card
+ * resolve, card-on-file text), not only the final stamp. For an office-approved street-level hold the order is
+ * lock + verify + STAMP in one transaction, then the legs (outbound-review-confirm activateHoldFencedByAddress):
+ * an address correction either lands before the verify (no leg runs) or serializes behind the lock and lands
+ * after the stamp (a post-approval change). A failed leg un-stamps and reopens the card. Runs the REAL hook
+ * against the migrated schema; every row it makes is removed afterwards. Synthetic data only.
+ */
+const { randomUUID } = require('crypto');
+const knexFactory = require('knex');
+
+// CI's DB-gated step selects suites by this exact line (.github/workflows/tests.yml).
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The leg that texts a customer, and the reminder registration, are observed rather than executed.
+jest.mock('../services/appointment-card-request', () => ({ requestCardForAppointment: jest.fn(async () => ({ action: 'skipped' })) }));
+// The real registration (so the hook's slot verify reads a real reminder row), observed.
+jest.mock('../services/appointment-reminders', () => {
+  const actual = jest.requireActual('../services/appointment-reminders');
+  return { ...actual, registerAppointment: jest.fn((...args) => actual.registerAppointment(...args)) };
+});
+jest.mock('../services/inspection-credit', () => ({
+  markBookingForInspectionCredit: jest.fn(async () => 0),
+  redeemInspectionCreditForBooking: jest.fn(async () => null),
+}));
+
+postgres('an office-approved street-level hold is activated behind its address witness (real hook, real PostgreSQL)', () => {
+  let knex;
+  const created = { customers: [], calls: [], visits: [], techs: [] };
+  const ADDRESS = { service_address_line1: '1234 Sample Newbuild Trl', service_address_line2: '', service_address_city: 'Parrish', service_address_state: 'FL', service_address_zip: '34219' };
+  const NORM = '1234 sample newbuild trl parrish fl 34219';
+  const cardRequest = require('../services/appointment-card-request');
+  const reminders = require('../services/appointment-reminders');
+
+  beforeAll(() => {
+    knex = knexFactory({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 6 } });
+  });
+  afterEach(async () => {
+    jest.clearAllMocks();
+    for (const id of created.visits) {
+      await knex('appointment_reminders').where({ scheduled_service_id: id }).del();
+      await knex('job_status_history').where({ job_id: id }).del();
+      await knex('triage_items').whereRaw("payload->>'scheduled_service_id' = ?", [id]).del();
+      await knex('scheduled_services').where({ id }).del();
+    }
+    for (const id of created.calls) await knex('call_log').where({ id }).del();
+    for (const id of created.customers) await knex('customers').where({ id }).del();
+    for (const id of created.techs) await knex('technicians').where({ id }).del();
+    created.visits = []; created.calls = []; created.customers = []; created.techs = [];
+  });
+  afterAll(async () => {
+    await knex.destroy();
+    await require('../models/db').destroy();   // the hook's own (global) pool
+  });
+
+  async function seedApprovedHold({ witness = NORM, cardStatus = 'open' } = {}) {
+    const customerId = randomUUID(); const callId = randomUUID(); const visitId = randomUUID();
+    await knex('customers').insert({ id: customerId, first_name: 'Fixture', phone: '+19415550100' });
+    await knex('call_log').insert({ id: callId });
+    await knex('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: '2099-01-05', window_start: '09:00:00', service_type: 'pest_control',
+      status: 'confirmed', customer_confirmed: false, source_action: 'voice_agent', source_call_log_id: callId, ...ADDRESS,
+    });
+    await knex('triage_items').insert({
+      call_log_id: callId, category: 'review', reason_code: 'outbound_booking_review', status: cardStatus,
+      payload: JSON.stringify({ street_level_address: true, scheduled_service_id: visitId, address_on_file: '1234 Sample Newbuild Trl', approved_address: witness }),
+    });
+    created.customers.push(customerId); created.calls.push(callId); created.visits.push(visitId);
+    return { customerId, callId, visitId, svc: { id: visitId, customer_id: customerId, source_action: 'voice_agent', source_call_log_id: callId, scheduled_date: '2099-01-05', window_start: '09:00:00', service_type: 'pest_control' } };
+  }
+  const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+  const state = async (visitId, callId) => ({
+    confirmed: (await knex('scheduled_services').where({ id: visitId }).first('customer_confirmed')).customer_confirmed,
+    card: (await knex('triage_items').where({ call_log_id: callId }).first('status')).status,
+  });
+
+  test('the approved address is unchanged: stamped first, then every leg runs (card resolved, reminders armed, card request sent)', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    expect(await runOfficeConfirmActivation(knex, svc, 'admin-dispatch')).toBe(true);
+    expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
+    expect(reminders.registerAppointment).toHaveBeenCalledTimes(1);
+    expect(cardRequest.requestCardForAppointment).toHaveBeenCalledTimes(1);
+  });
+
+  test('a correction committed BEFORE the verify: no leg runs at all (no card resolve, no card text), the hold stays pending', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    await knex('scheduled_services').where({ id: visitId }).update({ service_address_line1: '1240 Sample Newbuild Trl' });
+    expect(await runOfficeConfirmActivation(knex, svc, 'admin-dispatch')).toBe(false);
+    expect(await state(visitId, callId)).toEqual({ confirmed: false, card: 'open' });
+    expect(reminders.registerAppointment).not.toHaveBeenCalled();
+    expect(cardRequest.requestCardForAppointment).not.toHaveBeenCalled();
+  });
+
+  test('a correction in flight when the verify runs serializes behind the lock: the activation sees it, and no leg runs', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    const writer = await knex.transaction();
+    await writer('scheduled_services').where({ id: visitId }).forUpdate().first('id');
+    const activation = runOfficeConfirmActivation(knex, svc, 'admin-dispatch');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await writer('scheduled_services').where({ id: visitId }).update({ service_address_zip: '34203' });
+    await writer.commit();
+    expect(await activation).toBe(false);
+    expect(await state(visitId, callId)).toEqual({ confirmed: false, card: 'open' });
+    expect(cardRequest.requestCardForAppointment).not.toHaveBeenCalled();
+  });
+
+  test('a correction that arrives after the stamp is an ordinary post-approval change: the approved activation stands', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    const actualRegister = jest.requireActual('../services/appointment-reminders').registerAppointment;
+    reminders.registerAppointment.mockImplementationOnce(async (...args) => {
+      // A leg runs after the stamp committed: the correction now succeeds immediately (no lock held).
+      await knex('scheduled_services').where({ id: visitId }).update({ service_address_line1: '1240 Sample Newbuild Trl' });
+      return actualRegister(...args);
+    });
+    expect(await runOfficeConfirmActivation(knex, svc, 'admin-dispatch')).toBe(true);
+    expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
+  });
+
+  test('a core leg that fails un-stamps the visit and reopens the card, restoring the unstamped retry state', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    reminders.registerAppointment.mockResolvedValueOnce(null);   // the swallowed-failure signal of a core leg
+    expect(await runOfficeConfirmActivation(knex, svc, 'admin-dispatch')).toBe(false);
+    expect(await state(visitId, callId)).toEqual({ confirmed: false, card: 'open' });
+    // The retry (the lazy / sweep activation) re-verifies the witness and completes it.
+    const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+    const techId = randomUUID();
+    await knex('technicians').insert({ id: techId, name: 'Fixture Tech' });
+    created.techs.push(techId);
+    await knex('job_status_history').insert({ job_id: visitId, from_status: 'pending', to_status: 'confirmed', transitioned_by: techId });
+    expect(await activateLegacyOutboundReviewRowIfNeeded(knex, visitId, 'legacy-activation-sweep')).toBe(true);
+    expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
+  });
+
+  test('a non-hold voice booking and a field-confirmed one keep the hook-first order (the legs ran before any stamp)', async () => {
+    const plain = await seedApprovedHold();
+    await knex('triage_items').where({ call_log_id: plain.callId }).update({ payload: JSON.stringify({ origin: 'voice_agent', scheduled_service_id: plain.visitId }) });
+    let confirmedDuringLeg = null;
+    const actualRegister2 = jest.requireActual('../services/appointment-reminders').registerAppointment;
+    reminders.registerAppointment.mockImplementationOnce(async (...args) => {
+      confirmedDuringLeg = (await knex('scheduled_services').where({ id: plain.visitId }).first('customer_confirmed')).customer_confirmed;
+      return actualRegister2(...args);
+    });
+    expect(await runOfficeConfirmActivation(knex, plain.svc, 'admin-dispatch')).toBe(true);
+    expect(confirmedDuringLeg).toBe(false);
+  });
+});

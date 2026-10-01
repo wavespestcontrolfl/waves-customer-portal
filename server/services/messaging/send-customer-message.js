@@ -121,23 +121,45 @@ const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
 function heldVisitIdOf(input) {
   return input.appointmentId || input.metadata?.scheduled_service_id || input.metadata?.scheduledServiceId || null;
 }
-// Every visit the send is about: the one above plus the visits a composer draft's links point at
-// (metadata.linked_scheduled_service_ids, set by the Communications composer's /sms route).
-function heldVisitIdsOf(input) {
+// Every visit a send's BODY links to, resolved on the server from the text (composer-customer-links
+// visitsLinkedInBody: reschedule, appointment, track, prep and card-request links, long or /l/ short). The
+// body is the authority: a pasted link, a restored draft, a scheduled replay and an old composer tab carry
+// no client metadata, yet reach the same customer. Memoized per input (the hold is asked twice, at 6.35 and
+// at the provider boundary). A resolution error fails CLOSED like the hold predicate itself: it rejects, the
+// caller treats it as held (retryable).
+const bodyVisitLookups = new WeakMap();
+function visitsLinkedInBodyOf(input) {
+  if (!bodyVisitLookups.has(input)) {
+    bodyVisitLookups.set(input, require('../composer-customer-links').visitsLinkedInBody(input.body));
+  }
+  return bodyVisitLookups.get(input);
+}
+// Every visit the send is about: the explicit ids (appointmentId, metadata.scheduled_service_id, and the
+// composer's metadata.linked_scheduled_service_ids, kept as an additional input) plus the visits the body's
+// own links resolve to.
+async function heldVisitIdsOf(input) {
   const linked = Array.isArray(input.metadata?.linked_scheduled_service_ids) ? input.metadata.linked_scheduled_service_ids : [];
-  return [...new Set([heldVisitIdOf(input), ...linked].filter(Boolean).map(String))];
+  const fromBody = typeof input.body === 'string' && input.body ? (await visitsLinkedInBodyOf(input)).map((v) => v.id) : [];
+  return [...new Set([heldVisitIdOf(input), ...linked, ...fromBody].filter(Boolean).map(String))];
 }
 async function streetLevelHoldBlocksSend(input) {
-  const visitIds = heldVisitIdsOf(input);
   // Visit-scoped content is held whatever the generic audience classification says: a phone-only
   // composer send (a reschedule link inserted for a number whose owner was not adopted) and a shared-phone
   // scheduled send classify as 'lead' yet still carry a customer's visit link. Only staff-facing
   // audiences (internal briefings, admin, tech) are never about a customer's held visit.
-  if (!visitIds.length || ['internal', 'admin', 'tech'].includes(input.audience)) return false;
+  if (['internal', 'admin', 'tech'].includes(input.audience)) return false;
   // The card-on-file invitation the office-confirm hook itself sends (and its lazy-activation twin)
   // is part of releasing the hold: the hook runs before the confirmed stamp lands, and only after
   // the office approved the address (the activation guards refuse a hold otherwise).
   if (input.purpose === 'card_request' && input.metadata?.trigger === 'outbound_review_confirm') return false;
+  let visitIds;
+  try {
+    visitIds = await heldVisitIdsOf(input);
+  } catch (err) {
+    logger.warn(`[send_customer_message] linked-visit lookup failed — holding the send: ${err.code || err.name || 'error'}`);
+    return true;
+  }
+  if (!visitIds.length) return false;
   // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
   // stops NEW holds but never releases the customer messages of holds already open.
   const { isStreetLevelHoldVisit } = require('../street-level-hold');
@@ -145,6 +167,29 @@ async function streetLevelHoldBlocksSend(input) {
     if (await isStreetLevelHoldVisit(visitId)) return true;
   }
   return false;
+}
+
+// A hand-composed text replayed from the scheduled-SMS queue whose reschedule link points at a visit that
+// can no longer be rescheduled (cancelled, skipped, completed, underway — the same status gate the
+// /reschedule/:token page applies on click, reschedule-eligibility RESCHEDULABLE_STATUSES) is a stale link:
+// end it blocked and say why, instead of sending it (a held visit that left the hold by cancelling is
+// not a live hold any more, so the hold step alone would let it through). Scheduled replays of operator
+// text only: every immediate send, and every automated notice, keeps its prior behavior.
+const LINKED_VISIT_ENDED_BLOCK = Object.freeze({
+  code: 'LINKED_VISIT_ENDED',
+  reason: 'The visit this reschedule link points at is no longer reschedulable (cancelled, skipped or completed)',
+});
+async function endedLinkedVisitBlocksSend(input) {
+  if (input.entryPoint !== 'scheduled_sms_cron' || input.metadata?.humanAuthored !== true) return false;
+  if (['internal', 'admin', 'tech'].includes(input.audience) || typeof input.body !== 'string' || !input.body) return false;
+  let linked;
+  try {
+    linked = await visitsLinkedInBodyOf(input);
+  } catch {
+    return false;   // the hold step above already failed such a lookup closed
+  }
+  const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
+  return linked.some((v) => v.rescheduleLink && v.status && !RESCHEDULABLE_STATUSES.has(String(v.status).toLowerCase()));
 }
 
 // callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
@@ -897,7 +942,7 @@ async function sendCustomerMessageCore(input) {
   // 6.35 Street-level address hold (see streetLevelHoldBlocksSend above): nothing about
   //      a held visit reaches the customer before the office confirms the address.
   if (await streetLevelHoldBlocksSend(sendInput)) {
-    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput)} is a street-level address hold (${sendInput.purpose})`);
+    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput) || 'linked in the body'} is a street-level address hold (${sendInput.purpose})`);
     const blocked = { code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason };
     const audit = await persistAudit({
       input: sendInput,
@@ -916,6 +961,32 @@ async function sendCustomerMessageCore(input) {
       code: blocked.code,
       reason: blocked.reason,
       retryable: true,
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  // 6.36 Stale reschedule link on a scheduled operator text (see endedLinkedVisitBlocksSend): terminal.
+  if (await endedLinkedVisitBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] blocked: a linked visit is no longer reschedulable (${sendInput.entryPoint})`);
+    const blocked = { code: LINKED_VISIT_ENDED_BLOCK.code, reason: LINKED_VISIT_ENDED_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['linked_visit_ended'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,

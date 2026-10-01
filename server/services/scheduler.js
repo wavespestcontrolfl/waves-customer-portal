@@ -5178,6 +5178,12 @@ function initScheduledJobs() {
                   updated_at: completedAt,
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
+                // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
+                if (smsResult.code === 'LINKED_VISIT_ENDED') {
+                  await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
+                    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
+                  });
+                }
                 logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
                 // Terminal block on a deferred replay: delivery was refused,
                 // or an exhausted ambiguous review passed its safety hold.

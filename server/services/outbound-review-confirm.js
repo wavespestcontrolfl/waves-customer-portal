@@ -901,6 +901,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // failed stays on the retry rail. Fails closed.
     // (Recognized by its card whatever its state: a hold the completion settled without approving — an
     // incomplete / declined closeout — stays a non-activatable hold.)
+    let officeApprovedHold = false;
     if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db, { includeClosedOut: true })) {
       const officeApproved = row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId);
       // The recorded approval binds to the address the office confirmed: a correction after it voids it
@@ -916,6 +917,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
         logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
         return false;
       }
+      officeApprovedHold = officeApproved;
     }
     // Rejected rows are not activated (a cancelled/skipped booking was the office declining it);
     // completed/no_show rows DO — the lead conversion / card resolution / credit evidence are what a
@@ -937,6 +939,15 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       || ['cancelled', 'skipped'].includes(String(fresh.status || ''))) {
       return false;
     }
+    // An office-approved street-level hold is activated behind its address witness: lock + verify + stamp,
+    // THEN the legs (activateHoldFencedByAddress explains the order). A hold completed on site (field
+    // stamp) and every other row keep hook-first below.
+    if (officeApprovedHold) {
+      return await activateHoldFencedByAddress(db, row, routeTag, {
+        suppressCardAskWithoutClearance: true,
+        evidenceBookedAt: opts.evidenceBookedAt || null,
+      });
+    }
     // Hook FIRST, stamp on success: the customer_confirmed stamp is the
     // completion marker, so stamping before the hook would make a
     // transiently-failed leg unretryable forever (Codex #3361 r3 P1).
@@ -956,11 +967,8 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       return false;
     }
     // A rejection that committed during the hook window wins: never stamp a cancelled/skipped row
-    // confirmed (Codex #3361 r8 P1); a voice-agent row also stays pending if its address changed since
-    // the office approved it (stampCustomerConfirmed).
-    const stamped = await stampCustomerConfirmed(db, { id: serviceId }, {
-      bindAddress: row.source_action === 'voice_agent' && !(row.status === 'completed' && row.field_confirmed_at),
-    });
+    // confirmed (Codex #3361 r8 P1).
+    const stamped = await stampCustomerConfirmed(db, { id: serviceId });
     if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(db, row);
     return stamped > 0;
   } catch (e) {
@@ -985,13 +993,13 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
  * source, and a visit confirmed ON SITE by its technician (field stamp / performed completion: the tech
  * stood at the property) stamp exactly as before — the caller passes bindAddress for the office approvals.
  */
-async function stampCustomerConfirmed(dbh, svc, { bindAddress = false } = {}) {
+async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt = new Date() } = {}) {
   const stamp = (conn) => conn('scheduled_services')
     .where({ id: svc.id, customer_confirmed: false })
     // A rejection that committed during the hook window wins: never stamp a
     // cancelled/skipped row confirmed (same guard as the lazy helper).
     .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
-    .update({ customer_confirmed: true, confirmed_at: new Date() });
+    .update({ customer_confirmed: true, confirmed_at: stampedAt });
   if (!bindAddress) return stamp(dbh);
   let refused = false;
   const stamped = await dbh.transaction(async (trx) => {
@@ -1009,6 +1017,67 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false } = {}) {
     await reopenHoldCardForRestoredVisit(svc.id, dbh);
   }
   return stamped;
+}
+
+/**
+ * Activation of an office-APPROVED street-level address hold (the voice-agent booking Google matched only to
+ * the street), fenced by the approval's address witness. ORDER: lock + verify + STAMP, then act.
+ *
+ *   1. In ONE transaction (stampCustomerConfirmed): take the visit row FOR UPDATE, re-read the visit's
+ *      address from that locked row, compare it with the witness, and stamp customer_confirmed — or refuse
+ *      (and reopen the hold's review card) when the address changed since the approval.
+ *   2. Only after that commit run the hook legs (lead conversion, review-card resolve, owed follow-up and
+ *      disposition, reminders, inspection-credit evidence, the card-on-file text).
+ *
+ * Why stamp-first here (the rest of the lane keeps hook-first/stamp-on-success): the hook's legs are
+ * irreversible customer / money effects spread over several connections that themselves lock or update the
+ * visit row (inspection-credit redemption, the card funnel's card_link_sent_at, reminder registration), so
+ * they cannot run inside the lock without deadlocking against it — and an address correction committing
+ * after a verify made BEFORE the legs would still release them for an unseen address. With the stamp inside
+ * the same locked transaction as the verify, a correction that commits after the verify serializes behind
+ * the lock and lands AFTER the stamp: an ordinary post-approval correction of an approved visit, exactly as
+ * if the office had confirmed first and the customer corrected later. No leg ever runs for an address that
+ * was not the approved one.
+ *
+ * Crash / failure safety (the reason the lane is otherwise hook-first): a core leg that fails, or a visit
+ * cancelled during the legs, UN-STAMPS the visit (the exact stamp this call wrote, by its timestamp) and
+ * reopens a review card the legs resolved, restoring the unstamped, office-approved state the lazy /
+ * stranded-activation sweep retries (its witness check re-verifies the address first). A process exit
+ * between the stamp and the legs leaves the visit confirmed with its hold card still OPEN in the office's
+ * queue — visible, not silent. Every other source, and every non-hold voice booking, keeps hook-first.
+ *
+ * @returns {Promise<boolean>} true when the legs ran and the visit is stamped; false otherwise.
+ */
+async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
+  const stampedAt = new Date();
+  const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt });
+  if (!(stamped > 0)) {
+    // Refused (address changed: the card is reopened inside), a rejection took the row, or another activator
+    // stamped it first — then it is activated by that one (the legs are idempotent), as for the other rails.
+    const after = await dbh('scheduled_services').where({ id: svc.id }).first('customer_confirmed');
+    return after?.customer_confirmed === true;
+  }
+  let legsOk = false;
+  try {
+    legsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag, hookOpts);
+  } catch (e) {
+    logger.error(`[${routeTag}] hold activation hook threw for ${svc.id}: ${e.message}`);
+  }
+  if (!legsOk) {
+    logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — un-stamping so the activation sweep retries it`);
+    try {
+      await dbh('scheduled_services')
+        .where({ id: svc.id, customer_confirmed: true })
+        .where('confirmed_at', stampedAt)
+        .update({ customer_confirmed: false, confirmed_at: null });
+      await reopenHoldCardForRestoredVisit(svc.id, dbh);
+    } catch (e) {
+      logger.error(`[${routeTag}] un-stamp after a failed hold activation failed for ${svc.id}: ${e.message}`);
+    }
+    return false;
+  }
+  await reconcileStreetLevelHoldAfterStamp(dbh, svc);
+  return true;
 }
 
 /**
@@ -1047,15 +1116,12 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false } = {}) {
  */
 async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm', opts = {}) {
   let coreLegsOk = false;
-  // An address correction that landed between the approving transition and this activation voids the
-  // approval: run none of the legs (the stamp below re-checks under the row lock for the window that
-  // remains). A technician's own field confirm (skipCardRequest) is confirmed on site and not bound.
+  // An office approval of a street-level address hold is fenced by its address witness (lock + verify +
+  // stamp, then the legs: activateHoldFencedByAddress). A technician's own field confirm (skipCardRequest)
+  // is confirmed on site and not bound; every other voice booking keeps hook-first below.
   const bindAddress = svc.source_action === 'voice_agent' && !opts.skipCardRequest;
-  if (bindAddress && !(await approvedAddressStillCurrent(dbh, svc.id))) {
-    logger.info(`[${routeTag}] office-confirm activation skipped for ${svc.id}: the visit address changed after the approval`);
-    // A previous attempt's hook may have resolved the hold's card: reopen it so the office sees the hold.
-    await reopenHoldCardForRestoredVisit(svc.id, dbh);
-    return false;
+  if (bindAddress && await isStreetLevelHoldVisit(svc.id, dbh)) {
+    return activateHoldFencedByAddress(dbh, svc, routeTag, opts);
   }
   try {
     coreLegsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag, opts);
@@ -1070,7 +1136,7 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
     return false;
   }
   try {
-    const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress });
+    const stamped = await stampCustomerConfirmed(dbh, svc);
     if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(dbh, svc);
     if (stamped > 0) return true;
     // A zero-row stamp is not a failure when another activator (the stranded-activation sweep, a
