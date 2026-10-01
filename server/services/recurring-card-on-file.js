@@ -311,6 +311,18 @@ async function pafExistingDriftUnderLock(trx, { customerId, policy }) {
       const { customerOnAutopay } = require('./autopay-eligibility');
       if (await customerOnAutopay(row, { db: trx, failClosed: true })) return true;
     }
+    // GitHub Codex #5481 r8 P1: a saved-method policy suppresses the first
+    // invoice's pay link on the promise that THIS consented card is billed
+    // after the visit. Re-run the same lookup under the lock (it must still be
+    // the method the policy chose) and row-lock it until commit, so a portal
+    // removal cannot take it out from under the accept.
+    if (policy.exemptReason === 'saved_method_consented' && policy.savedMethodRowId) {
+      const ConsentService = require('./payment-method-consents');
+      const live = await ConsentService.findConsentedChargeableCard(customerId, { dbh: trx });
+      if (!live || String(live.id) !== String(policy.savedMethodRowId)) return true;
+      const reserved = await trx('payment_methods').where({ id: live.id, customer_id: customerId }).forUpdate().first('id');
+      if (!reserved) return true;
+    }
     return false;
   } catch (err) {
     logger.warn(`[recurring-cof] locked eligibility recheck failed for customer ${customerId} — treating as drift: ${err.message}`);

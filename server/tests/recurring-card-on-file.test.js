@@ -856,6 +856,24 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
         expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }), { customerId: 'cust-1', policy: MOVED })).toBe(false);
       });
 
+      it('r8 drift: the saved method a saved_method_consented policy chose is gone or changed under the lock', async () => {
+        const SAVED = { ...MOVED, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1' };
+        const ROW = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+        mockFindConsentedChargeableCard.mockResolvedValueOnce(null);
+        expect(await pafExistingDriftUnderLock(trxFor(ROW), { customerId: 'cust-1', policy: SAVED })).toBe(true);
+        mockFindConsentedChargeableCard.mockResolvedValueOnce({ id: 'pm-row-2' });
+        expect(await pafExistingDriftUnderLock(trxFor(ROW), { customerId: 'cust-1', policy: SAVED })).toBe(true);
+        // Still the same consented card: no drift (and it is row-locked until commit).
+        mockFindConsentedChargeableCard.mockResolvedValueOnce({ id: 'pm-row-1' });
+        const trx = jest.fn((table) => {
+          const c = { first: async () => (table === 'payment_methods' ? { id: 'pm-row-1' } : (table === 'autopay_log' ? null : ROW)) };
+          for (const m of ['where', 'whereIn', 'orderBy', 'forUpdate']) c[m] = () => c;
+          return c;
+        });
+        expect(await pafExistingDriftUnderLock(trx, { customerId: 'cust-1', policy: SAVED })).toBe(false);
+        expect(trx).toHaveBeenCalledWith('payment_methods');
+      });
+
       it('r5 drift: Auto Pay turned ON (another tab) since the policy was resolved without it', async () => {
         mockCustomerOnAutopay.mockResolvedValue(true);
         expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: true }), { customerId: 'cust-1', policy: MOVED })).toBe(true);

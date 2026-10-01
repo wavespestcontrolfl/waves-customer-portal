@@ -1416,12 +1416,17 @@ The accept decides ONE collection promise inside its transaction from the verifi
 real invoice outcome (an UNATTACHED first invoice, e.g. setup-only or an existing customer whose
 series already exists, is paid by link at accept and is never the after-visit promise) and
 answers:
-- `409 { code: 'CONSENT_VARIANT_STALE', collectionPromise: { variant, tender, version } }` when the
+- `409 { code: 'CONSENT_VARIANT_STALE', collectionPromise: { variant, tender, version, deferred } }` when the
   attested variant / tender / version differs from what it would record (a pre-transaction check
   returns the card best case the same way). Nothing is recorded or committed and the dropped
   SetupIntent is retired. The page drops the captured intent and refetches `/data`; when the
-  returned version differs from the one its bundle renders it reloads the page, and when a card
-  promise comes back without the after-visit variant it shows the base text for that selection.
+  returned version differs from the one its bundle renders it reloads the page. `deferred` (only on
+  the in-transaction refusal) says whether the selection's first invoice is deferred to the visit;
+  the page changes the payment timing only on `deferred: false` (a base-consent answer alone, e.g.
+  Auto Pay paused since the capture, does not move the timing). The pre-transaction refusal omits it.
+- `503 { code: 'RECURRING_CARD_RETIRE_FAILED' }` when an in-transaction refusal dropped a captured
+  SetupIntent and Stripe could not confirm retiring it after the rollback: nothing committed, the tab
+  keeps its intent and retries.
 - `409 { code: 'PAYMENT_TIMING_REFRESH', afterVisitDeferred: false }` when the tab attested the
   after-visit timing but the selection's first invoice goes out payable now (unattached, one-time,
   invoice mode, or the cohort marker gone), and `afterVisitDeferred: true` when an after-visit
@@ -1429,8 +1434,9 @@ answers:
   the sub-gate). The page shows the answered timing for that selection and refetches.
 - `409 { code: 'ACCEPT_BILLING_CHANGED' }` when the transaction's customer lock finds the moved
   cohort drifted: `billing_mode` moved into an ineligible lane, the pause or opt-out state changed,
-  Auto Pay was turned on since the policy was resolved, or the accept landed on another / no
-  customer. Nothing is suppressed, charged or enrolled on the stale decision.
+  Auto Pay was turned on since the policy was resolved, the saved method a `saved_method_consented`
+  policy chose is no longer that customer's consented chargeable card (it is row-locked until
+  commit), or the accept landed on another / no customer. Nothing is suppressed, charged or enrolled on the stale decision.
 
 On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
 tender, text }` (the exact authorization recorded as shown) beside the existing
