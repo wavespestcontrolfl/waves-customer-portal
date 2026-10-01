@@ -25,9 +25,10 @@ async function clickGate(reviewRequestId) {
 // check, the per-customer lock (it still serializes with the automatic sender),
 // the busy-lock refusal and the click gate are unchanged. The send itself still
 // lands in sms_log, where lastManualAskAt sees it, so automatic asks keep their
-// spacing around it. Confirmed prior asks never block it, but an UNRESOLVED
-// review-ask reservation (a send whose outcome is in flight or uncertain, other
-// than this attempt's own) still does, so a retry cannot double-text.
+// spacing around it. Confirmed prior asks never block it, but UNRESOLVED
+// evidence still does (an sms_log review-ask reservation, or a review_requests
+// follow-up reservation, whose outcome is in flight or uncertain, other than
+// this attempt's own), so a retry cannot double-text.
 async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null, skipSpacing = false } = {}) {
   if (!customerId) return { sent: false, blocked: true, code: 'REVIEW_CUSTOMER_REQUIRED',
     reason: 'Select the customer receiving this review request before sending.', httpStatus: 409 };
@@ -43,7 +44,7 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
       let unresolvedAt;
       try {
         unresolvedAt = await history.lastUnresolvedAskAt(customerId, {
-          since: new Date(Date.now() - history.ASK_SPACING_MS), excludeReservationId,
+          since: new Date(Date.now() - history.ASK_SPACING_MS), excludeReservationId, excludeRequestId,
         });
       } catch {
         return { sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE',

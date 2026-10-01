@@ -89,8 +89,13 @@ describe('review ask dispatch boundary', () => {
           reason: 'A review text to this customer is still being confirmed. Check the thread before sending again.' });
       expect(provider).not.toHaveBeenCalled();
       expect(history.lastUnresolvedAskAt).toHaveBeenCalledWith('customer', {
-        since: new Date(now.getTime() - history.ASK_SPACING_MS), excludeReservationId: 'own',
+        since: new Date(now.getTime() - history.ASK_SPACING_MS), excludeReservationId: 'own', excludeRequestId: null,
       });
+    });
+
+    test('this attempt\'s own claimed request is passed so it cannot block itself', async () => {
+      await dispatchReviewAsk('customer', async () => ({ sent: true }), { skipSpacing: true, excludeRequestId: 'rr-own', excludeReservationId: 'own' });
+      expect(history.lastUnresolvedAskAt).toHaveBeenCalledWith('customer', expect.objectContaining({ excludeRequestId: 'rr-own', excludeReservationId: 'own' }));
     });
 
     test('an unreadable unresolved-send lookup fails closed with a 503', async () => {

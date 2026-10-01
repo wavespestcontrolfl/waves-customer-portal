@@ -65,10 +65,16 @@ const FOLLOWUP_DELIVERED_SUBQUERY = `(
   GROUP BY metadata->>'review_request_id'
 ) followups`;
 
+// review_requests columns that hold UNRESOLVED send evidence: stamped before a
+// provider handoff and cleared once the outcome is known (accepted or a
+// definite non-send), so a set value means "may have reached the customer".
+// Shared by the spacing readers and lastUnresolvedAskAt so they cannot drift.
+const RESERVATION_FIELDS = ['followup_reserved_at'];
+
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null, includeReservations = true } = {}) {
   const timestampColumns = ['review_requests.sms_sent_at', 'review_requests.sent_at',
     'review_requests.followup_delivered_at', 'followups.followup_delivered_at'];
-  if (includeReservations) timestampColumns.push('review_requests.followup_reserved_at');
+  if (includeReservations) timestampColumns.push(...RESERVATION_FIELDS.map(field => `review_requests.${field}`));
   const q = db('review_requests')
     // Correlated to the customer so the derived table uses the audit log's
     // customer index instead of grouping every follow-up ever delivered.
@@ -94,7 +100,7 @@ function deliveredAskRows(customerId, { since = null, excludeRequestId = null, i
 // sms_sent_at/sent_at on the same row.
 function latestDeliveredAt(rows, { includeReservations = true } = {}) {
   const timestampFields = ['sms_sent_at', 'sent_at', 'followup_delivered_at', 'followup_recorded_at'];
-  if (includeReservations) timestampFields.push('followup_reserved_at');
+  if (includeReservations) timestampFields.push(...RESERVATION_FIELDS);
   return rows.reduce((latest, row) => {
     const at = Math.max(...timestampFields.map(field => row[field] ? new Date(row[field]).getTime() : 0));
     return Number.isFinite(at) && at > (latest?.getTime() || 0) ? new Date(at) : latest;
@@ -223,8 +229,21 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
 // When the newest UNRESOLVED review-ask reservation (a send whose outcome is
 // in flight or uncertain, not confirmed delivered) was opened, inside `since`.
 // Confirmed asks never count. Throws on a read failure: callers fail closed.
-async function lastUnresolvedAskAt(customerId, { since, excludeReservationId = null } = {}) {
-  return lastManualAskAt(customerId, { since, excludeReservationId, unresolvedOnly: true });
+// Two evidence stores, the same two lastDeliveredAskAt / lastManualAskAt
+// consult for spacing: sms_log review-ask reservations, and review_requests
+// reservation columns (an uncertain follow-up leaves only those).
+// excludeRequestId drops the caller's own claimed review_requests row.
+async function lastUnresolvedAskAt(customerId, { since, excludeReservationId = null, excludeRequestId = null } = {}) {
+  const sinceAt = since ? new Date(since) : null;
+  const [smsLogAt, requestRows] = await Promise.all([
+    lastManualAskAt(customerId, { since, excludeReservationId, unresolvedOnly: true }),
+    deliveredAskRows(customerId, { since: sinceAt, excludeRequestId }),
+  ]);
+  const reservedRows = requestRows.filter(row => RESERVATION_FIELDS.some(field => row[field]));
+  const requestAt = latestDeliveredAt(reservedRows.map(row => Object.fromEntries(
+    RESERVATION_FIELDS.map(field => [field, row[field]]))));
+  const requestWithinWindow = requestAt && (!sinceAt || requestAt >= sinceAt) ? requestAt : null;
+  return smsLogAt && (!requestWithinWindow || smsLogAt > requestWithinWindow) ? smsLogAt : requestWithinWindow;
 }
 
 module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };
