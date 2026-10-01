@@ -153,7 +153,7 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
-const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL, handledStatusRefusal } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -1122,9 +1122,6 @@ router.put('/:id', async (req, res, next) => {
     if (updates.status !== undefined && !LEAD_STATUS_SET.has(updates.status)) {
       return res.status(400).json({ error: 'Invalid lead status' });
     }
-    if (updates.status === 'handled' && existingLead.status !== 'handled') {
-      return res.status(400).json({ error: "'handled' is set automatically when the customer books online" });
-    }
     // Mirror the create-side shape rules: clearing sends '', which stores as
     // NULL; the expiry column is a calendar DATE, so only a date-shaped
     // string is accepted (a timestamp would smuggle a timezone into it).
@@ -1164,12 +1161,10 @@ router.put('/:id', async (req, res, next) => {
     const responseLead = await db.transaction(async (trx) => {
       const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
       if (!current) return null;
-      // The customer's own booking closed this request ('handled') after staff loaded
-      // it (codex #5477 r13): a status change made from the stale open view must not
-      // reopen it. Reopening a request staff SAW handled stays possible.
-      if (updates.status !== undefined && current.status === 'handled' && existingLead.status !== 'handled') {
-        return { closedMeanwhile: true };
-      }
+      // 'handled' is system-set only, and a status change made from a view loaded
+      // before the customer's booking closed the request never reopens it.
+      const refusal = handledStatusRefusal(updates.status, existingLead.status, current.status);
+      if (refusal) return { refusal };
       previousStatus = current.status;
       // Email-specific correction provenance (Codex round-4 P1 on the
       // V1/V2 email-disagreement hold, PR #4802): stamped ONLY when the
@@ -1208,9 +1203,7 @@ router.put('/:id', async (req, res, next) => {
       return statusChanged ? trx('leads').where('id', lead.id).first() : lead;
     });
     if (!responseLead) return res.status(404).json({ error: 'Lead not found' });
-    if (responseLead.closedMeanwhile) {
-      return res.status(409).json({ error: 'This request closed on its own: the customer booked online. Reload to see it.' });
-    }
+    if (responseLead.refusal) return res.status(responseLead.refusal.code).json({ error: responseLead.refusal.error });
 
     // Existing best-effort funnel settlement runs after the atomic lead/history write.
     if (updates.status && updates.status !== previousStatus) {

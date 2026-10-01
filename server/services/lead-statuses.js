@@ -148,8 +148,22 @@ function scopeToProspects(qb, alias = 'leads') {
   return qb.whereNotIn(`${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias)).whereRaw(wonDescendantSql(alias));
 }
 
+// 'handled' is system-set only (a /book request the customer's own booking closed).
+// A staff status write is refused when it would SET it (codex #5477 r9), or when the
+// booking closed the request after staff loaded it, so a change made from that stale
+// open view would reopen it (codex #5477 r13). Reopening a request staff SAW handled
+// stays possible. `seen` = the status staff loaded, `now` = the status under the row
+// lock. Returns the refusal (status code + message) or null.
+function handledStatusRefusal(requested, seen, now) {
+  if (requested === undefined || seen === 'handled') return null;
+  if (requested === 'handled') return { code: 400, error: "'handled' is set automatically when the customer books online" };
+  if (now === 'handled') return { code: 409, error: 'This request closed on its own: the customer booked online. Reload to see it.' };
+  return null;
+}
+
 module.exports = {
   NON_ENGAGED_LEAD_STATUSES,
+  handledStatusRefusal,
   OPEN_LEAD_STATUSES,
   applyOpenLeadPredicate,
   isOpenLeadRow,

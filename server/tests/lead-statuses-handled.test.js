@@ -97,10 +97,14 @@ describe("lead status 'handled'", () => {
     const tools = (LEADS_TOOLS || []).filter((t) => t.input_schema?.properties?.new_status?.enum);
     for (const t of tools) expect(t.input_schema.properties.new_status.enum).not.toContain('handled');
     const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
-    expect(route).toMatch(/if \(updates\.status === 'handled' && existingLead\.status !== 'handled'\) \{\s*return res\.status\(400\)/);
-    // a status edit made from a stale open view never reopens a request the booking closed meanwhile (codex #5477 r13)
-    expect(route).toMatch(/if \(updates\.status !== undefined && current\.status === 'handled' && existingLead\.status !== 'handled'\) \{\s*return \{ closedMeanwhile: true \};/);
-    expect(route).toMatch(/if \(responseLead\.closedMeanwhile\) \{\s*return res\.status\(409\)/);
+    expect(route).toMatch(/const refusal = handledStatusRefusal\(updates\.status, existingLead\.status, current\.status\);\s*if \(refusal\) return \{ refusal \};/);
+    expect(route).toMatch(/if \(responseLead\.refusal\) return res\.status\(responseLead\.refusal\.code\)/);
+    const { handledStatusRefusal } = require('../services/lead-statuses');
+    expect(handledStatusRefusal('handled', 'new', 'new')).toMatchObject({ code: 400 }); // staff never set it
+    expect(handledStatusRefusal('contacted', 'new', 'handled')).toMatchObject({ code: 409 }); // the booking closed it after staff loaded it (codex #5477 r13)
+    expect(handledStatusRefusal('new', 'handled', 'handled')).toBeNull(); // reopening a request staff saw handled
+    expect(handledStatusRefusal(undefined, 'new', 'handled')).toBeNull(); // a notes-only edit
+    expect(handledStatusRefusal('contacted', 'new', 'new')).toBeNull();
     // the board's handled column shows handled requests but takes no drops (codex #5477 r11)
     const board = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
     expect(board).toMatch(/const acceptsDrops = stage !== "handled";/);
