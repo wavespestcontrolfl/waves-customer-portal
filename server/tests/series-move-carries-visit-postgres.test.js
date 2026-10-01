@@ -13,6 +13,13 @@ const { randomUUID } = require('node:crypto');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// Captures the customer tracker broadcast (customer:job_update) the
+// post-commit cleanup sends for a rewound row.
+const mockEmits = [];
+jest.mock('../sockets', () => ({
+  ...jest.requireActual('../sockets'),
+  getIo: () => ({ to: (room) => ({ emit: (event, payload) => mockEmits.push({ room, event, payload }) }) }),
+}));
 
 jest.setTimeout(180000);
 
@@ -194,6 +201,19 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     expect(String(anchorOcc.visitWindowStart).slice(0, 5)).toBe('09:00');
     expect(result.carriedVisitMembers.map((k) => String(k.id)).sort()).toEqual(f.pest.map((r) => String(r.id)).sort());
     expect(result.followUpOccurrences.map((k) => String(k.id))).not.toEqual(expect.arrayContaining([String(f.pest[0].id)]));
+  });
+
+  test('a live carried partner lands confirmed, and its tracker refresh says confirmed', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    await db('scheduled_services').where({ id: f.pest[0].id }).update({ status: 'en_route' });
+    mockEmits.length = 0;
+    await moveLawnSeries(f);
+    const pest = await db('scheduled_services').where({ id: f.pest[0].id }).first();
+    expect(pest.status).toBe('confirmed');
+    const refresh = mockEmits.filter((e) => e.event === 'customer:job_update' && String(e.payload.job_id) === String(f.pest[0].id));
+    expect(refresh.length).toBeGreaterThan(0);
+    for (const e of refresh) expect(e.payload.status).toBe('confirmed');
   });
 
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {

@@ -3148,7 +3148,10 @@ class SmartRebooker {
               transitioned_by: null,
             });
           }
-          if (partnerRewound) rewoundSiblings.push({ ...partner, customer_id: service.customer_id });
+          // The cleanup refreshes the tracker with the LANDED status (a live
+          // partner went back to 'confirmed') and releases the technician
+          // the partner was pinned to (its original technician_id).
+          if (partnerRewound) rewoundSiblings.push({ ...partner, status: pUpdate.status, customer_id: service.customer_id });
           moveRows.push({
             id: partner.id,
             anchor: false,
