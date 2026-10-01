@@ -141,6 +141,27 @@ function appliedNitrogen(applications) {
 }
 
 /**
+ * The report-data caller's nitrogen answer for the program line. Only positive
+ * evidence clears it: a catalog analysis_n > 0, or the name/application check
+ * for products the catalog cannot resolve. A failed product load or catalog
+ * read counts as nitrogen applied (no line beats a wrong line).
+ * @param {{ applications?: object[], productsLoadFailed?: boolean, loadCatalogRows: (ids: string[]) => Promise<object[]> }} input
+ * @returns {Promise<boolean>}
+ */
+async function resolveNitrogenApplied({ applications = [], productsLoadFailed = false, loadCatalogRows }) {
+  if (productsLoadFailed) return true;
+  const apps = Array.isArray(applications) ? applications : [];
+  try {
+    const ids = [...new Set(apps.map((app) => app && app.product && app.product.catalogId).filter(Boolean))];
+    const rows = ids.length ? await loadCatalogRows(ids) : [];
+    return (Array.isArray(rows) ? rows : []).some((row) => Number(row && row.analysis_n || 0) > 0)
+      || appliedNitrogen(apps);
+  } catch {
+    return true;
+  }
+}
+
+/**
  * @param {{ grassType?: string|null, month?: number|null, applications?: object[], nitrogenApplied?: boolean|null }} input
  *   nitrogenApplied is the caller's catalog-backed answer (report-data reads
  *   analysis_n); null means derive it from `applications`. month is the visit's calendar month (1-12), already computed at a noon-UTC
@@ -169,4 +190,5 @@ module.exports = {
   grassKeyFor,
   protocolMonths,
   appliedNitrogen,
+  resolveNitrogenApplied,
 };

@@ -270,3 +270,33 @@ describe('buildLawnReportV2 and GATE_LAWN_EXPECTATIONS', () => {
     expect(withGate('false', () => gates.lawnExpectationsLive())).toBe(false);
   });
 });
+
+describe('resolveNitrogenApplied (the report-data caller)', () => {
+  const { resolveNitrogenApplied } = require('../services/service-report/lawn-program-line');
+  const rowsFor = (rows) => async () => rows;
+  test('a failed product load counts as nitrogen applied, with no catalog read', async () => {
+    const load = jest.fn();
+    await expect(resolveNitrogenApplied({ applications: [], productsLoadFailed: true, loadCatalogRows: load })).resolves.toBe(true);
+    expect(load).not.toHaveBeenCalled();
+  });
+  test('a failed catalog read counts as nitrogen applied', async () => {
+    const apps = [{ product: { name: 'Celsius WG', catalogId: 'c1' } }];
+    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: async () => { throw new Error('db'); } })).resolves.toBe(true);
+  });
+  test('a catalog analysis_n above zero counts', async () => {
+    const apps = [{ product: { name: 'Lawn Feed', catalogId: 'c1' } }];
+    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 16 }]) })).resolves.toBe(true);
+  });
+  test('an unresolved product named like a fertilizer analysis still counts (no catalogId)', async () => {
+    const apps = [{ product: { name: 'Granular 24-0-11' } }];
+    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([]) })).resolves.toBe(true);
+  });
+  test('a catalog-resolved product with no row still falls back to its name', async () => {
+    const apps = [{ product: { name: 'Granular 24-0-11', catalogId: 'missing' } }];
+    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([]) })).resolves.toBe(true);
+  });
+  test('no nitrogen evidence anywhere is a confirmed negative', async () => {
+    const apps = [{ product: { name: 'Celsius WG', catalogId: 'c1' } }];
+    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 0 }]) })).resolves.toBe(false);
+  });
+});

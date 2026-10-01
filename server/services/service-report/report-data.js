@@ -17,6 +17,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { resolveNitrogenApplied } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
@@ -5300,19 +5301,18 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // GATE_LAWN_EXPECTATIONS (P9): the program line steps aside in Jun-Sep
       // when the visit applied a nitrogen product, which the public
       // applications[] shape does not carry, so read analysis_n from the
-      // catalog here. Gate off = no query, byte-identical. A failed read is
-      // treated as nitrogen applied (no line beats a wrong line).
+      // catalog here. Gate off = no query, byte-identical. Only positive
+      // evidence clears nitrogen: a catalog hit OR the name-based check for
+      // products the catalog cannot resolve (no catalogId, no analysis_n row)
+      // both count, and a failed product load or catalog read counts as
+      // nitrogen applied (no line beats a wrong line; codex P1 pre-push).
       let nitrogenApplied = null;
       if (featureGates.lawnExpectationsLive()) {
-        try {
-          const catalogIds = [...new Set((applications || []).map((app) => app?.product?.catalogId).filter(Boolean))];
-          const nRows = catalogIds.length
-            ? await knex('products_catalog').whereIn('id', catalogIds).select('id', 'analysis_n')
-            : [];
-          nitrogenApplied = nRows.some((row) => Number(row.analysis_n || 0) > 0);
-        } catch {
-          nitrogenApplied = true;
-        }
+        nitrogenApplied = await resolveNitrogenApplied({
+          applications,
+          productsLoadFailed,
+          loadCatalogRows: (ids) => knex('products_catalog').whereIn('id', ids).select('id', 'analysis_n'),
+        });
       }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
