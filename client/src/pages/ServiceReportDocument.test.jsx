@@ -377,6 +377,30 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text).toContain('That gives today’s treatment time to work.');
   });
 
+  it('a label mow hold on the banner changes nothing in the printed document', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const build = (banner) => ({
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner,
+        aftercare: { watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: line1 },
+        followUp: { customerAction: line1 },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line1 }],
+      },
+    });
+    const base = { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+    const mow = { days: 2, untilDate: '2026-10-03', untilLabel: 'Sat', line: 'Mowing: hold off until Sat, 2 days after today\'s treatment.' };
+    const without = render(<ServiceReportDocument data={build(base)} token="tok123" />);
+    const textWithout = without.container.textContent;
+    without.unmount();
+    const withMow = render(<ServiceReportDocument data={build({ ...base, mowHold: mow })} token="tok123" />);
+    expect(withMow.container.textContent).toBe(textWithout);
+    expect(withMow.container.textContent).not.toContain('Mowing: hold off');
+    expect(withMow.container.textContent.match(/Skip your turf watering until Thu 3 PM\./g)).toHaveLength(1);
+  });
+
   it('hold then water-in: a hero task carrying both banner lines prints each line once', () => {
     const line1 = 'Skip your turf watering until Thu 3 PM.';
     const line2 = 'After that, water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.';
