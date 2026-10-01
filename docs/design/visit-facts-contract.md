@@ -502,7 +502,11 @@ only the *other* facts each line adds by hand are named here.
   `german_roach`, `german_roach_initial`. Has a gauge
   (`typed_activity_score`, `roach_activity`, derived from `activity_level`).
   Adds the typed photo summary,
-  product facts, photos and the `cockroach_work_from_products` **gap**.
+  product facts, photos and `cockroach_work_from_products`: the form's
+  `work_completed` chips are `autoFilled` (hidden) and derived at completion
+  from the submitted product rows (`cockroach-work-from-products.js`), so the
+  report's "What we did" reads them as before. Records completed earlier keep
+  the chips the tech picked.
 - **Termite bait** (`termite_bait`, form `termite_bait_station`,
   `20260612000001`): `termite_bait`, `termite_active_annual`,
   `termite_active_bait_quarterly`, `termite_monitoring`,
@@ -620,10 +624,6 @@ listed here, and every bullet here is still a gap fact on that line.
   line, but nothing records it today. The observations vocabulary is
   species-neutral and was unused on 0 of 69 visits, and product targets are
   the label list, not finds. Voice fill has to add the storage.
-- `cockroach.cockroach_work_from_products`: **the cockroach "What we did"
-  section has no product fallback.** `buildWork` in `cockroach-report-v2.js`
-  reads only the `work_completed` chips. A visit that recorded products but
-  no chips shows no work.
 - `reservice_pest.fast_complete_customer_text`: **Fast Complete sends no
   customer text.** `FastCompleteSheet.jsx` `completionBody` sends no
   `customerRecap` and sets `sendCompletionSms: false`, so the fact has no

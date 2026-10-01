@@ -481,7 +481,15 @@ export default function TriageInboxTabV2({ isAdmin }) {
       // expected_updated_at: version binding (enforced server-side for
       // house-number conflict cards) — a card refreshed since it was
       // rendered answers 409 instead of settling unseen evidence.
-      body: JSON.stringify({ verdict, wrong_fields: wrongFields || [], note: note || null, expected_updated_at: item.updated_at || null }),
+      body: JSON.stringify({
+        verdict, wrong_fields: wrongFields || [], note: note || null, expected_updated_at: item.updated_at || null,
+        // Auto-routed review: the decision this row DISPLAYS. The server checks it
+        // is still the call's newest decision and answers 409 otherwise, so a
+        // verdict never lands on a decision the reviewer did not see.
+        ...(kind === "auto_routed" && item.route_decision_id
+          ? { route_decision_id: item.route_decision_id, route_decision_revision: item.route_decision_revision || null }
+          : {}),
+      }),
     })
       .then(() => {
         setActioning(null);
@@ -510,6 +518,15 @@ export default function TriageInboxTabV2({ isAdmin }) {
           setDenyFields([]);
           load(mode, status, autoOnly);
           setError("This card's evidence changed since it loaded — review the refreshed card before answering.");
+          return;
+        }
+        // The decision under this auto-routed row was refreshed since it loaded
+        // (a reprocess): reload so the reviewer answers the CURRENT decision.
+        if (err?.status === 409 && err?.code === 'STALE_ROUTE_DECISION') {
+          setDenyFor(null);
+          setDenyFields([]);
+          load(mode, status, autoOnly);
+          setError("This call was reprocessed since it loaded — review the refreshed decision before answering.");
           return;
         }
         // Any other 409 (a relinked call, a reschedule proposal on the

@@ -223,7 +223,15 @@ const PROJECT_TYPES = {
         'Wall voids', 'Garage', 'Attic', 'Exterior perimeter', 'Landscape beds',
         'Lanai / pool cage', 'Other',
       ] },
-      { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
+      // Derived from the products recorded at completion (owner ruling
+      // 2026-09-26 — "just add solutions used", the same shape as T&S
+      // `treatments_completed`): the tech never taps this by hand.
+      // complete-scheduled-service.js fills it from the submitted product rows
+      // (cockroach-work-from-products.js) before the snapshot freezes, so the
+      // report, Today's Result, treatment evidence and trace eligibility keep
+      // reading the same chip vocabulary. Records completed before the change
+      // keep the chips the tech picked.
+      { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', autoFilled: true, options: [
         'Bait placement', 'Insect growth regulator', 'Crack & crevice treatment',
         'Dust application', 'Flush-out treatment', 'Exterior perimeter treatment',
         'Glue boards placed', 'Monitoring stations placed', 'Sanitation review completed',

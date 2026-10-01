@@ -65,7 +65,8 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
       triggerEventId: `microdeposit_verification_email:${invoice.id}:${touch}`,
       idempotencyKey: `microdeposit_verification_email:${invoice.id}:${touch}`,
       suppressionGroupKey: 'transactional_required',
-      categories: ['bank_verification', 'payment_setup'],
+      categories: ['bank_verification', 'payment_setup',
+        ...(enforceBillingPreference ? [] : [require('./collections/collection-hold').OPERATOR_INITIATED_EMAIL_CATEGORY])],
       withProviderHandoff: enforceBillingPreference
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey: TEMPLATE_KEY, dispatch, state,

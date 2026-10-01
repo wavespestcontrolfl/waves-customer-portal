@@ -246,7 +246,7 @@ async function findHostRow(sp, { hostParent, cols, to }) {
   const { TERMINAL_TRACK_STATES } = require('../server/services/customer-lifecycle-guard');
   const { isPlanSeriesRow } = require('../server/services/recurring-series-cancel-reseed');
   const {
-    resolveSeriesPropertyScope, seriesPropertyVerdict, _internals: { rowPropertyScope },
+    resolveSeriesPropertyScope, seriesPropertyVerdict, withComparableKeys, _internals: { rowPropertyScope },
   } = require('../server/services/rider-series-preview');
   const addressCols = ['service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip']
     .filter((c) => cols[c]);
@@ -264,12 +264,16 @@ async function findHostRow(sp, { hostParent, cols, to }) {
     .then((r) => r.filter(isPlanSeriesRow));
   if (!rows.length) return null;
   if (!cols.property_id) return rows[0];
-  const hostScope = await resolveSeriesPropertyScope(sp, hostParent);
-  if (!hostScope.resolved) return rows[0];
-  return rows.find((r) => {
+  const rawHostScope = await resolveSeriesPropertyScope(sp, hostParent);
+  if (!rawHostScope.resolved) return rows[0];
+  // An unstamped host parent resolves by address key only while its child rows
+  // carry just a property_id: make the two comparable (fail closed) before the
+  // verdict, same as the preview's host-date filter.
+  const rowScopes = rows.map(rowPropertyScope);
+  const [hostScope, ...comparable] = await withComparableKeys(sp, [rawHostScope, ...rowScopes]);
+  return rows.find((r, i) => {
     if (String(r.id) === String(hostParent.id)) return true;
-    const scope = rowPropertyScope(r);
-    return !scope.resolved || seriesPropertyVerdict(scope, hostScope) === 'same';
+    return !comparable[i].resolved || seriesPropertyVerdict(comparable[i], hostScope) === 'same';
   }) || null;
 }
 
@@ -342,13 +346,17 @@ async function assertNoWindowConflict(sp, { target, to, exemptIds, rowId }) {
 // its own property_id / stamped address that differs from the series scope would
 // be moved onto a lawn stop somewhere else. A row with no scope of its own
 // inherits the series scope (same rule as the preview's host-date filter).
-function assertRowAtPairProperty(row, ctx) {
+// A pest root with no stamped property resolves by address key only while its
+// id-stamped occurrences carry just a property_id: withComparableKeys resolves
+// the id side to its address key (fail closed) before the verdict.
+async function assertRowAtPairProperty(sp, row, ctx) {
   const {
-    seriesPropertyVerdict, _internals: { rowPropertyScope },
+    seriesPropertyVerdict, withComparableKeys, _internals: { rowPropertyScope },
   } = require('../server/services/rider-series-preview');
   const rowScope = rowPropertyScope(row);
   if (!rowScope.resolved) return;
-  if (seriesPropertyVerdict(rowScope, ctx.propertyScope) !== 'same') throw new PairSkip('row_property_differs', row.id);
+  const [comparableRow, comparableSeries] = await withComparableKeys(sp, [rowScope, ctx.propertyScope]);
+  if (seriesPropertyVerdict(comparableRow, comparableSeries) !== 'same') throw new PairSkip('row_property_differs', row.id);
 }
 
 // Ownership, status, date and near-term floor, then the durable pins.
@@ -551,7 +559,7 @@ async function planMove(sp, ctx, {
   const { cols } = ctx;
   const row = await sp('scheduled_services').where({ id: expect.rowId }).first();
   await assertRowMovable(sp, row, { expect, to, ctx });
-  assertRowAtPairProperty(row, ctx);
+  await assertRowAtPairProperty(sp, row, ctx);
   await assertFenced(ctx, row, to, target);
   await assertNoSideEffectRows(sp, row, ctx);
 

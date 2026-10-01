@@ -8,7 +8,14 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { emailTemplateAutomationsMode } = require('../config/feature-gates');
+// Light at load (the readers behind each builder are required lazily); the
+// key set below decides WHICH runs ever touch the email division.
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
+const {
+  hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
+  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, BUILDER_SKIPPED, PAYLOAD_CHANGED, isBoundaryRefusal, onceScopeFor, anyRivalAtSameProperty,
+} = require('./email-division/payload-builders');
+
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
 // appointment in any of these states is no longer an upcoming visit.
 const APPOINTMENT_CLOSED_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
@@ -110,6 +117,17 @@ const TRIGGER_MAPPINGS = {
     entityIdKeys: ['estimate_id', 'id'],
     recipientType: 'lead',
     recipientIdKeys: ['customer_id', 'lead_id'],
+    emailKeys: ['customer_email', 'email'],
+  },
+  // A customer's first performed visit on a service line. Mapped for the
+  // email division's lc.first_visit_pest; the producer call (an emitter at
+  // the completion site) is a separate step — see
+  // email-template-automation-emitters.js emitVisitCompletedFirst.
+  'visit.completed_first': {
+    entityType: 'service_record',
+    entityIdKeys: ['service_record_id', 'id'],
+    recipientType: 'customer',
+    recipientIdKeys: ['customer_id'],
     emailKeys: ['customer_email', 'email'],
   },
   'review.linked_5star': {
@@ -1628,8 +1646,11 @@ async function shadowPreflight(run, executionPayload, automation) {
     return { ok: true };
   }
 }
-async function finalizeShadowRun(run, automation, executionPayload = {}) {
-  const preflight = await shadowPreflight(run, executionPayload, automation);
+// `refusal` is a verdict the caller already reached (a payload builder's
+// skip): it settles exactly like a preflight refusal — would_block evidence,
+// promotable in place once whatever blocked it is fixed (#5418).
+async function finalizeShadowRun(run, automation, executionPayload = {}, refusal = null) {
+  const preflight = refusal || await shadowPreflight(run, executionPayload, automation);
   const wouldSendMetadata = {
     automation_key: automation.automation_key,
     template_key: run.template_key,
@@ -1653,6 +1674,8 @@ async function finalizeShadowRun(run, automation, executionPayload = {}) {
     });
     return blocked || { ...run, status: 'skipped', exit_reason: preflight.reason || 'would_block' };
   }
+  const onceScope = onceScopeFor(run);
+  if (onceScope) return finalizeShadowOnce(run, onceScope, wouldSendMetadata);
   const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'shadow',
     last_error: null,
@@ -1661,6 +1684,45 @@ async function finalizeShadowRun(run, automation, executionPayload = {}) {
   }).returning('*');
   await logRunEvent(run.id, 'would_send', 'Shadow mode: would have sent — nothing dispatched', wouldSendMetadata);
   return updated || { ...run, status: 'shadow' };
+}
+
+// The shadow twin of the once-per-customer (B5) / once-per-estimate (C1) guard:
+// live, exactly one send wins the scope, so shadow must not record several
+// would_sends for it (that would overstate what live would send). Under the SAME
+// per-customer advisory lock the ledger's reservation takes, the first shadow run
+// to settle for the scope is the winner (status 'shadow', would_send); a later
+// one records would_block (once_already_counted). Only shadow-ORIGIN 'shadow' runs
+// count, and a winner stops counting the moment a live replay promotes it (#5418:
+// promotion rewrites its status), so this never interferes with shadow->live
+// promotion — a would_block run is itself promotable (its latest event is
+// would_block) and live then decides through the real once guard.
+async function finalizeShadowOnce(run, scope, wouldSendMetadata) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${run.recipient_id || run.entity_id}`]);
+    const rivals = trx('email_template_automation_runs')
+      .where({ template_key: run.template_key, status: 'shadow' })
+      .whereNot({ id: run.id })
+      .whereRaw(SHADOW_ORIGIN_SQL);
+    if (scope === 'estimate') rivals.where({ entity_type: 'estimate', entity_id: String(run.entity_id) });
+    else rivals.where({ recipient_id: String(run.recipient_id) });
+    // 'property' (B1): a rival counts only at the same property.
+    const hasRival = scope === 'property'
+      ? await anyRivalAtSameProperty(trx, run, await rivals.select('entity_id'))
+      : Boolean(await rivals.first('id'));
+    if (hasRival) {
+      const reason = 'an earlier shadow run already counts for this customer (or estimate): live sends it once';
+      const [blocked] = await trx('email_template_automation_runs').where({ id: run.id }).update({
+        status: 'skipped', exit_reason: reason, last_error: null, completed_at: new Date(), updated_at: new Date(),
+      }).returning('*');
+      await logRunEvent(run.id, 'would_block', reason, { ...wouldSendMetadata, guard: 'once_already_counted' }, trx);
+      return blocked || { ...run, status: 'skipped', exit_reason: reason };
+    }
+    const [updated] = await trx('email_template_automation_runs').where({ id: run.id }).update({
+      status: 'shadow', last_error: null, completed_at: new Date(), updated_at: new Date(),
+    }).returning('*');
+    await logRunEvent(run.id, 'would_send', 'Shadow mode: would have sent — nothing dispatched', wouldSendMetadata, trx);
+    return updated || { ...run, status: 'shadow' };
+  });
 }
 
 // The ledger sends to the address its eligibility judged: the customer's
@@ -1753,6 +1815,23 @@ function recipientChangedSkip() {
   };
 }
 
+// The estimate a nurture run is about changed hands (customer or email) or is no
+// longer expired between the build and the provider boundary: terminal, never
+// retargeted — its bearer link must not reach the old recipient.
+function estimateChangedSkip(reason) {
+  const skipReason = {
+    ESTIMATE_NOT_EXPIRED: 'the estimate is no longer expired; not sent',
+    ESTIMATE_EXPIRY_SUPERSEDED: 'the estimate was extended and expired again since this run was created; a newer run owns the touch',
+    ESTIMATE_FOLLOWUP_BLOCKED: 'the estimate was archived or opted out of automated follow-up since this run was created; not sent',
+    VISIT_NOT_ELIGIBLE: 'the visit this run is about is no longer eligible (reassigned, suppressed, or renumbered since the run was created); not sent',
+  }[reason] || 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient';
+  if (String(reason).startsWith(`${BUILDER_SKIPPED}:`)) {
+    // The generic boundary rebuild: the builder itself no longer passes, with its own code.
+    return { skipReason: `the email can no longer be built for this send (${String(reason).slice(BUILDER_SKIPPED.length + 1)}); not sent`, skipGuard: 'payload_builder' };
+  }
+  return { skipReason, skipGuard: { [VISIT_NOT_ELIGIBLE]: 'visit_not_eligible' }[reason] || 'estimate_recipient_changed' };
+}
+
 // Ledger-routed dispatch (the wiring PR). Everything the library's
 // sendTemplate does before the provider — template/version resolution,
 // render + required variables, the unsubscribe/ASM compliance guard,
@@ -1787,7 +1866,7 @@ async function confirmedLedgerDelivery(run) {
   return settled.result?.sent ? settled : null;
 }
 
-async function dispatchThroughLedger(run, automation, executionPayload, stream, onQueued) {
+async function dispatchThroughLedger(run, automation, executionPayload, stream, onQueued, payloadFingerprint = null) {
   const delivered = await confirmedLedgerDelivery(run);
   if (delivered) return delivered;
   const refusal = await ledgerRecipientRefusal(run);
@@ -1805,6 +1884,9 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
     // the reservation and again at the provider handoff and refuses on a
     // mismatch — an email change after the build must never retarget it.
     expectedRecipientEmail: run.recipient_email,
+    // Once per customer / estimate, decided inside the reservation under the
+    // customer's advisory lock (null for a template with no such rule).
+    ...ledgerGuardsFor(run, executionPayload, payloadFingerprint),
     template: {
       templateKey: run.template_key,
       versionId: run.template_version_id || undefined,
@@ -1818,12 +1900,29 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   });
   if (out.sent) return { result: { sent: true, message: out.message } };
   if (out.duplicate) return settleLedgerDuplicate(run, out.row);
+  if (out.reason === PAYLOAD_CHANGED) {
+    // The provider-boundary rebuild passed but rendered different content than this
+    // attempt built: the evidence changed in between. The ledger settled the
+    // reservation retryable; the run is deferred (budget-neutral) so the next
+    // attempt rebuilds from fresh data.
+    throw Object.assign(new Error('the email\'s content changed between the build and the provider handoff'), { code: PAYLOAD_CHANGED });
+  }
   if (!out.row) {
     // Denied before any reservation (ineligible, a cap, a key conflict).
     if (out.reason === REASONS.LOOKUP_FAILED) {
       throw Object.assign(new Error('email division eligibility lookup failed'), { code: 'LEDGER_LOOKUP_FAILED' });
     }
     if (out.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
+    if (isBoundaryRefusal(out.reason)) return estimateChangedSkip(out.reason);
+    if (out.reason === ONCE_ALREADY_DELIVERED) {
+      return { skipReason: 'this customer (or estimate) already has a sent email of this kind; not sent again', skipGuard: 'already_delivered' };
+    }
+    if (out.reason === ONCE_IN_FLIGHT) {
+      // A qualifying sibling holds a live reservation: this run waits for its
+      // outcome through the bounded retry (sent -> skipped next time; failed or
+      // abandoned -> this run sends). Never a terminal skip.
+      throw Object.assign(new Error('another email of this kind is in flight for this customer (or estimate)'), { code: 'LEDGER_SIBLING_IN_FLIGHT' });
+    }
     return { skipReason: `email division ledger refused the send: ${out.reason}`, skipGuard: 'ledger_refused' };
   }
   // A reservation existed: its settled status says what happened. The ledger
@@ -1839,6 +1938,9 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   // dispatch takes.
   if (settled?.status === 'sent') throw out.error || deliveryUncertainError();
   if (settled?.status === 'skipped' && settled.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
+  if (settled?.status === 'skipped' && isBoundaryRefusal(settled.reason)) {
+    return estimateChangedSkip(settled.reason);
+  }
   if (settled?.status === 'skipped') {
     return { skipReason: `email division ledger refused the send: ${settled.reason || out.reason}`, skipGuard: 'ledger_refused' };
   }
@@ -1869,7 +1971,7 @@ async function withPrepSendLock(run, fn) {
 // on a conclusive no-delivery (prepUndelivered). Returns the finalized run
 // row, or { skipReason } when the page belongs to another guide; rethrows a
 // send failure for executeRun's retry / fail decision.
-async function dispatchRun(run, automation, executionPayload) {
+async function dispatchRun(run, automation, executionPayload, payloadFingerprint = null) {
   const prepClaim = await claimPrepPageForRun(run);
   if (!prepClaim.owned) return { skipReason: prepClaim.delivered ? 'prep guide already delivered for this visit' : 'prep page owned by another guide' };
   let prepDispatched = false;
@@ -1879,7 +1981,7 @@ async function dispatchRun(run, automation, executionPayload) {
     const ledgerStream = ledgerStreamFor(run.template_key);
     let result;
     if (ledgerStream) {
-      const routed = await dispatchThroughLedger(run, automation, executionPayload, ledgerStream, onQueued);
+      const routed = await dispatchThroughLedger(run, automation, executionPayload, ledgerStream, onQueued, payloadFingerprint);
       if (routed.skipReason) return { skipReason: routed.skipReason, skipGuard: routed.skipGuard };
       ({ result } = routed);
     } else {
@@ -1956,7 +2058,7 @@ function deferForPrepLock(run, attemptNumber, now) {
 }
 
 // A live ledger reservation (another attempt of this run's own send, e.g. a
-// crashed worker's) holds the send: wait for it the way a held prep lease waits — attempt restored, nothing
+// crashed worker's, or a live once-per-customer / estimate sibling) holds the send: wait for it the way a held prep lease waits — attempt restored, nothing
 // spent. Bounded: the reservation lease (RESERVATION_LIFETIME_MS) is the most
 // any one reservation can stay live, and the deferral count is capped at the
 // number of delays that fit in it (plus slack); past the cap the normal
@@ -1964,7 +2066,7 @@ function deferForPrepLock(run, attemptNumber, now) {
 const LEDGER_DEFER_MS = 2 * 60 * 1000;
 const LEDGER_DEFER_MESSAGE = 'Deferred: email division reservation outstanding';
 const LEDGER_MAX_DEFERRALS = Math.ceil(RESERVATION_LIFETIME_MS / LEDGER_DEFER_MS) + 2;
-const LEDGER_DEFER_CODES = new Set(['LEDGER_RESERVATION_OUTSTANDING']);
+const LEDGER_DEFER_CODES = new Set(['LEDGER_RESERVATION_OUTSTANDING', 'LEDGER_SIBLING_IN_FLIGHT']);
 async function deferForLedger(run, attemptNumber, now, err) {
   const used = await db('email_template_automation_run_events')
     .where({ run_id: run.id, event_type: 'retry_scheduled' })
@@ -1973,6 +2075,35 @@ async function deferForLedger(run, attemptNumber, now, err) {
     .first();
   if (Number(used?.n || 0) >= LEDGER_MAX_DEFERRALS) return null;
   return deferRun(run, attemptNumber, now, { delayMs: LEDGER_DEFER_MS, lastError: err.message, message: LEDGER_DEFER_MESSAGE });
+}
+
+// The payload changed between the build and the provider handoff (the boundary
+// rebuild rendered different content): back to runnable a little later with the
+// attempt restored, so the next attempt rebuilds from fresh data. Bounded to a
+// small number of deferrals; past it the run is a terminal 'payload_changed' skip.
+const PAYLOAD_DEFER_MS = 30 * 1000;
+const PAYLOAD_DEFER_MESSAGE = 'Deferred: the email content changed before the send; rebuilding from fresh data';
+const PAYLOAD_MAX_DEFERRALS = 3;
+async function deferForPayloadChange(run, attemptNumber, now) {
+  const used = await db('email_template_automation_run_events')
+    .where({ run_id: run.id, event_type: 'retry_scheduled', message: PAYLOAD_DEFER_MESSAGE })
+    .count('* as n')
+    .first();
+  if (Number(used?.n || 0) >= PAYLOAD_MAX_DEFERRALS) return null;
+  return deferRun(run, attemptNumber, now, { delayMs: PAYLOAD_DEFER_MS, lastError: PAYLOAD_CHANGED, message: PAYLOAD_DEFER_MESSAGE });
+}
+
+// The fingerprint of the payload this attempt built, kept on the run (its context)
+// as the audit of what the boundary compares against. Best-effort: the comparison
+// itself runs on the in-memory value.
+async function recordPayloadFingerprint(run, fingerprint) {
+  try {
+    await db('email_template_automation_runs').where({ id: run.id }).update({
+      context: db.raw("COALESCE(context, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ payload_fingerprint: fingerprint })]),
+    });
+  } catch (err) {
+    logger.warn(`[email-template-automation] payload fingerprint not recorded for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
+  }
 }
 
 async function finalizeFailedRun(run, err, attemptNumber, retryPolicy) {
@@ -2005,11 +2136,58 @@ async function loadRunAndAutomation(runOrId, automation) {
   return { run, resolvedAutomation };
 }
 
+// origin_mode (stamped at creation) OUTRANKS the current gate read for
+// 'shadow' — see the long note at its call site in executeRun.
+function dispatchModeFor(run) {
+  const dispatchMode = emailTemplateAutomationsMode();
+  return { dispatchMode, shadowRun: asObject(run.context).origin_mode === 'shadow' || dispatchMode === 'shadow' };
+}
+
+// The email division's payload builders (nurture.* / lc.* templates with a
+// real trigger): the run carries ids, the builder reads Waves' own data into
+// the template's payload and SKIPS — never retried — when a required
+// condition is not met. Runs on the shadow path too (read-only: shadow never
+// mints or calls out), so shadow reports exactly what live would do: a live
+// skip settles 'skipped' (guard payload_builder), a shadow skip is would_block
+// evidence, promotable once the data supports the send. No builder for the
+// key -> payload untouched. Returns { payload } to continue, or { settled }
+// (the finalized run row).
+async function applyPayloadBuilder(run, automation, payload, shadowRun, attemptNumber) {
+  if (!hasPayloadBuilder(run.template_key)) return { payload };
+  const built = await buildEmailDivisionPayload({ run, payload, mode: shadowRun ? 'shadow' : 'live' });
+  if (!built.skip) return { payload: built.payload, fingerprint: built.fingerprint || null };
+  if (shadowRun) {
+    return { settled: await finalizeShadowRun(run, automation, payload, { ok: false, reason: built.reason, code: 'payload_builder' }) };
+  }
+  return {
+    settled: await markRunSkipped(run, built.reason, { guard: 'payload_builder', code: built.code, attempt: attemptNumber }),
+  };
+}
+
 const GATE_OFF_REASON = 'email template automations gate is off';
+
+// Only a run that is runnable (or stale-running: a crashed worker's) is reclaimed;
+// a live worker's own run finalizes itself.
+async function recoverConfirmedDelivery(run, now) {
+  if (!ledgerStreamFor(run.template_key)) return null;
+  const reclaimable = RUNNABLE_STATUSES.includes(run.status)
+    || (run.status === 'running' && new Date(run.updated_at) <= staleRunningCutoff(now));
+  if (!reclaimable) return null;
+  const delivered = await confirmedLedgerDelivery(run);
+  if (!delivered) return null;
+  return (await finalizeSentRun(run, delivered.result)).updated;
+}
 
 async function executeRun(runOrId, { automation, now = new Date() } = {}) {
   const { run, resolvedAutomation } = await loadRunAndAutomation(runOrId, automation);
   if (FINAL_STATUSES.has(run.status)) return run;
+  // A confirmed delivery under this run's own key is settled FIRST, ahead of every
+  // check that reads mutable state (the automation's status, the gate, the live
+  // entity, exit conditions, the payload builder, the recipient checks): the email
+  // went out, so a reclaimed run is finalized sent — never skipped because the
+  // world changed after the send.
+  const recovered = await recoverConfirmedDelivery(run, now);
+  if (recovered) return recovered;
   const automationStatus = normalizeStatus(resolvedAutomation.status || 'active');
   if (automationStatus !== 'active') {
     return markRunSkipped(run, `automation status is ${automationStatus}`, { guard: 'automation_status' });
@@ -2070,7 +2248,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
         attempt: attemptNumber,
       });
     }
-    const executionPayload = { ...storedPayload, ...livePayload };
+    let executionPayload = { ...storedPayload, ...livePayload };
     const exitReason = exitReasonFor(asObject(resolvedAutomation.exit_conditions), executionPayload);
     if (exitReason) {
       return markRunSkipped(claimedRun, exitReason, { guard: 'exit_conditions', attempt: attemptNumber });
@@ -2099,9 +2277,16 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // is dropped, not deferred — its trigger's intent marker was settled
     // 'processed' when the run was created, so nothing replays it; a later
     // re-flip to live sends only events from then on.
-    const originMode = asObject(claimedRun.context).origin_mode;
-    const dispatchMode = emailTemplateAutomationsMode();
-    if (originMode === 'shadow' || dispatchMode === 'shadow') {
+    const built = await applyPayloadBuilder(claimedRun, resolvedAutomation, executionPayload, dispatchModeFor(claimedRun).shadowRun, attemptNumber);
+    if (built.settled) return built.settled;
+    executionPayload = built.payload;
+    const payloadFingerprint = built.fingerprint || null;
+    // The mode is read AGAIN, immediately before the decision it governs: the
+    // builder awaits database work, radar and consultation calls, and a gate flipped
+    // to shadow or off during them must stop the send (a shadow-origin run still
+    // never sends: origin_mode outranks the gate).
+    const { dispatchMode, shadowRun } = dispatchModeFor(claimedRun);
+    if (shadowRun) {
       return finalizeShadowRun(claimedRun, resolvedAutomation, executionPayload);
     }
     // Fail-closed (codex P1): a run already sitting in the queue (created
@@ -2113,13 +2298,19 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     if (dispatchMode === 'off') {
       return markRunSkipped(claimedRun, GATE_OFF_REASON, { guard: 'gate_off', attempt: attemptNumber });
     }
-    const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
+    if (payloadFingerprint) await recordPayloadFingerprint(claimedRun, payloadFingerprint);
+    const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload, payloadFingerprint));
     if (outcome.skipReason) {
       return markRunSkipped(claimedRun, outcome.skipReason, { guard: outcome.skipGuard || 'prep_page_owned', attempt: attemptNumber });
     }
     return outcome.updated;
   } catch (err) {
     if (err.message === PREP_LOCK_HELD) return deferForPrepLock(claimedRun, attemptNumber, now);
+    if (err.code === PAYLOAD_CHANGED) {
+      const deferred = await deferForPayloadChange(claimedRun, attemptNumber, now);
+      if (deferred) return deferred;
+      return markRunSkipped(claimedRun, 'the content this email was built from kept changing before the send; not sent', { guard: 'payload_changed', attempt: attemptNumber });
+    }
     if (LEDGER_DEFER_CODES.has(err.code)) {
       const deferred = await deferForLedger(claimedRun, attemptNumber, now, err);
       if (deferred) return deferred;

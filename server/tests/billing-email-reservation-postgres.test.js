@@ -621,4 +621,104 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     expect(rows.find((row) => row.id === sibling.id).metadata.delivered).toBeUndefined();
     expect(rows.find((row) => row.id === sibling.id).metadata.resolved).toBeUndefined();
   });
+  test('customer-level dunning: an accepted-but-unstamped email is repaired from the stored row, only when bound to THIS reservation', async () => {
+    // relative to the clock the code reads (reminderProgress' 90-day window), so the test means the same any day
+    const acceptedAt = new Date(Date.now() - 5000);
+    const customerId = randomUUID();
+    const scheduleId = randomUUID();
+    const eventKey = `customer-dunning:${scheduleId}:1:d60_reminder`;
+    const tail = `${scheduleId}:1:d60_reminder`;
+    const mine = ledger({ customerId, invoiceId: randomUUID(), eventKey, source: 'invoice_followups_customer' });
+    const otherKey = `customer-dunning:${scheduleId}:1:d90_final_notice`;
+    const unbound = ledger({ customerId, invoiceId: randomUUID(), eventKey: otherKey, source: 'invoice_followups_customer' });
+    await mockDatabase('collections_contact_ledger').insert([mine, unbound]);
+    const dunningMessage = (key, over = {}) => message(
+      { customer_id: customerId, notificationEventKey: key },
+      {
+        template_key: 'invoice.followup_combined_60_day', trigger_event_id: key.replace('customer-dunning:', 'customer_dunning:'),
+        idempotency_key: key.replace('customer-dunning:', 'customer_dunning_email:'), payload_snapshot: { collections_ledger_id: mine.id },
+        sent_at: acceptedAt, ...over,
+      },
+    );
+    await mockDatabase('email_messages').insert([
+      dunningMessage(eventKey),
+      dunningMessage(otherKey, { payload_snapshot: { collections_ledger_id: randomUUID() } }), // names another ledger row
+    ]);
+    const loaded = await mockDatabase('collections_contact_ledger').where({ customer_id: customerId });
+    const repaired = await Reservation.repairAcceptedBillingEmailReservations(loaded, mockDatabase);
+    expect([...repaired]).toEqual([mine.id]);
+    const rows = await mockDatabase('collections_contact_ledger').whereIn('id', [mine.id, unbound.id]);
+    expect(rows.find((r) => r.id === mine.id).metadata.delivered).toBe(true);
+    expect(new Date(rows.find((r) => r.id === mine.id).occurred_at).toISOString()).toBe(acceptedAt.toISOString());
+    expect(rows.find((r) => r.id === unbound.id).metadata.delivered).toBeUndefined();
+    expect(tail).toContain(scheduleId);
+    // the real progress read sees the repaired leg as delivered and the other as owed
+    const progress = await require('../services/billing-reminder-delivery')
+      .reminderProgress(customerId, 'invoice_followups_customer', ['email']);
+    expect(progress.find((e) => e.metadata.notificationEventKey === eventKey).complete).toBe(true);
+    expect(progress.find((e) => e.metadata.notificationEventKey === otherKey).complete).toBe(false);
+  });
+  test('reminderProgress { repair: false } sees accepted Email as delivered and changes no ledger row; the default repairs it', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const eventKey = `late-payment:${invoiceId}:14`;
+    const accepted = ledger({ customerId, invoiceId, eventKey });
+    await mockDatabase('collections_contact_ledger').insert(accepted);
+    await mockDatabase('email_messages').insert(message(
+      context({ customerId, invoiceId, eventKey, ledgerId: accepted.id }),
+      { sent_at: new Date() },
+    ));
+    const { reminderProgress } = require('../services/billing-reminder-delivery');
+    const readOnly = await reminderProgress(customerId, 'late_payment_checker', ['email'], { repair: false });
+    expect(readOnly.find((event) => event.metadata.notificationEventKey === eventKey)).toMatchObject({ complete: true });
+    expect((await mockDatabase('collections_contact_ledger').where({ id: accepted.id }).first()).metadata.delivered).toBeUndefined();
+    const repairing = await reminderProgress(customerId, 'late_payment_checker', ['email']);
+    expect(repairing.find((event) => event.metadata.notificationEventKey === eventKey)).toMatchObject({ complete: true });
+    expect((await mockDatabase('collections_contact_ledger').where({ id: accepted.id }).first()).metadata.delivered).toBe(true);
+  });
+  test('customer-dunning: a definite non-send recorded by the email library reopens or resolves the reservation; uncertain rows are left; readOnly writes nothing', async () => {
+    const customerId = randomUUID();
+    const scheduleId = randomUUID();
+    const mk = (step) => {
+      const eventKey = `customer-dunning:${scheduleId}:1:${step}`;
+      return { eventKey, row: ledger({ customerId, invoiceId: randomUUID(), eventKey, source: 'invoice_followups_customer' }) };
+    };
+    const blocked = mk('d3_gentle'); const failed = mk('d10_followup'); const inflight = mk('d17_third'); const readOnlyCase = mk('d30_final');
+    await mockDatabase('collections_contact_ledger').insert([blocked.row, failed.row, inflight.row, readOnlyCase.row]);
+    const email = (entry, over) => message(
+      { customer_id: customerId, notificationEventKey: entry.eventKey },
+      {
+        template_key: 'invoice.followup_combined_3_day', trigger_event_id: entry.eventKey.replace('customer-dunning:', 'customer_dunning:'),
+        idempotency_key: entry.eventKey.replace('customer-dunning:', 'customer_dunning_email:'),
+        payload_snapshot: { collections_ledger_id: entry.row.id }, send_attempt_token: 'tok-1', ...over,
+      },
+    );
+    await mockDatabase('email_messages').insert([
+      email(blocked, { status: 'blocked', error_message: 'Suppressed: bounce (transactional_required)' }),
+      email(failed, { status: 'failed', error_message: 'SendGrid 400', provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'tok-1' }),
+      email(inflight, { status: 'queued', provider_handoff_phase: 'started', provider_handoff_attempt_token: 'tok-1' }),
+      email(readOnlyCase, { status: 'blocked', error_message: 'Suppressed: bounce (transactional_required)' }),
+    ]);
+    const metaOf = async (entry) => (await mockDatabase('collections_contact_ledger').where({ id: entry.row.id }).first()).metadata;
+    const loaded = () => mockDatabase('collections_contact_ledger').where({ customer_id: customerId });
+
+    // read-only first: reports the verdicts in the loaded rows, changes nothing stored
+    const view = await loaded();
+    await Reservation.repairAcceptedBillingEmailReservations(view, mockDatabase, { readOnly: true });
+    expect(view.find((r) => r.id === blocked.row.id).metadata).toMatchObject({ resolved: true });
+    for (const entry of [blocked, failed, inflight, readOnlyCase]) expect(await metaOf(entry)).not.toHaveProperty('send_failed');
+
+    const repaired = await Reservation.repairAcceptedBillingEmailReservations(await loaded(), mockDatabase);
+    expect(repaired.size).toBe(0); // none of these is a delivery
+    expect(await metaOf(blocked)).toMatchObject({ send_failed: true, resolved: true, resolution: 'email_terminal_refusal' });
+    expect(await metaOf(failed)).toMatchObject({ send_failed: true });
+    expect(await metaOf(failed)).not.toHaveProperty('resolved');
+    expect(await metaOf(inflight)).not.toHaveProperty('send_failed'); // uncertain: still held
+    expect(await metaOf(blocked)).not.toHaveProperty('delivered');
+    // the real progress read now sees the resolved leg as terminal and the reopened one as owed
+    const progress = await require('../services/billing-reminder-delivery')
+      .reminderProgress(customerId, 'invoice_followups_customer', ['email']);
+    expect(progress.find((e) => e.metadata.notificationEventKey === blocked.eventKey)).toMatchObject({ complete: true });
+    expect(progress.find((e) => e.metadata.notificationEventKey === failed.eventKey)).toMatchObject({ complete: false });
+  });
 });

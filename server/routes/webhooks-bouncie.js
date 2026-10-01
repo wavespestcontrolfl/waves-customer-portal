@@ -194,6 +194,10 @@ async function processTrackingEvent({ logId, eventType, payload }) {
           ignition: point.ignition,
           speed_mph: point.speed_mph,
           reported_at: point.reported_at,
+          // Same compare-and-write guard as the Bouncie API fallback (round-37 P2): the
+          // tech was resolved by this IMEI at the top of the request; drop the point if
+          // the mapping moved meanwhile.
+          requireBouncieImei: tech.bouncie_imei,
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);

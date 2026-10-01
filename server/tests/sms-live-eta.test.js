@@ -1,0 +1,2764 @@
+/**
+ * SMS live GPS ETA (owner ruling 2026-09-29) — GATE_SMS_REAL_ANSWERS.
+ *
+ * A customer texting "where's the tech" on a TODAY en-route visit gets the
+ * live GPS ETA + tracking link instead of always handing off. Reuses the
+ * exact functions the public tracking page uses (resolveFreshTechPosition +
+ * calculateBoundedTrackingEta) — never reimplemented — so the drafter's
+ * facts block fails closed exactly like the tracking page does on a stale
+ * or missing position, missing coordinates, or a provider timeout/error.
+ *
+ * Covers:
+ *  - context-aggregator's resolveLiveEtaFact: the facts line's data source,
+ *    fail-closed on every edge.
+ *  - sms-shadow-drafter's buildFactsBlock: LIVE ETA + TRACKING LINK render
+ *    only when the gate is on and the resolved fact is present.
+ *  - the prompt rule: byte-identical to v11 when the gate is off; an
+ *    explicit "state that exact number, never invent one" allowance when on.
+ *  - the adversarial verifier: an ETA claim is grounded only against a
+ *    matching LIVE ETA fact.
+ *
+ * Synthetic customer names only, per repo policy.
+ */
+
+jest.mock('../services/tracking-vehicle-location', () => ({
+  resolveFreshTechPosition: jest.fn(),
+}));
+jest.mock('../services/customer-tracking-eta', () => {
+  const actual = jest.requireActual('../services/customer-tracking-eta');
+  return { ...actual, calculateBoundedTrackingEta: jest.fn() };
+});
+
+const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
+const { calculateBoundedTrackingEta, STALE_TECH_STATUS_MS } = require('../services/customer-tracking-eta');
+const {
+  resolveLiveEtaFact, liveEtaDestination, liveEtaDedupeKey, liveEtaEligible,
+  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests, perVisitLiveEtas, mergeLiveUpcoming, buildLiveEtaGroups,
+} = require('../services/context-aggregator');
+const {
+  buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, countEnRouteEtaStops, bodyHasTimedArrivalPhrase, bodyMentionsArrival, bodyClaimsCompletedArrival, findGroundedMinutesFigures,
+} = require('../services/sms-shadow-drafter');
+const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
+
+const GATE = 'GATE_SMS_REAL_ANSWERS';
+
+function baseRow(overrides = {}) {
+  return {
+    id: 'svc-1',
+    technician_id: 'tech-1',
+    track_view_token: 'abc123token',
+    track_token_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    tech_bouncie_imei: null,
+    service_lat: 27.4,
+    service_lng: -82.5,
+    service_address_line1: null,
+    service_address_zip: null,
+    service_address_city: null,
+    ...overrides,
+  };
+}
+
+function baseCustomer(overrides = {}) {
+  return {
+    address_line1: '100 Main St',
+    zip: '34219',
+    city: 'Parrish',
+    latitude: 27.41,
+    longitude: -82.51,
+    ...overrides,
+  };
+}
+
+// Codex round-9 P2 (PR #5334): the memo now caps its expiry at the fix's own
+// freshness deadline (fix time + STALE_TECH_STATUS_MS), so a "fresh" fixture
+// must genuinely be fresh relative to the real clock.
+const FRESH_POSITION = { lat: 27.39, lng: -82.49, lastReportedAt: new Date().toISOString(), source: 'tech_status' };
+const ETA_RESULT = { minutes: 14, distanceMiles: 3.2, source: 'google', techUpdatedAt: '2026-09-29T14:30:00Z' };
+
+afterEach(() => {
+  delete process.env[GATE];
+  jest.clearAllMocks();
+  // The cross-request memo (Codex round-4 P2) is process-wide, keyed on
+  // (technician, destination) — every test below reuses baseRow()'s
+  // tech-1/27.4,-82.5 pair, so a cached result from one test would otherwise
+  // leak into the next one's mocked expectations.
+  _resetLiveEtaMemoForTests();
+});
+
+describe('resolveLiveEtaFact — fail-closed data source', () => {
+  test('gate off: returns null without calling the position/ETA lookups at all', async () => {
+    delete process.env[GATE];
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+    expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+    expect(calculateBoundedTrackingEta).not.toHaveBeenCalled();
+  });
+
+  test('gate on, fresh position + a resolved ETA: returns minutes, an ET as-of stamp, and the canonical /track/:token URL', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toEqual({
+      minutes: 14,
+      asOf: expect.stringContaining('ET'),
+      trackUrl: expect.stringContaining('/track/abc123token'),
+      // Codex round-11 P2: the GPS fix's own tracker-staleness deadline.
+      fixExpiresAtMs: expect.any(Number),
+      fixAtMs: expect.any(Number),
+    });
+    expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1' }));
+    expect(calculateBoundedTrackingEta).toHaveBeenCalledWith(expect.objectContaining({
+      techLat: FRESH_POSITION.lat,
+      techLng: FRESH_POSITION.lng,
+      customerLat: 27.4,
+      customerLng: -82.5,
+    }));
+  });
+
+  test('the result carries the fix\'s tracker-staleness deadline: fix time + STALE_TECH_STATUS_MS (Codex round-11 P2)', async () => {
+    process.env[GATE] = 'true';
+    const fixAt = Date.now() - 60 * 1000;
+    resolveFreshTechPosition.mockResolvedValue({ ...FRESH_POSITION, lastReportedAt: new Date(fixAt).toISOString() });
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out.fixExpiresAtMs).toBe(fixAt + STALE_TECH_STATUS_MS);
+  });
+
+  test('no technician assigned: null, no lookups', async () => {
+    process.env[GATE] = 'true';
+    const out = await resolveLiveEtaFact(baseRow({ technician_id: null }), baseCustomer());
+    expect(out).toBeNull();
+    expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+  });
+
+  test('no tracking token: null (never a customer-facing fact with no link)', async () => {
+    process.env[GATE] = 'true';
+    const out = await resolveLiveEtaFact(baseRow({ track_view_token: null }), baseCustomer());
+    expect(out).toBeNull();
+    expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+  });
+
+  test('no destination coordinates anywhere (no visit pin, no customer geocode): null, no position lookup', async () => {
+    process.env[GATE] = 'true';
+    const row = baseRow({ service_lat: null, service_lng: null });
+    const customer = baseCustomer({ latitude: null, longitude: null });
+    const out = await resolveLiveEtaFact(row, customer);
+    expect(out).toBeNull();
+    expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+  });
+
+  test('stamped address diverges from the primary and the visit has no own pin: no pin beats a wrong pin', async () => {
+    process.env[GATE] = 'true';
+    const row = baseRow({
+      service_lat: null,
+      service_lng: null,
+      service_address_line1: '500 Other Ave',
+      service_address_zip: '34205',
+      service_address_city: 'Bradenton',
+    });
+    const customer = baseCustomer({ address_line1: '100 Main St', zip: '34219', city: 'Parrish' });
+    const out = await resolveLiveEtaFact(row, customer);
+    expect(out).toBeNull();
+    expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+  });
+
+  test('no fresh GPS position (stale ping or missing): null', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(null);
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+    expect(calculateBoundedTrackingEta).not.toHaveBeenCalled();
+  });
+
+  test('ETA lookup times out / returns nothing: null', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(null);
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+  });
+
+  test('position lookup throws: caught, returns null (a lookup failure never blocks drafting)', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockRejectedValue(new Error('bouncie down'));
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+  });
+
+  test('an ETA result with a non-finite minutes value is treated as no ETA', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ minutes: null, source: 'google' });
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+  });
+
+  // Codex round-2 P2: calculateBoundedTrackingEta falls back to a
+  // straight-line haversine guess (30mph average, source: 'haversine')
+  // whenever Google Distance Matrix times out, fails, or is unconfigured —
+  // that guess must never publish as a customer-facing "X minutes away".
+  test('a haversine fallback result (Distance Matrix timeout/failure/unconfigured) is rejected, not published as a customer fact', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ minutes: 22, distanceMiles: 8.1, source: 'haversine', techUpdatedAt: FRESH_POSITION.lastReportedAt });
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+  });
+
+  test('a resolved ETA with no source at all (unexpected shape) is also rejected, never assumed real', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ minutes: 14, distanceMiles: 3.2 });
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+  });
+});
+
+describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334): concurrent lanes share one lookup', () => {
+  test('two concurrent callers for the SAME (technician, destination) share one lookup and get the same number', async () => {
+    process.env[GATE] = 'true';
+    let resolvePosition;
+    resolveFreshTechPosition.mockImplementation(() => new Promise((resolve) => { resolvePosition = resolve; }));
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    // Two different scheduled_services rows at the same physical stop — the
+    // exact twilio-webhook.js scenario: processInboundSms and
+    // draftShadowReply each independently build a context for the SAME
+    // inbound and each resolves the SAME row's LIVE ETA.
+    const p1 = resolveLiveEtaFact(baseRow({ id: 'svc-a' }), baseCustomer());
+    const p2 = resolveLiveEtaFact(baseRow({ id: 'svc-b' }), baseCustomer());
+    resolvePosition(FRESH_POSITION);
+    const [out1, out2] = await Promise.all([p1, p2]);
+
+    expect(out1).toEqual(out2);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+    expect(calculateBoundedTrackingEta).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex round-5 P1: the memo must never leak one customer's tracking token
+  // to another customer who happens to share a tech+destination inside the
+  // 60s TTL (e.g. two units of one property, or a coincidental coordinate
+  // collision). Each caller's own track_view_token must always come back in
+  // ITS OWN result, even though the underlying GPS/Distance Matrix lookup is
+  // shared exactly once.
+  test('two different customers/tokens sharing a tech+destination each get their OWN trackUrl from one provider call', async () => {
+    process.env[GATE] = 'true';
+    let resolvePosition;
+    resolveFreshTechPosition.mockImplementation(() => new Promise((resolve) => { resolvePosition = resolve; }));
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    const rowA = baseRow({ id: 'svc-a', track_view_token: 'token-customer-a' });
+    const rowB = baseRow({ id: 'svc-b', track_view_token: 'token-customer-b' });
+    const customerA = baseCustomer({ address_line1: '100 Main St' });
+    const customerB = baseCustomer({ address_line1: '200 Other St' });
+
+    const p1 = resolveLiveEtaFact(rowA, customerA);
+    const p2 = resolveLiveEtaFact(rowB, customerB);
+    resolvePosition(FRESH_POSITION);
+    const [outA, outB] = await Promise.all([p1, p2]);
+
+    expect(outA.minutes).toBe(outB.minutes);
+    expect(outA.asOf).toBe(outB.asOf);
+    expect(outA.trackUrl).toContain('/track/token-customer-a');
+    expect(outB.trackUrl).toContain('/track/token-customer-b');
+    expect(outA.trackUrl).not.toBe(outB.trackUrl);
+    // One shared provider call for both — the memoized part is only the
+    // tech-position/route-minutes lookup.
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+    expect(calculateBoundedTrackingEta).toHaveBeenCalledTimes(1);
+  });
+
+  // Same guarantee against the CACHED-result path (no in-flight promise —
+  // the second call arrives after the first has already resolved and been
+  // stored).
+  test('a second customer reusing a cached (tech, destination) entry gets their OWN trackUrl, not the first customer\'s', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    const rowA = baseRow({ id: 'svc-a', track_view_token: 'token-customer-a' });
+    const rowB = baseRow({ id: 'svc-b', track_view_token: 'token-customer-b' });
+
+    const outA = await resolveLiveEtaFact(rowA, baseCustomer());
+    const outB = await resolveLiveEtaFact(rowB, baseCustomer());
+
+    expect(outA.trackUrl).toContain('/track/token-customer-a');
+    expect(outB.trackUrl).toContain('/track/token-customer-b');
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex round-23 P2: the memo key is the SAME identity tuple the snapshot
+  // records (technician + tracker device + destination).
+  test('a technician repointed to another tracker device inside the memo window gets a fresh lookup, not the old vehicle\'s minutes', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValueOnce({ ...ETA_RESULT, minutes: 7 }).mockResolvedValueOnce({ ...ETA_RESULT, minutes: 19 });
+    const before = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: '356938035643809' }), baseCustomer());
+    const same = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: '356938035643809' }), baseCustomer());
+    const after = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: '999999999999999' }), baseCustomer());
+    expect(same.minutes).toBe(before.minutes);
+    expect(after.minutes).toBe(19);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    expect(resolveFreshTechPosition.mock.calls[1][0]).not.toHaveProperty('bouncieImei'); // the lookup reads the current mapping itself
+  });
+  // Codex round-24 P2: tech_status has no device identity, so the resolver hands
+  // the lookup the technician row's last-edit time as a floor for cached fixes.
+  test('the cached-fix floor is the tracker-mapping change time; NULL = no known remap = no cutoff; a present-but-unreadable value bypasses the cache', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const changed = '2026-09-30T10:00:00.000Z';
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: changed, tech_bouncie_imei: 'DEV-A' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBe(changed);
+    // Round 35: an ordinary technician edit (name/phone/payroll) never sets a cutoff — the row has no remap time.
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: null, tech_bouncie_imei: 'DEV-B' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls[1][0].cachedNotBefore).toBeNull();
+    const before = Date.now();
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: 'garbage', tech_bouncie_imei: 'DEV-C' }), baseCustomer());
+    const floor = resolveFreshTechPosition.mock.calls[2][0].cachedNotBefore;
+    expect(floor).toBeInstanceOf(Date);
+    expect(floor.getTime()).toBeGreaterThanOrEqual(before);
+  });
+  test('resolveLiveEtaMinutesUncached forwards a caller connection to the position lookup (Codex #5334 P1) and omits it otherwise', async () => {
+    const { resolveLiveEtaMinutesUncached } = require('../services/context-aggregator');
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6 });
+    const handoff = jest.fn();
+    await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 }, { dbh: handoff });
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].dbh).toBe(handoff);
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0]).not.toHaveProperty('allowBouncieFallback');
+    // cacheOnly (a recompute inside a held transaction): read-only, no Bouncie fallback write
+    await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 }, { dbh: handoff, cacheOnly: true });
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].allowBouncieFallback).toBe(false);
+    await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 });
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0]).not.toHaveProperty('dbh');
+  });
+  test('resolveLiveEtaMinutesUncached (used by the send-time recompute) reads the configured device and its own edit floor, google results only', async () => {
+    const { resolveLiveEtaMinutesUncached } = require('../services/context-aggregator');
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6 });
+    const edited = '2026-09-30T10:00:00.000Z';
+    const fact = await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: edited }, { lat: 27.4, lng: -82.5 });
+    expect(fact.minutes).toBe(6);
+    expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1', cachedNotBefore: edited }));
+    calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6, source: 'haversine' });
+    expect(await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: edited }, { lat: 27.4, lng: -82.5 })).toBeNull();
+  });
+  test('the group and snapshot carry the fix timestamp', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: ['k'], uniqueLiveEtaKeys: ['k'], liveEtaResultByKey: new Map([['k', { minutes: 9, fixAtMs: 1234567890123, fixExpiresAtMs: 1234567990123 }]]), includeLiveEta: true, customer: baseCustomer() });
+    expect(g.fixAtMs).toBe(1234567890123);
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [g] }).entries[0].fixAtMs).toBe(1234567890123);
+  });
+
+  test.each([
+    "I'll call in 20 minutes.", 'We will text in 20 minutes.', 'Someone from the office will call in 20 minutes.', 'The office will email in 20 minutes.', "I'll call you in 20 minutes.",
+  ])('%p is an office callback duration, never a tech ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+  });
+  test.each(['The tech will call in 20 minutes.', 'The technician will text in 20 minutes when he arrives.'])('%p — a technician subject stays ETA-ish', (reply) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(20);
+  });
+  test('the dedupe key carries the device fingerprint: same tech + destination + different device never merge', () => {
+    const customer = baseCustomer();
+    expect(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1' }), customer)).not.toBe(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'B2' }), customer));
+    expect(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1' }), customer)).toBe(liveEtaDedupeKey(baseRow({ id: 'svc-2', tech_bouncie_imei: 'A1' }), customer));
+    expect(JSON.stringify(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: '356938035643809' }), customer))).not.toContain('356938035643809');
+  });
+
+  test('a different technician never shares the memo — its own lookup runs', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    await Promise.all([
+      resolveLiveEtaFact(baseRow({ id: 'svc-a', technician_id: 'tech-1' }), baseCustomer()),
+      resolveLiveEtaFact(baseRow({ id: 'svc-b', technician_id: 'tech-2' }), baseCustomer()),
+    ]);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+  });
+
+  test('a different destination never shares the memo, even for the same technician', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    await Promise.all([
+      resolveLiveEtaFact(baseRow({ id: 'svc-a', service_lat: 27.4, service_lng: -82.5 }), baseCustomer()),
+      resolveLiveEtaFact(baseRow({ id: 'svc-b', service_lat: 27.9, service_lng: -82.1 }), baseCustomer()),
+    ]);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+  });
+
+  test('a second, later call within the 60s TTL reuses the cached result with no second lookup', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    const row = baseRow();
+    const out1 = await resolveLiveEtaFact(row, baseCustomer());
+    const out2 = await resolveLiveEtaFact(row, baseCustomer());
+    expect(out1).toEqual(out2);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed/null lookup is memoized too — a second caller in the same window does not repeat it', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(null); // stale/missing GPS
+
+    const row = baseRow();
+    const out1 = await resolveLiveEtaFact(row, baseCustomer());
+    const out2 = await resolveLiveEtaFact(row, baseCustomer());
+    expect(out1).toBeNull();
+    expect(out2).toBeNull();
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
+  test('a call after the 60s TTL expires runs a fresh lookup, not the stale cached one', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    let now = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      await resolveLiveEtaFact(row, baseCustomer());
+      now += 61 * 1000; // past the 60s TTL
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
+  // Codex round-9 P2 (PR #5334): the TTL counts from insertion, but a fix
+  // resolveFreshTechPosition accepted at 4 min 50 s old must not be reused
+  // for a further 60 s — the public tracker rejects it as stale at 5 min.
+  test('a nearly-stale GPS fix is NOT reused past its own freshness deadline, even inside the 60s insert TTL', async () => {
+    process.env[GATE] = 'true';
+    const t0 = Date.now();
+    resolveFreshTechPosition.mockResolvedValue({ ...FRESH_POSITION, lastReportedAt: new Date(t0 - (STALE_TECH_STATUS_MS - 10 * 1000)).toISOString() });
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    let now = t0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      await resolveLiveEtaFact(row, baseCustomer());
+      now = t0 + 5 * 1000; // fix is 4:55 old, still fresh — reused
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+      now = t0 + 15 * 1000; // fix would now be 5:05 old: stale to the tracker, though the 60s TTL has 45s left
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
+  test('a brand-new GPS fix still gets the full 60s insert TTL (the cap never LENGTHENS it)', async () => {
+    process.env[GATE] = 'true';
+    const t0 = Date.now();
+    resolveFreshTechPosition.mockResolvedValue({ ...FRESH_POSITION, lastReportedAt: new Date(t0).toISOString() });
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    let now = t0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      await resolveLiveEtaFact(row, baseCustomer());
+      now = t0 + 59 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+      now = t0 + 61 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
+  // Codex round-16 P1 (PR #5334): a failed / no-fix lookup is cached ~10 s, not 60 s.
+  test('a failed/null lookup is cached only ~10s: reused at 9s, retried at 11s (a good result still lasts 60s)', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(null);
+    let now = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      const t0 = now;
+      await resolveLiveEtaFact(row, baseCustomer());
+      now = t0 + 9 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+      now = t0 + 11 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
+  test('the memo is bounded — many distinct keys never grow it past the cap', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    for (let i = 0; i < 250; i += 1) {
+      await resolveLiveEtaFact(baseRow({ id: `svc-${i}`, technician_id: `tech-${i}`, service_lat: 27 + i / 1000 }), baseCustomer());
+    }
+    expect(_liveEtaMemoSizeForTests()).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('perVisitLiveEtas — grouped-stop siblings share minutes, never a tracking link (Codex round-9 P2, PR #5334)', () => {
+  test('two siblings at one stop get the SAME minutes/asOf but each its OWN trackUrl', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const pest = baseRow({ id: 'svc-pest', service_type: 'Pest Control', track_view_token: 'token-pest' });
+    const lawn = baseRow({ id: 'svc-lawn', service_type: 'Lawn Care', track_view_token: 'token-lawn' });
+    const customer = baseCustomer();
+    const key = liveEtaDedupeKey(pest, customer);
+    expect(liveEtaDedupeKey(lawn, customer)).toBe(key);
+
+    // The representative's OWN result carries the pest link — exactly what
+    // the aggregator stores per key and used to copy to every sibling.
+    const representative = await resolveLiveEtaFact(pest, customer);
+    expect(representative.trackUrl).toContain('/track/token-pest');
+
+    const etas = perVisitLiveEtas([pest, lawn], [key, key], new Map([[key, representative]]));
+    expect(etas[0].trackUrl).toContain('/track/token-pest');
+    expect(etas[1].trackUrl).toContain('/track/token-lawn');
+    expect(etas[1].trackUrl).not.toContain('token-pest');
+    expect(etas[0].minutes).toBe(etas[1].minutes);
+    expect(etas[0].asOf).toBe(etas[1].asOf);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
+  test('a sibling with no track_view_token gets NO link — never the representative\'s', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const pest = baseRow({ id: 'svc-pest', track_view_token: 'token-pest' });
+    const lawn = baseRow({ id: 'svc-lawn', track_view_token: null });
+    const customer = baseCustomer();
+    const key = liveEtaDedupeKey(pest, customer);
+    const representative = await resolveLiveEtaFact(pest, customer);
+
+    const etas = perVisitLiveEtas([pest, lawn], [key, key], new Map([[key, representative]]));
+    expect(etas[0].trackUrl).toContain('/track/token-pest');
+    expect(etas[1].trackUrl).toBeNull();
+    expect(etas[1].minutes).toBe(representative.minutes);
+  });
+
+  test('a visit with no key / no resolved result stays null', () => {
+    expect(perVisitLiveEtas([baseRow(), baseRow()], [null, 'k'], new Map())).toEqual([null, null]);
+  });
+});
+
+// Codex round-13 P2 (PR #5334): limit(3) could drop the en-route row on a
+// 4-service day, so "where's the tech" found no live tech.
+describe('upcoming services keep a live visit the limit(3) would drop (round 13 P2)', () => {
+  const row = (id, date, track_state = 'scheduled') => ({ id, scheduled_date: date, track_state });
+  test('a customer with no live row (or a live row already in the first three) gets EXACTLY the old rows in the old order', () => {
+    const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-10-01')];
+    expect(mergeLiveUpcoming(limited, [])).toBe(limited);
+    expect(mergeLiveUpcoming(limited, [row('b', '2026-09-30', 'en_route')])).toBe(limited);
+  });
+
+  test('the live row the limit dropped is merged in, a non-live row comes off the end, date order is kept', () => {
+    const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-09-30')];
+    const merged = mergeLiveUpcoming(limited, [row('d', '2026-09-30', 'en_route')]);
+    expect(merged.map((r) => r.id).sort()).toEqual(['a', 'b', 'd']);
+    expect(merged).toHaveLength(3);
+  });
+
+  test('live rows are never the ones dropped to stay at the cap', () => {
+    const limited = [row('a', '2026-09-30', 'en_route'), row('b', '2026-09-30'), row('c', '2026-10-02')];
+    const merged = mergeLiveUpcoming(limited, [row('a', '2026-09-30', 'en_route'), row('d', '2026-10-01', 'on_property')]);
+    expect(merged.map((r) => r.id)).toEqual(['a', 'b', 'd']);
+  });
+
+  describe('loadUpcomingServices — the live query runs only when LIVE ETA is requested', () => {
+    function loadWithDb(limitedRows, liveRows) {
+      const calls = { live: 0, base: 0 };
+      let agg;
+      jest.isolateModules(() => {
+        jest.doMock('../models/db', () => jest.fn(() => {
+          let isLive = false;
+          const chain = {};
+          for (const m of ['leftJoin', 'where', 'whereNotIn', 'orderBy', 'limit']) chain[m] = () => chain;
+          chain.whereIn = (col) => { if (col === 'ss.track_state') isLive = true; return chain; };
+          chain.select = async () => { if (isLive) { calls.live += 1; return liveRows; } calls.base += 1; return limitedRows; };
+          return chain;
+        }));
+        agg = require('../services/context-aggregator');
+      });
+      return { agg, calls };
+    }
+    afterEach(() => { jest.dontMock('../models/db'); });
+
+    // Codex round-14 P2: the live-row query is independent of the operational
+    // status list. An in-memory query engine models the two constraints.
+    function loadWithRows(allRows) {
+      let agg;
+      jest.isolateModules(() => {
+        jest.doMock('../models/db', () => jest.fn(() => {
+          const filters = [];
+          let cap = Infinity;
+          const chain = {};
+          chain.leftJoin = () => chain;
+          chain.where = (col, opOrVal, maybeVal) => {
+            const [op, val] = maybeVal === undefined ? ['=', opOrVal] : [opOrVal, maybeVal];
+            filters.push((r) => (op === '>=' ? String(r[col.replace('ss.', '')]) >= String(val) : String(r[col.replace('ss.', '')]) === String(val)));
+            return chain;
+          };
+          chain.whereIn = (col, list) => { filters.push((r) => list.includes(r[col.replace('ss.', '')])); return chain; };
+          chain.whereNotIn = (col, list) => { filters.push((r) => !list.includes(r[col.replace('ss.', '')])); return chain; };
+          chain.orderBy = () => chain;
+          chain.limit = (n) => { cap = n; return chain; };
+          chain.select = async () => allRows.filter((r) => filters.every((f) => f(r))).slice(0, cap);
+          return chain;
+        }));
+        agg = require('../services/context-aggregator');
+      });
+      return agg;
+    }
+
+    test('a `rescheduled` row with a live track_state (markEnRoute status sync failed) is still found; terminal rows and other days are not', async () => {
+      const today = require('../utils/datetime-et').etDateString();
+      const mk = (id, status, track_state, scheduled_date = today) => ({ id, customer_id: 'c1', status, track_state, scheduled_date });
+      const rows = [
+        mk('p1', 'confirmed', 'scheduled'), mk('p2', 'confirmed', 'scheduled'), mk('p3', 'confirmed', 'scheduled'),
+        mk('split', 'rescheduled', 'en_route'),
+        mk('done', 'completed', 'en_route'), mk('cxl', 'cancelled', 'on_property'), mk('skip', 'skipped', 'en_route'),
+        mk('tomorrow', 'rescheduled', 'en_route', '2999-01-01'),
+      ];
+      const agg = loadWithRows(rows);
+      const out = await agg.loadUpcomingServices({ id: 'c1' }, true);
+      expect(out.map((r) => r.id)).toContain('split');
+      for (const gone of ['done', 'cxl', 'skip', 'tomorrow']) expect(out.map((r) => r.id)).not.toContain(gone);
+      expect(out).toHaveLength(3);
+      // Without LIVE ETA the split-state row is (as before) not requested at all.
+      const plain = await agg.loadUpcomingServices({ id: 'c1' }, false);
+      expect(plain.map((r) => r.id)).not.toContain('split');
+    });
+
+    test('includeLiveEta false: only the original limited query runs (byte-identical rows)', async () => {
+      const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-09-30')];
+      const { agg, calls } = loadWithDb(limited, [row('d', '2026-09-30', 'en_route')]);
+      await expect(agg.loadUpcomingServices({ id: 'c1' }, false)).resolves.toBe(limited);
+      expect(calls).toEqual({ live: 0, base: 1 });
+    });
+
+    test('includeLiveEta true: the live row missing from the limited list is merged in', async () => {
+      const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-09-30')];
+      const { agg, calls } = loadWithDb(limited, [row('d', '2026-09-30', 'en_route')]);
+      const out = await agg.loadUpcomingServices({ id: 'c1' }, true);
+      expect(out.map((r) => r.id)).toContain('d');
+      expect(out).toHaveLength(3);
+      expect(calls).toEqual({ live: 1, base: 1 });
+    });
+  });
+});
+
+describe('buildFactsBlock — LIVE ETA / TRACKING LINK rendering', () => {
+  const liveEta = { minutes: 12, asOf: '2:45 PM ET', trackUrl: 'https://portal.wavespestcontrol.com/track/abc123' };
+
+  test('gate on + a resolved liveEta on an en-route TODAY visit: both new lines render alongside LIVE STATUS', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: '1:00 PM–3:00 PM', tech: 'Sam', status: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
+    expect(block).toContain('LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)');
+    // SMS-safe, scheme-free form (comms-lint's portal-link-scheme rule fails
+    // any SMS carrying https://) — the fact itself must never carry a
+    // scheme a model that echoes it verbatim would then fail lint on.
+    expect(block).toContain('TRACKING LINK: portal.wavespestcontrol.com/track/abc123');
+    expect(block).not.toContain('https://portal.wavespestcontrol.com/track/abc123');
+  });
+
+  test('gate on but liveEta is null (stale/missing/timeout upstream): LIVE STATUS still renders, no ETA/link line', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', isToday: true, liveEta: null },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
+    expect(block).not.toContain('LIVE ETA');
+    expect(block).not.toContain('TRACKING LINK');
+  });
+
+  test('gate OFF: a liveEta fact is never rendered even if somehow present — byte-identical to v11', () => {
+    delete process.env[GATE];
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
+    expect(block).not.toContain('LIVE ETA');
+    expect(block).not.toContain('TRACKING LINK');
+  });
+
+  test('on_site status never renders LIVE ETA, even with a liveEta fact attached', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'X',
+      upcomingServices: [
+        { type: 'Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'on_site', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked on site at this visit');
+    expect(block).not.toContain('LIVE ETA');
+  });
+});
+
+describe('buildFactsBlock reads the customer-facing trackState, not raw status (Codex round-4 P2, PR #5334)', () => {
+  const liveEta = { minutes: 12, asOf: '2:45 PM ET', trackUrl: 'https://portal.wavespestcontrol.com/track/abc123' };
+
+  test('gate on: status says en_route but trackState (the tracker) says the admin flip never landed — NOT rendered as live, mirrors liveEtaEligible', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', trackState: 'scheduled', isToday: true, liveEta },
+      ],
+    });
+    expect(block).not.toContain('LIVE STATUS: tech marked en route');
+    expect(block).not.toContain('LIVE ETA');
+    expect(block).toContain('no live tech location known');
+  });
+
+  test('gate on: status says confirmed but trackState says en_route (status write lagged the tracker) — rendered live off trackState', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'confirmed', trackState: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
+    expect(block).toContain('LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)');
+  });
+
+  test('gate on: trackState says on_site even though status still says en_route — rendered on-site off trackState, never LIVE ETA', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', trackState: 'on_site', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked on site at this visit');
+    expect(block).not.toContain('LIVE ETA');
+  });
+
+  test('gate OFF: trackState is ignored entirely — rendering stays status-based, byte-identical to v11', () => {
+    delete process.env[GATE];
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'confirmed', trackState: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).not.toContain('LIVE STATUS');
+    expect(block).not.toContain('LIVE ETA');
+    expect(block).toContain('no live tech location known');
+  });
+
+  test('a context predating trackState (no field at all) falls back to status, gate on or off', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
+    expect(block).toContain('LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)');
+  });
+});
+
+describe('prompt rule — LIVE ETA allowance', () => {
+  test('gate off: no ETA/tracking-link language leaks into the prompt (v11 byte-identical)', () => {
+    delete process.env[GATE];
+    const prompt = buildSystemPrompt();
+    expect(prompt).not.toContain('LIVE ETA');
+    expect(prompt).not.toContain('TRACKING LINK');
+    expect(prompt).toMatch(/never guess an ETA/i);
+  });
+
+  test('gate on: the drafter may state the exact LIVE ETA minutes and share the tracking link, but still never invent one', () => {
+    process.env[GATE] = 'true';
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain('LIVE ETA');
+    expect(prompt).toContain('TRACKING LINK');
+    expect(prompt).toMatch(/never compute, round, or invent one/i);
+    // the no-status fallback (no LIVE STATUS at all) is untouched
+    expect(prompt).toMatch(/never guess an ETA/i);
+  });
+});
+
+describe('adversarial verifier — ETA claims checked against LIVE ETA', () => {
+  test('the checklist names ETA/minutes-away claims and requires an exact LIVE ETA match', () => {
+    const prompt = buildVerifierSystemPrompt();
+    expect(prompt).toMatch(/minutes away/i);
+    expect(prompt).toContain('LIVE ETA');
+    expect(prompt).toMatch(/EXACT number of minutes/);
+  });
+});
+
+describe('liveEtaDestination / liveEtaDedupeKey — grouped-stop dedupe (independent review finding #1, PR #5334)', () => {
+  test('two siblings at the same physical stop (same tech, same destination) share one key', () => {
+    const customer = baseCustomer();
+    const a = baseRow({ id: 'svc-a', technician_id: 'tech-1' });
+    const b = baseRow({ id: 'svc-b', technician_id: 'tech-1' });
+    expect(liveEtaDedupeKey(a, customer)).toBe(liveEtaDedupeKey(b, customer));
+    expect(liveEtaDedupeKey(a, customer)).not.toBeNull();
+  });
+
+  test('a different technician never merges with another tech\'s stop', () => {
+    const customer = baseCustomer();
+    const a = baseRow({ id: 'svc-a', technician_id: 'tech-1' });
+    const b = baseRow({ id: 'svc-b', technician_id: 'tech-2' });
+    expect(liveEtaDedupeKey(a, customer)).not.toBe(liveEtaDedupeKey(b, customer));
+  });
+
+  test('a different resolved destination never merges, even for the same technician', () => {
+    const customer = baseCustomer();
+    const a = baseRow({ id: 'svc-a', technician_id: 'tech-1', service_lat: 27.4, service_lng: -82.5 });
+    const b = baseRow({ id: 'svc-b', technician_id: 'tech-1', service_lat: 27.9, service_lng: -82.1 });
+    expect(liveEtaDedupeKey(a, customer)).not.toBe(liveEtaDedupeKey(b, customer));
+  });
+
+  test('no technician, or no resolvable destination: null (never dedupes a row that would fail closed on its own)', () => {
+    const customer = baseCustomer();
+    expect(liveEtaDedupeKey(baseRow({ technician_id: null }), customer)).toBeNull();
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer({ latitude: null, longitude: null }))).toBeNull();
+  });
+});
+
+describe('liveEtaEligible — track_state gate (Codex round-1 finding, PR #5334)', () => {
+  const TODAY = '2026-09-29';
+  test('status en_route + track_state en_route, today: eligible', () => {
+    expect(liveEtaEligible({ status: 'en_route', track_state: 'en_route', scheduled_date: TODAY }, TODAY)).toBe(true);
+  });
+
+  test('status en_route but track_state still "scheduled" (the admin flip landed, the tracker flip did not — server/routes/tech-track.js): NOT eligible', () => {
+    expect(liveEtaEligible({ status: 'en_route', track_state: 'scheduled', scheduled_date: TODAY }, TODAY)).toBe(false);
+  });
+
+  test('a no_show/cancelled/completed status overrides a stale track_state="en_route": NOT eligible', () => {
+    expect(liveEtaEligible({ status: 'cancelled', track_state: 'en_route', scheduled_date: TODAY }, TODAY)).toBe(false);
+    expect(liveEtaEligible({ status: 'completed', track_state: 'en_route', scheduled_date: TODAY }, TODAY)).toBe(false);
+  });
+
+  test('not today: NOT eligible even with both states en_route', () => {
+    expect(liveEtaEligible({ status: 'en_route', track_state: 'en_route', scheduled_date: '2026-09-28' }, TODAY)).toBe(false);
+  });
+});
+
+describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes — deterministic minutes guard (independent review finding #3, PR #5334; broadened — pre-push audit P1, round 2)', () => {
+  afterEach(() => { delete process.env[GATE]; });
+
+  test('arrival-scoped phrasing is detected: "X minutes away", "ETA is about X minutes", "arriving in X minutes"', () => {
+    expect(findEtaMinutesClaims('The tech is 12 minutes away.').map((c) => c.minutes)).toEqual([12]);
+    expect(findEtaMinutesClaims('ETA is about 9 minutes.').map((c) => c.minutes)).toEqual([9]);
+    expect(findEtaMinutesClaims('He\'s arriving in 15 minutes.').map((c) => c.minutes)).toEqual([15]);
+    expect(replyClaimsEtaMinutes('The tech is 12 minutes away.')).toBe(true);
+  });
+
+  // Broadened detection (pre-push audit P1): the number may now come AFTER
+  // the trigger, separated by a comma/"about", not just immediately before
+  // it — "The tech is on the way, about 12 minutes." was missed by the
+  // original narrow proximity window.
+  test('the number after the trigger, separated by a comma/"about", is detected: "on the way, about 12 minutes"', () => {
+    expect(findEtaMinutesClaims('The tech is on the way, about 12 minutes.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"out" right after the number, sentence-scoped: "12 minutes out"', () => {
+    expect(findEtaMinutesClaims('He\'s 12 minutes out.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"should arrive in about 12 min" (abbreviated "min")', () => {
+    expect(findEtaMinutesClaims('He should arrive in about 12 min.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"ETA 12 minutes" (bare ETA, no "is about")', () => {
+    expect(findEtaMinutesClaims('ETA 12 minutes.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"heading your way — 12 minutes" (em dash, number after the trigger)', () => {
+    expect(findEtaMinutesClaims('Heading your way — 12 minutes.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('unrelated durations never false-positive: "takes about 30 minutes to dry", "allow 30 minutes before letting pets out", "takes about 45 minutes"', () => {
+    expect(findEtaMinutesClaims('The treatment takes about 30 minutes to dry.')).toHaveLength(0);
+    expect(findEtaMinutesClaims('Please allow 30 minutes before letting pets out.')).toHaveLength(0);
+    expect(findEtaMinutesClaims('It takes about 45 minutes.')).toHaveLength(0);
+    expect(replyClaimsEtaMinutes('The treatment takes about 30 minutes to dry.')).toBe(false);
+    expect(replyClaimsEtaMinutes('Please allow 30 minutes before letting pets out.')).toBe(false);
+    expect(replyClaimsEtaMinutes('It takes about 45 minutes.')).toBe(false);
+  });
+
+  // The exclusion must win even when a duration phrase shares a sentence
+  // with a generic trigger word like "out" ("...letting pets out" carries
+  // "out") or "away"/"eta" elsewhere nearby.
+  // Round 3 (audit P1): a STRONG arrival word in the sentence makes every
+  // figure in it a claim — conservative on purpose. The worst case is a
+  // revision that splits the sentence; the alternative let "take about 12
+  // minutes to arrive" skip every freshness check.
+  test('a strong arrival word in the sentence wins over a duration exclusion (conservative)', () => {
+    expect(findEtaMinutesClaims('He\'s on the way — allow 30 minutes before letting pets out.').map((c) => c.minutes)).toEqual([30]);
+  });
+
+  test('gate off: never runs (byte-identical to v11 — no LIVE ETA fact can exist anyway)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 99 minutes away.', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate on: an ETA claim matching the facts block passes', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({ reply: 'The tech is 12 minutes away.', factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate on: a reply with no minutes claim passes regardless of the facts', () => {
+    process.env[GATE] = 'true';
+    expect(validateLiveEtaMinutes({ reply: 'The tech is on the way!', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate on: an ETA claim with NO LIVE ETA fact in the facts block fails', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({ reply: 'The tech is 12 minutes away.', factsBlock: 'LIVE STATUS: tech marked en route to this visit' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/no LIVE ETA/);
+  });
+
+  test('gate on: an ETA claim that does NOT match the facts number fails', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({ reply: 'The tech is 20 minutes away.', factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/20 minute/);
+    expect(result.violations[0]).toMatch(/12 minutes/);
+  });
+
+  test('an unrelated duration alongside a correct ETA claim never false-positives the whole reply', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({
+      reply: 'The tech is 12 minutes away. The treatment takes about 30 minutes to dry once he\'s done.',
+      factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
+    });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  // Codex round-2 P2: a range states TWO bounds — validating only the
+  // endpoint next to "min(s)/minutes" silently dropped the other one.
+  describe('range claims: every bound is its own claim', () => {
+    test('digit hyphen range: "10-12 minutes away"', () => {
+      expect(findEtaMinutesClaims('The tech is 10-12 minutes away.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('en dash range: "10–12 minutes away"', () => {
+      expect(findEtaMinutesClaims('The tech is 10–12 minutes away.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('"to" range, written-out number words: "ten to twelve minutes away"', () => {
+      expect(findEtaMinutesClaims('The tech is ten to twelve minutes away.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('"or" range: "10 or 12 minutes out"', () => {
+      expect(findEtaMinutesClaims('He\'s 10 or 12 minutes out.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('"between N and M minutes"', () => {
+      expect(findEtaMinutesClaims('He\'ll be there in between 10 and 12 minutes.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('a duration range never false-positives: "takes 10-12 minutes to dry"', () => {
+      expect(findEtaMinutesClaims('The treatment takes 10-12 minutes to dry.')).toEqual([]);
+    });
+
+    test('validateLiveEtaMinutes rejects a reply stating a range when only ONE bound is grounded', () => {
+      process.env[GATE] = 'true';
+      const result = validateLiveEtaMinutes({
+        reply: 'The tech is 10-12 minutes away.',
+        factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.violations[0]).toMatch(/10 minute/);
+    });
+
+    test('validateLiveEtaMinutes rejects a range across two distinct LIVE ETA lines (Codex r3: two live ETAs fail closed)', () => {
+      process.env[GATE] = 'true';
+      const factsBlock = 'UPCOMING SERVICES:\n- Pest TODAY LIVE ETA: about 10 minutes\n- Lawn TODAY LIVE ETA: about 12 minutes';
+      expect(validateLiveEtaMinutes({ reply: 'The tech is 10-12 minutes away.', factsBlock }).ok).toBe(false);
+    });
+  });
+
+  // Codex round-5 P2: a vague/approximate duration phrase states WHEN the
+  // tech arrives exactly like a parsed number, but there is no exact figure
+  // to check against the LIVE ETA fact — reject it outright, the same
+  // direction as an unmatched number, instead of waving it through as pure
+  // status copy.
+  describe('validateLiveEtaMinutes — vague/approximate duration wording is rejected, not waved through as status copy', () => {
+    let prior;
+    beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+    afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+    test.each([
+      'The tech is about half an hour away.',
+      'He is an hour out.',
+      'He should be there in a few minutes.',
+      'He should be there in a couple minutes.',
+      'He is a quarter hour out.',
+      'He is on the way and should be there shortly.',
+      'He is on the way and should be there any minute now.',
+      'He is on the way and should be there soon.',
+    ])('%p is rejected even though the facts carry a matching LIVE ETA', (reply) => {
+      const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' });
+      expect(result.ok).toBe(false);
+      expect(result.violations[0]).toMatch(/exact/i);
+    });
+
+    test('rejected the same way with NO LIVE ETA fact in the facts block at all', () => {
+      const result = validateLiveEtaMinutes({ reply: 'He is about half an hour away.', factsBlock: 'LIVE STATUS: tech marked en route to this visit' });
+      expect(result.ok).toBe(false);
+    });
+
+    test('pure status copy with no duration wording at all still passes', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The tech is on the way!', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
+    });
+
+    test('a duration phrase in an unrelated sentence (treatment dry time, not arrival) never false-positives', () => {
+      const result = validateLiveEtaMinutes({
+        reply: 'The tech is 12 minutes away. Please let the dog out — the treatment needs about half an hour to dry.',
+        factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
+      });
+      expect(result).toEqual({ ok: true, violations: [] });
+    });
+
+    test('gate off: never runs (byte-identical to v11)', () => {
+      delete process.env[GATE];
+      expect(validateLiveEtaMinutes({ reply: 'He is about half an hour away.', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
+    });
+  });
+});
+
+describe('round 6 (Codex P2): bare numeric ETA claims with no unit and no "in"/duration wording at all', () => {
+  let prior;
+  beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+  test.each([
+    ['ETA: 20', 20],
+    ['His ETA is 20.', 20],
+    ['ETA 20', 20],
+    ['eta ~20', 20],
+    ['20 out.', 20],
+  ])('%p is parsed as a minutes claim at draft time and blocked when it does not match the facts', (reply, minutes) => {
+    expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual([minutes]);
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(new RegExp(`${minutes} minute`));
+  });
+
+  test.each([
+    ['ETA: 20', 20],
+    ['His ETA is 20.', 20],
+    ['ETA 20', 20],
+    ['eta ~20', 20],
+    ['20 out.', 20],
+  ])('%p passes validateLiveEtaMinutes when it DOES match the facts', (reply, minutes) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: `LIVE ETA: about ${minutes} minutes (GPS, as of 2:45 PM ET)` });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test('negative: a clock time ("at 2:30") is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He\'ll be there at 2:30.')).toEqual([]);
+    expect(validateLiveEtaMinutes({ reply: 'He\'ll be there at 2:30.', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('negative: "by 3" (no am/pm, still clearly a time) is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He should be there by 3.')).toEqual([]);
+  });
+
+  test('negative: a time-of-day range ("arriving between 2 and 4 pm") is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He\'s arriving between 2 and 4 pm.')).toEqual([]);
+  });
+
+  test('negative: an address after the number ("on the way to 123 Main St") is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He\'s on the way to 123 Main St.')).toEqual([]);
+  });
+
+  test('a bare number with no arrival trigger anywhere in the sentence is never a claim', () => {
+    expect(findEtaMinutesClaims('Your invoice total is 20.')).toEqual([]);
+  });
+
+  test('"20 out of 30 jobs done today" never claims — "out of" is excluded', () => {
+    expect(findEtaMinutesClaims('20 out of 30 jobs done today.')).toEqual([]);
+  });
+
+  test('gate off: never runs (byte-identical to v11)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: 'ETA: 99', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+});
+
+describe('round 3 (audit P1s): arrival wording beats duration exclusions; every LIVE ETA line grounds', () => {
+  const { findEtaMinutesClaims, validateLiveEtaMinutes } = require('../services/sms-shadow-drafter');
+  let prior;
+  beforeEach(() => { prior = process.env.GATE_SMS_REAL_ANSWERS; process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; });
+
+  test.each([
+    'The tech will take about 12 minutes to arrive.',
+    'Please allow 12 minutes for him to arrive.',
+    'He should be here in 12 minutes.',
+    'Give it about 12 minutes and he will show up.',
+  ])('counts as an ETA claim: %s', (reply) => {
+    expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test.each([
+    'The treatment takes about 30 minutes to dry.',
+    'Please allow 30 minutes before letting pets out.',
+  ])('still not an ETA claim: %s', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+  });
+
+  test('two distinct live stops: no minutes figure may go out, even a real one (Codex r3: prose cannot bind to the right visit)', () => {
+    const factsBlock = 'UPCOMING SERVICES:\n- Pest TODAY LIVE ETA: about 9 minutes\n- Lawn TODAY LIVE ETA: about 20 minutes';
+    expect(validateLiveEtaMinutes({ reply: 'Your lawn tech is about 20 minutes away.', factsBlock }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: 'Your lawn tech is about 9 minutes away.', factsBlock }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: 'Your tech is about 15 minutes away.', factsBlock }).ok).toBe(false);
+  });
+});
+
+// Codex round-7 P2 (structural default-deny): every earlier round added one
+// more arrival-trigger word to findEtaMinutesClaims's phrase list ("on the
+// way", written numbers, ranges, "from you", bare "ETA: 20", "20 minutes to
+// go") — an open-ended enumeration. Once the facts actually carry a LIVE ETA
+// to check a claim against, validateLiveEtaMinutes stops depending on that
+// list for a plain minutes figure: it binds by default, no trigger word
+// required, unless its own clause is an explicit non-arrival duration.
+describe('round 7 (Codex P2): structural default-deny at draft time — a plain minutes figure needs no trigger word once the facts carry a LIVE ETA', () => {
+  let prior;
+  beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+  test.each([
+    '20 minutes to go.',
+    '20 min left.',
+    'Due in 20.',
+    'Be with you in 20 minutes.',
+    'Reach you in about 20.',
+  ])('%p is bound to the LIVE ETA figure with no trigger-list match required', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    '20 minutes to go.',
+    'Due in 20.',
+  ])('%p is rejected when it does not match the LIVE ETA figure', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+  });
+
+  test.each([
+    'Allow 30 minutes to dry.',
+    'The service takes about 45 minutes.',
+  ])('explicit non-arrival duration %p never needs to match the LIVE ETA figure', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' })).toEqual({ ok: true, violations: [] });
+  });
+
+  // The point of the structural fix: a bare "20 minutes." with no arrival
+  // wording at all still gets bound once the facts carry a LIVE ETA — no
+  // future phrasing needs its own trigger-word addition here.
+  test('a bare "20 minutes." with no arrival wording at all is still bound and checked', () => {
+    const passing = validateLiveEtaMinutes({ reply: '20 minutes.', factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' });
+    expect(passing).toEqual({ ok: true, violations: [] });
+    const failing = validateLiveEtaMinutes({ reply: '20 minutes.', factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(failing.ok).toBe(false);
+  });
+
+  test('the same bare "20 minutes." with NO LIVE ETA fact at all passes — nothing to check it against here', () => {
+    expect(validateLiveEtaMinutes({ reply: '20 minutes.', factsBlock: 'LIVE STATUS: tech marked en route to this visit' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate off: never runs (byte-identical to before)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: '20 minutes to go.', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+});
+
+describe('round 8 (Codex P2): bare-integer default-deny — "The tech should make it in 20" catches neither IMPLICIT_MINUTES_ARRIVAL_RE nor a strong trigger', () => {
+  let prior;
+  beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+    '20ish.',
+  ])('%p is bound to the LIVE ETA figure with no unit word or fixed phrase required', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+    'About 2 hours out.',
+  ])('%p is rejected when it does not match the LIVE ETA figure', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+  });
+
+  // Codex round-9 P2 (PR #5334): "about 2 hours out" used to be recorded as
+  // the raw captured "2", so a LIVE ETA of "2 minutes" accepted an ETA off by
+  // nearly two hours. Hour figures are now normalized to minutes BEFORE the
+  // comparison: 2 hours is 120 minutes.
+  test('"About 2 hours out." is REJECTED when the LIVE ETA is 2 minutes (round 9: hours are not minutes)', () => {
+    const result = validateLiveEtaMinutes({ reply: 'About 2 hours out.', factsBlock: 'LIVE ETA: about 2 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/120/);
+  });
+
+  test('"About 2 hours out." passes only against a LIVE ETA of exactly 120 minutes', () => {
+    const result = validateLiveEtaMinutes({ reply: 'About 2 hours out.', factsBlock: 'LIVE ETA: about 120 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  // Codex round-10 P2 (PR #5334): "12.5 minutes away" was read as "5" (the
+  // unit regex matched after the decimal point) and the "." split the
+  // sentence, so a live "5 minutes" fact accepted a 12.5-minute claim.
+  describe('decimal minutes are one value, never a fractional suffix (Codex round-10 P2)', () => {
+    test.each([
+      ['The tech is 12.5 minutes away.', [12.5]],
+      ['12.5 min out', [12.5]],
+      ['about 7.5 minutes from you', [7.5]],
+      ['between 10.5 and 12 minutes away', [10.5, 12]],
+    ])('findEtaMinutesClaims(%p) reads %p', (reply, minutes) => {
+      expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual(minutes);
+    });
+
+    test('a decimal claim never equals an integer LIVE ETA — even the fractional suffix or truncated integer', () => {
+      for (const n of [5, 12]) {
+        const result = validateLiveEtaMinutes({ reply: 'The tech is 12.5 minutes away.', factsBlock: `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)` });
+        expect(result.ok).toBe(false);
+      }
+    });
+
+    test('"1.5 hours" still normalizes to 90 minutes', () => {
+      expect(normalizeTimeQuantities('1.5 hours away')).toBe('90 minutes away');
+    });
+  });
+
+  // Codex pre-push P1 (round 11, PR #5334): with NO live ETA fact, "2 hours
+  // away" passed while "120 minutes away" failed — hours were only
+  // normalized on the live-context path. They are now normalized on every
+  // path; windows and durations stay unaffected.
+  describe('hour-based arrival claims are rejected with NO live ETA fact, exactly like their minutes equivalents (round 11 P1)', () => {
+    const NO_LIVE = 'LIVE STATUS: tech marked en route to this visit';
+    test.each([
+      ['The tech is 2 hours away.', 'The tech is 120 minutes away.'],
+      ['He is 2 hrs out.', 'He is 120 minutes out.'],
+      ['He is 1 hr 20 min away.', 'He is 80 minutes away.'],
+      ['He should arrive in about 1.5 hours.', 'He should arrive in about 90 minutes.'],
+    ])('%p is rejected like %p', (hours, minutes) => {
+      expect(validateLiveEtaMinutes({ reply: minutes, factsBlock: NO_LIVE }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply: hours, factsBlock: NO_LIVE }).ok).toBe(false);
+      expect(findEtaMinutesClaims(hours).map((c) => c.minutes)).toEqual(findEtaMinutesClaims(minutes).map((c) => c.minutes));
+    });
+
+    test.each([
+      'Your 2 hour arrival window starts at 9.',
+      'Your arrival window is 2 hours.',
+      'Your arrival window: 1 to 2 hours.',
+      'The treatment takes about 2 hours.',
+      'Please allow 2 hours before letting pets out.',
+    ])('%p is never an ETA claim', (reply) => {
+      expect(findEtaMinutesClaims(reply)).toEqual([]);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: NO_LIVE })).toEqual({ ok: true, violations: [] });
+    });
+  });
+
+  // Codex round-11 P2 (PR #5334): "one hundred twenty minutes away" used to
+  // read as "1 hundred 20 minutes", so only the trailing 20 was validated.
+  describe('written-out hundreds are ONE value (round 11 P2)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      ['one hundred twenty minutes away', 120],
+      ['a hundred and twenty minutes away', 120],
+      ['one hundred and twenty minutes away', 120],
+      ['hundred-twenty minutes away', 120],
+      ['one hundred twenty-five minutes out', 125],
+      ['a hundred minutes away', 100],
+    ])('%p is exactly %p — accepted only against that live figure', (phrase, minutes) => {
+      const reply = `The tech is ${phrase}.`;
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(minutes) }).ok).toBe(true);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(20) }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(25) }).ok).toBe(false);
+      expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual([minutes]);
+    });
+
+    test('normalizeNumberWords reads the whole compound', () => {
+      expect(normalizeNumberWords('one hundred twenty minutes')).toBe('120 minutes');
+      expect(normalizeNumberWords('twenty-five and twelve')).toBe('25 and 12');
+    });
+
+    test.each([
+      'The tech is a thousand minutes away.',
+      'The tech is a dozen minutes away.',
+      'The tech is hundreds of minutes away.',
+    ])('%p — a number word it cannot convert next to a time unit fails closed, live ETA or not', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' }).ok).toBe(false);
+    });
+
+    test('a hundred of something that is not a time is untouched', () => {
+      expect(validateLiveEtaMinutes({ reply: 'We serve over a hundred neighbors. The tech is on the way!', factsBlock: facts(12) }))
+        .toEqual({ ok: true, violations: [] });
+    });
+  });
+
+  // Codex pre-push P1 (round 12, PR #5334): the window exclusion is ONE
+  // shared predicate (isWindowQuantity) used by the normalizer AND every
+  // leftover-word check, so a window hour the normalizer leaves alone is
+  // never then rejected as an unread ETA — with live facts present.
+  describe('appointment-window hours pass with LIVE facts present; real hour ETAs still fail (round 12 P1)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      'Your arrival window is 2 hours.',
+      'Your 2 hour arrival window starts at 9.',
+      'Your tech will arrive within the 2-hour arrival window.',
+      'Your 2-hour window starts at 9.',
+      'Your arrival window: 1 to 2 hours.',
+      'Your arrival window is half an hour.',
+      'Your arrival window is a quarter of an hour.',
+      'Your arrival window is an hour.',
+      'Your arrival window is 2 hours. The tech is 2 minutes away.',
+    ])('%p is accepted against a live 2-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) })).toEqual({ ok: true, violations: [] });
+    });
+
+    test.each([
+      'The tech is 2 hours away.',
+      'He is about half an hour away.',
+      'He is an hour out.',
+      'The tech is a thousand minutes away.',
+      'Your arrival window is 2 hours, and the tech is 2 hours away.',
+    ])('%p is still rejected against a live 2-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+
+    // Codex round-12 P2: a hyphenated window ("the 2-hour arrival window")
+    // used to read as a bare "2 minutes" claim — checked against a live figure
+    // that is NOT 2, so the coincidence above cannot hide it.
+    test.each([
+      'Your tech will arrive within the 2-hour arrival window.',
+      'Your 2-hour window starts at 9.',
+      'Your tech will arrive within the 2 hour arrival window.',
+    ])('%p passes against a live 12-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(12) })).toEqual({ ok: true, violations: [] });
+    });
+
+    test.each([
+      ['The tech is 2-hour away.', 12],
+      ['The tech is 12-minute away.', 9],
+    ])('a hyphenated real ETA %p is still checked against live %p', (reply, live) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(live) }).ok).toBe(false);
+    });
+
+    test('a hyphenated minutes ETA matching the live figure is accepted', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The tech is 12-minute away.', factsBlock: facts(12) }).ok).toBe(true);
+    });
+
+  // Codex pre-push P1 (round 13, PR #5334): a duration governed by an OFFICE
+  // follow-up verb ("within the hour" is an approved sms-followup-sla phrase)
+  // is never a tech ETA, even when "arrival" shares the sentence.
+  describe('office follow-up timing is not a tech ETA; tech arrival timing still is (round 13 P1)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      "I'll confirm your arrival window within the hour.",
+      "I'll get back to you within the hour about your arrival.",
+      "We'll text you back within an hour about your arrival.",
+      'Someone will call you back within 30 minutes to confirm arrival.',
+      "I'll let you know within the hour when the tech is on the way.",
+      'Within the hour.',
+    ])('%p passes with live facts present', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) })).toEqual({ ok: true, violations: [] });
+    });
+
+    test.each([
+      'The tech will arrive within the hour.',
+      "I'll confirm the tech is on the way in 20 minutes.",
+      "The tech is 20 minutes away, I'll confirm.",
+      "I'll check — he is about 20 minutes away.",
+      "He will be there in 20. I'll confirm.",
+    ])('%p is still an ETA claim, rejected against a live 2', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+
+    test('the SLA phrase list is the shared follow-up module\'s, not a copy', () => {
+      expect(require('../services/sms-followup-sla').SLA_PHRASES).toContain('within the hour');
+    });
+  });
+
+    test('the normalizer and the leftover-word checks agree on windows', () => {
+      const body = 'Your arrival window is 2 hours.';
+      expect(normalizeTimeQuantities(body)).toBe(body);
+      expect(bodyHasTimedArrivalPhrase(body, { unnormalizedHoursOnly: true })).toBe(false);
+      expect(bodyHasTimedArrivalPhrase(body, { unconvertedNumbersOnly: true })).toBe(false);
+      expect(bodyHasTimedArrivalPhrase('Your arrival window is half an hour.')).toBe(false);
+    });
+  });
+
+  // Codex round-13 P2 (PR #5334): seconds/days/weeks arrival durations and
+  // completed-arrival claims.
+  describe('seconds, days and completed arrivals (round 13 P2)', () => {
+    const facts = (n) => `LIVE STATUS: tech marked en route to this visit, LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      ['The tech is 90 seconds away.', [1.5]],
+      ['The tech is 30 secs out.', [0.5]],
+      ['The tech is 60 seconds away.', [1]],
+    ])('%p reads as %p minutes', (reply, minutes) => {
+      expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual(minutes);
+    });
+    test.each([
+      'The tech is 90 seconds away.',
+      'The tech is a few seconds away.',
+      'The tech is 2 days away.',
+      'The tech will arrive in 3 weeks.',
+    ])('%p is rejected against a live 2-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+    test('"60 seconds away" binds to a live 1-minute ETA exactly', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The tech is 60 seconds away.', factsBlock: facts(1) }).ok).toBe(true);
+    });
+    test('a bare "day" (no count) is never a duration claim', () => {
+      expect(validateLiveEtaMinutes({ reply: 'Have a great day — the tech is on the way!', factsBlock: facts(2) }).ok).toBe(true);
+    });
+
+    test.each([
+      'The technician has arrived.',
+      'The tech just arrived at your home.',
+      'The tech is here.',
+      "He's outside.",
+      'The tech pulled up.',
+    ])('%p is rejected while the facts say the tech is still EN ROUTE', (reply) => {
+      const result = validateLiveEtaMinutes({ reply, factsBlock: facts(2) });
+      expect(result.ok).toBe(false);
+      expect(result.violations[0]).toMatch(/ARRIVED/);
+    });
+    test('the same arrival claims pass once the facts say the tech is on site', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The technician has arrived.', factsBlock: 'LIVE STATUS: tech marked on site at this visit' }).ok).toBe(true);
+    });
+    test.each([
+      'The tech will arrive in 2 minutes.',
+      'The tech is arriving in 2 minutes.',
+      "The tech hasn't arrived yet.",
+      'We are here to help — the tech is on the way!',
+      // Round-28 P2: non-technician subjects are not a visit arrival.
+      'Your payment has arrived at our office — the tech is on the way!',
+      'The package arrived at the office; the tech is on the way.',
+    ])('%p stays en-route status (not a completed arrival)', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(true);
+    });
+  });
+
+  describe('normalizeTimeQuantities — every hour quantity is read WITH its unit (Codex round-9 P2)', () => {
+    test.each([
+      ['about 2 hours out', 'about 120 minutes out'],
+      ['about 2 hrs out', 'about 120 minutes out'],
+      ['2h out', '120 minutes out'],
+      ['1 hr 20 min away', '80 minutes away'],
+      ['1h20m away', '80 minutes away'],
+      ['1 hour and 20 minutes away', '80 minutes away'],
+      ['an hour and 20 minutes away', '80 minutes away'],
+      ['1.5 hours away', '90 minutes away'],
+      ['2 and a half hours away', '150 minutes away'],
+      ['2 hours and a half away', '150 minutes away'],
+      ['an hour and a half away', '90 minutes away'],
+      ['1 to 2 hours away', '60-120 minutes away'],
+    ])('%p reads as %p', (input, expected) => {
+      expect(normalizeTimeQuantities(input)).toBe(expected);
+    });
+
+    test('a vague hour phrase is left alone for the fail-closed check, never guessed', () => {
+      expect(normalizeTimeQuantities('half an hour away')).toBe('half an hour away');
+      expect(normalizeTimeQuantities('an hour out')).toBe('an hour out');
+      expect(normalizeTimeQuantities('a couple hours out')).toBe('a couple hours out');
+    });
+  });
+
+  describe('validateLiveEtaMinutes — hour-based ETAs compare as minutes (Codex round-9 P2)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      ['He is 1 hr 20 min out.', 80],
+      ['He is 1 hour and 20 minutes away.', 80],
+      ['He is 1.5 hours away.', 90],
+      ['He is two and a half hours out.', 150],
+      ['He is an hour and a half away.', 90],
+    ])('%p matches a LIVE ETA of exactly %p minutes', (reply, minutes) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(minutes) }).ok).toBe(true);
+    });
+
+    test.each([
+      'He is 1 hr 20 min out.',
+      'He is 1 hour and 20 minutes away.',
+      'He is 1.5 hours away.',
+      'He is two and a half hours out.',
+      'He is an hour and a half away.',
+      'He is 2 hours out.',
+    ])('%p is rejected against a LIVE ETA of 2 minutes', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+
+    test.each([
+      'He is about half an hour away.',
+      'He is an hour out.',
+      'He is a couple hours out.',
+      'He is an hour or so away.',
+      'He is an hour out, about 12 minutes.',
+    ])('%p — an hour phrase the parser cannot turn into minutes fails closed even beside a matching minutes figure', (reply) => {
+      const result = validateLiveEtaMinutes({ reply, factsBlock: facts(12) });
+      expect(result.ok).toBe(false);
+    });
+
+    test('an hour-based dry-time duration in an unrelated clause is still never an ETA claim', () => {
+      const result = validateLiveEtaMinutes({
+        reply: 'The tech is 12 minutes away. Please keep pets off the lawn — allow 2 hours before letting them out.',
+        factsBlock: facts(12),
+      });
+      expect(result).toEqual({ ok: true, violations: [] });
+    });
+  });
+
+  // The "no-snapshot trigger path" fix: findEtaMinutesClaims itself now
+  // recognizes these phrasings, so an ungrounded claim fails closed even
+  // with NO LIVE ETA fact in the facts block at all — it must never be
+  // silently waved through as status copy just because
+  // findGroundedMinutesFigures never ran.
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+  ])('%p with NO LIVE ETA fact at all is rejected as an ungrounded claim', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' });
+    expect(result.ok).toBe(false);
+  });
+
+  test.each([
+    '$20 is due at the visit.',
+    'He should be there at 2:30.',
+    "He's on the way to 123 Main St.",
+    'You have 2 visits left this year.',
+    'Your renewal lands on the 20th.',
+    'Battery is at 100% right now.',
+  ])('negative: %p is never parsed as a bare-integer ETA claim even with a LIVE ETA fact present', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate off: never runs (byte-identical to before)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: 'The tech should make it in 20.', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+});
+
+// Codex pre-push P1 (round 14, PR #5334): bodyMentionsArrival is the
+// AFFIRMATIVE en-route status predicate, not a broad arrival-word trigger.
+describe('bodyMentionsArrival — affirmative en-route status only (round 14 P1)', () => {
+  test.each([
+    'The tech is on the way.', 'Your tech is en route.', 'The tech has left for your place.', 'The tech is close.',
+    'He will be there shortly.', 'He is heading over now.', 'The tech is arriving in 2 minutes.',
+  ])('%p is an en-route status claim', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(true);
+  });
+  test.each([
+    "I'll confirm your arrival window within the hour.", 'Your arrival window is 2 hours.', 'You have 2 visits left this year.',
+    "I'll text you once he's on the way.", 'If the tech is en route we will let you know.',
+  ])('%p is not', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(false);
+  });
+});
+
+// Codex round-15 (PR #5334): negated corrections, coming/headed, qualified bare
+// numbers, and equal live ETA entries.
+describe('round 15: negation, coming/headed, qualified ETAs, equal entries', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  test.each([
+    'He is no longer en route.', 'The tech is not on the way yet.', "The tech isn't coming today.",
+    'The tech is not headed your way.', "He hasn't left for your place.",
+  ])('%p is a correction, not an affirmative en-route claim', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(false);
+  });
+  test.each([
+    'The tech is coming now.', 'The tech is headed your way.', "He's heading over.", 'The technician is coming.',
+    'Not yet, but the tech is on the way.', 'The tech is on the way.',
+  ])('%p is an affirmative en-route claim', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(true);
+  });
+  test.each([
+    'The tech has not arrived yet.', "The tech isn't here yet.", "He hasn't pulled up.", 'The tech is not here.',
+  ])('%p is not a completed-arrival claim', (body) => {
+    expect(bodyClaimsCompletedArrival(body)).toBe(false);
+  });
+  test('"We are coming to help" is not a tech status claim', () => {
+    expect(bodyMentionsArrival('We are coming to help.')).toBe(false);
+  });
+
+  test.each(['ETA is 20 max', 'ETA is 20 or so', 'ETA 20 tops', 'His ETA is 20 give or take.'])('%p is a 20-minute claim', (body) => {
+    expect(findEtaMinutesClaims(body).map((c) => c.minutes)).toEqual([20]);
+    expect(findGroundedMinutesFigures(body).map((c) => c.minutes)).toEqual([20]);
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(9) }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(20) }).ok).toBe(true);
+  });
+  test.each(['You have 20 or so visits left.', 'ETA is 20 visits'])('%p stays a count, not an ETA', (body) => {
+    expect(findEtaMinutesClaims(body)).toEqual([]);
+  });
+
+  test('two LIVE ETA lines with the SAME figure still count as two stops — no number approved', () => {
+    const facts = 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: facts }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: 'The techs are on the way!', factsBlock: facts }).ok).toBe(true);
+  });
+});
+
+// Codex round-16 P2s (PR #5334).
+describe('round 16 P2s: Nm, slash fractions, status-only groups, distinct stops', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+
+  test.each([['ETA: 20m', 20], ['His ETA is 20 m', 20], ['tech is 20m away', 20]])('%p is an exact %p-minute claim (not just an unclassified signal)', (body, m) => {
+    expect(findEtaMinutesClaims(body).map((c) => c.minutes)).toEqual([m]);
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(9) }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(m) }).ok).toBe(true);
+  });
+  test('"5 m" outside an arrival sentence (metres) is untouched', () => {
+    expect(findEtaMinutesClaims('The hedge is 5 m wide.')).toEqual([]);
+  });
+
+  test.each([['1/2 hour away', 30], ['3/4 hr out', 45], ['1 1/2 hours away', 90]])('%p reads as %p minutes, never "1/120"', (body, m) => {
+    expect(findEtaMinutesClaims(body).map((c) => c.minutes)).toEqual([m]);
+    expect(validateLiveEtaMinutes({ reply: `The tech is ${body}.`, factsBlock: facts(m) }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply: `The tech is ${body}.`, factsBlock: facts(120) }).ok).toBe(false);
+  });
+  test('an appointment window in fractions is left alone', () => {
+    expect(validateLiveEtaMinutes({ reply: 'Your arrival window is 1/2 hour.', factsBlock: facts(12) })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('buildLiveEtaSnapshot keeps a status-only (minutes null) entry', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['t'] }] }))
+      .toEqual({ entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['t'] }] });
+  });
+
+  describe('buildLiveEtaGroups', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', ...extra });
+    test('an unresolved live stop still gets a minutes-null group (grouped siblings share one); resolved keeps minutes', () => {
+      const rows = [svc('a'), svc('b'), svc('c', { technician_id: null })];
+      const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: ['k1', 'k1', null], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', null]]), includeLiveEta: true });
+      expect(groups.map(({ destinations, ...g }) => g)).toEqual([
+        { minutes: null, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], state: 'en_route', technicianId: 'tech-1' },
+        { minutes: null, scheduledServiceIds: ['c'], trackTokens: ['tok-c'], state: 'en_route' },
+      ]);
+      const resolved = buildLiveEtaGroups({ upcomingServices: rows.slice(0, 2), liveEtaKeys: ['k1', 'k1'], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', { minutes: 9, fixExpiresAtMs: 5 }]]), includeLiveEta: true });
+      expect(resolved.map(({ destinations, ...g }) => g)).toEqual([{ minutes: 9, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], state: 'en_route', technicianId: 'tech-1', fixExpiresAtMs: 5 }]);
+    });
+    test('includeLiveEta false or a non-live row: no groups', () => {
+      expect(buildLiveEtaGroups({ upcomingServices: [svc('a')], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: false })).toEqual([]);
+      expect(buildLiveEtaGroups({ upcomingServices: [svc('a', { track_state: 'scheduled' })], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true })).toEqual([]);
+    });
+  });
+
+  test('grouped siblings render the ETA line twice but are ONE stop: a numeric draft is approved; two real stops are not', () => {
+    const twoLines = `${facts(9)}\n${facts(9)}`;
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: twoLines, liveEtaStopCount: 1 }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: twoLines, liveEtaStopCount: 2 }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: twoLines }).ok).toBe(false);
+  });
+});
+
+describe('counted day/week/month durations need a tech subject (round-17 follow-up)', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+  test.each(['Your visit is 2 days away.', "We'll see you in 2 weeks.", 'Your next treatment is in 3 weeks.'])('%p passes with and without live facts', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' }).ok).toBe(true);
+  });
+  test.each(['The tech is 2 days away.', 'He will arrive in 3 weeks.'])('%p is rejected', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts }).ok).toBe(false);
+  });
+});
+
+// Codex round-18 P2s (PR #5334).
+describe('round 18 P2s: decimals, driving, on-site groups, technician identity', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+
+  test.each([
+    'He will be there in 12.5.', 'The tech should make it in 12.5', "He'll be by in 12.5", 'ETA 12.5', 'ETA: 12.50', 'ETA is 12.5 max',
+    '12.5min away', '12.5 min away', 'The tech is 12.5 out',
+  ])('%p is ONE decimal claim (12.5) — never the prefix 12 or suffix 5, and never equal to an integer live ETA', (reply) => {
+    const claims = [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes);
+    expect(claims.length).toBeGreaterThan(0);
+    for (const c of claims) expect(c).toBe(12.5);
+    for (const live of [12, 5, 13]) expect(validateLiveEtaMinutes({ reply, factsBlock: facts(live) }).ok).toBe(false);
+  });
+
+  test.each([
+    'The technician is driving to your house now.', "He's driving over.", 'The tech is in the truck.', 'The crew is on the road.',
+  ])('%p is an affirmative en-route status', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(true);
+  });
+  test.each(['The tech is not driving over today.', 'We are driving to a training.'])('%p is not', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(false);
+  });
+
+  test('numeric ambiguity counts only EN-ROUTE stops: en-route(12) + on-site allows "12 minutes away"; two en-route do not', () => {
+    const oneEnRouteOneOnSite = { liveEtaGroups: [{ minutes: 12, state: 'en_route' }, { minutes: null, state: 'on_property' }] };
+    const twoEnRoute = { liveEtaGroups: [{ minutes: 12, state: 'en_route' }, { minutes: 12, state: 'en_route' }] };
+    expect(countEnRouteEtaStops(oneEnRouteOneOnSite)).toBe(1);
+    expect(countEnRouteEtaStops(twoEnRoute)).toBe(2);
+    expect(countEnRouteEtaStops({})).toBeNull();
+    const reply = 'The tech is 12 minutes away.';
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(12), liveEtaStopCount: countEnRouteEtaStops(oneEnRouteOneOnSite) }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(12), liveEtaStopCount: countEnRouteEtaStops(twoEnRoute) }).ok).toBe(false);
+  });
+
+  describe('buildLiveEtaGroups — on-site visits and technician identity', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', ...extra });
+    test('an on_property visit becomes a minutes-null status group recorded as on_property; a scheduled one does not', () => {
+      const rows = [svc('a', { status: 'on_site', track_state: 'on_property' }), svc('b', { track_state: 'scheduled' })];
+      expect(buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true }).map(({ destinations, ...g }) => g))
+        .toEqual([{ minutes: null, scheduledServiceIds: ['a'], trackTokens: ['tok-a'], state: 'on_property', technicianId: 'tech-1' }]);
+    });
+    test('the snapshot carries technicianId and state through', () => {
+      expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 9, scheduledServiceIds: ['a'], technicianId: 'tech-1', state: 'en_route' }] }))
+        .toEqual({ entries: [{ minutes: 9, scheduledServiceIds: ['a'], trackTokens: [], technicianId: 'tech-1', state: 'en_route' }] });
+    });
+  });
+});
+
+// Codex round-19 P2s (PR #5334).
+describe('round 19 P2s: window minutes, zero, tracking-link digits, on-site sibling grouping', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+
+  test.each([
+    'Your 120-minute arrival window starts at 9.', 'Your arrival window is 120 minutes.', 'Your 90 minute window starts at 9.',
+    'Your arrival window is 90 seconds.', 'Your arrival window: 20-30 minutes.',
+  ])('%p (a window, any unit) is never an ETA claim', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(9) })).toEqual({ ok: true, violations: [] });
+  });
+  test('a real minutes ETA beside a window is still checked', () => {
+    expect(validateLiveEtaMinutes({ reply: 'Your 120-minute arrival window starts at 9. The tech is 20 minutes away.', factsBlock: facts(9) }).ok).toBe(false);
+  });
+
+  test('"zero" is a number: "zero minutes away" is a 0-minute claim, checked against the live figure', () => {
+    expect(normalizeNumberWords('zero minutes away')).toBe('0 minutes away');
+    expect(findEtaMinutesClaims('The tech is zero minutes away.').map((c) => c.minutes)).toEqual([0]);
+    expect(validateLiveEtaMinutes({ reply: 'The tech is zero minutes away.', factsBlock: facts(9) }).ok).toBe(false);
+  });
+  test.each(['The tech is several minutes away.', 'The tech is a handful of minutes away.'])('%p — an unconvertible number word next to a time unit fails closed', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(9) }).ok).toBe(false);
+  });
+
+  test('the digits ending a /track/ token are not an ETA (link stripped before draft-time parsing)', () => {
+    const reply = 'Track your tech: portal.wavespestcontrol.com/track/abcdef9';
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' })).toEqual({ ok: true, violations: [] });
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away: portal.wavespestcontrol.com/track/abcdef7', factsBlock: facts(9) }).ok).toBe(true);
+    expect(require('../services/sms-track-links').stripTrackLinks('a b/track/x9 c')).toBe('a   c');
+  });
+
+  test('on-site grouped siblings sharing a technician + destination form ONE on_property group', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const mk = (id, extra = {}) => ({ id, scheduled_date: today, status: 'on_site', track_state: 'on_property', track_view_token: `tok-${id}`, track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', service_lat: 27.4, service_lng: -82.5, ...extra });
+    const customer = baseCustomer();
+    const rows = [mk('a'), mk('b'), mk('c', { technician_id: 'tech-2' })];
+    const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
+    expect(groups.map((g) => g.scheduledServiceIds)).toEqual([['a', 'b'], ['c']]);
+    expect(groups.every((g) => g.state === 'on_property' && g.minutes === null)).toBe(true);
+    expect(groups[0].trackTokens).toEqual(['tok-a', 'tok-b']);
+  });
+});
+
+// Codex round-20 P2s (PR #5334).
+describe('round 20 P2s: bare-past arrival, en-route hyphen, destination identity', () => {
+  test.each(['The technician arrived.', 'The tech just arrived at your home.', 'Our crew finally arrived.'])('%p is a completed-arrival claim', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+  });
+  test('a negated "hasn\'t arrived" is still a correction, not a claim', () => {
+    expect(bodyClaimsCompletedArrival("The technician hasn't arrived yet.")).toBe(false);
+  });
+  test.each(['Your technician is en-route.', 'Your technician is en route.', 'Your technician is enroute.'])('%p is an en-route status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+  });
+  test('bodyMentionsVisitStatus: broad status vocabulary, minus conditionals / corrections / windows', () => {
+    const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+    for (const t of ['The technician arrived.', 'Your tech is en-route.', 'The crew is outside.', 'The tech has pulled up.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    // Round-30 audit P1: plural technician subjects (grouped visits) are status claims too.
+    for (const t of ['Your techs are on the way.', 'Your technicians have arrived.', 'The crews are heading over.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    // Round-28 audit P1: arrive / coming / headed need a technician-type subject.
+    for (const t of ['Your payment has arrived at our office.', 'We are coming up on your renewal.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
+    for (const t of ['He will be arriving shortly.', 'Your tech Sam is heading over.', 'The tech is on the way.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    // Round-26 P2: movement forms need a technician-type subject.
+    for (const t of ['I pulled up your invoice.', 'The issue showed up again.', 'I left for the day.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
+    for (const t of ['The tech has pulled up.', 'The driver showed up.', 'The tech left for your place.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    // Round-25 P2: the noun "arrival" is not a status claim; verbal forms still are.
+    for (const t of ['Please review the arrival instructions.', 'Arrival instructions are attached.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
+    for (const t of ['He is arriving now.', 'Your tech arrives soon.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    for (const t of ['Thanks, 5 stars!', "I'll text you once he's on the way.", "The tech hasn't arrived yet.", 'Your arrival window is 2 hours.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('the snapshot carries each group destination through', () => {
+    const destinations = [{ id: 'a', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285' }];
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 9, scheduledServiceIds: ['a'], destinations }] }).entries[0].destinations).toEqual(destinations);
+  });
+  test('buildLiveEtaGroups records property id + stamped coordinates per member', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', property_id: 'prop-1', service_lat: '27.4', service_lng: '-82.5', service_address_line1: '1 Test St', service_address_zip: '34285' };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true });
+    expect(g.destinations).toEqual([{ id: 'a', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285', city: null, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } }]);
+  });
+});
+
+// Codex round-21 P2s (PR #5334).
+describe('round 21 P2s: list markers, subjectless "here", resolved destination', () => {
+  test.each(['1. Check the invoice', '2) Call us to confirm', '- 3. Pay online', 'Here is what to do:\n1. Check the invoice\n2. Call the office\n3) Reply YES'])('list markers are not ETA minutes: %p', (reply) => {
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(bodyHasTimedArrivalPhrase(reply, { unclassifiedSignalOnly: true })).toBe(false);
+  });
+  test('a real figure on a list line is still read; a mid-sentence "3." is unaffected', () => {
+    expect(findGroundedMinutesFigures('1. The tech is 15 minutes away').map((c) => c.minutes)).toContain(15);
+    expect(findGroundedMinutesFigures('The tech is 9 minutes away.').map((c) => c.minutes)).toEqual([9]);
+  });
+  test('the draft-time validator ignores list markers under a live ETA', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: '1. Check the invoice\n2. Reply YES', factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each(['We are here to help.', "We're here if you need anything.", 'Our office is here for you.', 'The technician is here to help with any questions.'])('%p is not visit status', (t) => {
+    const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each(['The technician is here.', "Your tech's outside.", 'The driver is at your door.', "They're almost there.", 'The crew is on-site.'])('%p is visit status', (t) => {
+    const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('destination identity records the RESOLVED destination and its source (visit pin vs customer fallback)', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const customer = { ...baseCustomer(), id: 'cust-1', latitude: 27.1, longitude: -82.2 };
+    const noPin = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', property_id: 'prop-1', service_lat: null, service_lng: null };
+    const pinned = { ...noPin, id: 'b', service_lat: 27.4, service_lng: -82.5 };
+    const [gA, gB] = buildLiveEtaGroups({ upcomingServices: [noPin, pinned], liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
+    expect(gA.destinations[0]).toMatchObject({ id: 'a', lat: null, lng: null, resolved: { source: 'customer', lat: 27.1, lng: -82.2 }, customerId: 'cust-1' });
+    expect(gB.destinations[0]).toMatchObject({ id: 'b', lat: 27.4, lng: -82.5, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } });
+    expect(gB.destinations[0].customerId).toBeUndefined();
+  });
+});
+
+// Codex round-22 P2s (PR #5334).
+describe('round 22 P2s: service durations, expired links, tracker device', () => {
+  test.each([
+    'The service will be 20 minutes.', 'The treatment is 20 minutes long.', 'The visit runs about an hour.', 'The appointment should take 45 minutes.',
+    'Your service will typically be about 30 minutes.', 'The inspection takes 20 minutes.', 'The application lasts 15 minutes.',
+  ])('%p is a service duration, never an ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' })).toEqual({ ok: true, violations: [] });
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ['The tech will be 20 minutes.', 20], ['The tech will be 20 minutes away.', 20], ['For your service, the tech will be 20 minutes away.', 20],
+    ['The service will be 20 minutes away.', 20], ['The technician is about 20 minutes out.', 20], ['Our service tech is 20 minutes from you.', 20],
+  ])('%p is still an ETA claim (%p)', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+
+  const expiredRow = (extra = {}) => baseRow({ track_token_expires_at: new Date(Date.now() - 60e3).toISOString(), ...extra });
+  test('an expired (or expiry-less) tracking token is never exposed: no ETA fact, no link, no snapshot token', async () => {
+    process.env[GATE] = 'true';
+    for (const row of [expiredRow(), baseRow({ track_token_expires_at: null })]) {
+      expect(await resolveLiveEtaFact(row, baseCustomer())).toBeNull();
+    }
+    expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+    const today = require('../utils/datetime-et').etDateString();
+    const mk = (id, extra) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, technician_id: 'tech-1', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), ...extra });
+    const [g] = buildLiveEtaGroups({ upcomingServices: [mk('a'), mk('b', { track_token_expires_at: new Date(Date.now() - 1000).toISOString() })], liveEtaKeys: ['k', 'k'], uniqueLiveEtaKeys: ['k'], liveEtaResultByKey: new Map([['k', null]]), includeLiveEta: true, customer: baseCustomer() });
+    expect(g.trackTokens).toEqual(['tok-a']);
+    const etas = perVisitLiveEtas([mk('a'), mk('b', { track_token_expires_at: new Date(Date.now() - 1000).toISOString() })], ['k', 'k'], new Map([['k', { minutes: 9, asOf: '2:45 PM ET' }]]));
+    expect(etas[0].trackUrl).toContain('/track/tok-a');
+    expect(etas[1].trackUrl).toBeNull();
+  });
+
+  test('the tracker device is recorded as a non-reversible fingerprint, never the raw IMEI, and survives into the snapshot', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', tech_bouncie_imei: '356938035643809', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() });
+    const { deviceFingerprint } = require('../services/live-eta-destination');
+    expect(g.deviceImei).toBe(deviceFingerprint('356938035643809'));
+    expect(JSON.stringify(g)).not.toContain('356938035643809');
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [g] }).entries[0].deviceImei).toBe(g.deviceImei);
+    expect(deviceFingerprint('  ')).toBeNull();
+  });
+});
+
+// Codex round-23 P2 (PR #5334): a count that was a written number word.
+describe('round 23 P2: number-word counts are not bare ETA figures', () => {
+  test.each(['Yes, we completed one.', 'We sprayed two areas.', 'We treated three.', 'Yes, we finished one of them.', 'Your tech is on the way and we sprayed two.'])('%p is a count, not an ETA', (reply) => {
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ["He's one minute away.", 1], ['The tech is about five out.', 5], ['The tech will be there in five', 5], ['The tech is five minutes away', 5],
+  ])('%p is still an ETA claim', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+  test('genuine typed bare digits stay default-deny: "Yes, we completed 1." is still read', () => {
+    expect(findGroundedMinutesFigures('Yes, we completed 1.').map((c) => c.minutes)).toEqual([1]);
+  });
+});
+
+// Codex round-42 P2 (PR #5334): the draft's technician names are persisted with the decision
+// (input_snapshot.tech_names) by every lane that persists live_eta_snapshot.
+describe('round 42 P2: tech_names plumbing (source pins)', () => {
+  const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
+  test('the drafter hands techNames to auto-send and to both publishSuggestion calls', () => {
+    const src = read('../services/sms-shadow-drafter.js');
+    expect(src).toContain('const techNames = techNamesFromContext(context);');
+    expect((src.match(/liveEtaSnapshot,\n\s+techNames,\n/g) || []).length).toBe(3);
+  });
+  test('publishSuggestion, claimAutoSend and the estimate lane persist tech_names only when non-empty', () => {
+    expect(read('../services/sms-suggest-mode.js')).toContain("{ tech_names: techNames }");
+    expect(read('../services/sms-auto-send.js')).toContain("{ tech_names: techNames }");
+    expect(read('../services/estimate-conversion-agent.js')).toContain("{ tech_names: llmDraft.techNames }");
+    expect(read('../services/estimate-conversion-agent.js')).toContain('techNames: drafter.techNamesFromContext(context)');
+  });
+});
+
+// Codex round-48 P2 (PR #5334): "reached your property" is a completed arrival.
+describe('round 48 P2: "reached" completed arrivals', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'The technician has reached your property.', 'He reached the house.', 'The crew reached your home.', 'The technician reached there.', 'They have reached your address.',
+    'The tech just reached your place.',
+  ])('%p is a completed-arrival claim and visit-status vocabulary', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('first-person and recorded-name forms', () => {
+    for (const t of ['We have reached your place.', 'We reached the house.', "We've reached your property."]) {
+      expect(bodyClaimsCompletedArrival(t)).toBe(true);
+      expect(bodyMentionsVisitStatus(t)).toBe(true);
+    }
+    expect(bodyClaimsCompletedArrival('Sam reached your address.', { techNames: ['Sam'] })).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam reached your address.')).toBe(false);
+  });
+  test.each([
+    'The tech has not reached your property yet.', 'Has he reached the house?', 'Did the technician reach your home?', 'Once the tech reached your home I will text.',
+    'The tech reached your home tomorrow.', 'The tech will reach your home soon.', 'The technician reached out to you.', 'I reached the office.',
+    'The technician reached the end of the street.', 'Your payment reached our account.',
+  ])('%p is not a completed-arrival claim (negated / question / conditional / future day / not an arrival)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('draft-time: "reached your property" against an en-route fact is rejected like "has arrived"', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'The technician has reached your property.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
+// Codex #5334 P2: a LABELED identifier is never a bare minutes figure.
+describe('labeled identifiers are not bare ETA figures', () => {
+  const { findGroundedMinutesFigures, bodyHasUnclassifiedArrivalDigit } = require('../services/sms-shadow-drafter');
+  test.each([
+    'Your confirmation code is 123.', 'We treated zone 2.', 'This is for invoice 12.', 'Please see account 30.', 'I opened ticket 20.', 'Your order #15.',
+    'Reference number 45.', 'Your reference no. 45.', 'It is on job 12.', 'The PIN is 150.', 'See policy 60.', 'Your case id is 99.',
+  ])('%p yields no minutes claim', (t) => {
+    expect(findGroundedMinutesFigures(t)).toEqual([]);
+    expect(bodyHasUnclassifiedArrivalDigit(t)).toBe(false);
+  });
+  test.each(['The tech should make it in 20.', 'Your technician is on the way, ETA 20.', 'He will be there in 15.', 'Your tech will be here in about 20.'])(
+    '%p is still a bare ETA claim (the exclusion is scoped to labels)', (t) => {
+      expect(findGroundedMinutesFigures(t).length).toBeGreaterThan(0);
+    });
+  test('a labeled identifier beside a real ETA does not hide the ETA', () => {
+    const minutes = findGroundedMinutesFigures('Order 12 is fine and the tech is 20 minutes away.').map((c) => c.minutes);
+    expect(minutes).toEqual([20]);
+  });
+});
+
+// Codex round-47 P2 (PR #5334): "made it (there)" is a completed arrival.
+describe('round 47 P2: "made it" completed arrivals', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  const sam = { techNames: ['Sam'] };
+  test.each([
+    'The technician made it to your house.', 'He made it.', 'The crew made it here.', 'Our team just made it to your property.', 'The technician finally made it.',
+    'They made it to your home.', 'The tech already made it there.',
+  ])('%p is a completed-arrival claim and visit-status vocabulary', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('first-person and recorded-name forms', () => {
+    for (const t of ['We made it to your home.', "We've made it.", 'We just made it there.']) {
+      expect(bodyClaimsCompletedArrival(t)).toBe(true);
+      expect(bodyMentionsVisitStatus(t)).toBe(true);
+    }
+    expect(bodyClaimsCompletedArrival('Sam made it there.', sam)).toBe(true);
+    expect(bodyMentionsVisitStatus('Sam made it to your house.', sam)).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam made it there.')).toBe(false);
+    expect(bodyClaimsCompletedArrival('Sam made it there.', { techNames: ['Dana'] })).toBe(false);
+  });
+  // Codex #5334 P2: the visit-status vocabulary needs the SAME technician-type subject as "got there" — customer-focused "made it" / "reached" is not visit status
+  test.each(['Glad you made it!', 'Thanks, you made it through the form.', 'I hope you made it home safe.', 'Congrats, you reached the final step.', 'Your payment reached us.', 'The package reached your house.'])(
+    '%p (no technician subject) is not visit status', (t) => {
+      expect(bodyMentionsVisitStatus(t)).toBe(false);
+    });
+  test.each([
+    "The technician hasn't made it yet.", 'The tech has not made it there.', 'Did the tech make it there?', 'Has he made it?', 'Is Sam making it?',
+    'Once the tech made it there I will text you.', 'The tech made it there tomorrow.', 'The tech will make it there soon.',
+    'The technician made it easy.', 'I made it to the office.', 'Your payment made it to us.', 'They made it up.', 'The team made it a priority.',
+  ])('%p is not a completed-arrival claim (negated / question / conditional / future day / not an arrival)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('draft-time: "made it there" against an en-route fact is rejected like "has arrived"', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'The technician made it to your house.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
+// Codex round-45 P2 (PR #5334): future on-site wording with a vague time is a timed arrival claim.
+describe('round 45 P2: "will be on site soon" is a timed arrival claim', () => {
+  test.each([
+    'The technician will be on site soon.', 'The tech should be on-site any minute.', 'The technician will arrive on site shortly.',
+    'He will be on the property soon.', 'The tech will be at your door momentarily.', 'Our driver will be at your home shortly.',
+  ])('%p', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply)).toBe(true);
+  });
+  test.each([
+    'The on-site inspection will be done soon.', 'We will be on site for about 45 minutes.', 'The on-site visit takes about 20 minutes.', 'He is on site.',
+    'The technician will be on site.', 'We will be on site Tuesday.', 'Soon we will have your report.',
+  ])('%p is not a timed arrival claim', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply)).toBe(false);
+    expect(findEtaMinutesClaims(reply).filter((c) => c.minutes === 45 || c.minutes === 20)).toEqual([]);
+  });
+  test('draft-time: the validator rejects it beside an en-route fact (an unsupported promise)', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+      expect(validateLiveEtaMinutes({ reply: 'The technician will be on site soon.', factsBlock: facts }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
+// Codex round-44 P2 (PR #5334): unit / apartment / suite identifiers are address numbers.
+describe('round 44 P2: unit identifiers are not ETA minutes', () => {
+  test.each([
+    'The technician is on the way to unit 12', 'He is heading to Apt 4 today.', 'Your tech is on the way to Suite 200.', 'On the way to bldg 3', 'We are at lot 15.',
+    'Your tech is at building 7.', 'The tech is on the way to #12.', 'Heading to apartment 9.', 'The tech is on the way to ste 14', 'The tech is at room 10.', 'Go to No. 12.',
+  ])('%p: 12-style unit numbers are never read as minutes', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    expect(bodyHasTimedArrivalPhrase(reply, { unclassifiedSignalOnly: true })).toBe(false);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).violations.join(' ')).not.toMatch(/minute\(s\) away/);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ['The tech is 12 minutes away', 12], ['He is on the way to unit 5, 12 minutes out', 12], ['Your tech is about 15 minutes away from unit 4', 15],
+  ])('%p: a real ETA beside a unit number is still read (%p)', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+});
+
+// Codex round-41 P2 (PR #5334): the tracker-remap GENERATION is part of the memo key and of the
+// persisted identity, so A->B->A invalidates earlier ETA facts although the device returns to A.
+describe('round 41 P2: mapping generation (bouncie_imei_changed_at) in the memo key and entry identity', () => {
+  test('A->B->A inside the memo window: the same device but a newer generation gets a FRESH lookup', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValueOnce({ ...ETA_RESULT, minutes: 7 }).mockResolvedValueOnce({ ...ETA_RESULT, minutes: 19 });
+    const first = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: null }), baseCustomer());
+    const same = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: null }), baseCustomer());
+    const afterRoundTrip = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: '2026-09-30T16:00:00.000Z' }), baseCustomer());
+    expect(same.minutes).toBe(first.minutes);
+    expect(afterRoundTrip.minutes).toBe(19);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+  });
+  test('the dedupe/memo identity differs by generation, and two rows at the same generation still match', () => {
+    const customer = baseCustomer();
+    const a = liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1', tech_mapping_changed_at: null }), customer);
+    const b = liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1', tech_mapping_changed_at: '2026-09-30T16:00:00.000Z' }), customer);
+    expect(a).not.toBe(b);
+    expect(liveEtaDedupeKey(baseRow({ id: 'svc-2', tech_bouncie_imei: 'A1', tech_mapping_changed_at: new Date('2026-09-30T16:00:00.000Z') }), customer)).toBe(b);
+  });
+  test('the group records the generation (ISO or null) only when the technician row carried it, and the snapshot persists it', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const base = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const build = (row) => buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() })[0];
+    const withGen = build({ ...base, tech_mapping_changed_at: new Date('2026-09-30T16:00:00.000Z') });
+    expect(withGen.mappingChangedAt).toBe('2026-09-30T16:00:00.000Z');
+    expect(build({ ...base, tech_mapping_changed_at: null }).mappingChangedAt).toBeNull();
+    expect('mappingChangedAt' in build(base)).toBe(false);
+    // Codex #5334 P2: a row with NO technician carries no mapping identity at all (nothing to re-check at send time)
+    const noTech = build({ ...base, technician_id: null, tech_mapping_changed_at: null });
+    expect('mappingChangedAt' in noTech).toBe(false);
+    expect('technicianId' in noTech).toBe(false);
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [withGen] }).entries[0].mappingChangedAt).toBe('2026-09-30T16:00:00.000Z');
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [build({ ...base, tech_mapping_changed_at: null })] }).entries[0].mappingChangedAt).toBeNull();
+  });
+});
+
+// Codex round-40 P2 (PR #5334): a retrospective exclusion needs an elapsed relation ON the figure.
+describe('round 40 P2: retrospective durations need an elapsed relation on the figure', () => {
+  test.each([
+    'We confirmed your technician is 20 minutes away.', 'I checked and the tech is 15 minutes out.', 'We texted the tech and he is 12 minutes away.',
+    'I emailed you earlier; your tech is 10 minutes away now.', 'Someone called him, and he is 25 minutes away.',
+  ])('%p is a CURRENT ETA (a past-tense office verb alone does not exclude it)', (reply) => {
+    const minutes = [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes);
+    expect(minutes.length).toBeGreaterThan(0);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    'I emailed it 10 minutes ago.', 'We sent the invoice 20 minutes ago.', 'I called about it for the last 20 minutes.', 'No news in the past 30 minutes.',
+    'I sent the invoice 20 minutes after we spoke.', 'We texted you 5 minutes after you called.',
+  ])('%p has an elapsed relation on the figure: not an ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+  });
+});
+
+// Codex round-39 P2s (PR #5334): smart punctuation is classified as the customer receives it;
+// "is there" is a completed arrival.
+describe('round 39 P2s: normalized punctuation; technician "is there"', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'They’re on the way.', 'The tech‘s en route.', 'Your technician’s running late.', 'The technician isn’t there yet, but is on the way.',
+    'He’s almost there.', 'Sam’s on the way.',
+  ])('%p (curly quotes) is classified like its straight-quote form', (t) => {
+    expect(bodyMentionsArrival(t, { techNames: ['Sam'] })).toBe(true);
+    expect(bodyMentionsVisitStatus(t, { techNames: ['Sam'] })).toBe(true);
+  });
+  test('negation and questions still work through smart punctuation', () => {
+    expect(bodyMentionsArrival('The tech isn’t on the way yet.')).toBe(false);
+    expect(bodyMentionsArrival('Is the tech on the way?')).toBe(false);
+    expect(bodyClaimsCompletedArrival('The technician hasn’t arrived.')).toBe(false);
+    expect(bodyClaimsCompletedArrival('He’s just arrived at your home.'.replace('He’s just arrived', 'He has just arrived'))).toBe(true);
+  });
+  test('smart dashes and quotes do not hide a minutes figure or a range', () => {
+    expect(findEtaMinutesClaims('The tech is 10–12 minutes away.').map((c) => c.minutes)).toEqual([10, 12]);
+    expect(findEtaMinutesClaims('He’s 12 minutes away — “about” that.').map((c) => c.minutes)).toEqual([12]);
+    expect(findGroundedMinutesFigures('The tech is “12” minutes away').map((c) => c.minutes)).toContain(12);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'He’s 12 minutes away.', factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply: 'The technician’s arrived.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each(['The technician is there.', 'Your tech is there.', 'The techs are there.', "He's there.", 'The crew is there.', 'The driver is now there.'])('%p is a completed arrival', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    'The technician is there to help.', 'The team is there to answer questions.', 'The technician will be there tomorrow.', 'The technician will be there shortly.',
+    'Is the technician there?', "The technician isn't there yet.", 'Once the tech is there I will text you.',
+  ])('%p is not a completed arrival', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+  });
+  test('"is there" against an en-route fact is rejected by the draft-time validator (like "has arrived")', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'The technician is there.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
+// Codex round-38 P2s (PR #5334): first-person arrival claims; retrospective durations.
+describe('round 38 P2s: first-person on-site claims; elapsed-time durations', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "We're on site.", "We've arrived.", "We're at your door.", 'We just got there.', 'We arrived at your home.', "We're outside your house.", 'We are now on-site.',
+  ])('%p is a first-person arrival claim (completed-arrival + visit-status vocabulary)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    "We're here.", "We're here to help.", 'We have on-site inspections available.', "We haven't arrived yet.", 'Have we arrived?', "Once we've arrived I'll text you.",
+    'We are at your house tomorrow.', "When we're on site I'll text you.",
+  ])('%p is not a live first-person arrival claim (bare here / negated / question / conditional / future day / not arrival)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('the en-route first-person forms are unchanged', () => {
+    expect(bodyMentionsArrival("We're on our way.")).toBe(true);
+    expect(bodyClaimsCompletedArrival("We're on our way.")).toBe(false);
+  });
+  test.each([
+    'I emailed it 10 minutes ago.', 'We sent the invoice 20 minutes ago.', 'I called about it for the last 20 minutes.', 'No news in the past 30 minutes.',
+    'We texted you 5 minutes ago.', 'Someone from the office called 15 minutes ago.'
+  ])('%p is a retrospective duration, never an ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ['The tech is 10 minutes away.', 10], ['We texted the tech and he is 12 minutes away.', 12], ['The tech will be there in 10 minutes, we called him 5 minutes ago.', 10],
+  ])('%p is still an ETA claim (%p)', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+});
+
+// Codex round-37 P2s (PR #5334): "got there" arrivals; publication expiry ignores link digits.
+describe('round 37 P2s: got-there completed arrivals; expiry parsing without tracking links', () => {
+  const { bodyMentionsVisitStatus, liveEtaExpiredByPublication } = require('../services/sms-shadow-drafter');
+  test.each([
+    'The technician just got there.', 'He got here.', 'Your tech has gotten to your house.', 'Our crew got to your property.', 'The tech finally got there.',
+  ])('%p is a completed-arrival claim and visit-status vocabulary', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('a recorded tech name works: "Sam just got there" only with Sam recorded', () => {
+    expect(bodyClaimsCompletedArrival('Sam just got there.', { techNames: ['Sam'] })).toBe(true);
+    expect(bodyMentionsVisitStatus('Sam just got there.', { techNames: ['Sam'] })).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam just got there.')).toBe(false);
+    expect(bodyClaimsCompletedArrival('Sam just got there.', { techNames: ['Dana'] })).toBe(false);
+  });
+  test.each([
+    "The technician hasn't got there yet.", 'Did the tech get there?', 'Has the technician got there yet?', 'Your order got there yesterday.',
+    'Once he gets there I will text you.',
+  ])('%p is not a completed-arrival claim (negation / question / conditional / not a technician subject)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('"got there" against an en-route fact is rejected by the draft-time validator (like "has arrived")', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+      expect(validateLiveEtaMinutes({ reply: 'The technician just got there.', factsBlock: facts }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test('liveEtaExpiredByPublication strips tracking links first: token-ending digits are not a minutes figure', () => {
+    const NOW_D = new Date('2026-09-30T15:00:00.000Z');
+    const context = { liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['a'], fixExpiresAtMs: NOW_D.getTime() - 1 }] };
+    const reply = 'Your tech is on the way. Track: portal.wavespestcontrol.com/track/abcdef9';
+    expect(liveEtaExpiredByPublication({ reply, context, now: NOW_D })).toBe(false);
+    // ...while a real minutes claim beside the same link is still aged out
+    expect(liveEtaExpiredByPublication({ reply: `Your tech is about 12 minutes away. Track: portal.wavespestcontrol.com/track/abcdef9`, context, now: NOW_D })).toBe(true);
+  });
+});
+
+// Codex round-36 P2s (PR #5334): coordinated predicates and past-tense route history.
+describe('round 36 P2s: subject carried across coordinated predicates; past-tense route history', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "The technician isn't there yet, but is on the way.", "The technician hasn't arrived, but is en route.", "He isn't here yet and is running late.",
+    "The tech isn't at your home yet, though is nearby.", "We aren't there yet, but are on our way.",
+  ])('%p: the second predicate keeps the subject, so it is a live status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('a recorded tech name is carried the same way; another name is not', () => {
+    expect(bodyMentionsArrival("Sam isn't there yet, but is on the way.", { techNames: ['Sam'] })).toBe(true);
+    expect(bodyMentionsArrival("Dana isn't there yet, but is on the way.", { techNames: ['Sam'] })).toBe(false);
+  });
+  test.each([
+    "The tech is not on the way and is not coming today.", "Your tech is on the way and we'll follow up tomorrow.".replace('on the way and', 'ready and'),
+    'Your receipt is on the way and is due Friday.', "The tech is fine, and is happy to help.",
+  ])('%p: still not a live route claim (negated conjunct / new subject / non-technician subject)', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+  });
+  test.each([
+    'The technician was on the way earlier.', 'The tech was en route and had been running late.', 'They were on the way an hour ago.',
+  ])('%p is past-tense route history, not a current claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('"was on the way earlier, but has now arrived": no current en-route claim, but a completed-arrival claim', () => {
+    const t = 'The technician was on the way earlier, but has now arrived.';
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyClaimsCompletedArrival('The technician has now arrived.')).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam was on the way earlier, but has now arrived.', { techNames: ['Sam'] })).toBe(true);
+  });
+  test('present-perfect continuing route ("has been on the way") is still current', () => {
+    expect(bodyMentionsArrival('The technician has been on the way for 10 minutes.')).toBe(true);
+  });
+  test('at draft time an on-site fact accepts "was on the way earlier, but has now arrived" and rejects a current on-the-way', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'Quarterly Pest TODAY, LIVE STATUS: tech marked on site at this visit';
+      expect(validateLiveEtaMinutes({ reply: 'The technician was on the way earlier, but has now arrived.', factsBlock: facts }).ok).toBe(true);
+      expect(validateLiveEtaMinutes({ reply: "The technician isn't there yet, but is on the way.", factsBlock: facts }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
+// Codex round-35 P2 (PR #5334): route wording is authorized by an EN-ROUTE fact only.
+describe('round 35 P2: on-site facts authorize only arrived/on-site wording', () => {
+  const onSiteFacts = 'Quarterly Pest TODAY, LIVE STATUS: tech marked on site at this visit';
+  const enRouteFacts = 'Quarterly Pest TODAY, LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+  const gateOn = (fn) => { const prior = process.env[GATE]; process.env[GATE] = 'true'; try { return fn(); } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; } };
+  test('gate on: the prompt splits route wording (en route) from arrived wording (on site)', () => {
+    const prompt = gateOn(() => buildSystemPrompt());
+    expect(prompt).toContain('ONLY when TODAY\'s visit line shows LIVE STATUS: tech marked en route');
+    expect(prompt).toContain('LIVE STATUS: tech marked on site, say only that the tech has arrived');
+    expect(prompt).toContain('never "on the way"');
+  });
+  test('gate off: the prompt keeps the exact v11 literal (byte-identical)', () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site.");
+    expect(prompt).toContain('LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now.');
+    expect(prompt).not.toContain('ONLY when TODAY');
+  });
+  test.each(['Your tech is on the way.', 'Sam is running late.', 'Your technician is nearby.', "We're on our way."])('%p against an on-site-only fact is rejected', (reply) => {
+    const v = gateOn(() => validateLiveEtaMinutes({ reply, factsBlock: onSiteFacts, techNames: ['Sam'] }));
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]).toMatch(/ON SITE/);
+  });
+  test.each(['Your tech has arrived.', 'Sam is on site now.', 'Your technician is here.'])('%p against an on-site fact is fine', (reply) => {
+    expect(gateOn(() => validateLiveEtaMinutes({ reply, factsBlock: onSiteFacts, techNames: ['Sam'] })).ok).toBe(true);
+  });
+  test('route wording against an en-route fact, or with an en-route stop beside an on-site one, is fine', () => {
+    expect(gateOn(() => validateLiveEtaMinutes({ reply: 'Your tech is on the way, about 9 minutes away.', factsBlock: enRouteFacts })).ok).toBe(true);
+    expect(gateOn(() => validateLiveEtaMinutes({ reply: 'Your tech is on the way.', factsBlock: `${onSiteFacts}\n${enRouteFacts}` })).ok).toBe(true);
+  });
+  test('gate off: the validator never fires', () => {
+    expect(validateLiveEtaMinutes({ reply: 'Your tech is on the way.', factsBlock: onSiteFacts }).ok).toBe(true);
+  });
+  test('IMEI change -> the cutoff bypasses an older cached fix; a name/phone edit (updated_at only) leaves the cache trusted', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    // The row carries an unrelated restamped technicians.updated_at but no remap time: no cutoff.
+    await resolveLiveEtaFact(baseRow({ tech_updated_at: new Date().toISOString(), tech_mapping_changed_at: null, tech_bouncie_imei: 'DEV-N' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].cachedNotBefore).toBeNull();
+    // After an IMEI change the cutoff is the change time.
+    const changed = new Date().toISOString();
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: changed, tech_bouncie_imei: 'DEV-M' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].cachedNotBefore).toBe(changed);
+  });
+});
+
+// Codex round-34 P2s (PR #5334): first-person plural route claims; a tech named Will.
+describe('round 34 P2s: "we" route claims and technician names that are auxiliaries', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "We're on our way.", 'We will be there shortly.', "We're en route.", "We'll be there in 15 minutes.", "We're almost there.", 'We are running late.',
+    "We'll be there soon.", 'We are now pulling up.',
+  ])('%p is a first-person route claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    "We're here to help.", 'We will be there Tuesday.', 'We will be there tomorrow.', 'We are on our way tomorrow.', "We're here for you.",
+    "When we're on our way I will text.", 'Are we on our way?', "We're not on our way yet.", "We're running late on emails today.".replace(' today', ''), 'We are looking into it.',
+  ])('%p is not a live route claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(t.includes('running late on emails'));
+    if (!t.includes('running late on emails')) expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    ['Will is on the way.', 'Will'], ['Will is running late.', 'Will'], ['Mark is on the way.', 'Mark'], ["Mark's en route.", 'Mark'],
+  ])('%p: declarative with tech name %p is a claim (never an interrogative opener)', (t, name) => {
+    expect(bodyMentionsArrival(t, { techNames: [name] })).toBe(true);
+    expect(bodyMentionsVisitStatus(t, { techNames: [name] })).toBe(true);
+  });
+  test.each([['Will has arrived.', 'Will'], ['Mark has arrived.', 'Mark'], ['Will just arrived at your home.', 'Will']])('%p completed-arrival claim with tech name %p', (t, name) => {
+    expect(bodyClaimsCompletedArrival(t, { techNames: [name] })).toBe(true);
+  });
+  test.each([
+    ['Will is on the way?', 'Will'], ['Is Will on the way?', 'Will'], ['Has Mark arrived yet?', 'Mark'], ['Will Mark be there soon', 'Mark'],
+    ['Will your technician be there', 'Will'], ['Has your technician arrived yet', 'Will'],
+  ])('%p is a real question (ends with ? or aux + subject inversion): not a claim', (t, name) => {
+    expect(bodyMentionsArrival(t, { techNames: [name] })).toBe(false);
+    expect(bodyClaimsCompletedArrival(t, { techNames: [name] })).toBe(false);
+  });
+  test('without a recorded name, "Will is on the way." is not a technician claim either way', () => {
+    expect(bodyMentionsArrival('Will is on the way.')).toBe(false);
+  });
+});
+
+// Codex round-33 (PR #5334): the prompt lets the model NAME the technician, so this
+// draft's recorded tech first name(s) are extra status subjects (synthetic names).
+describe('round 33: recorded technician names as status subjects', () => {
+  const { bodyMentionsVisitStatus, techNamesFromContext, sanitizeTechNames } = require('../services/sms-shadow-drafter');
+  const sam = { techNames: ['Sam'] };
+  test.each([
+    'Sam is on the way.', 'Sam is running late.', "Sam's en route.", 'sam is nearby.', 'Sam, the lead, is almost there.', 'Sam will arrive soon.',
+  ])('%p is a status claim when Sam is the snapshot\'s tech', (t) => {
+    expect(bodyMentionsArrival(t, sam)).toBe(true);
+    expect(bodyMentionsVisitStatus(t, sam)).toBe(true);
+    // ...and not without the recorded name (older snapshots keep current behavior)
+    expect(bodyMentionsArrival(t)).toBe(false);
+  });
+  test('"Sam has arrived" is a completed-arrival claim only with the recorded name', () => {
+    expect(bodyClaimsCompletedArrival('Sam has arrived.', sam)).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam just arrived at your home.', sam)).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam has arrived.')).toBe(false);
+    expect(bodyHasTimedArrivalPhrase('Sam has arrived.', { completedArrivalOnly: true, techNames: ['Sam'] })).toBe(true);
+  });
+  test.each(["Dana's order is on the way.", 'Dana is on the way to the store.', 'Samuel is on the way.', 'Your receipt is on the way.'])('%p is NOT a claim (not this draft\'s tech name / word-bounded)', (t) => {
+    expect(bodyMentionsArrival(t, sam)).toBe(false);
+    expect(bodyMentionsVisitStatus(t, sam)).toBe(false);
+    expect(bodyClaimsCompletedArrival(t, sam)).toBe(false);
+  });
+  test('corrections, questions and conditionals keep their exemptions with a name subject', () => {
+    for (const t of ['Sam is not on the way yet.', 'Is Sam on the way?', "I'll text you once Sam is on the way."]) expect(bodyMentionsArrival(t, sam)).toBe(false);
+    expect(bodyClaimsCompletedArrival('Has Sam arrived yet?', sam)).toBe(false);
+  });
+  test('names are sanitized: first token only, word-safe, deduped, no regex injection', () => {
+    expect(sanitizeTechNames(['Sam Rivera', 'sam', 'O\'Neil', '(.*)', 'a', '', null, 'X'.repeat(40)])).toEqual(['Sam', "O'Neil"]);
+    expect(bodyMentionsArrival('Anything is on the way.', { techNames: ['(.*)'] })).toBe(false);
+  });
+  test('draft-time names come from the context (liveEtaGroups + UPCOMING SERVICES tech)', () => {
+    expect(techNamesFromContext({ liveEtaGroups: [{ technicianNames: ['Sam'] }], upcomingServices: [{ tech: 'Alex Test' }] })).toEqual(['Sam', 'Alex']);
+    expect(techNamesFromContext({})).toEqual([]);
+  });
+  test('the draft-time validator uses them: "Sam has arrived" beside an en-route fact is rejected', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+      expect(validateLiveEtaMinutes({ reply: 'Sam has arrived.', factsBlock: facts, techNames: ['Sam'] }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply: 'Sam has arrived.', factsBlock: facts }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test('groups record the technician first name(s) from the UPCOMING SERVICES row, and the snapshot persists them (names only)', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', technician_name: 'Sam Rivera', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() });
+    expect(g.technicianNames).toEqual(['Sam']);
+    const snap = buildLiveEtaSnapshot({ liveEtaGroups: [g] });
+    expect(snap.entries[0].technicianNames).toEqual(['Sam']);
+    expect(JSON.stringify(snap)).not.toContain('Rivera');
+    const [noName] = buildLiveEtaGroups({ upcomingServices: [{ ...row, technician_name: null }], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() });
+    expect(noName.technicianNames).toBeUndefined();
+  });
+});
+
+// Codex round-32 P2s (PR #5334).
+describe('round 32 P2s: future-day scope is the status clause; running late/ahead are live status', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "Your technician is on the way, and we'll follow up tomorrow.", 'Your tech is on the way but the report will be ready tomorrow.',
+    'Your tech is on the way, however we will call you Friday.', 'Our crew is en route, though the invoice posts next week.',
+  ])('%p: the day belongs to the NEXT clause, so the status stays live', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    'Your technician is coming tomorrow.', 'Your tech, Sam, is coming tomorrow.', 'Tomorrow your tech is on the way.', 'Your tech is running late tomorrow.',
+  ])('%p: the day is in the status clause, so it is scheduling copy', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Your tech is running late.', 'Your technician is running a bit behind.', 'He is running ahead of schedule.', 'The crew is running about 10 minutes late.',
+    'Our team is running ahead.', 'Your tech is behind schedule.', 'The tech is running early today.', 'They are running a few minutes late.',
+  ])('%p (a prompt-sanctioned live-status form) is a status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    'Our office is running late on emails.', 'The tech is not running late.', 'Is your tech running late?', "I'll text you once he's running late.",
+    'Your invoice is behind schedule.',
+  ])('%p is not a status claim (no tech subject / negated / question / conditional)', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+});
+
+// Codex round-31 P2s (PR #5334).
+describe('round 31 P2s: team subjects, explicit future days', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
+  const otherDay = DAYS.find((d) => d !== todayName);
+  test.each([
+    'Our team is on the way.', 'The team is en route.', 'Our teams are heading over.', 'Our team will be there shortly.',
+  ])('%p is a technician-type status claim (team is a subject)', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each(['Our team is here to help.', 'Our team will be here to help you.', 'The team is here to answer questions.'])('%p stays non-status', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('the completed-arrival classifier already shares the team subject', () => {
+    expect(bodyClaimsCompletedArrival('Our team has arrived.')).toBe(true);
+  });
+  test.each([
+    'Your technician is coming tomorrow.', 'We will be there tomorrow.', 'The tech will be there next week.', 'Your tech is coming next Monday.',
+    'Your tech will be there on the 5th.', 'Your technician is coming Oct 5.', 'The tech is on the way on 10/5.', 'Tomorrow your tech is on the way.',
+    'Your tech is coming in 3 days.', 'The tech is coming tomorrow.', 'Your tech is coming tomorrow, not today.', // the day is in the status clause; ", not today" is a corrective aside
+    `Your tech will be there ${otherDay}.`,
+  ])('%p names a future day: a scheduling statement, not live status', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Your technician is coming today.', 'Your tech is on the way now.', 'The tech is en route this morning.', 'Your tech is on the way tonight.',
+    `Your tech will be there ${todayName}.`, 'The tech is on the way; your report will be ready tomorrow.',
+    'Your report is ready tomorrow; your tech is on the way.',
+  ])('%p stays live status', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+});
+
+// Codex round-30 P2s (PR #5334).
+describe('round 30 P2: route idioms need a technician-type subject', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'Your receipt is on the way.', 'The replacement trap is en route.', 'Your order is on the way.', 'Your package will arrive tomorrow.',
+    "We'll be there Tuesday.", "You're close to renewal.", 'The parts are en-route from the warehouse.',
+  ])('%p is fulfillment/scheduling copy, not a technician claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Your tech is on the way.', 'Your tech, Sam, is on his way.', "He's en route.", 'The technician is now en-route.', 'Our driver will be on the way shortly.',
+    'The tech will arrive soon.', 'Your tech is almost there.', 'Our crew is heading over.', "They'll be there shortly.",
+  ])('%p is a technician status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each(['He is no longer en route.', 'The tech is not on the way yet.', 'Your tech is not en route.'])('%p stays a correction, not a claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+  });
+  test('the default-deny vocabulary is never narrower than the en-route classifier', () => {
+    for (const t of ['Your tech is on the way.', "They'll be there shortly.", 'The tech will arrive soon.', 'Your tech is almost there.', 'The crew is heading over.']) {
+      expect(bodyMentionsArrival(t) && !bodyMentionsVisitStatus(t)).toBe(false);
+    }
+  });
+});
+
+describe('round 30 P2: liveEtaExpiredByPublication', () => {
+  const { liveEtaExpiredByPublication } = require('../services/sms-shadow-drafter');
+  const NOW_D = new Date('2026-09-30T15:00:00.000Z');
+  const ctx = (e = {}) => ({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['a'], ...e }] });
+  const claim = 'Your tech is about 12 minutes away.';
+  test('fix deadline passed -> expired; not yet -> fresh', () => {
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx({ fixExpiresAtMs: NOW_D.getTime() - 1 }), now: NOW_D })).toBe(true);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx({ fixExpiresAtMs: NOW_D.getTime() + 60e3 }), now: NOW_D })).toBe(false);
+  });
+  test('facts older than the 15-minute draft window -> expired', () => {
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx(), factsAt: new Date(NOW_D.getTime() - 16 * 60e3), now: NOW_D })).toBe(true);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx(), factsAt: new Date(NOW_D.getTime() - 5 * 60e3), now: NOW_D })).toBe(false);
+  });
+  test('status-only copy, no live entries, or minutes-null entries never expire', () => {
+    expect(liveEtaExpiredByPublication({ reply: 'Your tech is on the way.', context: ctx({ fixExpiresAtMs: 1 }), now: NOW_D })).toBe(false);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: {}, now: NOW_D })).toBe(false);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: { liveEtaGroups: [{ minutes: null, scheduledServiceIds: ['a'], fixExpiresAtMs: 1 }] }, now: NOW_D })).toBe(false);
+  });
+});
+
+// Codex round-29 P2s (PR #5334): conditional scope + interrogatives.
+describe('round 29 P2s: introductory phrases are not conditionals; questions are not claims', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'After checking, your technician is en route.', 'After we confirmed the address, the tech is on the way.',
+    'Before we head out, your technician is en route.',
+  ])('%p: the status is asserted, so it is a claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    "I'll text you once he's on the way.", "When the tech is en route, I'll let you know.", 'If your technician is en route, call us.',
+    'As soon as the tech is on the way we will text you.',
+  ])('%p: the conditional governs the status clause, so it is not a claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Has your technician arrived yet?', 'Have the crew arrived?', 'Is your technician here?', 'Did the tech arrive? We can check.',
+    'Has the tech arrived yet? We will look into it.',
+  ])('%p is a question, not a completed-arrival claim', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+  });
+  test.each(['Is your technician en route?', 'Is the tech on the way yet?', 'Are they nearby?', 'Is your technician en route yet?'])('%p is a question, not an en-route claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    ['Your technician has arrived, is that ok?', 'completed'], ['Did the tech arrive? He has arrived.', 'completed'],
+  ])('a statement clause beside a question is still a claim: %p', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+  });
+  test('an en-route statement beside a question is still a claim', () => {
+    expect(bodyMentionsArrival(' The tech is en route, is that ok?')).toBe(true);
+    expect(bodyMentionsVisitStatus('The tech is en route, is that ok?')).toBe(true);
+  });
+});
+
+// Codex round-27 P2 (PR #5334): the technician subject must be in the SAME clause.
+describe('round 27 P2: long-duration subject is scoped to its clause', () => {
+  test.each([
+    'He completed the service; your next visit is 2 days away.',
+    'The tech finished up, and your next visit is 3 weeks away.',
+    'She treated the yard but your follow-up is 2 weeks away.',
+    'The technician did a great job. Your next visit is 2 days away.',
+  ])('%p is ordinary scheduling copy, not a tech ETA', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply, { unnormalizedHoursOnly: true })).toBe(false);
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+  });
+  test.each([
+    'The tech is 2 days away.', 'He will arrive in 3 weeks.', 'Your technician is about 2 days out.',
+  ])('%p is still a technician timed claim', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply, { unnormalizedHoursOnly: true })).toBe(true);
+  });
+});
+
+// Codex round-17 P2 / round-29 P2 (PR #5334): the destination is the PUBLIC
+// TRACKER's rule (routes/track-public.js): each coordinate independently
+// COALESCEs visit -> customer (unless the stamped address diverges), and only a
+// complete resulting pair is usable — so the text and the tracking page agree.
+describe('liveEtaDestination — per-coordinate fallback exactly as the public tracker (round 29 P2)', () => {
+  test('a half-stamped visit mixes its own coordinate with the customer\'s, like the tracker', () => {
+    expect(liveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer())).toEqual({ lat: 27.4, lng: -82.51 });
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: -82.5 }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.5 });
+  });
+  test('a complete visit pair wins; a complete customer pair is the fallback', () => {
+    expect(liveEtaDestination(baseRow(), baseCustomer())).toEqual({ lat: 27.4, lng: -82.5 });
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.51 });
+  });
+  test('the visit half and the customer half can complement each other; otherwise no complete pair fails closed', () => {
+    expect(liveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer({ longitude: null }))).toBeNull();
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: -82.5 }), baseCustomer({ latitude: null }))).toBeNull();
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer({ latitude: null }))).toBeNull();
+  });
+  test('a diverging stamped address never borrows the customer\'s coordinates, even for one half', () => {
+    const diverged = { service_address_line1: '9 Other Ave', service_address_zip: '99999', service_address_city: 'Elsewhere' };
+    const customer = baseCustomer({ address_line1: '1 Test St', zip: '34285', city: 'Venice' });
+    expect(liveEtaDestination(baseRow({ ...diverged, service_lat: 27.4, service_lng: null }), customer)).toBeNull();
+    expect(liveEtaDestination(baseRow({ ...diverged, service_lat: 27.4, service_lng: -82.5 }), customer)).toEqual({ lat: 27.4, lng: -82.5 });
+  });
+  test('the resolution source is visit / customer / mixed, and customer-dependent sources are flagged', () => {
+    const { resolveLiveEtaDestination, usesCustomerCoordinates } = require('../services/live-eta-destination');
+    expect(resolveLiveEtaDestination(baseRow(), baseCustomer()).source).toBe('visit');
+    expect(resolveLiveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer()).source).toBe('customer');
+    expect(resolveLiveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer()).source).toBe('mixed');
+    expect(resolveLiveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer({ latitude: null })).source).toBeNull();
+    expect(['visit', 'customer', 'mixed', null].map(usesCustomerCoordinates)).toEqual([false, true, true, false]);
+  });
+  test('the tracker\'s own SQL rule is pinned, so this helper cannot drift from it unnoticed', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/track-public.js'), 'utf8');
+    expect(src).toContain("COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude");
+    expect(src).toContain("COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude");
+  });
+  test('a mixed destination is recorded with its source + customer id so send time re-resolves it', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const customer = { ...baseCustomer(), id: 'cust-1' };
+    const half = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', service_lat: 27.4, service_lng: null };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [half], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
+    expect(g.destinations[0]).toMatchObject({ resolved: { source: 'mixed', lat: 27.4, lng: -82.51 }, customerId: 'cust-1' });
+  });
+});
+
+describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2)', () => {
+  test('no scheduled_service ever backed a LIVE ETA fact: null', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [] })).toBeNull();
+    expect(buildLiveEtaSnapshot({})).toBeNull();
+    expect(buildLiveEtaSnapshot(null)).toBeNull();
+  });
+
+  test('carries the exact groups context-aggregator collected, filtering out nullish ids', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1', null, 'svc-2'] }] }))
+      .toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: [] }] });
+  });
+
+  // Codex round-11 P2 (PR #5334): the GPS-fix expiry rides into the persisted
+  // entry so send time can expire the claim with its fix.
+  test('carries a finite fixExpiresAtMs into the entry, and omits it when unknown (older-shape entries unchanged)', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [
+      { minutes: 12, scheduledServiceIds: ['svc-1'], fixExpiresAtMs: 1780000000000 },
+      { minutes: 9, scheduledServiceIds: ['svc-2'], fixExpiresAtMs: undefined },
+      { minutes: 7, scheduledServiceIds: ['svc-3'], fixExpiresAtMs: NaN },
+    ] })).toEqual({ entries: [
+      { minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: [], fixExpiresAtMs: 1780000000000 },
+      { minutes: 9, scheduledServiceIds: ['svc-2'], trackTokens: [] },
+      { minutes: 7, scheduledServiceIds: ['svc-3'], trackTokens: [] },
+    ] });
+  });
+
+  test('two distinct stops (different technicians/destinations) persist as two separate entries', () => {
+    expect(buildLiveEtaSnapshot({
+      liveEtaGroups: [
+        { minutes: 9, scheduledServiceIds: ['svc-1'] },
+        { minutes: 20, scheduledServiceIds: ['svc-2'] },
+      ],
+    })).toEqual({
+      entries: [
+        { minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: [] },
+        { minutes: 20, scheduledServiceIds: ['svc-2'], trackTokens: [] },
+      ],
+    });
+  });
+
+  test('a group with no ids, or a non-numeric non-null minutes value, is dropped (a minutes-null status-only group is kept — round 16)', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 'soon', scheduledServiceIds: ['svc-1'] }, { minutes: 12, scheduledServiceIds: [] }, { minutes: null, scheduledServiceIds: [] }] }))
+      .toBeNull();
+  });
+
+  // Codex round-4 P2 (PR #5334): the /track/:token(s) each entry covers,
+  // carried through unchanged — filtered of blanks the same way ids are —
+  // so sms-eta-freshness.js can revalidate a tracking-link-only reply.
+  test('carries each group\'s trackTokens through, filtering blanks', () => {
+    expect(buildLiveEtaSnapshot({
+      liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: ['tok-a', null, 'tok-b', ''] }],
+    })).toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: ['tok-a', 'tok-b'] }] });
+  });
+
+  test('a group with no trackTokens at all still persists (defaults to empty)', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] }))
+      .toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: [] }] });
+  });
+});
