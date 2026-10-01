@@ -14,6 +14,7 @@ const { buildWhatToExpect, toExpectationProduct, whatToExpectClasses } = require
 const { findReportProductCopyEntry } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
+const { writerPromiseLines } = require('./visit-promises');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -121,7 +122,7 @@ function reachOutDate(serviceYmd, days) {
 }
 
 function buildWriterRecords({
-  serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [],
+  serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [], promises = [],
 } = {}) {
   const sections = [];
   const expectations = writerExpectations({ line, findingsType, applications });
@@ -139,10 +140,19 @@ function buildWriterRecords({
   if (reach) {
     sections.push(`REACH-OUT DATE: ${reach.full} (the service date plus the longest window in EXPECTATIONS). When you tell the customer when to contact us, use this date exactly.`);
   }
+  // The technician's promise marks (visit-promises.js): only marked
+  // promises, each with its mark.
+  const promiseLines = writerPromiseLines(promises);
+  if (promiseLines.length) {
+    sections.push(`PROMISES (what we promised this customer before today, and how the technician marked each one today; mention only these, only as marked):\n${promiseLines.join('\n')}`);
+  }
   return {
     sections,
     allowedPhrases: groundedTimeframePhrases(expectations.lines),
     allowedDates: reach ? [reach.full, reach.monthDay] : [],
+    // How many marked promises reached the writer (the generate route's
+    // promise-only grounding check).
+    promiseCount: promiseLines.length,
   };
 }
 

@@ -50,12 +50,15 @@ function makeDb(lead, estimate = null) {
         // deleted_at guard on the lead lookup — fixtures are never deleted,
         // so the guard is a chain no-op here.
         whereNull: () => q,
+        // the attach's still-not-closed write predicate (codex #5477 r12)
+        whereNotIn: (col, list) => { q._notIn = { col, list }; return q; },
         first: async () => {
           if (table === 'leads' && lead && clause.id === lead.id) return lead;
           if (table === 'estimates' && estimate && clause.id === estimate.id) return estimate;
           return null;
         },
         update: async (patch) => {
+          if (q._notIn && lead && q._notIn.list.includes(lead.status)) return 0;
           updates.push({ table, clause, patch });
           return 1;
         },
@@ -126,6 +129,28 @@ describe('lead-estimate link service', () => {
 
     expect(updates).toEqual([]);
     expect(activities).toEqual([]);
+  });
+
+  test('a booking that closed the request (handled) between the read and the write: 409, nothing attached (codex #5477 r12)', async () => {
+    const lead = { id: 'lead-1', status: 'new', phone: '9415550101', first_contact_at: new Date().toISOString() };
+    const { database, updates, activities } = makeDb(lead);
+    const read = database;
+    // the validation reads the lead open; the close commits before the attach's write
+    const racing = (table) => {
+      const q = read(table);
+      const where = q.where.bind(q);
+      return { ...q, where: (clause) => { const w = where(clause); const first = w.first; w.first = async () => { const r = await first(); if (r === lead) { const open = { ...lead }; lead.status = 'handled'; return open; } return r; }; return w; } };
+    };
+    racing.transaction = read.transaction;
+    await expect(attachLeadToEstimate({
+      database: racing,
+      leadId: lead.id,
+      estimateId: 'estimate-1',
+      estimate: { id: 'estimate-1', customer_phone: '+1 (941) 555-0101' },
+      technician: { first_name: 'Ava', last_name: 'Tech' },
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+    expect(activities).toHaveLength(0);
   });
 
   test('allows replacing a stale linked estimate when the caller opts in', async () => {
@@ -982,6 +1007,91 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // The contact fallback must restrict to unconverted, non-deleted leads.
     expect(database._calls.whereNull).toContain('customer_id');
     expect(database._calls.whereNull).toContain('deleted_at');
+  });
+
+  describe('excludeCallbackRequests (codex #5477 r1 P1): a /book preferred-time request is closed by the booking, never won by the generic conversion', () => {
+    const customer = { id: 'c1', phone: '+19415550100', member_since: '2026-01-01' };
+    const request = { id: 'Lreq', status: 'new', lead_type: 'book_preferred_time', first_contact_at: '2025-12-15T10:00:00Z' };
+
+    test('contact fallback: the unlinked request is not a candidate, nothing converts', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, contactLeads: [{ ...request, customer_id: null }] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toEqual({ converted: false, reason: 'no_open_lead' });
+      expect(markConverted).not.toHaveBeenCalled();
+    });
+
+    test('contact fallback: the same request still converts for a staff-driven trigger (flag off, behavior unchanged)', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, contactLeads: [{ ...request, customer_id: null }] });
+      const result = await convertLeadFromEvent({
+        source: 'appointment_booked', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreq'] });
+    });
+
+    test('contact fallback: a real lead beside the request is no longer "ambiguous" — the real lead converts, the request does not', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const real = { id: 'Lreal', status: 'new', lead_type: 'web_form', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' };
+      const database = makeConvertDb({ customer, contactLeads: [{ ...request, customer_id: null }, real] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreal'] });
+      expect(markConverted).toHaveBeenCalledTimes(1);
+    });
+
+    test('customer-link tier: a request already carrying the customer id is not a candidate either', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, customerOpenLeads: [{ ...request, customer_id: 'c1' }] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toEqual({ converted: false, reason: 'no_open_lead' });
+      expect(markConverted).not.toHaveBeenCalled();
+    });
+
+    test('customer-link tier: flag off, the linked request converts as before', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, customerOpenLeads: [{ ...request, customer_id: 'c1' }] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreq'] });
+    });
+
+    test('the estimate-link tier stays authoritative: a request staff attached an estimate to still converts through that estimate', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({
+        estimate: { id: 'e1', customer_id: 'c1' },
+        leadsByEstimate: [{ ...request, estimate_id: 'e1', status: 'estimate_sent' }],
+      });
+      const result = await convertLeadFromEvent({
+        source: 'estimate_accepted', estimateId: 'e1', excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreq'] });
+    });
+
+    test('bookingId rides to markConverted only when supplied (lineage persisted at the conversion; other callers unchanged)', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, contactLeads: [{ id: 'Lgen', status: 'new', lead_type: 'web_form', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' }] });
+      await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, bookingId: 'sba-9', database, leadAttributionService: { markConverted } });
+      expect(markConverted.mock.calls[0][1]).toEqual({ customerId: 'c1', triggerSource: 'recurring_service_booked', bookingId: 'sba-9' });
+      markConverted.mockClear();
+      await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+      expect(markConverted.mock.calls[0][1]).not.toHaveProperty('bookingId');
+    });
+
+    test('both /book conversion calls (primary and replay) pass the flag', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
+      // Each call's argument object runs to the first line that closes it ("});"),
+      // so a spread like ...(x ? { estimateId } : {}) inside the call is kept.
+      const calls = src.match(/convertLeadFromEvent\(\{[\s\S]*?\n\s*\}\);/g) || [];
+      expect(calls).toHaveLength(2); // primary + replay series
+      for (const c of calls) expect(c).toMatch(/excludeCallbackRequests: true/);
+    });
   });
 
   test('enforceOriginating converts a contact lead first contacted before the customer signed up', async () => {

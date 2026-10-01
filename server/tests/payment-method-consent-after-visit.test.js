@@ -121,4 +121,18 @@ describe('recordConsent stores the variant snapshot under its own label', () => 
     });
     expect(insert.mock.calls[0][0]).toMatchObject({ consent_text_version: 'agreement_v3', consent_text_snapshot: 'signed text' });
   });
+
+  // GitHub Codex #5481 r5 P1: a recovery records the text the accept persisted
+  // as shown, verbatim, even if today's copy for that variant changed.
+  test('renderedConsent: the shown text + version are recorded verbatim, never re-derived', async () => {
+    const insert = stubInsert();
+    await recordConsent({ ...base, consentVariant: 'after_visit_card', renderedConsent: { text: 'OLDER SHOWN TEXT', version: 'v12_2026-09-30' } });
+    expect(insert.mock.calls[0][0]).toMatchObject({ consent_text_version: 'v12_2026-09-30', consent_text_snapshot: 'OLDER SHOWN TEXT' });
+  });
+
+  test('renderedConsent needs text and a v<N> version (never an agreement label)', async () => {
+    stubInsert();
+    await expect(recordConsent({ ...base, renderedConsent: { text: 'x', version: 'agreement_v3' } })).rejects.toThrow(/rendered consent/);
+    await expect(recordConsent({ ...base, renderedConsent: { text: '', version: 'v11_2026-08-25' } })).rejects.toThrow(/rendered consent/);
+  });
 });

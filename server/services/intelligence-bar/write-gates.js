@@ -38,17 +38,8 @@ const OUTSIDE_WRITE_TOOL_NAMES = new Set([
   'request_codex_review',
   'submit_gsc_sitemap',
   // Feature switches (owner ruling 2026-09-28, Decision 5): a GrowthBook flag
-  // toggle and a Railway GATE_* variable change. PREVIEW ONLY for now — both
-  // executors refuse confirmed:true until the commit-path PR.
-  'set_railway_gate',
-  'set_growthbook_feature_environment',
-]);
-
-// Proposals whose card is shown but CANNOT be confirmed yet: their executors
-// refuse confirmed:true until the commit-path PR. The contract carries
-// preview_only (the card hides Confirm) and /confirm-action refuses them
-// before dispatch. The commit-path PR removes a tool from this set.
-const PREVIEW_ONLY_WRITE_TOOL_NAMES = new Set([
+  // toggle and a Railway GATE_* variable change. Confirmed, each acts only
+  // on its `_verified_*` pins (outside-write-pins.js).
   'set_railway_gate',
   'set_growthbook_feature_environment',
 ]);
@@ -134,5 +125,4 @@ module.exports = {
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   OUTSIDE_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
-  PREVIEW_ONLY_WRITE_TOOL_NAMES,
 };

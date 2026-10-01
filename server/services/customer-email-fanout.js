@@ -60,7 +60,7 @@ const { lockTriageCall } = require('../utils/triage-locks');
 // in-flight send) but gets its own column-only customer_email sync below —
 // this service is diff-gated, so "heal on the next fan-out" never comes.
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 // Mirrors OPEN_STATES in routes/admin-triage.js.
 const OPEN_REVIEW_STATES = ['open', 'in_progress'];

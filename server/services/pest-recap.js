@@ -222,25 +222,46 @@ async function loadCommonProducts(svc, knex) {
 }
 
 /**
- * Build the data the recap modal needs: service info, timeline, catalog,
- * prior note. `includeCommonProducts` adds the Fast Complete picker's
- * most-used list; only that sheet asks for it, so the recap modal (and the
- * sheet's stock re-read) never pay for the aggregate.
+ * The visit identity the recap context returns as `service` — also what a
+ * client echoes back as `expectedVisit` (see recapVisitIdentityChanged).
  */
-async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
-  const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
-  if (!ok) return { ok: false, reason };
+function recapServiceIdentity(svc, profile) {
+  return {
+    id: svc.id,
+    customerId: svc.customer_id,
+    customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim() || 'Customer',
+    serviceType: svc.service_type,
+    status: svc.status,
+    scheduledDate: svc.scheduled_date,
+    propertyId: svc.property_id ?? null,
+    catalogServiceId: svc.service_id ?? null,
+    address: resolveVisitAddress({
+      visit: svc,
+      customer: {
+        address_line1: svc.cust_address_line1,
+        address_line2: svc.cust_address_line2,
+        city: svc.cust_city,
+        state: svc.cust_state,
+        zip: svc.cust_zip,
+      },
+    }),
+    hasPhone: !!svc.cust_phone,
+    category: profile?.category || null,
+    // The live completion profile key, so a client routed from a stale
+    // schedule row (the tech Fast Complete sheet) can confirm this is
+    // still the visit type it was opened for.
+    serviceKey: profile?.serviceKey || null,
+  };
+}
 
-  // Started first so the aggregate overlaps the reads below.
-  const commonProductsLoad = includeCommonProducts ? loadCommonProducts(svc, knex) : null;
-
-  const timeline = await knex('job_status_history')
-    .where({ job_id: serviceId })
-    .orderBy('transitioned_at', 'asc')
-    .select('from_status', 'to_status', 'transitioned_at')
-    .catch(() => []);
-
-  const products = await knex('products_catalog')
+/**
+ * The active catalog list the Fast Complete product picker and the recap modal
+ * share. `extraColumns` lets another sheet (Tree & Shrub Fast Complete) add
+ * classifier inputs to the same row shape. Never rejects: a failed read is an
+ * empty list, as it always was here.
+ */
+function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
+  return knex('products_catalog')
     .where({ active: true })
     .orderBy('category')
     .orderBy('name')
@@ -264,9 +285,32 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
       // its "0 in stock" warning, and the formulation that names a gel bait
       // its name doesn't (Vendetta Plus), so it is weighed in grams.
       'display_name', 'inventory_unit', 'inventory_on_hand', 'formulation',
+      ...extraColumns,
     )
     .then((rows) => rows.map((row) => ({ ...row, inventory_on_hand: numberOrNull(row.inventory_on_hand) })))
     .catch(() => []);
+}
+
+/**
+ * Build the data the recap modal needs: service info, timeline, catalog,
+ * prior note. `includeCommonProducts` adds the Fast Complete picker's
+ * most-used list; only that sheet asks for it, so the recap modal (and the
+ * sheet's stock re-read) never pay for the aggregate.
+ */
+async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
+  const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
+  if (!ok) return { ok: false, reason };
+
+  // Started first so the aggregate overlaps the reads below.
+  const commonProductsLoad = includeCommonProducts ? loadCommonProducts(svc, knex) : null;
+
+  const timeline = await knex('job_status_history')
+    .where({ job_id: serviceId })
+    .orderBy('transitioned_at', 'asc')
+    .select('from_status', 'to_status', 'transitioned_at')
+    .catch(() => []);
+
+  const products = await loadRecapCatalogProducts(knex);
 
   // A FAILED lookup is not "no record" (codex P1 r15): reporting null on
   // a transient error would let the modal treat a real completed visit as
@@ -318,32 +362,7 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     ok: true,
     eligible,
     existingRecordLoadFailed,
-    service: {
-      id: svc.id,
-      customerId: svc.customer_id,
-      customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim() || 'Customer',
-      serviceType: svc.service_type,
-      status: svc.status,
-      scheduledDate: svc.scheduled_date,
-      propertyId: svc.property_id ?? null,
-      catalogServiceId: svc.service_id ?? null,
-      address: resolveVisitAddress({
-        visit: svc,
-        customer: {
-          address_line1: svc.cust_address_line1,
-          address_line2: svc.cust_address_line2,
-          city: svc.cust_city,
-          state: svc.cust_state,
-          zip: svc.cust_zip,
-        },
-      }),
-      hasPhone: !!svc.cust_phone,
-      category: profile?.category || null,
-      // The live completion profile key, so a client routed from a stale
-      // schedule row (the tech Fast Complete sheet) can confirm this is
-      // still the visit type it was opened for.
-      serviceKey: profile?.serviceKey || null,
-    },
+    service: recapServiceIdentity(svc, profile),
     timeline,
     products,
     ...(commonProducts && { commonProducts }),
@@ -1571,4 +1590,6 @@ module.exports = {
   submitRecap,
   // Shared with completeScheduledService's expectedVisit guard.
   recapVisitIdentityChanged,
+  recapServiceIdentity,
+  loadRecapCatalogProducts,
 };

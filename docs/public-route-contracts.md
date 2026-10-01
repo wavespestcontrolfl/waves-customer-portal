@@ -554,6 +554,15 @@ closeout. They are opaque, non-bearer references that grant no read or write
 access; no sibling invoice, report, receipt, or other bearer token rides a line
 item. Legacy and unrelated invoice rows may omit the ownership fields.
 
+Visit note: `/api/pay/:token` returns `service.techNotes` only as the reviewed
+report text (`customerSafeVisitNotes` with `projectLine`, server/services/context-aggregator.js;
+owner ruling 2026-10-01: customers see only the report text, never the tech's
+raw note). The invoice keeps the note as it stood when billed, which on older
+invoices is the raw note, so the route screens it on the way out against the
+visit's own record (`service_records` by the invoice's `service_record_id` and
+`customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
+missing record returns null.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
@@ -939,23 +948,77 @@ row or bell). Recency is `extracted_data.last_requested_at`, written only by a
 submit — office edits (status, notes, assignment) never extend the dedupe
 window or the suppression. Filing a lead also stamps its
 `ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
-public lead. A booking NEVER closes a preferred-time request (owner ruling
-2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
-on both the first commit and the `txResult.existing` replay; a free re-service
-callback visit is skipped) never marks the lead won and never touches its funnel
-row — the booking's own attribution runs exactly as for any other booking.
-Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
-booked customer's open preferred-time leads (phone match) whose
-`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
-booked <service> for <date> (visit <id>) on /book — close this request if
-nothing else is needed" — deduped per (lead, visit) through
-`lead_activities.metadata`, so a replay never stacks notes; a newer request is
-new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+public lead. A booking closes a preferred-time request on its own (owner ruling
+2026-10-01, replacing the 2026-09-30 note-only rule): a completed self-booking
+(`createSelfBooking`, every service type, on both the first commit and the
+`txResult.existing` replay; a free re-service callback visit is skipped) moves
+each of the booked customer's open preferred-time leads whose
+`last_requested_at` is at or before the booking (60 s of clock slack) to the
+terminal status `handled`. A lead qualifies only when its phone matches (last
+10 digits), its `customer_id` is null or the booked customer, AND its identity
+corroborates the booked customer (`corroboratesBookedCustomer`): it is linked
+to that customer, or its email matches the customer's non-blank email, or its
+first AND last name both match. A phone match alone never closes a request (a
+shared household or reassigned number). The booked visit must also carry every
+service line the request asked for (`inferServiceLine` per part of a composite
+such as `Lawn Care + Pest Control` or `Lawn & Pest`, on both sides); a request
+that named no service is answered by any booking, and one asking for a line the
+visit does not carry (a lawn + pest request, then a lawn-only booking) stays
+open for the office. It must also be for the same property, judged by /book's own address matcher
+(`addressMatchesCustomer`: normalized street with suffix variants, unit value,
+zip) against the visit's service address (its own stamp, else the customer's);
+a customer with two homes on one phone who asks at A and books at B, or at
+another unit of the same building, keeps the A request open (a side with no
+street does not block the close). The audit row and the FYI name the visit's service and day
+as read under the visit lock. A request staff attached an estimate
+to (`leads.estimate_id` set) is never closed and never converted by the
+booking: it stays open, as before this change, and converts the way any
+estimate-linked lead does (the estimate's acceptance,
+`markLinkedLeadEstimateAccepted`) or by staff. `handled` means closed, neither
+won nor lost, and is set through
+`closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel stage
+(`handled` has no funnel mapping, so the `ad_service_attribution` stage stays
+as it is and nothing is uploaded to Google or Meta for the request); the
+booking's own attribution runs exactly as for any other booking. Once the
+booking has its own funnel row, the closed request's row is removed
+(`dropSupersededPreferredFunnelRows`), so the journey counts as one lead; only
+by the booking whose close is the request's CURRENT one (a request reopened and
+closed again by a later booking is that booking's). First
+touch keeps the credit (owner ruling 2026-10-01): when the request's row came
+in paid (`is_paid`: a paid click, or paid UTMs whose click id was stripped)
+and the booking's own row has no paid click id, the booking's
+row first takes the request's touch (source, detail, lead date, click ids,
+UTM campaign/term, `is_paid`; the earliest paid request by first-contact
+instant wins, and the transfer is recorded on that request's close audit
+(`touch_to`) so a close that runs in parts (a replay closing an older request
+later) still ends on the earliest contact; when the
+booking converted a genuine lead instead of writing its own row, that lead's
+booked row is the target, and it keeps its own touch when its first contact
+(`leads.first_contact_at`, the instant, not the row's calendar `lead_date`)
+came no later than the request's; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
+is credited, and reported, to that ad. Every other lead surface
+treats `handled` as closed: it is out of the open set, out of every prospect
+denominator (conversion, win and lost rates), and never re-attached by a later
+form, call, estimate or email fan-out. The close runs inside the per-(lead,
+visit) transaction that takes, in order, the booked customer `FOR SHARE`
+(the visit's CURRENT owner, so a merge since the booking is judged on the
+winner; re-reading their phone, name and email), the booked visit `FOR UPDATE` (still
+live, not cancelled / skipped / rescheduled / no_show, and not a callback; customer before visit, the order a customer merge
+uses), and the lead `FOR UPDATE` (still `book_preferred_time`, open, not
+converted or deleted, no estimate attached, phone still matching the
+customer's current phone, `customer_id` null or the booker's, identity still
+corroborated, same service line), then writes ONE `status_change` activity row
+("Closed automatically — customer booked <service> for <date> (visit <id>) on
+/book"), deduped per (lead, visit) through `lead_activities.metadata`, so a
+replay never closes twice; a newer request is new work and stays open. The office
+gets ONE admin FYI per close (area Leads, category `lead`, linked to the lead,
+deduped per (lead, visit)) and nothing else: no customer message of any kind.
+`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it), and moves a lead off it only when the caller sends `seen_status: 'handled'` together with `seen_updated_at` matching the lead's current `updated_at` (so a request reopened and closed again by a later booking is not overwritten from a view of the earlier close) (the status its page showed; the Leads page sends it with every status change and mark-lost, and a caller that sends none is refused with 409) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. Writers that read a lead open and write later re-assert it at the write, so a close in between wins: attaching an estimate (`attachLeadToEstimate`, 409 when the lead closed since) and the Agent Ops mark-contacted / follow-up / draft actions (409). The lead's `first_contact_channel`
 is `booking`, so the shared customer-originated-contact allowlist
 (`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
-booking that committed while a submit was still in flight (its note ran before
-the lead was visible) is reconciled by the submit after its commit: the lead gets
-the same note and NO `new_lead` bell rings; with no live booking since the
+booking that committed while a submit was still in flight (its close ran before
+the lead was visible) is reconciled by the submit after its commit: the lead
+closes the same way (with the admin FYI) and NO `new_lead` bell rings; with no live booking since the
 request began the bell rings as usual. A repeat submit inside 24h merges only that
 request's own fields into `extracted_data`; the lead's first-touch UTM /
 referrer / landing URL are written once at creation and kept. The service line
@@ -1335,6 +1398,116 @@ the after-first-visit promise on the annual-prepay option on the strength of thi
 Informational only for now: no client reads it, and it moves no money and sends no
 message.
 
+Existing customers adding a service (owner ruling 2026-09-30/10-01, PR-B,
+`GATE_PAF_EXISTING_CUSTOMERS`, dark). The sentence above that excludes plan members NOT on
+Auto Pay (`existing_plan_customer`) and paused-Auto-Pay (`autopay_paused`) holds ONLY while
+the sub-gate is off. The sub-gate is live only when BOTH `GATE_PAY_AFTER_FIRST_VISIT` and
+`GATE_PAF_EXISTING_CUSTOMERS` are exactly `'true'` and the card lane is on. Then the policy
+resolver (`resolveRecurringCardPolicyForEstimate`) no longer returns those two exemptions
+for an ELIGIBLE customer: per-application / per-visit / one-time-lane customers and
+non-member profiles whose customer row loaded, when they would otherwise have received one of
+those two exemptions (a plan member not on Auto Pay, or a paused customer). An existing customer
+who never had either exemption (no plan, not paused) was already on the new-customer card rail
+before this gate and is unchanged by it (no `afterVisitCard` marker, base consent).
+Monthly-membership-lane customers
+(`billing_mode` `monthly_membership`, or NULL with a positive `monthly_rate`) and
+annual-prepay-lane customers stay on `existing_plan_customer` / `autopay_paused`: their add-on
+joins `monthly_rate` (billed by the monthly cron) or is covered by the prepay term. An
+eligible customer follows the new-customer card rail: a saved consented card auto-satisfies
+(`saved_method_consented`), otherwise `POST /:token/accept` returns `402
+RECURRING_CARD_REQUIRED` until a live-verified SetupIntent is supplied. The accept's
+first-application invoice is attached to the visit with NO pay link and NO invoice message
+at accept, and completion charges it after the visit. Payer-billed (`payer_billed`,
+`payer_check_uncertain`), `invoice_mode`, commercial manual billing, one-time and the legacy
+prepay carve-out are unchanged, and a customer already on Auto Pay is still
+`autopay_already_active`. The policy carries an internal `afterVisitCard: true` marker (and
+`autopayPaused: true` for the paused cohort). A paused-Auto-Pay customer (owner R5) keeps a
+card on file but the pause is never lifted and nothing is auto-charged: completion skips the
+charge (`customerOnAutopay` is false while paused) and the normal pay link goes out in the
+completion text after the visit. `GET /api/estimates/:token/data` `recurringCardPolicy` gains
+up to four keys, each OMITTED (never `false`) unless it applies, so gate-off responses are
+byte-identical: `afterVisitExisting: true` (an existing customer moved onto the rail by this
+sub-gate, any lane state), `afterVisitConsent: true` (that customer must capture a card and is
+shown the `after_visit_card` v12 authorization, which the accept then records; never set for a
+paused or Auto-Pay-off customer), `afterVisitPaused: true` (the paused cohort: the page says the card is
+kept and a pay link follows each service; the base consent is recorded, not `after_visit_card`),
+and `afterVisitAutopayOff: true` (below).
+The estimate-accepted notification for this cohort says nothing is charged today and the saved
+payment method (tender-neutral: a bank capture is not "a card") is billed after the first visit (a
+pay link follows the visit when Auto Pay is paused or off) instead of "our team will follow up with
+the invoice details". A setup-only first invoice (no first-application amount) is still minted
+unattached with its pay link at accept, as before. Owner R4 (a monthly-membership member's add-on
+must not be billed before its first performed visit) is NOT part of this change.
+
+Annual prepay is never widened: the resolver skips the sub-gate whenever the request's payment
+preference is `prepay_annual`, so with `GATE_PREPAY_CARD_AND_CHARGE` on a prepay accept from a plan
+member (paused or not) resolves exactly as before (`existing_plan_customer` / `autopay_paused`, never
+the in-lane prepay charge-at-accept plan). `/data` resolves with no preference, so it forces
+`recurringCardPolicy.prepayInLane` to `false` for the moved cohort (those customers are shown no
+in-lane prepay copy or capture).
+
+Explicit Auto Pay opt-out (held cohort). An otherwise-eligible plan member who turned Auto Pay off
+on purpose (`customers.autopay_enabled` is not true AND the latest `autopay_log` toggle row, event
+type `autopay_enabled` | `autopay_disabled`, is `autopay_disabled` — the same rule
+`autopay-setup-link.js` uses) is treated like the paused cohort: the card is kept/captured but
+NEVER enrolled (`autopay_enabled` stays false; the accept, the saved-card auto-enroll and the
+`setup_intent.succeeded` recovery all skip enrollment, the last via the
+`estimate_data.acceptedRecurringCardSkipEnrollment` stamp), nothing is auto-charged, no pay link at
+accept, the normal pay link goes out after the visit, and the BASE consent is recorded. The policy
+carries `autopayDisabled: true` (independent of the pause: a customer can be both paused and opted
+out, e.g. the in-charge card was detached during a pause, and then both markers are kept and the
+paused copy wins); `/data` adds `recurringCardPolicy.afterVisitAutopayOff: true`
+(omitted otherwise) with neutral copy ("we send you a link to pay after your first visit", no
+"paused" claim). A failed opt-out lookup fails closed to today's `existing_plan_customer`.
+
+Commercial manual billing now clears every card-rail shape of this cohort (including the
+`saved_method_consented` auto-satisfy shape, which has `required: false`) in both `/data` and the
+accept, through one helper, so the two agree: `required: false`, `exemptReason:
+'commercial_manual_billing'`, no saved-method auto-enroll, no after-visit markers.
+
+`PUT /:token/accept` request fields (all optional; sent only by a tab whose `/data` carried one of
+the after-visit markers above, never for annual prepay, so every other client is unchanged):
+- `recurringCardConsentVariant` (`'after_visit_card'` when that text was rendered, else absent),
+  `recurringCardConsentVersion` (the version of the text the tab's own bundle RENDERED for the
+  captured method: `v12_2026-09-30` for `after_visit_card`, the global card / ACH version for the
+  base text) and `recurringCardConsentTender` (`'card'` | `'us_bank_account'`, the tender the
+  rendered text was for). The paused / Auto-Pay-off cohorts send the tender and base version too.
+- `afterVisitTimingShown: true` when the page showed "billed after your first visit" payment
+  timing for the selection (a first-application invoice, not one-time).
+
+The accept decides ONE collection promise inside its transaction from the verified tender and the
+real invoice outcome (an UNATTACHED first invoice, e.g. setup-only or an existing customer whose
+series already exists, is paid by link at accept and is never the after-visit promise) and
+answers:
+- `409 { code: 'CONSENT_VARIANT_STALE', collectionPromise: { variant, tender, version, deferred } }` when the
+  attested variant / tender / version differs from what it would record (a pre-transaction check
+  returns the card best case the same way). Nothing is recorded or committed and the dropped
+  SetupIntent is retired. The page drops the captured intent and refetches `/data`; when the
+  returned version differs from the one its bundle renders it reloads the page. `deferred` (only on
+  the in-transaction refusal) says whether the selection's first invoice is deferred to the visit;
+  the page changes the payment timing only on `deferred: false` (a base-consent answer alone, e.g.
+  Auto Pay paused since the capture, does not move the timing). The pre-transaction refusal omits it.
+- `503 { code: 'RECURRING_CARD_RETIRE_FAILED' }` when an in-transaction refusal dropped a captured
+  SetupIntent and Stripe could not confirm retiring it after the rollback: nothing committed, the tab
+  keeps its intent and retries.
+- `409 { code: 'PAYMENT_TIMING_REFRESH', afterVisitDeferred: false }` when the tab attested the
+  after-visit timing but the selection's first invoice goes out payable now (unattached, one-time,
+  invoice mode, or the cohort marker gone), and `afterVisitDeferred: true` when an after-visit
+  cohort accept WILL defer its attached invoice but the tab attested no timing (a tab from before
+  the sub-gate). The page shows the answered timing for that selection and refetches.
+- `409 { code: 'ACCEPT_BILLING_CHANGED' }` when the transaction's customer lock finds the moved
+  cohort drifted: `billing_mode` moved into an ineligible lane, the pause or opt-out state changed,
+  Auto Pay was turned on since the policy was resolved, the saved method a `saved_method_consented`
+  policy chose is no longer that customer's consented chargeable card (it is row-locked until
+  commit), or the accept landed on another / no customer. Nothing is suppressed, charged or enrolled on the stale decision.
+
+On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
+tender, text }` (the exact authorization recorded as shown) beside the existing
+`acceptedRecurringCardConsentVariant` stamp. The inline enrollment and the `setup_intent.succeeded`
+recovery record that text and version verbatim (never re-derived from current copy), and the
+recovery passes the committed `accepted_at` as the authorization time so an Auto Pay opt-out made
+after accepting is honored.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
@@ -1713,7 +1886,22 @@ until it fits. The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
-not be carried as `lead.next`. The PDF is unchanged and ignores it.
+not be carried as `lead.next`. While the gate is on the lawn payload also
+drops stock copy (lawn only; every field keeps its key): the unverifiable
+past-tense `insights[].wavesAction` lines and four stock `whyItMatters` lines
+become null (product-grounded `wavesAction` and every watering
+`customerAction` / `nextVisitPlan` are unchanged), and `mowing.recommendation`
+is null for a too-short / too-tall reading when the mowing finding is among the
+three findings the web card shows. The sprinkler-coverage water finding
+carries `kind: 'coverage_watch'` (lead mode only) so the water card knows the
+finding owns that guidance even after a narrative headline rewrite. The web report folds secondary finding,
+water and photo-note detail into expanders that print open. The lawn PDF, when
+`lead` is present, prints `lead.why` as the status detail, finding bullets as
+headline + what we saw (+ why it matters only for needs_attention) with no
+"What Waves did" line, and skips the follow-up's stock "No action is needed"
+line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
+stamp while the gate is on, so gate-off PDFs are never served after the flip
+(or the reverse on rollback).
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

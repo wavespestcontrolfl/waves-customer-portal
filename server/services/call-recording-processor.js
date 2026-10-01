@@ -1444,7 +1444,7 @@ const { resolveCallLeadSource } = require('../utils/call-lead-source');
 // estimate_viewed / estimate_drafted / awaiting_address / …) is covered without
 // enumerating a growing set, while won/lost/disqualified/duplicate rows fall
 // through to a fresh insert instead of hiding the inquiry on a closed lead.
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'handled'];
 
 // Coarse account classification of a phone-matched caller, used only to give the
 // extraction model context ("this caller is already a Waves customer"). Mirrors
@@ -1813,8 +1813,10 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
 // triage card instead), so this is the only one.
 // The dispatch schedule link for a held visit: ?appointment opens the visit,
 // ?date selects its day. Shared by the admin bell and the review card.
+// The card's "Open visit" link; the one builder lives in street-level-hold.js (the triage list rebuilds it
+// with a moved hold's live date).
 function streetLevelVisitLink(visitId, visitDate) {
-  return `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`;
+  return require('./street-level-hold').streetLevelVisitLink(visitId, visitDate);
 }
 function streetLevelVisitWhen(scheduledDate, windowStart) {
   return [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
@@ -5416,7 +5418,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         // quote hides in a closed lead the pipeline view never shows.
         const currentLead = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .first('id', 'status');
         if (!currentLead) return false;
@@ -5427,7 +5429,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         }
         const claimed = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .update(claimUpdates);
         if (claimed) {
@@ -5469,13 +5471,13 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         q.whereNull('customer_id').orWhere('customer_id', customerId);
       const convertible = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .first('id');
       if (!convertible) return false;
       const updated = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .update({
           status: 'won',

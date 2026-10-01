@@ -135,7 +135,20 @@ jest.mock('../models/db', () => {
       // → rows (commitReservation's graduation UPDATE uses the latter).
       state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
-      hits.forEach((row) => Object.assign(row, obj));
+      hits.forEach((row) => {
+        // Emulate the atomic JSON-path stamps (jsonb_set on estimate_data) the
+        // accept writes — assigning the raw token would clobber the column.
+        const raw = obj.estimate_data && obj.estimate_data.__raw;
+        if (raw && /jsonb_set/.test(raw)) {
+          const key = /'\{(\w+)\}'/.exec(raw)[1];
+          const wasString = typeof row.estimate_data === 'string';
+          const cur = (wasString ? JSON.parse(row.estimate_data) : row.estimate_data) || {};
+          cur[key] = /'true'::jsonb/.test(raw) ? true : obj.estimate_data.bindings[0];
+          Object.assign(row, { ...obj, estimate_data: wasString ? JSON.stringify(cur) : cur });
+        } else {
+          Object.assign(row, obj);
+        }
+      });
       return {
         returning: async () => hits.map((r) => ({ ...r })),
         then: (res, rej) => Promise.resolve(hits.length).then(res, rej),
@@ -2353,6 +2366,413 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(res.data.code).toBe('CONTACT_LAST_NAME_INVALID');
     expect(storedEstimate().status).toBe('sent');
     expect(db.__state.tables.customers).toHaveLength(0);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+// GitHub Codex #5481 r2 — the accept must bind to exactly what /data showed.
+describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const { AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  // The accept route rate-limits per token — a fresh token per seed keeps
+  // each case independent of how many accepts the earlier ones sent.
+  let TOKEN = 'tok-pafb-r2-x0123456789';
+  let tokenSeq = 0;
+  let resolverSpy;
+  let retireSpy;
+
+  function seed() {
+    retireSpy = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+    tokenSeq += 1;
+    TOKEN = `tok-pafb-r2-${tokenSeq}-x0123456789`;
+    resetStore(recurringPestEstimate({ id: 'est-pafb-r2', token: TOKEN }));
+  }
+  function livePolicy(policy) {
+    resolverSpy = jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue(policy);
+  }
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+  const CAPTURED = {
+    recurringCardSetupIntentId: 'seti_captured_1',
+    recurringCardConsentVariant: 'after_visit_card',
+    recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+  };
+
+  afterEach(() => {
+    if (resolverSpy) resolverSpy.mockRestore();
+    resolverSpy = null;
+    if (retireSpy) retireSpy.mockRestore();
+    retireSpy = null;
+  });
+
+  test('P0: rollout gate turned off mid-flight (policy no longer enforced) — captured intent + attestation 409, nothing committed', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    // r3 P0: the orphaned capture is retired in Stripe so it can never be recovered later.
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: a captured intent alone (no attestation) is refused the same way', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: another tab saved a consented method (saved_method_consented) after this tab captured — 409, intent stays unbound', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: a retire that cannot be confirmed fails closed (503), nothing committed, no 409 that would drop the intent', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(503);
+    expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: an after-visit variant mismatch on a still-required policy also retires the dropped intent', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true, autopayDisabled: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+  });
+
+  test('r3 P0: an attestation alone (no intent) retires nothing', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardConsentVariant: 'after_visit_card' });
+    expect(res.status).toBe(409);
+    expect(retireSpy).not.toHaveBeenCalled();
+  });
+
+  test('control: a not-required policy with NO intent / attestation still accepts', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  function acceptedData() {
+    const raw = storedEstimate().estimate_data;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  }
+
+  test('pre-push P0: PAF 409 stale -> reload -> accept on a no-capture path durably marks the accept so the webhook can never enroll the discarded intent', async () => {
+    seed();
+    // Tab 1 captured under the after-visit flow; another tab then saved a
+    // consented method, so the live policy is the PAF saved-method cohort.
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
+    const stale = await putAccept(TOKEN, CAPTURED);
+    expect(stale.status).toBe(409);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    // The reloaded tab accepts without the (dropped) intent; the locked-row
+    // eligibility recheck is a DB read this in-memory store does not model.
+    const driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    driftSpy.mockRestore();
+    expect(acceptedData().acceptedRecurringCardSetupIntentId).toBe(RecurringCards.ACCEPTED_NO_CAPTURE_MARKER);
+  });
+
+  test('r3 P1: a gate-off no-capture accept writes NO marker (byte-identical to pre-PR-B)', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  test.each([
+    ['payer_billed', { enforced: true, required: false, exemptReason: 'payer_billed' }],
+    ['autopay_already_active', { enforced: true, required: false, exemptReason: 'autopay_already_active' }],
+    ['commercial_manual_billing', { enforced: true, required: false, exemptReason: 'commercial_manual_billing' }],
+    ['payer_check_uncertain', { enforced: true, required: false, exemptReason: 'payer_check_uncertain' }],
+    ['existing_plan_customer', { enforced: true, required: false, exemptReason: 'existing_plan_customer' }],
+    ['saved_method_consented (non-PAF)', {
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1',
+    }],
+  ])('r3 P1: exempt cohort %s writes NO marker — a legacy recovery stays exactly as before', async (_name, policy) => {
+    seed();
+    livePolicy(policy);
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  describe('r3 P0: ACCEPT_BILLING_CHANGED drift under the customer lock orphans the verified capture', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType: 'card',
+      });
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(true);
+    });
+    afterEach(() => {
+      verifySpy.mockRestore();
+      bankSpy.mockRestore();
+      driftSpy.mockRestore();
+    });
+
+    test('drift -> the captured intent is retired before the reloadable 409', async () => {
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('a retire Stripe cannot confirm fails closed (503), nothing committed', async () => {
+      retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+  });
+
+  // GitHub Codex #5481 r3 (structural): ONE collection promise decided in the
+  // accept transaction from the verified tender + the real invoice outcome.
+  describe('r3: the collection promise the accept records equals what the capture UI attested', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    let underLockSpy;
+    let enrollSpy;
+    const BASE_VERSION = require('../services/payment-method-consent-text').CONSENT_VERSION;
+    // The in-memory DB keeps a ?::jsonb binding as its string (Postgres stores the object).
+    const asJson = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    const AFTER_VISIT = {
+      recurringCardSetupIntentId: 'seti_captured_1',
+      recurringCardConsentVariant: 'after_visit_card',
+      recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+      recurringCardConsentTender: 'card',
+      // A current tab attests the "billed after your first visit" timing it shows.
+      afterVisitTimingShown: true,
+    };
+    function verification(methodType) {
+      verifySpy.mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType,
+      });
+    }
+    function conversion(firstScheduledServiceId) {
+      EstimateConverter.convertEstimate.mockResolvedValueOnce({
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId,
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      });
+    }
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent');
+      verification('card');
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
+      underLockSpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+      enrollSpy = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    });
+    afterEach(() => {
+      [verifySpy, bankSpy, driftSpy, underLockSpy, enrollSpy].forEach((spy) => spy.mockRestore());
+    });
+
+    test('attached first-application invoice + card tender + after-visit attestation: accepted, variant stamped, enrollment records it', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBe('after_visit_card');
+      expect(enrollSpy).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
+      expect(retireSpy).not.toHaveBeenCalled();
+    });
+
+    test('an UNATTACHED standard invoice (setup-only shape / no first visit: pay link at accept) is not the after-visit promise — 409, nothing recorded, dropped intent retired', async () => {
+      conversion(null);
+      // A setup-only page shows no first-visit timing, so it attests none.
+      const { afterVisitTimingShown: _shown, ...noTiming } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, noTiming);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      // The promise the server would record rides the 409 so the reloaded tab
+      // renders the base text for this selection instead of looping.
+      // deferred:false — the unattached first invoice goes out at accept.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'card', version: require('../services/payment-method-consent-text').CONSENT_VERSION, deferred: false });
+    });
+
+    test('the same unattached shape accepts when the tab rendered (and attests) the base text — recorded variant is base', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', recurringCardConsentVersion: BASE_VERSION });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+    });
+
+    test('ACH tender captured but the tab attests the after-visit CARD text (rendered ACH) — 409, nothing recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('ACH tender, tab attests the tender-specific base text: accepted, no after-visit variant stamped or recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+      // r5 P1: the exact text + version shown is persisted for the webhook
+      // recovery and handed to the inline enrollment verbatim.
+      const ConsentText = require('../services/payment-method-consent-text');
+      expect(asJson(acceptedData().acceptedRecurringCardConsent)).toEqual({
+        variant: null, version: BASE_VERSION, tender: 'us_bank_account', text: ConsentText.getConsentText('us_bank_account'),
+      });
+      expect(enrollSpy.mock.calls[0][0].renderedConsent).toEqual({ text: ConsentText.getConsentText('us_bank_account'), version: BASE_VERSION });
+    });
+
+    test('r5 audit: a tab that showed "billed after your first visit" timing is refused when the first invoice goes out payable at accept (unattached)', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(false);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    });
+
+    test('r6 audit: the timing attestation is judged even after the cohort marker is gone (sub-gate turned off): a payable invoice is refused', async () => {
+      resolverSpy.mockResolvedValue({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('r5 audit: the same timing attestation is honored when the invoice really is deferred (attached)', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { ...AFTER_VISIT, afterVisitTimingShown: true });
+      expect(res.status).toBe(200);
+    });
+
+    test('r5: a bank capture whose tab attests an OLDER base ACH version is refused (the newer wording is never recorded)', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: 'v10_2026-01-01', afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      // The attached first invoice is still deferred: a version refresh is not a timing change.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'us_bank_account', version: BASE_VERSION, deferred: true });
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('r5: an after-visit card accept persists the exact v12 text + version for recovery', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(200);
+      const ConsentText = require('../services/payment-method-consent-text');
+      expect(asJson(acceptedData().acceptedRecurringCardConsent)).toEqual({
+        variant: 'after_visit_card', version: ConsentText.AFTER_VISIT_CONSENT_VERSION, tender: 'card',
+        text: ConsentText.getConsentText('card', { variant: 'after_visit_card' }),
+      });
+    });
+
+    test('a tab that attests a tender different from the verified one is refused even with no variant', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    });
+
+    test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
+      conversion('ss-first');
+      const { recurringCardConsentTender: _tender, ...legacy } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, legacy);
+      expect(res.status).toBe(200);
+    });
+
+    test('r7: an after-visit accept that WILL defer its attached invoice but carries no timing attestation (a tab from before the gate) is refused for a refresh', async () => {
+      conversion('ss-first');
+      const { afterVisitTimingShown: _shown, ...unattested } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, unattested);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(true);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    });
+  });
+
+  test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'resolver-customer-not-the-trx-one', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 });

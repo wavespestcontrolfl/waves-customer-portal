@@ -89,6 +89,27 @@ describe('writer records', () => {
     expect(allowedDates).toEqual([]);
   });
 
+  test("the technician's promise marks become the PROMISES record; none, no record", () => {
+    const { sections } = buildWriterRecords({
+      serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS],
+      promises: [
+        { mark: 'done', description: 'Check under the dishwasher' },
+        { mark: 'partly', description: 'Look at the gap under the garage door', stillLeft: 'the left side' },
+      ],
+    });
+    const record = sections.find((section) => section.startsWith('PROMISES'));
+    expect(record).toContain('mention only these, only as marked');
+    expect(buildWriterRecords({
+      serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS],
+      promises: [{ mark: 'done', description: 'Check under the dishwasher' }],
+    }).promiseCount).toBe(1);
+    expect(record).toContain('- Done today: Check under the dishwasher');
+    expect(record).toContain('- Partly done today: Look at the gap under the garage door (still left: the left side)');
+    const none = buildWriterRecords({ serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS] });
+    expect(none.sections.join('\n')).not.toContain('PROMISES');
+    expect(none.promiseCount).toBe(0);
+  });
+
   test('carries no booking state: the report shows the next visit live', () => {
     const { sections } = buildWriterRecords({
       serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'one_time', applications: [TAURUS],
