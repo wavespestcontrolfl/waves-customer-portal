@@ -13,9 +13,8 @@
  *     'conversational' alone is deliberately NOT exempt, because cold
  *     automated sends (the lead-webhook form auto-reply, the lead-response
  *     agent) reuse that policy for its consent/trust shape while being
- *     exactly the machine-initiated night texts the window fences (the
- *     dropped-call speed-play text has honored this same 8-8 fence since
- *     before the gate). It also serves sends whose purpose must stay
+ *     exactly the machine-initiated night texts the window fences. It
+ *     also serves sends whose purpose must stay
  *     stricter than the conversational policy (the reschedule-reply
  *     confirmation keeps purpose 'appointment' for its trust floor).
  *     Only inbound-reply handlers may set it; an automation/cron passing
@@ -122,6 +121,12 @@ const OPERATOR_ENTRY_POINTS = new Set([
 //     to stop; unfencing them is a new owner ruling, not a PR nit.
 const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'customer_service_request',
+  // Owner ruling 2026-09-30 (generalizing 2026-09-28 below): ANY text that
+  // answers the customer's own inbound contact — a call, a text, an email —
+  // goes out at once, at any hour. A dropped call is the caller reaching
+  // us; the address-request speed play is our reply to it. dropped-call-sms.js
+  // drops its own pre-claim window check (this exemption is what lets it).
+  'dropped_call_sms',
   'estimate_accept_annual_prepay',
   'estimate_accept_onetime_booking',
   'estimate_accept_onetime_confirmed',

@@ -193,9 +193,9 @@ describe('checkSendWindow validator', () => {
     }
     // Purely schedule-driven sends reusing the conversational policy stay
     // fenced too — a machine, not a person, picks their moment.
-    // dropped_call_sms is untouched by the 2026-09-28 ruling below (owner:
-    // gated off, not in scope) and stays fenced.
-    for (const entryPoint of ['booking_abandon_recovery_cron', 'dropped_call_sms']) {
+    // (dropped_call_sms left this list under the 2026-09-30 ruling: any
+    // reply to the caller's own inbound contact goes out at any hour.)
+    for (const entryPoint of ['booking_abandon_recovery_cron']) {
       const res = checkSendWindow({ ...SMS, purpose: 'conversational', entryPoint }, null, null, EVENING_ET);
       expect(res.ok).toBe(false);
       expect(res.code).toBe('QUIET_HOURS_HOLD');
@@ -227,8 +227,8 @@ describe('checkSendWindow validator', () => {
     }
   });
 
-  test('missed-call and voicemail text-backs pass at night too (owner ruling 2026-09-28: a caller reaching out is a customer action)', () => {
-    for (const entryPoint of ['missed_call_text_back', 'voicemail_lead_sms']) {
+  test('missed-call, voicemail and dropped-call text-backs pass at night too (owner rulings 2026-09-28 / 2026-09-30: a caller reaching out is a customer action)', () => {
+    for (const entryPoint of ['missed_call_text_back', 'voicemail_lead_sms', 'dropped_call_sms']) {
       expect(checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET)).toEqual({ ok: true });
       // Also exempt under the conversational-policy shape these two lanes
       // actually send with (purpose stays 'missed_call_followup', but the

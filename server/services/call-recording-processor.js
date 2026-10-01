@@ -18500,6 +18500,10 @@ const CallRecordingProcessor = {
                 scheduledServiceId,
                 trigger: 'ai_call_pipeline',
                 recipientPhone: smsRecipient || null,
+                // Owner ruling 2026-09-30: the caller just phoned us, so the
+                // card ask answering that call goes out now, not at 8 AM.
+                // Outbound dials are OUR contact — those stay fenced.
+                customerInitiated: !isOutboundCall(call),
               });
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
@@ -18752,6 +18756,10 @@ const CallRecordingProcessor = {
                         const at = parseETDateTime(`${String(scheduledDateForLog).slice(0, 10)}T${windowStartForLog ? String(windowStartForLog).slice(0, 5) : '08:00'}`);
                         return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
                       })() : {}),
+                      // Owner ruling 2026-09-30: a confirmation answering the
+                      // caller's own inbound call is never held to 8 AM.
+                      // Outbound dials are our contact and stay fenced.
+                      ...(!isOutboundCall(call) ? { customerInitiated: true } : {}),
                       identityTrustLevel: 'phone_matches_customer',
                       metadata: {
                         original_message_type: 'confirmation',
@@ -18930,6 +18938,9 @@ const CallRecordingProcessor = {
                           identityTrustLevel: isServiceContactRole(contact.role)
                             ? 'service_contact_authorized'
                             : 'phone_matches_customer',
+                          // Same inbound-call provenance as the primary send
+                          // above (owner ruling 2026-09-30).
+                          ...(!isOutboundCall(call) ? { customerInitiated: true } : {}),
                           metadata: {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,

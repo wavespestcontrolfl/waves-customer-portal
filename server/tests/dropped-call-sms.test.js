@@ -323,10 +323,6 @@ describe('callbackClause / window helpers', () => {
     expect(_private.callbackClause(null)).toBe('');
   });
 
-  it('window check follows ET hours', () => {
-    expect(_private.withinSendWindowET(IN_WINDOW)).toBe(true);
-    expect(_private.withinSendWindowET(OUT_OF_WINDOW)).toBe(false);
-  });
 });
 
 // Codex pre-push r1 P1 on PR #5012: callback_clause and the sms fromNumber
@@ -482,12 +478,14 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(sent.metadata.fromNumber).not.toBe('+19415993489');
   });
 
-  it('quiet hours — skips BEFORE any claim, one-shot not consumed', async () => {
+  it('evening drop still texts — no module-level quiet-hours fence (owner ruling 2026-09-30: a reply to the caller\'s own contact goes out at any hour)', async () => {
     jest.setSystemTime(OUT_OF_WINDOW);
     const res = await sendDroppedCallAddressRequest(sendArgs());
-    expect(res).toEqual({ sent: false, skipped: 'quiet_hours' });
-    expect(state.inserts).toHaveLength(0);
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(res.sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // The send-window exemption is by ENTRY POINT in the shared validator —
+    // the module itself carries no clock check any more.
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ entryPoint: 'dropped_call_sms' }));
   });
 
   it('sms_log dedupe read failure — fails closed', async () => {

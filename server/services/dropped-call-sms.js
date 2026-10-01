@@ -16,9 +16,10 @@
  *   send side (this module), in order:
  *   1. GATE_DROPPED_CALL_SMS — customer-facing auto-send, fails CLOSED in
  *      every environment until the owner enables it.
- *   2. Quiet hours — sends only 8am–8pm ET; outside the window the one-shot
- *      is NOT consumed (the triage card still tells the office to call
- *      back).
+ *   2. (Retired 2026-09-30.) The 8am–8pm quiet-hours fence no longer
+ *      applies: the caller just dialed us, and the owner's ruling is that a
+ *      reply to the customer's own inbound contact goes out at any hour —
+ *      the send-window validator exempts entry point 'dropped_call_sms'.
  *   3. One text per phone number EVER — DB-atomic claim on
  *      dropped_call_sms_claims (phone PRIMARY KEY, INSERT ... ON CONFLICT
  *      DO NOTHING), belt-and-suspenders sms_log history check, plus an
@@ -41,7 +42,6 @@ const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
-const { isWithinSendWindowET } = require('./messaging/send-window');
 // sent:true is necessary but not sufficient — upstream suppressions (gate
 // off, template disabled, owner kill switch) report sent:true with a
 // sentinel providerMessageId and no SMS leaves the system.
@@ -231,15 +231,6 @@ function outboundWavesCallerId(call = {}) {
     ? candidate : null;
 }
 
-// Boundary source is the shared customer-SMS window module — this fence
-// predates GATE_SMS_SEND_WINDOW and stays live regardless of the gate (the
-// gate check lives in the canonical-path validator, not in the bounds), but
-// the 8/20 ET hours themselves must have exactly one owner so a future
-// hours change can't update one fence and leave the other stale.
-function withinSendWindowET(now = new Date()) {
-  return isWithinSendWindowET(now);
-}
-
 async function stampStatus(leadId, status) {
   try {
     await db('leads').where({ id: leadId }).update({
@@ -338,14 +329,6 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
   if (!Number.isFinite(callAgeMs) || callAgeMs > MAX_CALL_AGE_MS) {
     logger.info(`[dropped-call-sms] Call too old for a drop text (lead ${leadId}) — skipped`);
     return { sent: false, skipped: 'call_too_old' };
-  }
-
-  // Quiet hours BEFORE any claim: an evening drop still gets its triage card
-  // ("call them back"); the one-shot stays available in case a later
-  // scheduler rail wants to pick it up.
-  if (!withinSendWindowET()) {
-    logger.info(`[dropped-call-sms] Outside 8am-8pm ET window — text skipped for lead ${leadId}`);
-    return { sent: false, skipped: 'quiet_hours' };
   }
 
   // "No texts" said on an earlier call with this number (or on this one,
@@ -877,5 +860,5 @@ module.exports = {
   detectDroppedMidIntake,
   eligibleNewProspect,
   MIN_CALL_SECONDS,
-  _private: { callbackClause, outboundWavesCallerId, withinSendWindowET, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
+  _private: { callbackClause, outboundWavesCallerId, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
 };
