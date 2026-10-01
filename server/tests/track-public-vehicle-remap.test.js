@@ -19,7 +19,7 @@ const { calculateBoundedTrackingEta, techMappingCutoff } = require('../services/
 const trackPublicRouter = require('../routes/track-public');
 
 const service = (extra = {}) => ({
-  technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: '2026-09-30T10:00:00.000Z', latitude: 27.4, longitude: -82.5, ...extra,
+  technician_id: 'tech-1', tech_mapping_changed_at: '2026-09-30T10:00:00.000Z', latitude: 27.4, longitude: -82.5, ...extra,
 });
 
 beforeEach(() => {
@@ -31,8 +31,9 @@ test('buildVehicle passes the technician row\'s mapping timestamp as the cached-
   const v = await trackPublicRouter._test.buildVehicle(service());
   expect(v.etaMinutes).toBe(9);
   expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({
-    techId: 'tech-1', bouncieImei: 'DEV-A', cachedNotBefore: '2026-09-30T10:00:00.000Z',
+    techId: 'tech-1', cachedNotBefore: '2026-09-30T10:00:00.000Z',
   }));
+  expect(resolveFreshTechPosition.mock.calls[0][0]).not.toHaveProperty('bouncieImei');
 });
 
 test('NO remap time (NULL) means no cutoff: an ordinary technician edit leaves the cached fix trusted', async () => {

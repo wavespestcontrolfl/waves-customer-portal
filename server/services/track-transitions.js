@@ -259,7 +259,7 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
     // point: a tech_status fix older than the mapping change is bypassed for the
     // configured device's own position, and an unverifiable one yields no ETA.
     const [tech, dest] = await Promise.all([
-      db('technicians').where({ id: technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at'),
+      db('technicians').where({ id: technicianId }).first('bouncie_imei_changed_at'),
       serviceId
         ? db('scheduled_services as s')
           .leftJoin('customers as c', 's.customer_id', 'c.id')
@@ -282,7 +282,6 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
     ]);
     const ts = await resolveFreshTechPosition({
       techId: technicianId,
-      bouncieImei: tech?.bouncie_imei,
       cachedNotBefore: techMappingCutoff(tech?.bouncie_imei_changed_at),
       logPrefix: 'track-transitions',
     });

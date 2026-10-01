@@ -134,8 +134,6 @@ async function resolveBouncieFallback({
 
 async function resolveFreshTechPosition({
   techId,
-  // Accepted for compatibility; the CURRENT mapping is read here and is the only IMEI ever used.
-  bouncieImei: _callerImei = null,
   bouncieService = null,
   allowBouncieFallback = true,
   timeoutMs = BOUNCIE_LOCATION_FALLBACK_TIMEOUT_MS,

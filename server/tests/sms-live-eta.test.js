@@ -302,7 +302,7 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     expect(same.minutes).toBe(before.minutes);
     expect(after.minutes).toBe(19);
     expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
-    expect(resolveFreshTechPosition.mock.calls[1][0].bouncieImei).toBe('999999999999999');
+    expect(resolveFreshTechPosition.mock.calls[1][0]).not.toHaveProperty('bouncieImei'); // the lookup reads the current mapping itself
   });
   // Codex round-24 P2: tech_status has no device identity, so the resolver hands
   // the lookup the technician row's last-edit time as a floor for cached fixes.
@@ -329,7 +329,7 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     const edited = '2026-09-30T10:00:00.000Z';
     const fact = await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: edited }, { lat: 27.4, lng: -82.5 });
     expect(fact.minutes).toBe(6);
-    expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1', bouncieImei: 'DEV-A', cachedNotBefore: edited }));
+    expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1', cachedNotBefore: edited }));
     calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6, source: 'haversine' });
     expect(await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: edited }, { lat: 27.4, lng: -82.5 })).toBeNull();
   });

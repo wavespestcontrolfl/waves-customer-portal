@@ -42,12 +42,13 @@ beforeEach(() => {
   calculateBoundedTrackingEta.mockReset().mockResolvedValue({ minutes: 11, source: 'google' });
 });
 
-test('the position comes from the shared lookup with the technician\'s IMEI and remap cutoff', async () => {
+test('the position comes from the shared lookup with the technician\'s remap cutoff and NO caller-supplied IMEI', async () => {
   installDb({ tech: { bouncie_imei: 'DEV-A', bouncie_imei_changed_at: '2026-09-30T10:00:00.000Z' } });
   expect(await resolveEnRouteEtaMinutes({ technicianId: 'tech-1', customerId: 'cust-1', serviceId: 'svc-1' })).toBe(11);
   expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({
-    techId: 'tech-1', bouncieImei: 'DEV-A', cachedNotBefore: '2026-09-30T10:00:00.000Z',
+    techId: 'tech-1', cachedNotBefore: '2026-09-30T10:00:00.000Z',
   }));
+  expect(resolveFreshTechPosition.mock.calls[0][0]).not.toHaveProperty('bouncieImei');
   expect(calculateBoundedTrackingEta).toHaveBeenCalledWith(expect.objectContaining({ techLat: 27.1, techLng: -82.2, customerLat: 27.4, customerLng: -82.5 }));
 });
 

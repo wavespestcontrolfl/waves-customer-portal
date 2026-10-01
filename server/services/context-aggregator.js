@@ -676,7 +676,6 @@ async function resolveLiveEtaMinutesUncached(row, dest) {
 
     const position = await resolveFreshTechPosition({
       techId: row.technician_id,
-      bouncieImei: row.tech_bouncie_imei,
       // Round-24/35 P2: tech_status carries no device identity, so a cached fix
       // reported before the technician's tracker mapping last CHANGED
       // (technicians.bouncie_imei_changed_at, set only when bouncie_imei changes;

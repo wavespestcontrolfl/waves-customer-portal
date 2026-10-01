@@ -88,9 +88,9 @@ describe('one statement: current mapping + cache', () => {
     install({ imei: 'DEV-B', changedAt: new Date(Date.now() - 30e3), ts: fixRow(2) });
     pingTechLocation.mockResolvedValue({ tech_id: 't1' });
     const svc = bouncie(freshLoc());
-    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'DEV-A', cachedNotBefore: null, bouncieService: svc });
+    const out = await resolveFreshTechPosition({ techId: 't1', cachedNotBefore: null, bouncieService: svc });
     expect(out.source).toBe('bouncie_api');
-    expect(svc.getLocationByImei).toHaveBeenCalledWith('DEV-B'); // the CURRENT imei, never the caller's DEV-A
+    expect(svc.getLocationByImei).toHaveBeenCalledWith('DEV-B'); // the CURRENT mapped imei (the function takes no caller IMEI)
   });
   test('cache-only callers (allowBouncieFallback false) get null rather than a stale point', async () => {
     install({ changedAt: minutesAgo(1), ts: fixRow(3) });

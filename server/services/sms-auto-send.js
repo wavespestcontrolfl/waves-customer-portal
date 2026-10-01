@@ -752,12 +752,15 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
  * await before the provider request. Fails closed: a body claiming a booked appointment with no snapshot / no live callback is blocked.
  */
 function reserviceBookedHandoffCheck({ claim, reply, customerId }) {
-  return async () => {
+  const check = async () => {
     const block = await require('./sms-shadow-drafter').reserviceBookedReferenceBlock({
       body: reply, customerId, booked: claim.reserviceBookedSnapshot || null,
     });
     return block ? { ok: false, code: 'reservice_booking_changed', reason: block } : { ok: true };
   };
+  // A pure state read, so it declares itself repeatable: twilio.js re-runs it after the durable attempt marker, the last await
+  // before the SDK request (Codex #5334 P2: it must be the LAST recheck, after the live-ETA read).
+  return require('./agent-decision-send-checks').markRepeatable(check);
 }
 
 /** The lane-specific sendCustomerMessage input for a claimed reply. */
@@ -790,13 +793,15 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the executor's own
     // check ran before its recheck/handoff awaits and sendCustomerMessage's recipient and
     // policy work; the same shared check (from the claim's in-memory snapshot — no extra
-    // read) runs again immediately before the provider request, composed AFTER the
-    // gratitude lane's own predicate.
+    // read) runs again immediately before the provider request. ORDER (Codex #5334 P2): the
+    // async ETA read goes FIRST and the lane's own predicate (booked-callback reference /
+    // gratitude handoff) LAST, so no other state can change after the final guard and before
+    // the provider request; the repeatable parts re-run in the same order after the marker.
     providerPreSendCheck: (() => {
       const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
-        laneFields.providerPreSendCheck,
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
+        laneFields.providerPreSendCheck,
       );
     })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an
@@ -892,17 +897,6 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
         }
       }
     }
-    // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
-    // the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.
-    if (!gratitudeLane) {
-      const booked = await reserviceBookedHandoffCheck({ claim, reply, customerId })();
-      if (!booked.ok) {
-        logger.warn(`[sms-auto-send] booked re-service reference stale (decision ${claim.decisionId}): ${booked.reason}`);
-        const outcome = await notSent(booked.code, booked.reason);
-        await reopenParked('Auto-send held: the referenced re-service appointment changed — suggestion reopened.');
-        return outcome;
-      }
-    }
     // LIVE ETA send-time recheck (independent review + Codex round-1
     // finding, PR #5334): the SAME shared check the immediate /sms send and
     // the scheduler's queued-send path run (sms-eta-freshness) — claim's
@@ -937,6 +931,19 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
       const outcome = await notSent(etaReason);
       await reopenParked('Auto-send held: the live ETA it quoted is no longer current — suggestion reopened.');
       return outcome;
+    }
+    // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
+    // the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.
+    // Codex #5334 P2: it runs AFTER the (async) live-ETA recheck above, so booking state that changes while the ETA read was in flight is
+    // still caught: the last async read before provider entry is the booked-callback one.
+    if (!gratitudeLane) {
+      const booked = await reserviceBookedHandoffCheck({ claim, reply, customerId })();
+      if (!booked.ok) {
+        logger.warn(`[sms-auto-send] booked re-service reference stale (decision ${claim.decisionId}): ${booked.reason}`);
+        const outcome = await notSent(booked.code, booked.reason);
+        await reopenParked('Auto-send held: the referenced re-service appointment changed — suggestion reopened.');
+        return outcome;
+      }
     }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);

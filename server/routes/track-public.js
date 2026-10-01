@@ -179,7 +179,6 @@ async function buildVehicle(service) {
 
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,
-    bouncieImei: service.tech_bouncie_imei,
     // Same remap floor as the SMS ETA path (round-34 P2): a cached tech_status fix
     // reported before the technician's tracker mapping was last edited may be the
     // OLD vehicle's, so the text and the tracking page never show different vehicles.
@@ -447,7 +446,6 @@ router.get('/:token', async (req, res, next) => {
         db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
         db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
         't.name as tech_name',
-        't.bouncie_imei as tech_bouncie_imei',
         't.bouncie_imei_changed_at as tech_mapping_changed_at',
         't.photo_url as tech_photo_url',
         't.photo_s3_key as tech_photo_s3_key',
