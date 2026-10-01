@@ -73,6 +73,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn(() => false),
   gates: {},
+  payAfterFirstVisitLive: () => false,
   estimateConsultationOfferLive: () => process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
   leadInspectionLinkLive: () => process.env.GATE_LEAD_INSPECTION_LINK === 'true',
 }));

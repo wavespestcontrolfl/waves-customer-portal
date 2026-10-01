@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -255,7 +255,14 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // revalidate quoted OPEN TIMES windows at dispatch, threaded from
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          // Codex round-43 P2: the already-booked re-service callback(s) the drafted reply may refer to ({ lane: { date, windowStart } }) —
+          // rechecked live before provider entry (reserviceBookedHandoffCheck), same snapshot the manual / scheduled seams read.
+          ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
           ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+          // Independent review finding (PR #5334): the same live-ETA
+          // send-time snapshot publishSuggestion persists — see its comment.
+          ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
+          ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
@@ -300,7 +307,13 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot };
+    return {
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, reserviceBookedSnapshot,
+      // Independent review finding (PR #5334): carried in-memory so
+      // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
+      // through the row it just inserted.
+      liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
+    };
   });
 }
 
@@ -475,6 +488,26 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 }
 
 /** Mark a claim whose send was blocked/failed/errored. The draft stays 'shadow'. */
+// A provider-boundary refusal that means the live-ETA recheck could not READ the state (Codex
+// round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
+// either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
+// the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
+function isRetryableEtaBoundaryRefusal(result) {
+  return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
+    && result.retryable === true && result.code === 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY';
+}
+
+// Release a claim that never reached the provider WITHOUT recording a failed auto-send (the row
+// was inserted as CLAIM_STATUS by claimAutoSend moments ago, so removing it restores the
+// pre-claim state). Only while still CLAIM_STATUS; errors are logged, never thrown.
+async function releaseClaim(decisionId) {
+  try {
+    await db('agent_decisions').where({ id: decisionId, status: CLAIM_STATUS }).del();
+  } catch (err) {
+    logger.warn(`[sms-auto-send] releaseClaim errored (decision ${decisionId}): ${err.message}`);
+  }
+}
+
 async function failClaim(decisionId, reason) {
   try {
     await db('agent_decisions')
@@ -711,6 +744,25 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
   };
 }
 
+/**
+ * Codex round-43 P2: a drafted reply that refers to an ALREADY-BOOKED re-service callback ("your re-service is scheduled for Thursday,
+ * 9-11 AM") carries no escalate action, so it is auto-send eligible — and the booking can be cancelled or moved between drafting and
+ * sending. The same live check the manual / scheduled seams run (sms-shadow-drafter reserviceBookedReferenceBlock) against the snapshot
+ * persisted on the claim. Runs BOTH before provider entry (dispatchClaimedSend) and as the ordinary lane's providerPreSendCheck, the last
+ * await before the provider request. Fails closed: a body claiming a booked appointment with no snapshot / no live callback is blocked.
+ */
+function reserviceBookedHandoffCheck({ claim, reply, customerId }) {
+  const check = async () => {
+    const block = await require('./sms-shadow-drafter').reserviceBookedReferenceBlock({
+      body: reply, customerId, booked: claim.reserviceBookedSnapshot || null,
+    });
+    return block ? { ok: false, code: 'reservice_booking_changed', reason: block } : { ok: true };
+  };
+  // A pure state read, so it declares itself repeatable: twilio.js re-runs it after the durable attempt marker, the last await
+  // before the SDK request (Codex #5334 P2: it must be the LAST recheck, after the live-ETA read).
+  return require('./agent-decision-send-checks').markRepeatable(check);
+}
+
 /** The lane-specific sendCustomerMessage input for a claimed reply. */
 function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }) {
   const parkedIds = claim.parkedIds || [];
@@ -724,7 +776,10 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       await dispatch(trx);
       return { ok: true };
     }),
-  } : {};
+  } : {
+    // Codex round-43 P2: the ordinary lane's last await before the provider request rechecks a booked-callback reference.
+    providerPreSendCheck: reserviceBookedHandoffCheck({ claim, reply, customerId }),
+  };
   return {
     to: claim.toPhone,
     body: reply,
@@ -735,6 +790,20 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'sms_auto_send_executor',
     ...laneFields,
+    // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the executor's own
+    // check ran before its recheck/handoff awaits and sendCustomerMessage's recipient and
+    // policy work; the same shared check (from the claim's in-memory snapshot — no extra
+    // read) runs again immediately before the provider request. ORDER (Codex #5334 P2): the
+    // async ETA read goes FIRST and the lane's own predicate (booked-callback reference /
+    // gratitude handoff) LAST, so no other state can change after the final guard and before
+    // the provider request; the repeatable parts re-run in the same order after the marker.
+    providerPreSendCheck: (() => {
+      const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      return composeProviderPreSendChecks(
+        etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
+        laneFields.providerPreSendCheck,
+      );
+    })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an
     // accepted send whose ordinary sms_log insert fails is promoted with the
     // provider's real context. Borrowing never creates a second reservation;
@@ -828,6 +897,54 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
         }
       }
     }
+    // LIVE ETA send-time recheck (independent review + Codex round-1
+    // finding, PR #5334): the SAME shared check the immediate /sms send and
+    // the scheduler's queued-send path run (sms-eta-freshness) — claim's
+    // liveEtaSnapshot/factsGeneratedAt are the in-memory copies claimAutoSend
+    // just inserted, so this needs no round trip through the row. A reply
+    // that makes a minutes-away/ETA claim with no backing snapshot, a stale
+    // draft, or a visit that is no longer customer-facing en_route fails
+    // closed — same supersede-via-failClaim mechanism every other refusal
+    // here uses, siblings reopened the same way.
+    const { etaClaimBlockReason } = require('./sms-eta-freshness');
+    const etaReason = await etaClaimBlockReason({
+      liveEtaSnapshot: claim.liveEtaSnapshot,
+      factsGeneratedAt: claim.factsGeneratedAt,
+      techNames: claim.techNames,
+      promptVersion: claim.promptVersion,
+      outgoingBody: reply,
+    });
+    if (etaReason && require('./sms-eta-freshness').isEtaInfrastructureFailure(etaReason)) {
+      // The recheck could not READ the live state (Codex round-44 P2) — nothing is known to
+      // be stale, so the claim is RELEASED instead of failed: the freshly inserted claim row
+      // is removed and its reservation settled (nothing was sent), parked siblings reopen, and
+      // the verified draft falls through to a human-visible suggestion that the reviewer-send
+      // seam rechecks again. The decision is never recorded as a failed auto-send.
+      logger.warn(`[sms-auto-send] live ETA recheck unreadable (decision ${claim.decisionId}): ${etaReason}; releasing the claim (retryable)`);
+      await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+      await releaseClaim(claim.decisionId);
+      await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+      return { sent: false, reason: etaReason, retryable: true };
+    }
+    if (etaReason) {
+      logger.warn(`[sms-auto-send] live ETA unsendable (decision ${claim.decisionId}): ${etaReason}`);
+      const outcome = await notSent(etaReason);
+      await reopenParked('Auto-send held: the live ETA it quoted is no longer current — suggestion reopened.');
+      return outcome;
+    }
+    // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
+    // the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.
+    // Codex #5334 P2: it runs AFTER the (async) live-ETA recheck above, so booking state that changes while the ETA read was in flight is
+    // still caught: the last async read before provider entry is the booked-callback one.
+    if (!gratitudeLane) {
+      const booked = await reserviceBookedHandoffCheck({ claim, reply, customerId })();
+      if (!booked.ok) {
+        logger.warn(`[sms-auto-send] booked re-service reference stale (decision ${claim.decisionId}): ${booked.reason}`);
+        const outcome = await notSent(booked.code, booked.reason);
+        await reopenParked('Auto-send held: the referenced re-service appointment changed — suggestion reopened.');
+        return outcome;
+      }
+    }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -858,6 +975,17 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
   if (isAmbiguousProviderOutcome(result)) {
     logger.warn(`[sms-auto-send] provider outcome uncertain (decision ${claim.decisionId}) — claim retained for reconciliation`);
     return { sent: false, reason: 'provider_uncertain', ambiguous: true, decisionId: claim.decisionId };
+  }
+
+  if (isRetryableEtaBoundaryRefusal(result)) {
+    // Same release path as the early executor check: release the claim (never auto_send_failed),
+    // settle the reservation, reopen parked siblings; the verified draft falls through to a
+    // human-visible suggestion that the reviewer-send seam rechecks again.
+    logger.warn(`[sms-auto-send] live ETA recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    await releaseClaim(claim.decisionId);
+    await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+    return { sent: false, reason: result.code, retryable: true };
   }
 
   const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');
@@ -924,11 +1052,20 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
   // push audit P1 round 2): currentPromptVersion() suffixes
   // REAL_ANSWERS_PROMPT_VERSION with whichever per-category gates are also
   // on (e.g. '...+complaints'), so an exact 2-value list would stop
-  // matching the moment any category gate joins the master one — the
-  // prefix recognizes every such variant without enumerating them. This is
-  // a DISCOVERY filter (no single row to compare against yet), so it's a
-  // membership check rather than the per-row "whichever version this draft
-  // actually used" the claim/reload sites use.
+  // matching the moment any category gate joins the master one. Codex
+  // round-2 finding: an EXACT match against the CURRENT
+  // REAL_ANSWERS_PROMPT_VERSION also stopped matching the moment that
+  // constant's own numeric suffix bumps (e.g. 'house_voice_v12_real_answers'
+  // → '...answers2') — drafts written in the minutes before such a deploy
+  // under the PREVIOUS identity were orphaned. The gratitude copy is
+  // identical across every v12 real-answers variant regardless of that
+  // suffix or any category tag, so this matches the whole v12 real-answers
+  // FAMILY by prefix (REAL_ANSWERS_PROMPT_BASE_PREFIX, e.g.
+  // 'house_voice_v12_real_answers%' — covers the bare identity, any numeric
+  // bump, and any +category suffix on either) plus the exact v11 identity.
+  // This is a DISCOVERY filter (no single row to compare against yet), so
+  // it's a membership check rather than the per-row "whichever version this
+  // draft actually used" the claim/reload sites use.
   const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({

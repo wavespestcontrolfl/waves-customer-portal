@@ -72,7 +72,18 @@ function mockMakeBuilder(table) {
     insert(row) {
       const rowsToAdd = (Array.isArray(row) ? row : [row]).map((r, i) => ({ id: r.id || `${table}-${(mockState.tables[table] || []).length + i + 1}`, ...r }));
       mockState.tables[table] = [...(mockState.tables[table] || []), ...rowsToAdd];
-      return { returning: () => Promise.resolve(rowsToAdd) , then: (fn) => Promise.resolve(rowsToAdd.length).then(fn) };
+      return {
+        returning: () => Promise.resolve(rowsToAdd),
+        // INSERT ... ON CONFLICT (col) DO NOTHING: a row whose key already exists is dropped.
+        onConflict: (col) => ({
+          ignore: () => {
+            const before = (mockState.tables[table] || []).filter((r) => !rowsToAdd.includes(r));
+            mockState.tables[table] = [...before, ...rowsToAdd.filter((r) => !before.some((b) => String(b[col]) === String(r[col])))];
+            return Promise.resolve();
+          },
+        }),
+        then: (fn) => Promise.resolve(rowsToAdd.length).then(fn),
+      };
     },
   };
   return builder;
@@ -338,6 +349,44 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
     expect(mockTransition.mock.calls.map(([a]) => a.jobId)).toEqual(['l2']);
   });
 
+  test('a legacy visit with no catalog service is family-checked too: re-typed to another family since the plan, it is left alone', async () => {
+    seedHeld([lawnVisit('l1', daysOut(5), { service_type: 'Mosquito Control Service' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held({ customerId: 'c1' })]);
+    expect(mockTransition.mock.calls.map(([a]) => a.jobId)).toEqual(['l2']);
+    expect(record()).toMatchObject({ skipped: ['l2'], unresolved: [], skipsFinal: true });
+  });
+
+  test('a visit the tracker shows complete (status never synced) is ended, not live: the plan closes without ringing the office', async () => {
+    seedHeld([lawnVisit('l1', daysOut(5), { track_state: 'complete' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held()]);
+    expect(mockTransition.mock.calls.map(([a]) => a.jobId)).toEqual(['l2']);
+    expect(record()).toMatchObject({ skipped: ['l2'], unresolved: [], skipsFinal: true });
+    expect(bells('plan_hold_skip_failed')).toHaveLength(0);
+  });
+
+  test('a visit whose status still says underway but whose tracker shows complete is ended, not live: no office bell, the plan closes', async () => {
+    for (const status of ['on_site', 'en_route']) {
+      mockTransition.mockClear();
+      mockNotifyAdmin.mockClear();
+      seedHeld([lawnVisit('l1', daysOut(5), { status, track_state: 'complete' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+      await applyHoldSkips([held()]);
+      expect(mockTransition.mock.calls.map(([a]) => a.jobId)).toEqual(['l2']);
+      expect(record()).toMatchObject({ skipped: ['l2'], unresolved: [], skipsFinal: true });
+      expect(bells('plan_hold_skip_failed')).toHaveLength(0);
+    }
+  });
+
+  test('recording the skips keeps a reminder claim already on the hold', async () => {
+    seedHeld();
+    const claim = { at: new Date().toISOString(), visitId: 'back', delivered: false };
+    mockState.tables.plan_holds[0].moved_visits = JSON.stringify({ moved: [], toSkip: [], skipped: [], reminderClaim: claim });
+    mockState.forUpdate = 0;
+    await applyHoldSkips([held()]);
+    expect(record()).toMatchObject({ skipped: ['l1', 'l2'], skipsFinal: true, reminderClaim: claim });
+    // The hold row is read for update (with the two visit rows), so the merge cannot interleave with a claim.
+    expect(mockState.forUpdate).toBe(3);
+  });
+
   test('a visit left bookable inside the pause keeps the plan open, and the daily recovery retries it; an ended visit closes it', async () => {
     seedHeld([lawnVisit('l1', daysOut(5), { track_state: 'en_route' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
     await applyHoldSkips([held()]);
@@ -525,12 +574,45 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
   });
 
-  test('a same-case retry keeps the Away Mode value recorded by its first attempt, never the date that attempt wrote', async () => {
-    const { recordPendingAwayMode } = require('../services/cancellation-resolution/holds');
-    holdSeed({ moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false, awayPairing: { previousUntil: null, until: daysOut(30) } }) });
+  test('Away Mode reads the prior value, writes the preference and records it on the holds under one row lock; a same-case retry keeps its first attempt\'s value', async () => {
+    const { startAwayMode } = require('../services/cancellation-resolution/holds');
+    const lawn = JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false });
+    holdSeed({ moved_visits: lawn });
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(5) }];
+    mockState.forUpdate = 0;
+    expect(await startAwayMode({ customerId: 'c1', caseId: 'k', until: daysOut(30), holdIds: ['h1'] })).toMatchObject({ until: daysOut(30), previousUntil: daysOut(5) });
+    expect(mockState.forUpdate).toBeGreaterThanOrEqual(2); // the preference row and the hold row
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(30));
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).awayPairing).toEqual({ previousUntil: daysOut(5), until: daysOut(30) });
+    // The retry finds the preference already at `until` and still restores the first value.
+    expect(await startAwayMode({ customerId: 'c1', caseId: 'k', until: daysOut(30), holdIds: ['h1'] })).toMatchObject({ previousUntil: daysOut(5) });
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).awayPairing).toEqual({ previousUntil: daysOut(5), until: daysOut(30) });
+  });
+
+  test('a same-case Away Mode retry whose first attempt had no prior date records null, not the live preference value', async () => {
+    const { startAwayMode } = require('../services/cancellation-resolution/holds');
+    // The first attempt wrote this record when the customer had no prior
+    // date: JSON.stringify dropped the undefined previousUntil key.
+    holdSeed({ moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false, awayPairing: { until: daysOut(30) } }) });
     mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(30) }];
-    expect(await recordPendingAwayMode(['h1'], { customerId: 'c1', until: daysOut(30) })).toBe(null);
-    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).awayPairing).toEqual({ previousUntil: null, until: daysOut(30) });
+    expect(await startAwayMode({ customerId: 'c1', caseId: 'k', until: daysOut(30), holdIds: ['h1'] })).toMatchObject({ until: daysOut(30), previousUntil: null });
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).awayPairing.previousUntil ?? null).toBe(null);
+  });
+
+  test('Away Mode creates a customer\'s first preferences row conflict-safely, and writes its staff note only when asked', async () => {
+    const { startAwayMode, noteAwayMode } = require('../services/cancellation-resolution/holds');
+    seed({});
+    mockState.tables.property_preferences = [];
+    expect(await startAwayMode({ customerId: 'c1', caseId: 'k', until: daysOut(30) })).toMatchObject({ previousUntil: null });
+    expect(mockState.tables.property_preferences).toHaveLength(1);
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(30));
+    // A second accept finds the row the first created: still exactly one.
+    await startAwayMode({ customerId: 'c1', caseId: 'k2', until: daysOut(40) });
+    expect(mockState.tables.property_preferences).toHaveLength(1);
+    // No note from the write itself: a rolled-back accept must leave none.
+    expect(mockState.tables.customer_interactions).toHaveLength(0);
+    await noteAwayMode({ customerId: 'c1', caseId: 'k', until: daysOut(40) });
+    expect(mockState.tables.customer_interactions.map((n) => n.subject)).toEqual([`Away Mode until ${daysOut(40)} (cancel flow)`]);
   });
 
   test('undoing an unfinished paired accept also puts Away Mode back — unless the preference changed since', async () => {
@@ -545,6 +627,26 @@ describe('runPlanHoldLifecycle', () => {
     seedPaired(daysOut(60));
     await runPlanHoldLifecycle({ today: TODAY });
     expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
+  });
+
+  test('undoing an unfinished accept restores Away Mode from the locked row when a same-case retry paired it after the bulk read', async () => {
+    // The bulk read sees no pairing; the retry records it before the undo's row lock.
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000),
+      moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false }) });
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(30) }];
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => {
+      const rec = JSON.parse(mockState.tables.plan_holds[0].moved_visits);
+      if (rec.awayPairing === undefined) {
+        mockState.tables.plan_holds[0].moved_visits = JSON.stringify({ ...rec, awayPairing: { previousUntil: daysOut(5), until: daysOut(30) } });
+      }
+      return openTrx(cb);
+    };
+    try {
+      await runPlanHoldLifecycle({ today: TODAY });
+    } finally { db.transaction = openTrx; }
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(5));
   });
 
   test('a resumed hold whose first visit back is months after the return date still gets its text a week before it', async () => {
@@ -669,6 +771,26 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockSms).not.toHaveBeenCalled();
     expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
     expect(bells('plan_hold_restart_text_undelivered')).toHaveLength(0);
+  });
+
+  test('an earlier visit scheduled after the claim is caught at the send: the text is not sent naming the later one', async () => {
+    holdSeed({ resume_on: daysOut(0) }, [lawnVisit('back', daysOut(4))]);
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => {
+      const r = await openTrx(cb);
+      mockState.tables.scheduled_services.unshift(lawnVisit('earlier', daysOut(2))); // the mock does not sort by date
+      return r;
+    };
+    try {
+      await sendDueRestartTexts(['h1']);
+    } finally { db.transaction = openTrx; }
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
+    // The next run names the real first visit back.
+    await sendDueRestartTexts(['h1']);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(2)) }), expect.anything());
+    expect(mockSms).toHaveBeenCalledTimes(1);
   });
 
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {

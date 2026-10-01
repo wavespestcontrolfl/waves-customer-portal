@@ -625,6 +625,21 @@ describe('operator override leaves a trail (never blocks)', () => {
     await expect(b.m.recordHoldOverride(who)).resolves.toBe(false);
   });
 
+  test('on a caller transaction the lookup runs in a savepoint, so a failed read cannot abort the charge transaction', async () => {
+    const { m } = load({ holdRows: [{ ...HOLD }] });
+    const spDb = makeFakeDb({ collections_flags: [{ ...HOLD }] });
+    const trx = Object.assign(jest.fn(() => { throw new Error('the outer transaction must not be queried directly'); }), {
+      isTransaction: true,
+      transaction: jest.fn(async (fn) => fn(spDb)),
+    });
+    expect(await m.recordHoldOverride({ ...who, database: trx })).toBe(true);
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(trx).not.toHaveBeenCalled();
+    // A savepoint whose read fails rolls back to the savepoint and only logs.
+    trx.transaction.mockRejectedValueOnce(new Error('current transaction is aborted'));
+    await expect(m.recordHoldOverride({ ...who, database: trx })).resolves.toBe(false);
+  });
+
   test('the routes pass the override trail INTO the charge (recorded at the boundary) and no longer pre-check the hold', () => {
     const fs = require('fs'); const path = require('path');
     const bh = fs.readFileSync(path.join(__dirname, '../routes/admin-billing-health.js'), 'utf8');

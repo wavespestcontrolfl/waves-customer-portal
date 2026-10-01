@@ -6,6 +6,12 @@
 // while naturally-completed ones do not, and the durable-finalize set is
 // derived from the registry itself.
 
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
@@ -34,6 +40,7 @@ jest.mock('../services/dispatch-completion-deferred', () => ({
   finalizeDeferredDeclineNotice: jest.fn(async () => ({ ok: true })),
   terminalDeferredCompletionSend: jest.fn(async () => {}),
   terminalDeferredDeclineNotice: jest.fn(async () => {}),
+  handOverHeldInvoiceToSender: jest.fn(async () => ({ queued: true })),
 }));
 jest.mock('../services/appointment-card-request', () => ({
   sendDeferredInvitationEmailLeg: jest.fn(async () => ({ ok: true })),
@@ -104,14 +111,29 @@ const {
 
 function firstChain(row) {
   const q = {};
-  for (const m of ['where', 'whereNull', 'whereIn']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereNull', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => row);
+  return q;
+}
+
+// The invoice-queue UPDATE (collection-hold.queueHeldInvoiceForSender): where/whereNull chain ending in update().
+function queueChain(count) {
+  const q = {};
+  for (const m of ['where', 'whereNull']) q[m] = jest.fn(() => q);
+  q.update = jest.fn(async () => count);
+  return q;
+}
+
+function failingQueueChain() {
+  const q = {};
+  for (const m of ['where', 'whereNull']) q[m] = jest.fn(() => q);
+  q.update = jest.fn(async () => { throw new Error('queue write down'); });
   return q;
 }
 
 function throwChain() {
   const q = {};
-  for (const m of ['where', 'whereNull', 'whereIn']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereNull', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => { throw new Error('db down'); });
   return q;
 }
@@ -314,6 +336,34 @@ describe('deferred-replay registry', () => {
       expect(db).toHaveBeenCalledWith('call_log');
       expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', expect.objectContaining({ originCallId: 'call-legacy', callAt }));
     });
+  });
+
+  // Round-11 P2: the dispute-hold recheck must not delay a notice the customer's OWN action produced
+  // (meta.customer_initiated === true, the marker the scheduler forwards as customerInitiated) for a
+  // plain DISPUTE hold. Codex #5424 r13: a wrong-number / wrong-party FALLBACK hold still waits.
+  test('billing failure replay: a held customer waits with a named retry time, but customer_initiated skips the DISPUTE part of the recheck', async () => {
+    const Hold = require('../services/collections/collection-hold');
+    const run = async (extra) => {
+      db.mockReturnValueOnce(firstChain({ status: 'failed', retry_count: 1 }));
+      db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+      return recheckDeferredReplay('billing_failure_deferred', { payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1, ...extra });
+    };
+    const holdKind = (kind) => Hold.messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (
+      opts.ignoreDisputeHold && kind === 'dispute' ? { held: false } : { held: true, reason: 'hold' }));
+    holdKind('dispute');
+    try {
+      expect(await run({})).toMatchObject({ eligible: false, reason: 'collection-hold', retryable: true });
+      Hold.messagingHeldByCollectionHold.mockClear();
+      expect(await run({ customer_initiated: true })).toEqual({ eligible: true });
+      expect(Hold.messagingHeldByCollectionHold).toHaveBeenCalledWith('cust-1', undefined, { ignoreDisputeHold: true });
+      // only the boolean true exempts (a stringy marker does not)
+      expect(await run({ customer_initiated: 'true' })).toMatchObject({ eligible: false, reason: 'collection-hold' });
+      // a FALLBACK hold is never skipped, customer-initiated or not
+      holdKind('fallback');
+      expect(await run({ customer_initiated: true })).toMatchObject({ eligible: false, reason: 'collection-hold', retryable: true });
+    } finally {
+      Hold.messagingHeldByCollectionHold.mockReset().mockResolvedValue({ held: false });
+    }
   });
 
   test('billing failure replay retains its retry on a database outage', async () => {
@@ -1229,21 +1279,165 @@ describe('deferred-replay registry', () => {
     expect(db).not.toHaveBeenCalled();
 
     // Still collectible — nothing to strip.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
-    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .toEqual({ eligible: true });
 
     // Settled zero-due overnight (or otherwise terminal): the report still
     // sends (eligible: true, never cancelled/suppressed — the owner's r8
     // ruling), but the frozen pay-link line is now stale.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'prepaid', payer_id: null }));
-    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-terminal:prepaid' });
 
     // Moved to a payer overnight: same treatment — strip, don't suppress.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: 'payer-1' }));
-    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed' });
+  });
+
+  test('completion recheck (B10 follow-up): an active dispute hold strips the pay link, never the whole report send', async () => {
+    const meta = { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' };
+    // Hold lookup is the first read; a hold row means strip (no invoice read needed).
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' });
+    expect(db).toHaveBeenCalledTimes(1);
+    expect(db).toHaveBeenCalledWith('collections_flags');
+
+    // Released / non-dispute hold: the lookup finds no active dispute row, so the
+    // ordinary collectibility path runs and a collectible invoice keeps its link.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(firstChain(undefined));
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta)).toEqual({ eligible: true });
+
+    // A first-attempt lookup failure is not a confirmed hold: hold the row for
+    // the rail's bounded retry instead of stripping a link permanently.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: false, reason: 'hold-recheck-failed', retryable: true });
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { ...meta, scheduled_sms_attempts: 2 }))
+      .toEqual({ eligible: false, reason: 'hold-recheck-failed', retryable: true });
+  });
+
+  test('completion recheck (B10 follow-up): a row with no customer_id resolves the customer from the invoice, so a hold still strips', async () => {
+    const meta = { invoice_id: 'inv-1', pay_url: 'https://p' };
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' })); // customer from the invoice
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));          // active dispute hold
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' });
+    expect(db).toHaveBeenCalledWith('invoices');
+    expect(db).toHaveBeenLastCalledWith('collections_flags');
+    // The invoice read itself failing fails closed (retryable first attempt), not "no hold".
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: false, reason: 'hold-recheck-failed', retryable: true });
+  });
+
+  test('completion recheck (B10 follow-up): a hold lookup that still fails at the attempt cap fails CLOSED to a strip (report-only), never a pay link', async () => {
+    const meta = { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1', scheduled_sms_attempts: 3 };
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' });
+    // The retry that recovers is a normal hold answer: released hold, link kept.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(firstChain(undefined));
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { ...meta, scheduled_sms_attempts: 2 }))
+      .toEqual({ eligible: true });
+  });
+
+  test('decline notice (B10 follow-up): an active dispute hold suppresses the whole notice and queues its invoice onto the sender; the terminal hook restores the record', async () => {
+    const inv = { id: 'inv-1', status: 'sent', payer_id: null, customer_id: 'cust-1' };
+    db.mockReturnValueOnce(firstChain(inv));
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
+    const queue = queueChain(1);
+    db.mockReturnValueOnce(queue);
+    expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
+      .toEqual({ eligible: false, reason: 'collections-dispute-hold' });
+    expect(db).toHaveBeenCalledWith('collections_flags');
+    // The suppressed notice was the invoice's only pay-link delivery: the invoice is QUEUED onto the
+    // scheduled-invoice sender (owner ruling 2026-09-30), which holds it while the hold stands.
+    // Behavior is covered against Postgres in collection-hold-invoice-sender-postgres.test.js.
+    expect(db).toHaveBeenLastCalledWith('invoices');
+    expect(queue.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', scheduled_send_error: null }));
+
+    // The scheduler's terminal path for an ineligible, non-retryable recheck runs this hook.
+    expect(requiresDurableFinalize('autopay_completion_decline_deferred')).toBe(true);
+    const { terminalDeferredDeclineNotice } = require('../services/dispatch-completion-deferred');
+    const meta = { invoice_id: 'inv-1', service_record_id: 'rec-1' };
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta);
+    expect(terminalDeferredDeclineNotice).toHaveBeenCalledWith(meta);
+
+    // Released / non-dispute hold: the notice stays eligible and nothing is queued.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(firstChain(inv));
+    db.mockReturnValueOnce(firstChain(undefined));
+    expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1' }))
+      .toEqual({ eligible: true });
+    expect(db).toHaveBeenCalledWith('collections_flags');
+    expect(db).not.toHaveBeenCalledWith('dispatch_alerts');
+    expect(db).toHaveBeenCalledTimes(2);
+  });
+
+  test('decline notice (B10 follow-up): a queue write that fails is NOT swallowed - retryable-ineligible plus a durable office alert', async () => {
+    const inv = { id: 'inv-1', status: 'sent', payer_id: null, customer_id: 'cust-1' };
+    db.mockReturnValueOnce(firstChain(inv));
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
+    db.mockReturnValueOnce(failingQueueChain());
+    const alerts = require('../services/dispatch-alerts');
+    const createAlert = jest.spyOn(alerts, 'createAlert').mockResolvedValue({ id: 'a1' });
+    try {
+      expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
+        .toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+      expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'collection_hold_invoice_queue_failed',
+        payload: expect.objectContaining({ invoiceId: 'inv-1', customerId: 'cust-1' }),
+      }));
+    } finally { createAlert.mockRestore(); }
+  });
+
+  test('decline notice terminal hand-over (Codex #5424 r15 P1): queue + ownership marker go through handOverHeldInvoiceToSender with the record id', async () => {
+    const { handOverHeldInvoiceToSender } = require('../services/dispatch-completion-deferred');
+    handOverHeldInvoiceToSender.mockClear();
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1', service_record_id: 'rec-1' });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-1', serviceRecordId: 'rec-1', smsLogId: null });
+    // a notice with no completion record hands over with a null record (queue only, no marker to write)
+    handOverHeldInvoiceToSender.mockClear();
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-2', customer_id: 'cust-1' });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-2', serviceRecordId: null, smsLogId: null });
+    // a recordless hand-over names the deferred sms_log row the terminal hook is finishing, which carries the one-time
+    // re-arm grant (Codex #5459 r6 P2)
+    handOverHeldInvoiceToSender.mockClear();
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-3', customer_id: 'cust-1', deferred_sms_log_id: 'sms-9' });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-3', serviceRecordId: null, smsLogId: 'sms-9' });
+    // and the durable terminal-hook runner is what supplies it (every terminal hook run, inline or swept)
+    expect(require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/deferred-replay-registry.js'), 'utf8'))
+      .toMatch(/onTerminalDeferredReplay\(entryPoint, msgId \? \{ \.\.\.claimMeta, deferred_sms_log_id: msgId \} : claimMeta\)/);
+    // a hand-over failure is reported as a failed hook (the terminal sweep retries) after the office alert
+    handOverHeldInvoiceToSender.mockRejectedValueOnce(new Error('queue down'));
+    db.mockReturnValueOnce(firstChain(undefined)); // no open alert yet
+    const alerts = require('../services/dispatch-alerts');
+    const createAlert = jest.spyOn(alerts, 'createAlert').mockResolvedValue({ id: 'a1' });
+    try {
+      expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1', service_record_id: 'rec-1' })).toMatchObject({ ok: false });
+      expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ type: 'collection_hold_invoice_queue_failed' }));
+    } finally { createAlert.mockRestore(); }
+  });
+
+  test('decline notice (B10 follow-up): a hold lookup failure is retryable-ineligible, never an eligible send', async () => {
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, customer_id: 'cust-1' }));
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
+      .toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
   });
 
   test('completion recheck (round 10 #4634 finding 3): a transient collectibility-read failure stays retryable-ineligible, never promoted to a strip', async () => {
@@ -1254,14 +1448,16 @@ describe('deferred-replay registry', () => {
     // a pay link that never had anything actually wrong with it, on
     // nothing more than a DB hiccup that the scheduler's bounded retry
     // ladder would otherwise have resolved on the next pass.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(throwChain());
-    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .resolves.toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
   });
 
   test('completion recheck (round 10 #4634 finding 3): an invoice row that is simply gone is treated like a confirmed-terminal invoice (strip, never suppress)', async () => {
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain(undefined));
-    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .resolves.toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-missing' });
   });
 
@@ -1269,8 +1465,9 @@ describe('deferred-replay registry', () => {
     // invoiceWithdrawnFromCustomer (invoice-helpers.js, real implementation)
     // keys on the payer_billed: prefix a packet withdrawal stamps on
     // scheduled_send_error — no mock needed, a real row triggers it.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: 'payer_billed: adopted 2026-09-20' }));
-    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .resolves.toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed-withdrawn' });
   });
 
@@ -1281,10 +1478,11 @@ describe('deferred-replay registry', () => {
     // completion text anyway. It must take the same suppress/terminal path
     // every other genuinely-ineligible reason took before the round-8
     // strip carve-out.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
     db.mockReturnValueOnce(firstChain({ status: 'stopped' }));
     await expect(recheckDeferredReplay('dispatch_completion_deferred', {
-      invoice_id: 'inv-1', pay_url: 'https://p', followup_sequence_id: 'seq-1',
+      invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1', followup_sequence_id: 'seq-1',
     })).resolves.toEqual({ eligible: false, reason: 'sequence-stopped' });
   });
 
@@ -1652,6 +1850,7 @@ describe('deferred-replay registry', () => {
 
     // Unchanged balance replays; legacy rows without the stamp skip the pin.
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, total: 100, credit_applied: 0 }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' })); // customer read for the dispute-hold recheck
     const same = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1', rendered_amount: '100.00' });
     expect(same.eligible).toBe(true);
   });
@@ -1826,8 +2025,9 @@ describe('invoice_followup_deferred × collections policy', () => {
     db.mockReturnValueOnce(firstChain({ status: 'active' }));
   }
 
-  test('gate off + legacy keyless row: no consult, no resolution, no reservation — byte-identical', async () => {
+  test('gate off + legacy keyless row: no policy consult, no reservation (one customer read for the dispute-hold recheck)', async () => {
     db.mockReturnValueOnce(firstChain(COLLECTIBLE));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     const result = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1' });
     expect(result.eligible).toBe(true);
     expect(collectionsChannelPermitted).not.toHaveBeenCalled();
