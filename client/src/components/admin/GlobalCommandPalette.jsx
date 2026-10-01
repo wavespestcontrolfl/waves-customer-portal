@@ -722,9 +722,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     }
   };
 
-  const saveKnowledgeGap = (question) => adminFetch("/admin/intelligence-bar/knowledge-gap", {
+  const saveKnowledgeGap = (question, requestKey) => adminFetch("/admin/intelligence-bar/knowledge-gap", {
     method: "POST",
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, request_key: requestKey }),
   });
 
   const actionEpoch = threadEpochRef.current;

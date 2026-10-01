@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { uuid } from "../../utils/ibSession";
 
 /**
  * Intelligence Bar "add to knowledge gaps" prompt. Shown when a knowledge
@@ -16,6 +17,9 @@ export const KNOWLEDGE_GAP_MAX = 300;
 
 function GapRow({ initial, save, dark }) {
   const [text, setText] = useState(String(initial || "").slice(0, KNOWLEDGE_GAP_MAX));
+  // One key per box: a retry after a lost response re-sends it, so the
+  // server saves this gap once however many times the button is tapped.
+  const [requestKey] = useState(uuid);
   const [state, setState] = useState("idle"); // idle | saving | saved | error
   const [error, setError] = useState("");
   const trimmed = text.replace(/\s+/g, " ").trim();
@@ -27,7 +31,7 @@ function GapRow({ initial, save, dark }) {
     setState("saving");
     setError("");
     try {
-      await save(trimmed);
+      await save(trimmed, requestKey);
       setState("saved");
     } catch (err) {
       setError(err?.message || "Could not save");
@@ -59,6 +63,8 @@ function GapRow({ initial, save, dark }) {
           border: `1px solid ${border}`,
           borderRadius: 6,
           font: "inherit",
+          // Mobile Safari zooms the page on focus below 16px.
+          fontSize: dark ? "inherit" : 16,
           color: "inherit",
           background: "transparent",
         }}

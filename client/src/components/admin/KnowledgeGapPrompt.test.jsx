@@ -25,7 +25,25 @@ describe("KnowledgeGapPrompt", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
     await waitFor(() => expect(screen.getByText(/Added to Monday's knowledge-gaps email/)).toBeInTheDocument());
     expect(save).toHaveBeenCalledTimes(1);
-    expect(save).toHaveBeenCalledWith("chinch bugs zoysia");
+    expect(save).toHaveBeenCalledWith("chinch bugs zoysia", expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/));
+  });
+
+  it("a retry after a failed save sends the same request key", async () => {
+    const save = vi.fn()
+      .mockRejectedValueOnce(new Error("Network error"))
+      .mockResolvedValueOnce({ success: true });
+    render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={save} />);
+    const button = screen.getByRole("button", { name: "Add to knowledge gaps" });
+    fireEvent.click(button);
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1][1]).toBe(save.mock.calls[0][1]);
+  });
+
+  it("the mobile box is 16px so Safari does not zoom on focus", () => {
+    render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={vi.fn()} variant="light" />);
+    expect(screen.getByRole("textbox", { name: "Knowledge gap" }).style.fontSize).toBe("16px");
   });
 
   it("keeps the box and shows the error when the save fails", async () => {

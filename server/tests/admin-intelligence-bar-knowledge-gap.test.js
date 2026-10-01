@@ -9,7 +9,8 @@
  *     saves it.
  *  2. A search with any hit, or a failed search, adds no knowledgeMisses key.
  *  3. POST /knowledge-gap (admin only) saves exactly the text sent, as an
- *     'intelligence_bar' row with coverage 'none'.
+ *     'intelligence_bar' row with coverage 'none', keyed by the prompt box's
+ *     request_key so a retry is a no-op; IB_WRITES_DISABLED refuses it.
  *
  * Harness (mocks + helpers) mirrors admin-intelligence-bar-tool-activity.test.js.
  */
@@ -23,7 +24,11 @@ const mockCreatePendingAction = jest.fn();
 const mockClaimForConfirm = jest.fn();
 const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
-const mockDbInsert = jest.fn(async () => undefined);
+const mockOnConflictIgnore = jest.fn(async () => undefined);
+const mockOnConflict = jest.fn(() => ({ ignore: mockOnConflictIgnore }));
+// Awaitable (the /query loop's analytics insert) and chainable (the
+// knowledge-gap save's onConflict().ignore()).
+const mockDbInsert = jest.fn(() => Object.assign(Promise.resolve(undefined), { onConflict: mockOnConflict }));
 const mockDbTable = jest.fn();
 const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
@@ -221,14 +226,18 @@ describe('knowledgeMisses on /query', () => {
   });
 });
 
+const KEY = '3f2b8c1e-5a4d-4c6b-9e7f-0a1b2c3d4e5f';
+
 describe('POST /knowledge-gap', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.IB_WRITES_DISABLED;
   });
+  afterAll(() => { delete process.env.IB_WRITES_DISABLED; });
 
   test('saves the operator-edited text as an Intelligence Bar gap', async () => {
     await withServer(async (baseUrl) => {
-      const { status, body } = await postGap(baseUrl, { question: '  chinch bugs\n on   zoysia ' });
+      const { status, body } = await postGap(baseUrl, { question: '  chinch bugs\n on   zoysia ', request_key: KEY.toUpperCase() });
       expect(status).toBe(200);
       expect(body).toEqual({ success: true });
       expect(knowledgeQueryInserts()).toEqual([{
@@ -236,23 +245,39 @@ describe('POST /knowledge-gap', () => {
         articles_referenced: '[]',
         asked_by: 'intelligence_bar',
         coverage: 'none',
+        request_key: KEY,
       }]);
+      // A retry with the same key is a no-op at the unique index.
+      expect(mockOnConflict).toHaveBeenCalledWith('request_key');
+      expect(mockOnConflictIgnore).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('the IB write freeze refuses it', async () => {
+    process.env.IB_WRITES_DISABLED = 'true';
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postGap(baseUrl, { question: 'chinch bugs on zoysia', request_key: KEY });
+      expect(status).toBe(409);
+      expect(body.error).toMatch(/IB_WRITES_DISABLED/);
+      expect(mockDbInsert).not.toHaveBeenCalled();
     });
   });
 
   test('technicians are refused', async () => {
     await withServer(async (baseUrl) => {
-      const { status } = await postGap(baseUrl, { question: 'chinch bugs on zoysia' }, 'tech');
+      const { status } = await postGap(baseUrl, { question: 'chinch bugs on zoysia', request_key: KEY }, 'tech');
       expect(status).toBe(403);
       expect(mockDbInsert).not.toHaveBeenCalled();
     });
   });
 
   test.each([
-    ['too short', { question: 'ab' }],
-    ['too long', { question: 'x'.repeat(301) }],
-    ['not a string', { question: ['chinch bugs'] }],
-    ['missing', {}],
+    ['too short', { question: 'ab', request_key: KEY }],
+    ['too long', { question: 'x'.repeat(301), request_key: KEY }],
+    ['not a string', { question: ['chinch bugs'], request_key: KEY }],
+    ['missing', { request_key: KEY }],
+    ['no request key', { question: 'chinch bugs on zoysia' }],
+    ['a request key that is not a UUID', { question: 'chinch bugs on zoysia', request_key: 'retry-1' }],
   ])('%s is refused', async (_label, payload) => {
     await withServer(async (baseUrl) => {
       const { status } = await postGap(baseUrl, payload);

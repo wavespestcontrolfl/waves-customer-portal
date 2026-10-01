@@ -3192,6 +3192,11 @@ router.post('/query', runQuery);
 // (services/knowledge/knowledge-gaps-weekly.js).
 router.post('/knowledge-gap', async (req, res, next) => {
   if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+  // One key per prompt box: a retry after a lost response re-sends it and
+  // the unique index makes the second insert a no-op.
+  const requestKey = typeof req.body?.request_key === 'string' ? req.body.request_key.trim().toLowerCase() : '';
+  if (!UUID_RE.test(requestKey)) return res.status(400).json({ error: 'request_key must be a UUID' });
   const question = typeof req.body?.question === 'string' ? req.body.question.replace(/\s+/g, ' ').trim() : '';
   if (question.length < 3 || question.length > KNOWLEDGE_GAP_MAX) {
     return res.status(400).json({ error: `question must be 3 to ${KNOWLEDGE_GAP_MAX} characters` });
@@ -3202,7 +3207,8 @@ router.post('/knowledge-gap', async (req, res, next) => {
       articles_referenced: JSON.stringify([]),
       asked_by: 'intelligence_bar',
       coverage: 'none',
-    });
+      request_key: requestKey,
+    }).onConflict('request_key').ignore();
     res.json({ success: true });
   } catch (err) {
     next(err);
