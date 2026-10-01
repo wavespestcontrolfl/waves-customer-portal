@@ -43,7 +43,7 @@ const CONFLICT_RECOVERY_REASONS = new Set([
 ]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
-const { V2_DECISION_VERSIONS, withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_XMIN_TEXT, isListedRouteDecision, routeDecisionsListedScope } = require('../services/call-routing-gates');
 
 // A deny rejects the call's UNIT evidence only when it is a whole-call deny
 // (no wrong_fields) or names the address — a field-scoped deny (service,
@@ -162,14 +162,18 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 // reprocess since the page loaded) or is not one of the call's decisions is
 // REJECTED (409, STALE_ROUTE_DECISION) instead of landing on a decision the
 // reviewer never saw; so is one whose row was refreshed IN PLACE since it loaded
-// (the same id, a new created_at: `routeDecisionCreatedAt`). No id (an older client, the triage-card verdicts): a verdict
+// (the same id, a new revision: `routeDecisionRevision`, the row's xmin). No id (an older client, the triage-card verdicts): a verdict
 // that wins the lock freezes the row it names; one that loses attaches to the
 // refreshed newest row it now reads, as before.
-async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy, routeDecisionId = null, routeDecisionCreatedAt = null }) {
+async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy, routeDecisionId = null, routeDecisionRevision = null }) {
   await withLockedRouteDecisions(db, { callLogId, mode: 'enforce' }, async (trx, rows) => {
     // Newest first, read AFTER the locks are granted (created_at is refreshed).
-    const newestOf = (list) => [...list].sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
-    const picked = resolveDisplayedRouteDecision(rows, routeDecisionId, newestOf, routeDecisionCreatedAt);
+    // The current decision is picked from the SAME set the auto-routed list shows
+    // (isListedRouteDecision / routeDecisionsListedScope share one definition), so
+    // a displayed row is never judged "stale" against a row the list excludes (codex
+    // #5446 r2 P2).
+    const newestOf = (list) => [...list].filter(isListedRouteDecision).sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
+    const picked = resolveDisplayedRouteDecision(rows, routeDecisionId, newestOf, routeDecisionRevision);
     if (picked.missing || picked.stale) {
       const err = new Error('This decision changed since it loaded — review the refreshed decision before answering.');
       err.statusCode = 409;
@@ -2225,10 +2229,8 @@ router.get('/auto-routed', async (req, res) => {
       // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the
       // DISTINCT ON subquery spans both versions), but a superseded stale
       // decision never duplicates or shadows the fresh one.
-      .whereIn('route_decisions.id', db('route_decisions')
-        .select(db.raw('DISTINCT ON (call_log_id) id'))
-        .whereIn('decision_version', V2_DECISION_VERSIONS)
-        .where('mode', 'enforce')
+      .whereIn('route_decisions.id', routeDecisionsListedScope(db('route_decisions')
+        .select(db.raw('DISTINCT ON (call_log_id) id')))
         .orderByRaw('call_log_id, created_at DESC'))
       .where('route_decisions.final_action_taken', 'auto_route')
       .orderBy('route_decisions.created_at', 'desc')
@@ -2239,6 +2241,9 @@ router.get('/auto-routed', async (req, res) => {
         'route_decisions.created_scheduled_service_id',
         'route_decisions.sms_enqueued',
         'route_decisions.created_at',
+        // the revision the review displays and sends back (xmin; changes on EVERY
+        // update of the row, e.g. a reprocess refresh or the outcome update)
+        db.raw(`${ROUTE_DECISION_XMIN_TEXT} AS route_decision_revision`),
         'call_log.lead_synopsis',
         'call_log.call_summary',
         'call_log.from_phone',
@@ -2279,11 +2284,12 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
       return res.status(400).json({ error: 'route_decision_id must be a UUID' });
     }
 
-    // ...and the created_at it displayed: a reprocess refreshes an unreviewed
-    // decision in place under the SAME id, so the id alone is not a revision.
-    const rawCreatedAt = req.body?.route_decision_created_at == null ? '' : String(req.body.route_decision_created_at).trim();
-    if (rawCreatedAt && Number.isNaN(new Date(rawCreatedAt).getTime())) {
-      return res.status(400).json({ error: 'route_decision_created_at must be a timestamp' });
+    // ...and the revision it displayed (the row's xmin as text): a decision row is
+    // updated IN PLACE after it is shown (a reprocess refresh, the outcome update),
+    // so the id alone is not a revision. Absent = an older client.
+    const rawRevision = req.body?.route_decision_revision == null ? '' : String(req.body.route_decision_revision).trim();
+    if (rawRevision && !/^\d{1,12}$/.test(rawRevision)) {
+      return res.status(400).json({ error: 'route_decision_revision must be a revision token' });
     }
 
     await upsertFeedback({
@@ -2294,7 +2300,7 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
       note: typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null,
       reviewedBy: req.technicianId,
       routeDecisionId: rawDecisionId || null,
-      routeDecisionCreatedAt: rawCreatedAt || null,
+      routeDecisionRevision: rawRevision || null,
     });
     res.json({ ok: true, call_log_id: callLogId, verdict });
   } catch (err) {

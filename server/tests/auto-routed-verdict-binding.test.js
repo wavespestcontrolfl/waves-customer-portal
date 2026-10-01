@@ -26,8 +26,8 @@ const OLD = '22222222-2222-4222-8222-222222222222';
 const NEW = '33333333-3333-4333-8333-333333333333';
 const OTHER = '44444444-4444-4444-8444-444444444444';
 const decisionRows = () => [
-  { id: OLD, call_log_id: CALL, mode: 'enforce', decision_version: 'v2-1.50.0', created_at: '2026-01-01T00:00:00Z', final_action_taken: 'auto_route' },
-  { id: NEW, call_log_id: CALL, mode: 'enforce', decision_version: 'v2-1.50.0+r1', created_at: '2026-01-02T00:00:00Z', final_action_taken: 'auto_route' },
+  { id: OLD, call_log_id: CALL, mode: 'enforce', decision_version: 'v2-1.49.0', created_at: '2026-01-01T00:00:00Z', revision: '1001', final_action_taken: 'auto_route' },
+  { id: NEW, call_log_id: CALL, mode: 'enforce', decision_version: 'v2-1.50.0', created_at: '2026-01-02T00:00:00Z', revision: '2002', final_action_taken: 'auto_route' },
 ];
 const newestByCreatedAt = (list) => [...list].sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
 
@@ -42,12 +42,12 @@ describe('resolveDisplayedRouteDecision', () => {
   test('the displayed row is no longer the newest: stale', () => {
     expect(resolveDisplayedRouteDecision(decisionRows(), OLD, newestByCreatedAt)).toMatchObject({ stale: true, decision: { id: NEW } });
   });
-  test('an IN-PLACE refresh (same id, new created_at) is stale; the created_at the reviewer saw still passes', () => {
+  test('an IN-PLACE update (same id, new revision) is stale; the revision the reviewer saw still passes', () => {
     const rows = decisionRows();
-    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2026-01-02T00:00:00Z')).toMatchObject({ decision: { id: NEW } });
-    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2026-01-02T00:00:00.000Z')).toMatchObject({ decision: { id: NEW } });
-    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2026-01-01T12:00:00Z')).toMatchObject({ stale: true });
-    // an older client sends no created_at: the id check alone
+    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2002')).toMatchObject({ decision: { id: NEW } });
+    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, 2002)).toMatchObject({ decision: { id: NEW } });
+    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2001')).toMatchObject({ stale: true });
+    // an older client sends no revision: the id check alone
     expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, null)).toMatchObject({ decision: { id: NEW } });
   });
   test('the displayed row is not one of the call\'s decisions: missing', () => {
@@ -88,6 +88,7 @@ function fakeDb({ rows = decisionRows() } = {}) {
     }
     throw new Error(`unexpected table ${table}`);
   };
+  trx.raw = (sql) => ({ raw: sql }); // the revision (xmin) column rides the locked read
   db.mockImplementation((table) => {
     if (table === 'call_log') return { where: () => ({ first: () => Promise.resolve({ id: CALL }) }) };
     return trx(table);
@@ -146,21 +147,33 @@ describe('POST /api/admin/triage/auto-routed/:callLogId/verdict', () => {
     expect(state.feedback).toHaveLength(0);
   });
 
-  test('the SAME row refreshed in place by a reprocess since the page loaded (same id, new created_at): 409, nothing written', async () => {
+  test('the SAME row updated in place since the page loaded (a refresh OR the outcome update: same id, new revision): 409, nothing written', async () => {
     const state = fakeDb();
-    const res = await post({ route_decision_id: NEW, route_decision_created_at: '2026-01-01T12:00:00Z' });
+    const res = await post({ route_decision_id: NEW, route_decision_revision: '2001' });
     expect(res.statusCode).toBe(409);
     expect(res.body.code).toBe(STALE_ROUTE_DECISION);
     expect(state.feedback).toHaveLength(0);
     // the revision the reviewer saw still passes
-    const ok = await post({ route_decision_id: NEW, route_decision_created_at: '2026-01-02T00:00:00Z' });
+    const ok = await post({ route_decision_id: NEW, route_decision_revision: '2002' });
     expect(ok.statusCode).toBe(200);
     expect(state.feedback[0].route_decision_id).toBe(NEW);
   });
 
-  test('a malformed created_at is a 400', async () => {
+  test('a malformed revision is a 400', async () => {
     fakeDb();
-    expect((await post({ route_decision_id: NEW, route_decision_created_at: 'yesterday-ish' })).statusCode).toBe(400);
+    expect((await post({ route_decision_id: NEW, route_decision_revision: 'yesterday-ish' })).statusCode).toBe(400);
+  });
+
+  test('the current decision is picked from the SAME set the list shows (codex #5446 r2 P2): a newer enforce row the list excludes does not make the displayed one stale', async () => {
+    const rows = [...decisionRows(), { id: OTHER, call_log_id: CALL, mode: 'enforce', decision_version: 'legacy-call-v1', created_at: '2026-01-03T00:00:00Z', revision: '3003', final_action_taken: 'x' }];
+    const state = fakeDb({ rows });
+    const res = await post({ route_decision_id: NEW });
+    expect(res.statusCode).toBe(200);
+    expect(state.feedback[0].route_decision_id).toBe(NEW);
+    // and the no-id fallback attaches to the listed decision too, never the unlisted one
+    const fallback = fakeDb({ rows });
+    await post({});
+    expect(fallback.feedback[0].route_decision_id).toBe(NEW);
   });
 
   test('no id (an older client) falls back to today\'s behavior: the newest decision', async () => {
@@ -218,13 +231,13 @@ describe('POST /api/ai/admin/calls/:id/route-feedback', () => {
     expect(state.feedback).toHaveLength(0);
   });
 
-  test('an in-place refresh of the displayed row (same id, new created_at): 409, nothing written', async () => {
+  test('an in-place update of the displayed row (same id, new revision): 409, nothing written', async () => {
     const state = fakeDb({ rows: rowsFor() });
-    const res = await post({ routeDecisionId: NEW, routeDecisionCreatedAt: '2026-01-01T12:00:00Z' });
+    const res = await post({ routeDecisionId: NEW, routeDecisionRevision: '2001' });
     expect(res.statusCode).toBe(409);
     expect(res.body.code).toBe(STALE_ROUTE_DECISION);
     expect(state.feedback).toHaveLength(0);
-    expect((await post({ routeDecisionId: NEW, routeDecisionCreatedAt: '2026-01-02T00:00:00Z' })).statusCode).toBe(200);
+    expect((await post({ routeDecisionId: NEW, routeDecisionRevision: '2002' })).statusCode).toBe(200);
   });
 
   test('an id that is not this call\'s decision keeps its existing 400', async () => {
@@ -246,9 +259,64 @@ describe('the auto-routed review client', () => {
   test('sends the displayed route_decision_id and reloads on STALE_ROUTE_DECISION', () => {
     const src = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(src).toMatch(/kind === "auto_routed" && item\.route_decision_id\s*\?/);
-    expect(src).toMatch(/route_decision_id: item\.route_decision_id, route_decision_created_at: item\.created_at \|\| null/);
+    expect(src).toMatch(/route_decision_id: item\.route_decision_id, route_decision_revision: item\.route_decision_revision \|\| null/);
     const log = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/CallLogTabV2.jsx'), 'utf8');
-    expect(log).toMatch(/routeDecisionCreatedAt: call\.routeDecision\?\.createdAt \|\| null/);
+    expect(log).toMatch(/routeDecisionRevision: call\.routeDecision\?\.revision \|\| null/);
     expect(src).toMatch(/err\?\.code === 'STALE_ROUTE_DECISION'[\s\S]{0,200}load\(mode, status, autoOnly\)/);
+  });
+});
+
+// Every route_decisions writer takes the call row lock first (codex #5446 r2 P1), and the
+// auto-routed list and the verdict writer pick the current decision from one shared
+// definition (r2 P2).
+describe('route_decisions writers and the shared listed-decision predicate', () => {
+  const root = path.join(__dirname, '..');
+  const walk = (dir, out = []) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', 'tests', 'models', '__tests__'].includes(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full, out); else if (e.name.endsWith('.js')) out.push(full);
+    }
+    return out;
+  };
+
+  test('the ONLY code that inserts into route_decisions is call-routing-gates (upsertRouteDecision, insertRouteDecisionLocked)', () => {
+    const inserters = walk(root)
+      .filter((f) => /route_decisions'\)\s*\.insert\(|into\s+route_decisions/i.test(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.relative(root, f));
+    expect(inserters).toEqual(['services/call-routing-gates.js']);
+    const gates = fs.readFileSync(path.join(root, 'services/call-routing-gates.js'), 'utf8');
+    // each of the gate's writers locks the call row first
+    expect(gates).toMatch(/async function insertRouteDecisionLocked[\s\S]*?await lockCallRow\(trx, payload\.call_log_id\);[\s\S]*?\.insert\(payload\)/);
+    expect(gates).toMatch(/const write = async \(c\) => \{[\s\S]*?await lockCallRow\(c, decision\.call_log_id\);[\s\S]*?c\('route_decisions'\)\.insert\(decision\)/);
+    expect(gates).toMatch(/async function updateUnreviewedRouteDecisions\(trx, scope, patch\) \{[\s\S]*?await lockCallRow\(trx, scope\.call_log_id\)/);
+    expect(gates).toMatch(/async function withLockedRouteDecisions[\s\S]*?await lockCallRow\(trx, callLogId\);/);
+  });
+
+  test('the legacy shadow decision writer (processor x2 + the backfill) goes through the shared locked insert', () => {
+    const src = fs.readFileSync(path.join(root, 'services/call-route-decisions.js'), 'utf8');
+    expect(src).toMatch(/insertRouteDecisionLocked\(db, payload, \{ returning: \['id'\] \}\)/);
+    expect(src).not.toMatch(/db\('route_decisions'\)/);
+  });
+
+  test('the list and the verdict writer share one definition of the listed decision', () => {
+    const { isListedRouteDecision, routeDecisionsListedScope, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+    expect(isListedRouteDecision({ mode: 'enforce', decision_version: 'v2-1.50.0' })).toBe(true);
+    expect(isListedRouteDecision({ mode: 'shadow', decision_version: 'v2-1.50.0' })).toBe(false);
+    expect(isListedRouteDecision({ mode: 'enforce', decision_version: 'legacy-call-v1' })).toBe(false);
+    const knex = require('knex')({ client: 'pg' });
+    const q = routeDecisionsListedScope(knex('route_decisions')).toSQL();
+    expect(q.bindings).toEqual([...V2_DECISION_VERSIONS, 'enforce']);
+    const triage = fs.readFileSync(path.join(root, 'routes/admin-triage.js'), 'utf8');
+    expect(triage).toMatch(/routeDecisionsListedScope\(db\('route_decisions'\)/);
+    expect(triage).toMatch(/filter\(isListedRouteDecision\)/);
+    expect(triage).not.toMatch(/whereIn\('decision_version', V2_DECISION_VERSIONS\)/);
+  });
+
+  test('the list returns the revision (xmin) and the calls list maps it', () => {
+    expect(fs.readFileSync(path.join(root, 'routes/admin-triage.js'), 'utf8')).toMatch(/\$\{ROUTE_DECISION_XMIN_TEXT\} AS route_decision_revision/);
+    const ai = fs.readFileSync(path.join(root, 'routes/ai-assistant.js'), 'utf8');
+    expect(ai).toMatch(/select\('route_decisions\.\*', db\.raw\(ROUTE_DECISION_REVISION_SQL\)\)/);
+    expect(ai).toMatch(/revision: row\.revision == null \? null : String\(row\.revision\)/);
   });
 });

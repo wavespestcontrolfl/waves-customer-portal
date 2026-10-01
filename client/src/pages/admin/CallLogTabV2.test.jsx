@@ -94,10 +94,10 @@ describe("CallLogTabV2 call deep link from an alert", () => {
 // superseded since the list loaded is answered 409 STALE_ROUTE_DECISION; the tab
 // must reload the calls so the next Right/Wrong judges the CURRENT decision.
 describe("CallLogTabV2 route review on a stale decision", () => {
-  const callWith = (createdAt) => ({
+  const callWith = (revision) => ({
     id: "call-9", direction: "inbound", from_phone: "+19415550123", answered_by: "human", duration_seconds: 60,
     created_at: new Date().toISOString(),
-    routeDecision: { id: "rd-1", finalAction: "auto_route", recommendation: "auto_create_appointment", blockedReasons: [], createdAt },
+    routeDecision: { id: "rd-1", finalAction: "auto_route", recommendation: "auto_create_appointment", blockedReasons: [], createdAt: "2026-01-01T00:00:00Z", revision },
     routeFeedback: null,
   });
   let listLoads;
@@ -113,7 +113,7 @@ describe("CallLogTabV2 route review on a stale decision", () => {
       }
       const body = u.includes("route-calibration") || u.includes("/admin/call-recordings/stats")
         ? {}
-        : (() => { listLoads += 1; return { calls: [callWith(listLoads === 1 ? "2026-01-01T00:00:00Z" : "2026-01-02T00:00:00Z")] }; })();
+        : (() => { listLoads += 1; return { calls: [callWith(listLoads === 1 ? "1001" : "1002")] }; })();
       return { ok: true, status: 200, json: async () => body };
     }));
   });
@@ -122,13 +122,13 @@ describe("CallLogTabV2 route review on a stale decision", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends the displayed decision's id and created_at, then reloads the calls on STALE_ROUTE_DECISION", async () => {
+  it("sends the displayed decision's id and revision, then reloads the calls on STALE_ROUTE_DECISION", async () => {
     render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
     const rightButton = await screen.findByRole("button", { name: /Right/ });
     const loadsBeforeClick = listLoads;
     fireEvent.click(rightButton);
     await waitFor(() => expect(posted).not.toBeNull());
-    expect(posted).toMatchObject({ verdict: "accept", routeDecisionId: "rd-1", routeDecisionCreatedAt: "2026-01-01T00:00:00Z" });
+    expect(posted).toMatchObject({ verdict: "accept", routeDecisionId: "rd-1", routeDecisionRevision: "1001" });
     // the stale answer triggers a reload (a second list fetch) and tells the reviewer why
     await waitFor(() => expect(listLoads).toBeGreaterThan(loadsBeforeClick));
     expect(await screen.findByText(/reprocessed since it loaded/)).toBeInTheDocument();
