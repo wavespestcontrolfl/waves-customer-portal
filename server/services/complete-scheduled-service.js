@@ -12,6 +12,11 @@ const { stampedDivergesSql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
+// How long a NEGATIVE pending_setup_fee marker (a completion mid-mint) stays
+// an in-flight lease that no other completion may adopt. A mint is a few
+// seconds; a marker idle this long belongs to a dead worker.
+const SETUP_FEE_CLAIM_LEASE_MS = 10 * 60 * 1000;
+
 // The visit columns the issued-invoice closeout's record, service line and
 // attribution are derived from before the row lock; any of them moving under
 // the lock refuses the closeout (GitHub r11 P2 #4127).
@@ -8863,6 +8868,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
             recurring_parent_id: svc.recurring_parent_id || null,
           },
         }, db);
+        // A live stamp on this estimate's series that NO completion can ever
+        // consume (dues-covered lane / no live consumer) is not a deferral:
+        // the obligation reads owed and the office bills the fee manually. The
+        // stamp must not stay armed — a later lane flip or a re-activated
+        // series would auto-bill it on top of that manual bill. Clear it
+        // (guarded on the exact value) and say so in the alert. A failure
+        // here fails the lookup CLOSED (503 + resume) like any other read.
+        if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length) {
+          const { neutralizeUnconsumableSetupFeeStamps } = require('../services/setup-fee-obligation');
+          const cleared = await neutralizeUnconsumableSetupFeeStamps(db, obligation.unconsumableStamps);
+          if (cleared.length) {
+            const clearedTotal = cleared.reduce((sum, c) => sum + c.amount, 0);
+            obligation.neutralizedStampNote = ` NOTE: a queued setup-fee stamp ($${clearedTotal.toFixed(2)}) on this estimate's series could never auto-bill and was cleared so it cannot charge the fee a second time — bill the fee ONLY manually, once.`;
+            logger.warn(`[dispatch] visit ${svc.id}: cleared ${cleared.length} unconsumable setup-fee stamp(s) on estimate ${obligation.estimateSlug || obligation.estimateId} (${cleared.map((c) => c.parentId).join(', ')}) — the manual bill owns the fee`);
+          }
+        }
         const setupFeeDedupeKey = `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`;
         // Stale-alert reconciliation (Codex P0, pre-push rounds 8–10):
         // runs on EVERY completion that does not itself park, whatever
@@ -8886,7 +8907,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // parking a second one (Codex P0, pre-push round 11).
           // Retain the accepted fee for the terminal alert's locked coverage recheck.
           unmintedSetupFeeObligation = obligation;
-          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.`;
+          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.${obligation.neutralizedStampNote || ''}`;
         } else if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           // One parked visit per estimate (Codex P0, pre-push round 8):
           // the fee obligation stays owed while a parked visit sits
@@ -8937,7 +8958,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 const created = await require('../services/notification-service').notifyAdmin(
                   'billing',
                   'Setup fee never invoiced — historic first visit billed without it',
-                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.`,
+                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.${obligation.neutralizedStampNote || ''}`,
                   {
                     link: `/admin/customers?customerId=${svc.customer_id}`,
                     bell: true,
@@ -9683,6 +9704,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } else {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
           }
+          alertBody += unmintedSetupFeeObligation.neutralizedStampNote || '';
           if (already) {
             // resolvedCovered flips back to false: a re-park after a
             // resolved round means the obligation REOPENED (coverage
@@ -10336,8 +10358,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 .update({ pending_setup_fee: null, updated_at: new Date() });
               logger.info(`[dispatch] orphaned setup-fee claim healed for series ${setupParentId} — fee already on invoice ${lineExists.id}`);
             } else {
+              // The negative marker is a LEASE, not just a flag: a claim
+              // written seconds ago belongs to a completion that is mid-mint
+              // right now (another visit of this series), and its invoice
+              // simply is not committed yet, so the line check above cannot
+              // see it. Adopting it would mint + charge the fee twice
+              // (Codex P1 on #5485). Only a marker idle for the whole lease
+              // is a dead worker's orphan; the updated_at CAS then still
+              // collapses concurrent adopters to one.
               const adopted = await db('scheduled_services')
                 .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee, updated_at: parentRow.updated_at })
+                .where('updated_at', '<', new Date(Date.now() - SETUP_FEE_CLAIM_LEASE_MS))
                 .update({ updated_at: new Date() });
               if (adopted === 1) {
                 secureSetupFee = { parentId: setupParentId, amount };

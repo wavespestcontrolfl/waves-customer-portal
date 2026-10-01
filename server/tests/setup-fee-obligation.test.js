@@ -513,9 +513,31 @@ describe('fee deferred to the first performed visit (series claim)', () => {
     expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
   });
 
-  test('a stamp at a DIFFERENT amount is someone else\'s claim — the obligation survives', async () => {
+  // The stamp IS the fee: the completion mint bills whatever the series
+  // carries, so calling the obligation "owed" on a cents mismatch would park the
+  // visit for a manual bill AND let the stamp auto-bill on top of it later.
+  test('ANY live stamp on this estimate\'s own series is deferred, whatever its amount (the stamp is the fee the mint bills)', async () => {
     mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 49 })] });
-    expect((await run()).owed).toBe(true);
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+    mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: -49 })] });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
+  // A dues-covered lane (monthly membership / annual prepay) never runs the
+  // completion mint, so its stamp can never be consumed: that is a stranded
+  // claim, not a deferral. The obligation reads owed and the stamp is reported
+  // so the completion can neutralize it before the manual bill goes out.
+  test.each(['monthly_membership', 'annual_prepay'])('a stamp on a %s customer is NOT a deferral — owed, with the stranded stamp reported', async (lane) => {
+    mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 99 })], customers: { billing_mode: lane } });
+    const out = await run();
+    expect(out.owed).toBe(true);
+    expect(out.deferredToFirstVisit).toBeUndefined();
+    expect(out.unconsumableStamps).toEqual([{ parentId: 'ss-root', rawAmount: 99, amount: 99 }]);
+  });
+
+  test('a per_application / per_visit customer\'s stamp reports no stranded stamps', async () => {
+    mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 99 })], customers: { billing_mode: 'per_application' } });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
   });
 
   test('a parent with no stamp and no claim record is still owed (gate off / pre-feature accepts keep parking)', async () => {

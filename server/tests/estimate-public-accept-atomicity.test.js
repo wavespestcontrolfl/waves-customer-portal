@@ -2374,7 +2374,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   const savedEnv = {};
   let policySpy;
 
-  function setupOnlyFixture(id, { withAnchor = true, parentId = null, price = 50 } = {}) {
+  function setupOnlyFixture(id, { withAnchor = true, parentId = null, price = 50, billingMode = 'per_application', visitsKnown = true } = {}) {
     resetStore(recurringPestEstimate({
       id,
       token: `tok-${id}-x0123456789`,
@@ -2387,14 +2387,17 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
         result: {
           recurring: {
             discount: 0,
-            services: [{ name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, visitsPerYear: 12 }],
+            services: [{ name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, ...(visitsKnown ? { visitsPerYear: 12 } : {}) }],
           },
           oneTime: { items: [], membershipFee: 99 },
           results: {
-            mq: [
+            // visitsKnown=false: a plan whose tier ladder cannot be resolved
+            // to monthly tier rows with a visit count (no frequency rows at
+            // all) — the preview keeps the BASE copy for it.
+            mq: visitsKnown ? [
               { n: 'Monthly', key: 'monthly12', v: 12, mo: 79, ann: 948, pv: 79 },
               { n: 'Seasonal', key: 'seasonal9', v: 9, mo: 65, ann: 780, pv: 86.67 },
-            ],
+            ] : [],
           },
         },
       }),
@@ -2403,15 +2406,21 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
       ...(parentId ? [{ id: parentId, customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null }] : []),
       { id: `ss-${id}`, customer_id: 'customers-1', recurring_parent_id: parentId, pending_setup_fee: null, estimated_price: price },
     ] : [];
-    EstimateConverter.convertEstimate.mockResolvedValueOnce({
-      customerId: 'cust-1',
-      tier: 'Bronze',
-      monthlyRate: 60,
-      firstScheduledServiceId: withAnchor ? `ss-${id}` : null,
-      recurringConversionSkipped: false,
-      welcomeSms: null,
-      membershipEmail: null,
-      deferredFollowUpReminderRows: [],
+    // The real converter stamps the converted customer's billing lane
+    // (per_application unless it preserves an existing membership); the fake
+    // trx's customers table is where the accept's in-trx lane read looks.
+    EstimateConverter.convertEstimate.mockImplementationOnce(async () => {
+      for (const row of db.__state.tables.customers) row.billing_mode = billingMode;
+      return {
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId: withAnchor ? `ss-${id}` : null,
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      };
     });
     return `tok-${id}-x0123456789`;
   }
@@ -2512,9 +2521,12 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 
-  // Codex pre-push r2 P1: the consent snapshot of record is the text the UI
-  // displayed, so it must not depend on whether the stamp landed.
-  test('gate ON, capture-required, stamp CANNOT land (no first visit / occupied claim): the payable invoice is minted but the displayed after_visit_card consent is still the one recorded', async () => {
+  // Reviewer P2-A (supersedes Codex pre-push r2 P1's "record after_visit_card
+  // even on fallback"): the capture UI showed the after-first-visit promise, so
+  // when the stamp cannot land the accept is REFUSED retryably (409, the whole
+  // accept — conversion, invoice, consent — rolls back). It never falls back to
+  // a payable setup invoice with the after-visit consent on record.
+  test('gate ON, capture-required, stamp CANNOT land (no first visit / occupied claim): the accept fails 409 (refresh) — no payable invoice, no after_visit_card consent, nothing committed', async () => {
     gateOn();
     policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
     jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
@@ -2526,19 +2538,63 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
 
     const noAnchor = setupOnlyFixture('paf-consent-noanchor', { withAnchor: false });
     const first = await putAccept(noAnchor, { recurringCardSetupIntentId: 'seti_paf_fb' });
-    expect(first.status).toBe(200);
-    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
-    expect(first.data.setupFeeAfterFirstVisit).toBeUndefined();
-    expect(enroll.mock.calls[0][0].consentVariant).toBe('after_visit_card');
+    expect(first.status).toBe(409);
+    expect(first.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(first.data.error).toMatch(/reload the page/i);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(enroll).not.toHaveBeenCalled();
+    expect(storedEstimate().status).not.toBe('accepted');
 
-    InvoiceService.create.mockClear();
-    enroll.mockClear();
     const occupied = setupOnlyFixture('paf-consent-occupied');
     db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
     const second = await putAccept(occupied, { recurringCardSetupIntentId: 'seti_paf_fb' });
-    expect(second.status).toBe(200);
+    expect(second.status).toBe(409);
+    expect(second.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(enroll).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
+  });
+
+  // Reviewer P3: the accept attempts the stamp only where the preview applied
+  // the same eligibility — a tier whose visit count is unknown shows the BASE
+  // text, so it keeps today's payable invoice and records the BASE consent.
+  test('gate ON, a monthly tier with an UNKNOWN visit count: never attempted — the payable invoice is minted, nothing stamped, BASE consent recorded', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_uk', paymentMethodId: 'pm_paf_uk', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-unknown-visits', { visitsKnown: false, price: null });
+    const response = await putAccept(token, { recurringCardSetupIntentId: 'seti_paf_uk' });
+    expect(response.status).toBe(200);
     expect(InvoiceService.create).toHaveBeenCalledTimes(1);
-    expect(enroll.mock.calls[0][0].consentVariant).toBe('after_visit_card');
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
+  // Reviewer P2-B: a monthly-membership / prepay lane covers its first visit
+  // with dues, the completion mint never runs the claim there, so the stamp
+  // would strand. The lane is read INSIDE the trx after the converter set it.
+  test.each(['monthly_membership', 'annual_prepay', null])('gate ON, converted customer billing lane %s (not per_application): never stamped — today\'s payable invoice, BASE consent', async (lane) => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_ln', paymentMethodId: 'pm_paf_ln', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture(`paf-lane-${lane}`, { billingMode: lane });
+    const response = await putAccept(token, { recurringCardSetupIntentId: 'seti_paf_ln' });
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
   });
 
   test('gate ON but not on the setup-only shape (first-application line present): base consent, no after_visit_card', async () => {
@@ -2557,25 +2613,26 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
   });
 
-  test('gate ON but no first visit exists to carry the stamp: falls back to today\'s payable invoice — a fee is never dropped', async () => {
+  test('gate ON but no first visit exists to carry the stamp: the accept is refused retryably — a fee is never dropped and no payable invoice contradicts the page', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-noanchor', { withAnchor: false });
     const response = await putAccept(token);
 
-    expect(response.status).toBe(200);
-    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
-    expect(response.data.nextStep).toBe('pay_invoice');
-    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 
   // Codex pre-push r3 P1: a monthly-tier quote with an unknown visit count
   // converts to an UNPRICED visit; the completion mint gate refuses it, so a
-  // stamp there would queue the fee indefinitely.
-  test('gate ON but the first visit has no billable price (unpriced / $0): never deferred — the payable invoice is minted and nothing is stamped', async () => {
+  // stamp there would queue the fee indefinitely. The preview already keeps
+  // the BASE text for such a tier (monthlyTierVisitCountsResolvable), so the
+  // accept never attempts the stamp: today's payable invoice, nothing stamped.
+  test('gate ON, tier visit count unknown (the converter leaves the visit unpriced): never deferred — the payable invoice is minted and nothing is stamped', async () => {
     gateOn();
     for (const price of [null, 0]) {
       InvoiceService.create.mockClear();
-      const token = setupOnlyFixture(`paf-unpriced-${price}`, { price });
+      const token = setupOnlyFixture(`paf-unpriced-${price}`, { price, visitsKnown: false });
       const response = await putAccept(token);
 
       expect(response.status).toBe(200);
@@ -2586,12 +2643,30 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     }
   });
 
+  // Defense in depth: the preview said "billed with your first visit" (visit
+  // counts known) yet the converted first visit carries no billable price — a
+  // stamp there would never be consumed, a payable invoice would contradict
+  // the page: refuse retryably.
+  test('gate ON, counts known but the first visit has no billable price (unpriced / $0): the accept is refused 409, nothing stamped, nothing minted', async () => {
+    gateOn();
+    for (const price of [null, 0]) {
+      InvoiceService.create.mockClear();
+      const token = setupOnlyFixture(`paf-unpriced-known-${price}`, { price });
+      const response = await putAccept(token);
+
+      expect(response.status).toBe(409);
+      expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    }
+  });
+
   // The visit price on a converted tier row comes from the converter's own
   // derivation (billing-cadence perApplicationChargeAmount, the figure it
   // stamps as estimated_price). Feed the REAL derivation through the accept:
   // a monthly-tier plan whose visit count is unknown resolves no price (the
-  // converter leaves the row unpriced and completion parks it) → never
-  // deferred; a known count resolves one → deferred.
+  // converter leaves the row unpriced and completion parks it) and the page
+  // shows the base text → never deferred; a known count resolves one → deferred.
   test('real converter derivation: unknown-visit-count monthly tier resolves no price and is never deferred; a known count is deferred at that price', async () => {
     gateOn();
     const BillingCadence = require('../services/billing-cadence');
@@ -2602,7 +2677,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(derive(null)).toBeNull();
     expect(derive(9)).toBe(128);
 
-    const unresolved = setupOnlyFixture('paf-real-unknown', { price: derive(null) });
+    const unresolved = setupOnlyFixture('paf-real-unknown', { price: derive(null), visitsKnown: false });
     const first = await putAccept(unresolved);
     expect(first.status).toBe(200);
     expect(first.data.nextStep).toBe('pay_invoice');
@@ -2617,15 +2692,15 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(99);
   });
 
-  test('gate ON but the series already carries a DIFFERENT setup claim: never overwritten — the payable invoice is minted', async () => {
+  test('gate ON but the series already carries a DIFFERENT setup claim: never overwritten — the accept is refused 409 (no payable invoice contradicting the page)', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-occupied');
     db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
     const response = await putAccept(token);
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(409);
     expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
-    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 
   test('gate ON but not on the card rail (exempt customer): today\'s payable invoice', async () => {
@@ -2661,16 +2736,19 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     db.__state.tables.scheduled_services.push({ id: 'ss-member-2', customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null, estimated_price: 40 });
     // Re-arm the converter result with a combined-invoice sibling (setupOnlyFixture queued one already).
     EstimateConverter.convertEstimate.mockReset();
-    EstimateConverter.convertEstimate.mockResolvedValueOnce({
-      customerId: 'cust-1',
-      tier: 'Bronze',
-      monthlyRate: 60,
-      firstScheduledServiceId: 'ss-paf-multi',
-      combinedInvoiceMemberIds: ['ss-member-2'],
-      recurringConversionSkipped: false,
-      welcomeSms: null,
-      membershipEmail: null,
-      deferredFollowUpReminderRows: [],
+    EstimateConverter.convertEstimate.mockImplementationOnce(async () => {
+      for (const row of db.__state.tables.customers) row.billing_mode = 'per_application';
+      return {
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId: 'ss-paf-multi',
+        combinedInvoiceMemberIds: ['ss-member-2'],
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      };
     });
     const response = await putAccept(token);
 

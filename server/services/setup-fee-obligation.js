@@ -137,35 +137,66 @@ function isPlanApplicationRow(row) {
   return !!(row && row.is_recurring);
 }
 
+// Lanes whose first visit is covered without a per-visit completion invoice
+// (the 8AM dues cron / the prepaid term pay for it). The completion mint never
+// runs there, so a setup-fee stamp on such a customer's series can never be
+// consumed — it is not a deferral, it is a stranded claim.
+const DUES_COVERED_LANES = new Set(['monthly_membership', 'annual_prepay']);
+
 // True when this estimate's own series carries the setup fee as a durable
-// per-series claim: a live stamp at exactly `expectedFeeCents` on a series
-// parent that can still consume it (a NEGATIVE stamp is a completion's
-// in-progress marker and always counts — resume mints or heals it), or the
+// per-series claim: ANY live stamp on a series root of this estimate (the
+// stamp IS the fee — a stamp at another amount is still the figure the
+// completion mint bills, so calling the obligation "owed" on a cents mismatch
+// would park the visit for a manual bill AND let the stamp auto-bill on top of
+// it later). A NEGATIVE stamp is a completion's in-progress marker and always
+// counts (resume mints or heals it); a positive stamp counts when its series
+// can still consume it AND the customer's lane runs completion mints. The
 // immutable setup_fee_claims record of a non-dead invoice on such a series
 // (the claim consumed by the first performed completion; a stamp never
-// outlives the mint, the record does). Query failures propagate: the caller
-// fails CLOSED exactly as it does for the invoice reads below.
+// outlives the mint, the record does) counts at the frozen fee. Query
+// failures propagate: the caller fails CLOSED exactly as it does for the
+// invoice reads below.
+//
+// Returns { covers, unconsumableStamps }: live positive stamps this estimate's
+// series carries that NO completion can ever consume (dues-covered lane / a
+// series with no live consumer). When the obligation is then owed the office
+// bills the fee manually, and the completion neutralizes these so they cannot
+// auto-bill on top of that manual bill later.
 async function deferredSetupFeeCovers(conn, estimate, expectedFeeCents, { completingVisitId = null, completingParentId = null } = {}) {
-  if (!(expectedFeeCents > 0)) return false;
+  const none = { covers: false, unconsumableStamps: [] };
   const roots = await conn('scheduled_services')
     .where({ source_estimate_id: estimate.id, customer_id: estimate.customer_id })
     .whereNull('recurring_parent_id')
     .select('id', 'status', 'pending_setup_fee');
   const rootRows = (Array.isArray(roots) ? roots : []).filter((r) => r && r.id != null);
-  if (!rootRows.length) return false;
+  if (!rootRows.length) return none;
   const { seriesCanStillConsume } = require('./secure-appointment-plans');
+  const { resolveBillingLane } = require('./billing-lane');
+  const customerRow = await conn('customers')
+    .where({ id: estimate.customer_id })
+    .first('billing_mode', 'waveguard_tier', 'monthly_rate');
+  const lane = resolveBillingLane(customerRow || {}).mode;
+  const lanePaysAtCompletion = !DUES_COVERED_LANES.has(lane);
+  const unconsumableStamps = [];
+  let covers = false;
   for (const root of rootRows) {
     const stamp = root.pending_setup_fee != null ? Number(root.pending_setup_fee) : NaN;
     if (!Number.isFinite(stamp) || stamp === 0) continue;
-    if (Math.round(Math.abs(stamp) * 100) !== expectedFeeCents) continue;
     // The completing visit is itself a live consumer of its own series: a
     // parent already completed (a declined first visit) with the claim still
     // queued is consumed by THIS child, whatever status the row reads mid-
     // completion.
     const completingIsMember = String(completingVisitId || '') === String(root.id)
       || String(completingParentId || '') === String(root.id);
-    if (stamp < 0 || completingIsMember || await seriesCanStillConsume(conn, root)) return true;
+    if (stamp < 0) { covers = true; continue; }
+    if (lanePaysAtCompletion && (completingIsMember || await seriesCanStillConsume(conn, root))) {
+      covers = true;
+    } else {
+      unconsumableStamps.push({ parentId: root.id, rawAmount: root.pending_setup_fee, amount: Math.round(stamp * 100) / 100 });
+    }
   }
+  if (covers) return { covers: true, unconsumableStamps: [] };
+  if (!(expectedFeeCents > 0)) return { covers: false, unconsumableStamps };
   const claims = await conn('setup_fee_claims')
     .whereIn('scheduled_service_id', rootRows.map((r) => r.id))
     .select('invoice_id', 'amount');
@@ -178,9 +209,26 @@ async function deferredSetupFeeCovers(conn, estimate, expectedFeeCents, { comple
     // the stamped-notes check applies to refunded fee lines below (a bounced
     // refund restores 'paid'; a manual re-bill instruction risks a double
     // collection). Only a voided / canceled invoice collected nothing.
-    if (invoice && !['void', 'canceled', 'cancelled'].includes(status)) return true;
+    if (invoice && !['void', 'canceled', 'cancelled'].includes(status)) return { covers: true, unconsumableStamps: [] };
   }
-  return false;
+  return { covers: false, unconsumableStamps };
+}
+
+// Clears the unconsumable POSITIVE stamps the detector reported, guarded on the
+// exact value read (compare-and-swap: a stamp that moved since is left alone).
+// Called by the completion when the obligation is OWED, so the manual bill the
+// office is about to cut is the only place the fee gets billed. Returns the
+// stamps actually cleared.
+async function neutralizeUnconsumableSetupFeeStamps(conn, stamps) {
+  const cleared = [];
+  for (const stamp of Array.isArray(stamps) ? stamps : []) {
+    if (!stamp?.parentId || !(Number(stamp.rawAmount) > 0)) continue;
+    const rows = await conn('scheduled_services')
+      .where({ id: stamp.parentId, pending_setup_fee: stamp.rawAmount })
+      .update({ pending_setup_fee: null, updated_at: new Date() });
+    if (rows === 1) cleared.push({ parentId: stamp.parentId, amount: stamp.amount });
+  }
+  return cleared;
 }
 
 /**
@@ -380,17 +428,18 @@ async function findUnmintedSetupFeeObligation({
   // (scheduled_services.pending_setup_fee) instead of minting an invoice
   // whose notes say "accepted estimate #<id>", so the note-based checks above
   // would call it "never minted" and park the first visit for manual billing
-  // while completion is about to bill it on the visit's own invoice. A live
-  // claim (positive = queued, negative = a completion mid-mint) at exactly
-  // the frozen fee, or the immutable setup_fee_claims record of a live
+  // while completion is about to bill it on the visit's own invoice. ANY live
+  // claim (positive = queued, negative = a completion mid-mint) that a
+  // completion can still consume, or the immutable setup_fee_claims record of a live
   // series invoice that already carries it, is "deferred / billed", not
   // "missing". Deliberately NOT behind the sub-gate: it only ever matches a
   // stamp this estimate's own series carries, and a stamp written while the
   // gate was on must stay recognised after a flip back off.
-  if (await deferredSetupFeeCovers(conn, estimate, expectedFeeCents, {
+  const deferral = await deferredSetupFeeCovers(conn, estimate, expectedFeeCents, {
     completingVisitId: excludeScheduledServiceId,
     completingParentId: visitPlanRow?.recurring_parent_id || null,
-  })) {
+  });
+  if (deferral.covers) {
     return { owed: false, deferredToFirstVisit: true };
   }
   // Converter provenance: the accept actually ran the conversion (tier
@@ -477,6 +526,10 @@ async function findUnmintedSetupFeeObligation({
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,
     billedPriorPlanVisitIds,
+    // Live positive stamps no completion can ever consume (dues-covered lane /
+    // no live consumer): the completion neutralizes them when it parks the
+    // manual bill, so the fee can never bill twice.
+    unconsumableStamps: deferral.unconsumableStamps,
     deadInvoice: deadInvoice
       ? { id: deadInvoice.id, invoiceNumber: deadInvoice.invoice_number || null, status: String(deadInvoice.status || '') }
       : null,
@@ -485,6 +538,7 @@ async function findUnmintedSetupFeeObligation({
 
 module.exports = {
   findUnmintedSetupFeeObligation,
+  neutralizeUnconsumableSetupFeeStamps,
   _private: {
     SETUP_FEE_RULE_SAFE_CUTOFF, parseEstimateData, isPlanApplicationRow, snapshotShowsSetupFee,
   },

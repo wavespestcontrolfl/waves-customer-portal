@@ -37,7 +37,10 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // Heal: line exists → clear the marker, never a second line.
     expect(dispatchSource).toMatch(/orphaned setup-fee claim healed/);
     // Adopt: no line → exactly one adopter via the updated_at lease CAS.
-    expect(dispatchSource).toMatch(/pending_setup_fee: parentRow\.pending_setup_fee, updated_at: parentRow\.updated_at \}\)\s*\n\s*\.update\(\{ updated_at: new Date\(\) \}\)/);
+    // The marker is a LEASE: only a marker idle for the whole lease (a dead
+    // worker) may be adopted — a fresh one is another visit's in-flight mint.
+    expect(dispatchSource).toMatch(/const SETUP_FEE_CLAIM_LEASE_MS = \d+ \* 60 \* 1000;/);
+    expect(dispatchSource).toMatch(/pending_setup_fee: parentRow\.pending_setup_fee, updated_at: parentRow\.updated_at \}\)\s*\n\s*\.where\('updated_at', '<', new Date\(Date\.now\(\) - SETUP_FEE_CLAIM_LEASE_MS\)\)\s*\n\s*\.update\(\{ updated_at: new Date\(\) \}\)/);
   });
 
   test('a successful mint retires the claim ONLY when the fee line rode the invoice; the clear is guarded on the exact negative marker', () => {

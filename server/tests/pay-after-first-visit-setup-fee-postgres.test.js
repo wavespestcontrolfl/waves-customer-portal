@@ -352,7 +352,7 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
-  test('combined-visit packet: a still-queued deferred claim sends the closeout to the office (the packet mint carries no setup line); no marker or no stamp does not', async () => {
+  test('combined-visit packet: any still-queued setup claim on the series (PAF marker or not) sends the closeout to the office (the packet mint carries no setup line); no stamp does not', async () => {
     const f = await seed();
     try {
       const { deferredSetupClaimStillQueued } = require('../services/visit-completion-invoice');
@@ -360,11 +360,16 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       expect(await deferredSetupClaimStillQueued(mockPg, member)).toBe(true);
       // A child member resolves its series parent's claim.
       expect(await deferredSetupClaimStillQueued(mockPg, { id: f.childIds[0], recurring_parent_id: f.parentId, source_estimate_id: f.estimateId })).toBe(true);
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: -SETUP_FEE });
+      expect(await deferredSetupClaimStillQueued(mockPg, member)).toBe(true);
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: null });
       expect(await deferredSetupClaimStillQueued(mockPg, member)).toBe(false);
+      // Keyed on the STAMP itself, not the PAF estimate marker: a secure
+      // plan-choice stamp (gate-off, no setupFeeDeferredToFirstVisit marker)
+      // is the same durable claim.
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: SETUP_FEE });
       await mockPg('estimates').where({ id: f.estimateId }).update({ estimate_data: JSON.stringify({ acceptedSetupFeeAmount: SETUP_FEE }) });
-      expect(await deferredSetupClaimStillQueued(mockPg, member)).toBe(false);
+      expect(await deferredSetupClaimStillQueued(mockPg, member)).toBe(true);
     } finally { await cleanup(f); }
   });
 
@@ -376,8 +381,70 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: -SETUP_FEE });
       expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+      // The stamp IS the fee: any live stamp on this estimate's own series is
+      // deferred (a cents mismatch must neither park the visit for a manual bill
+      // nor leave the stamp armed to bill on top of it).
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: 49 });
+      expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: null });
       expect((await run()).deferredToFirstVisit).toBeUndefined();
+    } finally { await cleanup(f); }
+  });
+
+  // Reviewer P2-B/P2-D: a stamp on a customer whose lane never runs the
+  // completion mint (monthly membership: dues cover the visit) can never be
+  // consumed. The detector must not call it a deferral (the fee would be
+  // silently lost), and when the office is told to bill the fee manually the
+  // stranded stamp is neutralized so it cannot auto-bill ON TOP of that bill
+  // if the lane later flips or the series is re-activated.
+  test('a live stamp on a monthly_membership customer is not a deferral: owed, the stamp is reported and neutralized (CAS on the exact value)', async () => {
+    const f = await seed();
+    try {
+      await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 45 });
+      const { findUnmintedSetupFeeObligation, neutralizeUnconsumableSetupFeeStamps } = require('../services/setup-fee-obligation');
+      const verdict = await findUnmintedSetupFeeObligation({ sourceEstimateId: f.estimateId, customerId: f.customerId, excludeScheduledServiceId: f.parentId }, mockPg);
+      expect(verdict.owed).toBe(true);
+      expect(verdict.deferredToFirstVisit).toBeUndefined();
+      expect(verdict.unconsumableStamps).toEqual([{ parentId: f.parentId, rawAmount: expect.anything(), amount: SETUP_FEE }]);
+
+      // A stamp that moved since the read is left alone.
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: 49 });
+      expect(await neutralizeUnconsumableSetupFeeStamps(mockPg, verdict.unconsumableStamps)).toEqual([]);
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(49);
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: SETUP_FEE });
+      expect(await neutralizeUnconsumableSetupFeeStamps(mockPg, verdict.unconsumableStamps)).toEqual([{ parentId: f.parentId, amount: SETUP_FEE }]);
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
+  test('hold -> manual bill -> next completion: a stranded stamp is neutralized at the hold, so the setup fee is billed exactly ONCE (the manual bill)', async () => {
+    const f = await seed();
+    try {
+      // Visit 1 completes on a lane that never runs the completion mint.
+      await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 45 });
+      const first = await complete(f, f.parentId);
+      expect(first).toMatchObject({ status: 200 });
+      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+      // The completion's obligation check found the stamp stranded and cleared it.
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+
+      // The office bills the fee manually (the line the alert instructs).
+      const manual = await require('../services/invoice').create({
+        customerId: f.customerId, serviceDate: require('../utils/datetime-et').etDateString(),
+        lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: SETUP_FEE }],
+        notes: `Manual bill for accepted estimate #${f.estimateId}. $${SETUP_FEE} setup fee only.`,
+      });
+      await mockPg('invoices').where({ id: manual.id }).update({ status: 'paid', paid_at: new Date() });
+
+      // The customer's lane flips to per-application; the next completion mints
+      // its own invoice. A still-armed stamp would add a SECOND setup line.
+      await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'per_application' });
+      await makeDue(f.childIds[0]);
+      const next = await complete(f, f.childIds[0]);
+      expect(next).toMatchObject({ status: 200 });
+      const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoices.flatMap(setupLines)).toHaveLength(1);
+      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', [f.parentId, ...f.childIds])).toHaveLength(0);
     } finally { await cleanup(f); }
   });
 });

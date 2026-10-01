@@ -1354,9 +1354,15 @@ about the viewer's own estimate: no customer, payer or payment-method data. (2) 
 accept actually STAMPED the setup fee on the first visit's series parent
 (`scheduled_services.pending_setup_fee`) instead of minting a payable unattached invoice:
 the payload then carries `invoiceId: null`, `invoiceMode: false`, no `invoicePayUrl` and
-`nextStep: 'confirmed'`. An accept that could not defer (no series parent, a different
-claim already on the series, not on the card rail, a bait-station setup in the quote)
-keeps today's payload and pay link and omits the field. (3) Durable retry: the accept
+`nextStep: 'confirmed'`. An accept that is not eligible to defer (not on the card rail, a
+bait-station setup or first-application line in the quote, a monthly tier whose visit
+count is unknown, or a converted customer whose billing lane is not `per_application`)
+keeps today's payload and pay link, omits the field and records the BASE consent. An
+accept the page DID promise first-visit billing for (card rail, setup-only shape, known
+visit counts, `per_application` lane) whose stamp cannot land (no series parent, no
+billable first visit, a different claim already on the series) is REFUSED with
+`409 { code: 'SETUP_FEE_TERMS_REFRESH' }` and the whole accept rolls back, never a
+payable setup invoice recorded under the after-first-visit consent. (3) Durable retry: the accept
 persists `estimates.estimate_data.setupFeeDeferredToFirstVisit: true` in the same
 transaction as the lane stamp (`recurringCardLaneAccepted`), and a retry of that
 already-accepted estimate (`alreadyAccepted: true`) rebuilds the same

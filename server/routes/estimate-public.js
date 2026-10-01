@@ -12531,52 +12531,82 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (shouldCreateStandardDraftInvoice && setupFeeApplies && !includesFirstApplicationLine
             && !(acceptedRodentSetupAmount > 0)
             && require('../config/feature-gates').pafSetupFeeLive()
-            && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicy)) {
-            // Same eligibility the preview (/data flag, legacy page) applies:
-            // a tier whose visit count is unknown shows the BASE consent text,
-            // so that is what is recorded for it.
-            setupFeeAfterVisitConsentShown = monthlyTierVisitCountsResolvable(pricingFrequencies);
-            const deferFeeAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
-            const deferAnchorId = standardConversionResult?.firstScheduledServiceId || null;
-            if (deferFeeAmount > 0 && deferAnchorId) {
-              const deferAnchor = await trx('scheduled_services').where({ id: deferAnchorId })
-                .first('id', 'recurring_parent_id', 'customer_id', 'source_estimate_id', 'estimated_price');
-              const deferSeriesParentId = deferAnchor
-                ? (deferAnchor.recurring_parent_id || deferAnchor.id)
-                : null;
-              // The claim is consumed only by a completion MINT, and the mint
-              // gate refuses an unresolved/zero visit amount (a monthly-tier
-              // quote with an unknown visit count converts to an unpriced
-              // row — completion parks it). Deferring onto such a visit would
-              // queue the fee indefinitely, so only a visit with its own
-              // positive price carries the stamp; anything else keeps the
-              // payable setup invoice.
-              const deferAnchorBillable = Number(deferAnchor?.estimated_price) > 0;
-              if (!deferAnchorBillable) {
-                logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — first visit ${deferAnchorId} has no billable price to carry it; minting the payable setup invoice as before`);
-              }
-              if (deferAnchorBillable && deferSeriesParentId && String(deferAnchor.customer_id) === String(customerId)) {
-                // Compare-and-swap from NULL (the same shape invoice.js and
-                // admin-schedule stamp with): never overwrites another claim.
-                const stampedRows = await trx('scheduled_services')
-                  .where({ id: deferSeriesParentId })
-                  .whereNull('pending_setup_fee')
-                  .update({ pending_setup_fee: deferFeeAmount, updated_at: new Date() });
-                if (stampedRows === 1) {
-                  deferSetupFeeStamp = { parentId: deferSeriesParentId, amount: deferFeeAmount };
-                } else {
-                  const existingClaim = await trx('scheduled_services').where({ id: deferSeriesParentId }).first('pending_setup_fee');
-                  if (existingClaim && Math.round(Number(existingClaim.pending_setup_fee) * 100) === Math.round(deferFeeAmount * 100)) {
-                    // The identical claim is already on the series: idempotent.
+            && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicy)
+            // The SAME eligibility predicate the preview (/data flag, legacy
+            // page) applies: a tier whose visit count is unknown shows the
+            // BASE text and keeps today's payable invoice, so the accept
+            // never even attempts the stamp for it.
+            && monthlyTierVisitCountsResolvable(pricingFrequencies)) {
+            // Only a per-application customer's first visit bills on its own
+            // completion invoice. A monthly-membership / prepay lane is dues-
+            // covered at its first visit (the completion mint never runs the
+            // claim there), so a stamp would sit unbilled forever. Read AFTER
+            // convertEstimate, inside the trx: the converter is what sets (or,
+            // for an existing member, preserves) the billing lane. Such a
+            // customer was never shown the after-visit promise as theirs to
+            // keep, so it keeps today's payable invoice and the base consent.
+            const deferLaneRow = await trx('customers').where({ id: customerId }).first('billing_mode');
+            const deferLaneIsPerApplication = deferLaneRow?.billing_mode === 'per_application';
+            if (!deferLaneIsPerApplication) {
+              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — customer ${customerId} billing lane is ${deferLaneRow?.billing_mode || 'unset'}, not per_application; minting the payable setup invoice as before`);
+            } else {
+              // The page promised "billed with your first visit" and the
+              // capture UI rendered the after_visit_card authorization for
+              // exactly this shape — so the stamp MUST land, or the accept is
+              // refused (below). Never record the after-visit consent for an
+              // accept that then bills a payable invoice.
+              setupFeeAfterVisitConsentShown = true;
+              const deferFeeAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
+              const deferAnchorId = standardConversionResult?.firstScheduledServiceId || null;
+              if (deferFeeAmount > 0 && deferAnchorId) {
+                const deferAnchor = await trx('scheduled_services').where({ id: deferAnchorId })
+                  .first('id', 'recurring_parent_id', 'customer_id', 'source_estimate_id', 'estimated_price');
+                const deferSeriesParentId = deferAnchor
+                  ? (deferAnchor.recurring_parent_id || deferAnchor.id)
+                  : null;
+                // The claim is consumed only by a completion MINT, and the mint
+                // gate refuses an unresolved/zero visit amount (a monthly-tier
+                // quote with an unknown visit count converts to an unpriced
+                // row — completion parks it). Deferring onto such a visit would
+                // queue the fee indefinitely, so only a visit with its own
+                // positive price carries the stamp.
+                const deferAnchorBillable = Number(deferAnchor?.estimated_price) > 0;
+                if (!deferAnchorBillable) {
+                  logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — first visit ${deferAnchorId} has no billable price to carry it`);
+                }
+                if (deferAnchorBillable && deferSeriesParentId && String(deferAnchor.customer_id) === String(customerId)) {
+                  // Compare-and-swap from NULL (the same shape invoice.js and
+                  // admin-schedule stamp with): never overwrites another claim.
+                  const stampedRows = await trx('scheduled_services')
+                    .where({ id: deferSeriesParentId })
+                    .whereNull('pending_setup_fee')
+                    .update({ pending_setup_fee: deferFeeAmount, updated_at: new Date() });
+                  if (stampedRows === 1) {
                     deferSetupFeeStamp = { parentId: deferSeriesParentId, amount: deferFeeAmount };
                   } else {
-                    logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — series ${deferSeriesParentId} already carries a different setup claim; minting the payable setup invoice as before`);
+                    const existingClaim = await trx('scheduled_services').where({ id: deferSeriesParentId }).first('pending_setup_fee');
+                    if (existingClaim && Math.round(Number(existingClaim.pending_setup_fee) * 100) === Math.round(deferFeeAmount * 100)) {
+                      // The identical claim is already on the series: idempotent.
+                      deferSetupFeeStamp = { parentId: deferSeriesParentId, amount: deferFeeAmount };
+                    } else {
+                      logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — series ${deferSeriesParentId} already carries a different setup claim`);
+                    }
                   }
                 }
               }
-            }
-            if (!deferSetupFeeStamp) {
-              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} could not be deferred to the first visit (no series parent to carry it) — minting the payable setup invoice as before`);
+              if (!deferSetupFeeStamp) {
+                // Refuse retryably (rolls the whole accept back, including the
+                // conversion): the customer was shown "billed with your first
+                // visit", and a payable setup invoice is not that. The
+                // standard 409 refresh shape the discount-slice guard uses.
+                logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} could not be deferred to the first visit — refusing the accept (the page promised first-visit billing)`);
+                const termsErr = estimateAcceptError(
+                  'We couldn\u2019t finish setting up your first-visit billing just now \u2014 please reload the page and try again, or call us and we\u2019ll book it for you.',
+                  409,
+                );
+                termsErr.code = 'SETUP_FEE_TERMS_REFRESH';
+                throw termsErr;
+              }
             }
           }
           if (deferSetupFeeStamp) {

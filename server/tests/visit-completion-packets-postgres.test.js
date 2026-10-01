@@ -523,6 +523,21 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  // Any LIVE pending_setup_fee on the series parent (the secure plan-choice
+  // stamp, written with every pay-after-first-visit gate OFF and no estimate
+  // marker) is consumed only by the single-visit completion mint — the packet
+  // mint carries no setup line, so it must route to the office instead of
+  // minting the visit without the fee (and silently deferring it again).
+  test.each([['positive', 99], ['negative in-progress marker', -99]])('a grouped closeout whose series carries a live %s setup-fee stamp goes to the office, never minting without the fee (gates off)', async (kind, stamp) => {
+    const estimateId = await linkFixtureEstimate();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: stamp });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee)).toBe(stamp);
+    expect(estimateId).toBeTruthy();
+  });
+
   test.each(['uncovered', 'paid', 'canceled sibling'])('a performed recurring application adjusted to zero still reviews its accepted setup fee (%s)', async (coverage) => {
     const covered = coverage === 'paid';
     const estimateId = await linkFixtureEstimateWithSetupObligation();
