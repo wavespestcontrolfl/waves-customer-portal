@@ -441,6 +441,23 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(P.listReplayInputs(inputs, { familyKey: 'mosquito', cadence: 'monthly' }).services.pest.frequency).toBe('quarterly');
     expect(inputs.services.pest.frequency).toBe('quarterly'); // never mutates the stored inputs
   });
+  test('engine inputs come from the admin V2 engineRequest (translated), then engineInputs, then a public `inputs` with a services map', () => {
+    const translate = jest.fn((profile, selected, options) => ({ homeSqFt: profile.squareFootage, lotSqFt: profile.lotSqFt, services: { pest: { frequency: options.pestFrequency || 'quarterly' } }, selected }));
+    const admin = { id: 'e-admin', estimate_data: { engineRequest: { profile: { squareFootage: 2400, lotSqFt: 9000 }, selectedServices: ['pest_control'], options: { pestFrequency: 'bimonthly' } }, inputs: { squareFootage: '2400', frequency: 'Bi-monthly' } } };
+    const out = P.engineInputsFromEstimate(admin, { translateV2CallToV1Input: translate });
+    expect(translate).toHaveBeenCalledWith({ squareFootage: 2400, lotSqFt: 9000 }, ['pest_control'], { pestFrequency: 'bimonthly' });
+    expect(out).toMatchObject({ homeSqFt: 2400, services: { pest: { frequency: 'bimonthly' } } });
+    expect(P.hasSizeInput(out, 'pest_control')).toBe(true);
+    // an admin save whose UI-form `inputs` has no services map is not an engine input on its own
+    expect(P.engineInputsFromEstimate({ id: 'e-ui', estimate_data: { inputs: { squareFootage: '2400', frequency: 'Quarterly' } } }, { translateV2CallToV1Input: translate })).toBeNull();
+    // engineInputs wins over the UI form; the public wizard's `inputs` (engine shape) still replays
+    expect(P.engineInputsFromEstimate({ id: 'e-ei', estimate_data: { engineInputs: { homeSqFt: 1800, services: { pest: {} } }, inputs: { squareFootage: '1800' } } }, { translateV2CallToV1Input: translate })).toMatchObject({ homeSqFt: 1800 });
+    expect(P.engineInputsFromEstimate({ id: 'e-pub', estimate_data: { inputs: { homeSqFt: 2100, services: { pest: { frequency: 'quarterly' } } } } }, { translateV2CallToV1Input: translate })).toMatchObject({ homeSqFt: 2100 });
+    // a translator that throws falls through to the stored shapes, never aborts the batch
+    const throwing = jest.fn(() => { throw new Error('gated add-on'); });
+    expect(P.engineInputsFromEstimate(admin, { translateV2CallToV1Input: throwing })).toBeNull();
+    expect(P.engineInputsFromEstimate({ id: 'e-str', estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 1500, services: { pest: {} } } }) }, { translateV2CallToV1Input: null })).toMatchObject({ homeSqFt: 1500 });
+  });
   test('a replay whose cadence still does not match the line is not a list rate', () => {
     const result = { lineItems: [{ service: 'pest_control', annualAfterDiscount: 468, visitsPerYear: 4 }], waveGuard: { tier: 'bronze' } };
     expect(P.listRateFromEngineResult(result, 'pest_control', 'quarterly')).toMatchObject({ perAppCents: 11700, cadenceMismatch: false });

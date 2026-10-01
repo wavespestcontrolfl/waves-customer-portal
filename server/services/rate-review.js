@@ -654,12 +654,46 @@ function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince }) {
 
 // ── engine replay (list rate) ───────────────────────────────────────────
 
-function engineInputsFromEstimate(estimate) {
+// The V2 admin estimator's request → v1 engine input translator lives on a
+// route module; required lazily (service → route load-order cycle, same as
+// admin-estimate-persistence.js#serverRecomputeFromEstimateData).
+let translateV2CallToV1InputCached;
+function lazyTranslateV2() {
+  if (translateV2CallToV1InputCached === undefined) {
+    try {
+      translateV2CallToV1InputCached = require('../routes/property-lookup-v2').translateV2CallToV1Input || null;
+    } catch (_) {
+      translateV2CallToV1InputCached = null;
+    }
+  }
+  return translateV2CallToV1InputCached;
+}
+
+// The engine input an accepted estimate was priced from, in the canonical
+// order admin-estimate-persistence.js replays it: the admin V2
+// engineRequest (profile / selectedServices / options, translated), then a
+// stored engineInputs, then the public wizard's `inputs` — which IS the
+// engine shape there, but is the UI form on an admin V2 save, so it only
+// counts when it carries a services map. Returns null when nothing can be
+// replayed (→ cadence mode or skipped).
+function engineInputsFromEstimate(estimate, deps = {}) {
   const data = parseJson(estimate && estimate.estimate_data);
   if (!data || typeof data !== 'object') return null;
-  const inputs = (data.engineInputs && typeof data.engineInputs === 'object') ? data.engineInputs
-    : (data.inputs && typeof data.inputs === 'object') ? data.inputs : null;
-  return inputs;
+  const req = data.engineRequest;
+  if (req && typeof req === 'object' && req.profile && typeof req.profile === 'object') {
+    const translate = deps.translateV2CallToV1Input !== undefined ? deps.translateV2CallToV1Input : lazyTranslateV2();
+    if (typeof translate === 'function') {
+      try {
+        const v1 = translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {});
+        if (v1 && typeof v1 === 'object') return v1;
+      } catch (err) {
+        logger.warn(`[rate-review] engineRequest translation failed for estimate ${estimate.id}: ${err.message}`);
+      }
+    }
+  }
+  if (data.engineInputs && typeof data.engineInputs === 'object') return data.engineInputs;
+  if (data.inputs && typeof data.inputs === 'object' && data.inputs.services && typeof data.inputs.services === 'object') return data.inputs;
+  return null;
 }
 
 function hasSizeInput(inputs, line) {
@@ -713,7 +747,7 @@ function listRateFromEngineResult(result, line, cadence) {
 }
 
 async function replayEstimate(estimate, { familyKey, cadence }, deps) {
-  const inputs = engineInputsFromEstimate(estimate);
+  const inputs = engineInputsFromEstimate(estimate, deps);
   if (!inputs) return null;
   const engine = deps.pricingEngine || require('./pricing-engine');
   try {
@@ -1182,7 +1216,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     // falls to the cadence mode or is skipped.
     let list = { cents: null, source: 'none', cadenceMismatch: false, engineTier: null };
     for (const estimate of linkedEstimates) {
-      const inputs = engineInputsFromEstimate(estimate);
+      const inputs = engineInputsFromEstimate(estimate, deps);
       if (!hasSizeInput(inputs, familyKey)) continue;
       const cacheKey = `${estimate.id}|${familyKey}|${cadence}`;
       if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence }, deps));
@@ -1574,7 +1608,7 @@ module.exports = {
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,
-    resolveAnniversary, resolveCurrentRate, matchPrepayTerm, familyOfCoverage, consolidatePlanLines, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer,
+    resolveAnniversary, resolveCurrentRate, matchPrepayTerm, familyOfCoverage, consolidatePlanLines, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer, engineInputsFromEstimate,
     loadActivePlanLines, loadFirstCompletedVisits, loadCompletedVisitRows, loadExceptionSignals, loadPriorReviews, loadLedgerSlices, loadEstimates, loadCustomers,
     MAX_USABLE_MINUTES, MIN_TREATMENT_MINUTES, MAX_ALLOWANCE_MINUTES, MIN_LINE_RPH_SAMPLE, CADENCE_VISITS, CONVERSATION_MINUTES_KEYS, INTERACTION_HOME, INTERACTION_NOT_HOME,
   },
