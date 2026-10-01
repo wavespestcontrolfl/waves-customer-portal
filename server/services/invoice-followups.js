@@ -2857,8 +2857,14 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
  * Returns undefined for a per-invoice send. For a customer on an open
  * customer-level schedule it returns the schedule's send-now result
  * ({ routedTo: 'customer_schedule', scheduleId, ... }, customer-dunning/wiring.js).
+ * The combined step goes out only when `combined` ({ scheduleId, stepIndex },
+ * the step the operator was shown and confirmed) names that schedule at its
+ * current step; otherwise nothing is sent (COMBINED_CONFIRM_REQUIRED, or
+ * SCHEDULE_CHANGED for a step that moved on). A `combined` confirmation for a
+ * customer no longer on a schedule sends nothing either: the invoice's own
+ * step is not the message the operator confirmed (COMBINED_SCHEDULE_CLOSED).
  */
-async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
+async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined = null } = {}) {
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq || seq.status === 'stopped' || seq.status === 'completed') return;
 
@@ -2871,17 +2877,21 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
   // left exactly as it is. Checked and written under the customer's dunning
   // key (SHARED), so a promotion cannot commit between the check and the write.
   let ownedBy = null;
+  let confirmedCombinedGone = false;
   await db.transaction(async (trx) => {
     await lockCustomerDunningShared(trx, seq.customer_id);
     ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
     if (ownedBy) return;
+    if (combined) { confirmedCombinedGone = true; return; }
     await trx('invoice_followup_sequences').where({ id: seq.id }).update({
       updated_at: trx.fn.now(),
       status: 'active',
       next_touch_at: new Date(Date.now() - 1000),
     });
   });
-  if (ownedBy) return require('./customer-dunning/wiring').sendNowForSchedule(ownedBy, seq.customer_id);
+  const Wiring = () => require('./customer-dunning/wiring');
+  if (ownedBy) return Wiring().sendNowForInvoiceOnSchedule(ownedBy, seq.customer_id, combined);
+  if (confirmedCombinedGone) return Wiring().combinedScheduleClosed(combined.scheduleId);
 
   const row = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
@@ -2897,7 +2907,7 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
   // A promotion that committed after the re-arm above: fireStep refused under
   // the key (nothing was claimed or sent), so the click goes to the schedule.
   const fired = row ? await fireStep(row, { operatorInitiated }) : undefined;
-  if (fired?.ownedBy) return require('./customer-dunning/wiring').sendNowForSchedule(fired.ownedBy, seq.customer_id);
+  if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, combined);
   return undefined;
 }
 

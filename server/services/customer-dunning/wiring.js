@@ -136,11 +136,63 @@ const NOT_LIVE = Object.freeze({
 /**
  * An office send-now for a customer on a schedule (the invoice follow-up send-now routes here when the
  * customer is owned): the schedule's CURRENT step through the normal send path with operator channels,
- * only while the live gate covers the customer. Never sends for a dark schedule.
+ * only while the live gate covers the customer. Never sends for a dark schedule. `expectedStepIndex`: the
+ * step the operator confirmed; a schedule that moved on since sends nothing (SCHEDULE_CHANGED).
  */
-async function sendNowForSchedule(scheduleId, customerId, { now = new Date() } = {}) {
+async function sendNowForSchedule(scheduleId, customerId, { now = new Date(), expectedStepIndex = null } = {}) {
   if (!liveForCustomer(customerId)) return { routedTo: 'customer_schedule', scheduleId, ...NOT_LIVE };
-  return Admin.sendNow(scheduleId, { now });
+  return Admin.sendNow(scheduleId, { now, expectedStepIndex });
+}
+
+// The invoice panel's send-now for a customer on combined reminders sends the COMBINED step, so it needs the
+// operator's confirmation of that step (Codex #5503 r2 P1: a panel showing the invoice's own "Day 14" sent
+// the schedule's "Day 60" across every invoice). Without it, or for another schedule, nothing is sent.
+const COMBINED_CONFIRM_REQUIRED = Object.freeze({
+  ok: false,
+  reason: 'combined_confirm_required',
+  message: 'This customer is on combined reminders. Reload to see the combined step before sending.',
+});
+// The operator confirmed a combined step, but the customer is no longer on combined reminders: the
+// invoice's own next step is a different message, so it is not sent in its place.
+const COMBINED_SCHEDULE_CLOSED = Object.freeze({
+  ok: false,
+  reason: 'combined_schedule_closed',
+  message: 'This customer is no longer on combined reminders. Reload to see this invoice\'s next step before sending.',
+});
+
+/**
+ * The invoice send-now's routing for an OWNED invoice (invoice-followups.js sendNextTouchNow). `confirmed`
+ * = { scheduleId, stepIndex } from the request (the combined step the panel showed), or null.
+ */
+function sendNowForInvoiceOnSchedule(scheduleId, customerId, confirmed, { now = new Date() } = {}) {
+  if (!confirmed || String(confirmed.scheduleId) !== String(scheduleId) || !Number.isInteger(confirmed.stepIndex)) {
+    return { routedTo: 'customer_schedule', scheduleId, ...COMBINED_CONFIRM_REQUIRED };
+  }
+  return sendNowForSchedule(scheduleId, customerId, { now, expectedStepIndex: confirmed.stepIndex });
+}
+
+/** The send-now answer for a confirmed combined step whose customer has no open schedule any more. */
+const combinedScheduleClosed = (scheduleId) => ({ routedTo: 'customer_schedule', scheduleId, ...COMBINED_SCHEDULE_CLOSED });
+
+/**
+ * What the invoice panel shows (GET /api/admin/invoices/:id/followup) for a customer on combined
+ * reminders: the open schedule, the human name of its current step and how many invoices it covers.
+ * null when the customer has no open schedule.
+ */
+async function customerScheduleSummary(customerId) {
+  if (!UUID.test(String(customerId || ''))) return null;
+  const schedule = await Schedule.openScheduleFor(customerId);
+  if (!schedule) return null;
+  const members = await Schedule.activeMemberRows(customerId);
+  const stepIndex = Number(schedule.step_index);
+  return {
+    id: schedule.id,
+    status: schedule.status,
+    stepIndex,
+    stepLabel: Schedule.STEPS[stepIndex]?.label || null,
+    invoiceCount: members.length,
+    nextTouchAt: schedule.next_touch_at || null,
+  };
 }
 
 const CONTROLS = Object.freeze({
@@ -157,6 +209,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Refusals whose own message is the copy the office reads.
 const CONFLICT_CODES = Object.freeze({
   in_flight: 'IN_FLIGHT', schedule_not_live: 'SCHEDULE_NOT_LIVE', evidence_unreadable: 'EVIDENCE_UNREADABLE', outcome_unconfirmed: 'OUTCOME_UNCONFIRMED',
+  combined_confirm_required: 'COMBINED_CONFIRM_REQUIRED', combined_schedule_closed: 'COMBINED_SCHEDULE_CLOSED',
 });
 
 // A send-now that reached the customer: the step went out (advanced / completed), or one leg did and the
@@ -228,6 +281,9 @@ module.exports = {
   darkReason,
   releaseIfDark,
   sendNowForSchedule,
+  sendNowForInvoiceOnSchedule,
+  combinedScheduleClosed,
+  customerScheduleSummary,
   controlCustomerSchedule,
   httpResult,
   _test: { resetReadMemory: () => { lastReadSawOpen = false; } },

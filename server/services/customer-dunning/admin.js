@@ -74,9 +74,12 @@ async function whyNotClaimable(scheduleId, now) {
   return row.status === 'paused' ? 'schedule_paused' : null;
 }
 
-/** Fires the CURRENT stage through the normal send path with operator channels. */
-async function sendNow(scheduleId, { now = new Date() } = {}) {
-  const out = await Runner.processSchedule(scheduleId, now, { operatorInitiated: true, force: true });
+/**
+ * Fires the CURRENT stage through the normal send path with operator channels. `expectedStepIndex` (the
+ * step the operator confirmed): a schedule that moved on since is not claimed (409 SCHEDULE_CHANGED).
+ */
+async function sendNow(scheduleId, { now = new Date(), expectedStepIndex = null } = {}) {
+  const out = await Runner.processSchedule(scheduleId, now, { operatorInitiated: true, force: true, expectedStepIndex });
   if (out.outcome === 'skipped' && out.reason === 'not_claimable') {
     const why = await whyNotClaimable(scheduleId, now);
     if (why === 'in_flight') return { routedTo: 'customer_schedule', scheduleId, ...IN_FLIGHT };

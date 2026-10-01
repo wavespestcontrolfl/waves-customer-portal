@@ -566,10 +566,14 @@ async function runClaimed(claimed, opts) {
  * Process ONE schedule end to end. `force` (operator send-now) skips the
  * "due" test only; every other guard, the claim included, still applies.
  */
-async function processSchedule(scheduleId, now = new Date(), { operatorInitiated = false, force = false, claimAt = null } = {}) {
+async function processSchedule(scheduleId, now = new Date(), {
+  operatorInitiated = false, force = false, claimAt = null, expectedStepIndex = null,
+} = {}) {
   // `claimAt` is when the claim is actually taken (a batch passes its start
   // time plus elapsed wall time); `now` stays the batch clock for cadence.
-  const claimed = await Schedule.claim(scheduleId, claimAt || now, { force });
+  // `expectedStepIndex` (an office send-now): claim only while the schedule is
+  // still at the step the operator confirmed.
+  const claimed = await Schedule.claim(scheduleId, claimAt || now, { force, expectedStepIndex });
   if (!claimed) return outcome('skipped', { reason: 'not_claimable' });
   try {
     return await runClaimed(claimed, { now, operatorInitiated });

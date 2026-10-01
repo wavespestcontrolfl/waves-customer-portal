@@ -247,17 +247,57 @@ describe('sendNextTouchNow (the invoice follow-up send-now)', () => {
     mockDb.firsts.invoices = { id: 'inv-1', customer_id: CUST, status: 'overdue' };
   });
 
-  test('an owned customer: the schedule\'s send-now, and the member row is left exactly as it is', async () => {
+  const CONFIRM_REQUIRED = {
+    routedTo: 'customer_schedule',
+    scheduleId: 'sched-1',
+    ok: false,
+    reason: 'combined_confirm_required',
+    message: 'This customer is on combined reminders. Reload to see the combined step before sending.',
+  };
+
+  test('an owned customer with the combined step confirmed: the schedule\'s send-now at THAT step, and the member row is left exactly as it is', async () => {
+    mockGates.live = true;
     mockDb.raw = async (sql) => ({ rows: /customer_dunning_schedules/.test(sql) ? [{ id: 'sched-1' }] : [] });
     const routed = { routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'advanced' };
-    const spy = jest.spyOn(Wiring, 'sendNowForSchedule').mockResolvedValue(routed);
-    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true })).resolves.toEqual(routed);
-    expect(spy).toHaveBeenCalledWith('sched-1', CUST);
+    const spy = jest.spyOn(Admin, 'sendNow').mockResolvedValue(routed);
+    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: { scheduleId: 'sched-1', stepIndex: 4 } }))
+      .resolves.toEqual(routed);
+    expect(spy).toHaveBeenCalledWith('sched-1', { now: expect.any(Date), expectedStepIndex: 4 });
     expect(writes()).toEqual([]);
     // the ownership read ran under the shared key
     const raws = mockDb.log.filter((e) => e.raw).map((e) => e.raw);
     expect(raws[0]).toMatch(/pg_advisory_xact_lock_shared/);
     expect(raws[1]).toMatch(/customer_dunning_schedules/);
+  });
+
+  // Codex #5503 r2 P1: the panel showed this invoice's own step; the click must never send the combined one unseen.
+  test('an owned customer WITHOUT the confirmation (a stale panel): nothing is sent, nothing is written', async () => {
+    mockGates.live = true;
+    mockDb.raw = async (sql) => ({ rows: /customer_dunning_schedules/.test(sql) ? [{ id: 'sched-1' }] : [] });
+    const spy = jest.spyOn(Admin, 'sendNow');
+    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true })).resolves.toEqual(CONFIRM_REQUIRED);
+    // a confirmation of ANOTHER schedule (released and promoted again since the panel loaded) confirms nothing
+    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: { scheduleId: 'sched-0', stepIndex: 4 } }))
+      .resolves.toEqual(CONFIRM_REQUIRED);
+    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: { scheduleId: 'sched-1', stepIndex: null } }))
+      .resolves.toEqual(CONFIRM_REQUIRED);
+    expect(spy).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
+  });
+
+  test('a confirmed combined step for a customer no longer on a schedule: nothing re-armed or sent (the invoice\'s own step is a different message)', async () => {
+    mockGates.live = true;
+    const spy = jest.spyOn(Admin, 'sendNow');
+    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: { scheduleId: 'sched-1', stepIndex: 4 } }))
+      .resolves.toEqual({
+        routedTo: 'customer_schedule',
+        scheduleId: 'sched-1',
+        ok: false,
+        reason: 'combined_schedule_closed',
+        message: 'This customer is no longer on combined reminders. Reload to see this invoice\'s next step before sending.',
+      });
+    expect(spy).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
   });
 
   test('not owned: re-armed under the shared key, then the per-invoice touch (undefined result, as before)', async () => {
@@ -282,10 +322,11 @@ describe('sendNextTouchNow (the invoice follow-up send-now)', () => {
     mockDb.firsts['invoice_followup_sequences as s'] = { id: 'seq-1', invoice_id: 'inv-1', customer_id: CUST, step_index: 2, next_touch_at: due };
     // fireStep's locked re-read sees the re-armed row
     mockDb.firsts.invoice_followup_sequences = { id: 'seq-1', invoice_id: 'inv-1', customer_id: CUST, status: 'active', step_index: 2, next_touch_at: due };
-    const routed = { routedTo: 'customer_schedule', scheduleId: 'sched-2', outcome: 'held' };
-    const spy = jest.spyOn(Wiring, 'sendNowForSchedule').mockResolvedValue(routed);
-    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true })).resolves.toEqual(routed);
-    expect(spy).toHaveBeenCalledWith('sched-2', CUST);
+    const spy = jest.spyOn(Admin, 'sendNow');
+    // the operator confirmed the invoice's own step: the schedule promoted meanwhile is not sent unseen
+    await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true }))
+      .resolves.toEqual({ ...CONFIRM_REQUIRED, scheduleId: 'sched-2' });
+    expect(spy).not.toHaveBeenCalled();
     // only the re-arm wrote; no claim was stamped
     expect(writes().filter((w) => w.args[0]?.touch_claimed_at)).toEqual([]);
   });
@@ -443,7 +484,43 @@ describe('send-now and staff controls', () => {
     expect(await Wiring.sendNowForSchedule('sched-1', CUST, { now: NOW })).toMatchObject({ reason: 'schedule_not_live' });
     mockGates.allow = null;
     expect(await Wiring.sendNowForSchedule('sched-1', CUST, { now: NOW })).toMatchObject({ outcome: 'advanced' });
-    expect(sendNow).toHaveBeenCalledWith('sched-1', { now: NOW });
+    expect(sendNow).toHaveBeenCalledWith('sched-1', { now: NOW, expectedStepIndex: null });
+    // the step the operator confirmed rides to the claim
+    await Wiring.sendNowForSchedule('sched-1', CUST, { now: NOW, expectedStepIndex: 3 });
+    expect(sendNow).toHaveBeenLastCalledWith('sched-1', { now: NOW, expectedStepIndex: 3 });
+  });
+
+  test('admin.sendNow claims only at the confirmed step (forced, operator channels)', async () => {
+    Runner.processSchedule.mockResolvedValue({ outcome: 'advanced' });
+    await Admin.sendNow('sched-1', { now: NOW, expectedStepIndex: 3 });
+    expect(Runner.processSchedule).toHaveBeenCalledWith('sched-1', NOW, { operatorInitiated: true, force: true, expectedStepIndex: 3 });
+  });
+
+  test('a schedule that moved past the confirmed step sends nothing: 409 SCHEDULE_CHANGED', async () => {
+    Runner.processSchedule.mockResolvedValue({ outcome: 'skipped', reason: 'not_claimable' });
+    mockDb.firsts.customer_dunning_schedules = { ...openRow, step_index: 4 };
+    mockDb.results['invoice_followup_sequences as s'] = [];
+    const out = await Admin.sendNow('sched-1', { now: NOW, expectedStepIndex: 3 });
+    expect(Wiring.httpResult(out)).toEqual({
+      status: 409, body: { error: 'The reminder schedule changed. Reload and try again.', code: 'SCHEDULE_CHANGED', scheduleId: 'sched-1' },
+    });
+  });
+
+  test('customerScheduleSummary: the open schedule, the human name of its step and how many invoices it covers; null otherwise', async () => {
+    const openFor = jest.spyOn(Schedule, 'openScheduleFor');
+    const members = jest.spyOn(Schedule, 'activeMemberRows');
+    expect(await Wiring.customerScheduleSummary('not-a-uuid')).toBeNull();
+    expect(openFor).not.toHaveBeenCalled();
+    openFor.mockResolvedValueOnce(undefined);
+    expect(await Wiring.customerScheduleSummary(CUST)).toBeNull();
+    const next = new Date(NOW.getTime() + 86400000);
+    openFor.mockResolvedValueOnce({ ...openRow, step_index: 4, next_touch_at: next });
+    members.mockResolvedValueOnce([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    expect(await Wiring.customerScheduleSummary(CUST)).toEqual({
+      id: 'sched-1', status: 'active', stepIndex: 4, stepLabel: Schedule.STEPS[4].label, invoiceCount: 3, nextTouchAt: next,
+    });
+    expect(Schedule.STEPS[4].label).toBe('60-day reminder');
+    expect(members).toHaveBeenCalledWith(CUST);
   });
 
   test('404: a non-uuid id (no query) and a customer with no open schedule', async () => {

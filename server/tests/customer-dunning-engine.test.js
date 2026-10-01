@@ -2689,6 +2689,13 @@ describe('operator send-now', () => {
     expect(Schedule.claim).toHaveBeenCalledWith(SCHEDULE_ID, NOW, expect.objectContaining({ force: true }));
   });
 
+  test('the step the operator confirmed rides to the claim (a schedule that moved on is not claimed); a run without one claims any step', async () => {
+    await run({ operatorInitiated: true, force: true, expectedStepIndex: 4 });
+    expect(Schedule.claim).toHaveBeenLastCalledWith(SCHEDULE_ID, NOW, { force: true, expectedStepIndex: 4 });
+    await run();
+    expect(Schedule.claim).toHaveBeenLastCalledWith(SCHEDULE_ID, NOW, { force: false, expectedStepIndex: null });
+  });
+
   describe('the operator email re-checks at the FINAL provider boundary (after provider preparation)', () => {
     const operatorEmailOnly = () => { customer.phone = null; };
     const boundaryReads = () => mockResolve.mock.calls.filter(([, opts]) => opts?.database === MOCK_TRX).length;

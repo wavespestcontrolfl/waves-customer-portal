@@ -331,21 +331,27 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       expect(['member_claim_fresh', 'fewer_than_two_active_members', undefined]).toContain(promoted.reason);
     });
 
-    test('sendNextTouchNow racing a promotion: the click goes to the schedule and the member row is left as it was', async () => {
+    // Codex #5503 r2 P1: the operator confirmed the invoice's own step (the panel loaded before the
+    // promotion), so the combined step the schedule now owns is never sent unseen.
+    test('sendNextTouchNow racing a promotion: the click is refused for confirmation (nothing sent) and the member row is left as it was', async () => {
       const c = await customer();
       const a = await member(c, { due: false });
       const b = await member(c, { sentDaysAgo: 30, step: 2, due: false });
       mockResolve.mockResolvedValue(setFor([a, b]));
       const before = await seqRow(a.seq.id);
-      const toSchedule = jest.spyOn(Wiring, 'sendNowForSchedule').mockImplementation(async (scheduleId) => ({ routedTo: 'customer_schedule', scheduleId, outcome: 'advanced' }));
+      const toSchedule = jest.spyOn(Wiring, 'sendNowForSchedule');
       const gate = pauseAt(/pg_advisory_xact_lock_shared/);
       const click = Followups.sendNextTouchNow(a.invoiceId, { operatorInitiated: true });
       await gate.reached;
       const promoted = await Schedule.promoteCustomer(c, new Date());
       expect(promoted.promoted).toBe(true);
       gate.release();
-      expect(await click).toEqual({ routedTo: 'customer_schedule', scheduleId: promoted.schedule.id, outcome: 'advanced' });
-      expect(toSchedule).toHaveBeenCalledWith(promoted.schedule.id, c);
+      expect(await click).toMatchObject({
+        routedTo: 'customer_schedule', scheduleId: promoted.schedule.id, ok: false, reason: 'combined_confirm_required',
+      });
+      expect(toSchedule).not.toHaveBeenCalled();
+      expect(await app('customer_dunning_schedules').where({ id: promoted.schedule.id }).first('touch_claimed_at'))
+        .toEqual({ touch_claimed_at: null });
       const after = await seqRow(a.seq.id);
       expect(after.status).toBe('active');
       expect(new Date(after.next_touch_at).getTime()).toBe(new Date(before.next_touch_at).getTime()); // not re-armed

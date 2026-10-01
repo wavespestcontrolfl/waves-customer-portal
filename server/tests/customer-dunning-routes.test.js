@@ -19,9 +19,11 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/stripe', () => ({}));
 const mockControl = jest.fn();
+const mockSummary = jest.fn();
 jest.mock('../services/customer-dunning/wiring', () => ({
   ...jest.requireActual('../services/customer-dunning/wiring'),
   controlCustomerSchedule: (...a) => mockControl(...a),
+  customerScheduleSummary: (...a) => mockSummary(...a),
 }));
 const mockSendNextTouchNow = jest.fn();
 jest.mock('../services/invoice-followups', () => ({
@@ -53,7 +55,7 @@ const post = (base, path, body, role = 'admin') => fetch(`${base}${path}`, {
   method: 'POST', headers: { 'content-type': 'application/json', 'x-test-role': role }, body: JSON.stringify(body || {}),
 });
 
-beforeEach(() => { mockControl.mockReset(); mockSendNextTouchNow.mockReset(); });
+beforeEach(() => { mockControl.mockReset(); mockSendNextTouchNow.mockReset(); mockSummary.mockReset(); });
 
 describe('POST /api/admin/customers/:id/dunning-schedule/:control', () => {
   test.each(['send-now', 'pause', 'resume', 'release'])('%s: admin only; passes the control, the admin and a trimmed reason; answers what the control returned', async (control) => {
@@ -107,7 +109,55 @@ describe('POST /api/admin/invoices/:id/followup/send-now', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
     });
-    expect(mockSendNextTouchNow).toHaveBeenCalledWith('inv-1', { operatorInitiated: true });
+    expect(mockSendNextTouchNow).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, combined: null });
+  });
+
+  // Codex #5503 r2 P1: the combined step goes out only with the operator's explicit confirmation of it.
+  test('the request confirms a combined step only with { combined: true, scheduleId, stepIndex }; anything else confirms nothing', async () => {
+    mockSendNextTouchNow.mockResolvedValue(undefined);
+    await withServer(async (base) => {
+      await post(base, '/api/admin/invoices/inv-1/followup/send-now', { combined: true, scheduleId: 'sched-1', stepIndex: 4 });
+      await post(base, '/api/admin/invoices/inv-1/followup/send-now', { combined: 'yes', scheduleId: 'sched-1', stepIndex: 4 });
+      await post(base, '/api/admin/invoices/inv-1/followup/send-now', { combined: true, scheduleId: 7, stepIndex: '4' });
+    });
+    expect(mockSendNextTouchNow.mock.calls.map(([, opts]) => opts.combined)).toEqual([
+      { scheduleId: 'sched-1', stepIndex: 4 },
+      null,
+      { scheduleId: null, stepIndex: null },
+    ]);
+  });
+
+  test('an owned customer without the confirmation: 409 COMBINED_CONFIRM_REQUIRED with the office copy; with it, the combined send\'s 200', async () => {
+    const { sendNowForInvoiceOnSchedule } = jest.requireActual('../services/customer-dunning/wiring');
+    mockSendNextTouchNow.mockImplementation(async (_id, { combined }) => (combined
+      ? { routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'advanced' }
+      : sendNowForInvoiceOnSchedule('sched-1', CUST, combined)));
+    await withServer(async (base) => {
+      const refused = await post(base, '/api/admin/invoices/inv-1/followup/send-now');
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toEqual({
+        error: 'This customer is on combined reminders. Reload to see the combined step before sending.',
+        code: 'COMBINED_CONFIRM_REQUIRED',
+        scheduleId: 'sched-1',
+      });
+      const sent = await post(base, '/api/admin/invoices/inv-1/followup/send-now', { combined: true, scheduleId: 'sched-1', stepIndex: 4 });
+      expect(sent.status).toBe(200);
+      expect((await sent.json()).outcome).toBe('advanced');
+    });
+  });
+
+  test('a confirmed combined step whose schedule closed meanwhile: 409 COMBINED_SCHEDULE_CLOSED, never the invoice\'s own step', async () => {
+    const { combinedScheduleClosed } = jest.requireActual('../services/customer-dunning/wiring');
+    mockSendNextTouchNow.mockResolvedValue(combinedScheduleClosed('sched-1'));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/admin/invoices/inv-1/followup/send-now', { combined: true, scheduleId: 'sched-1', stepIndex: 4 });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'This customer is no longer on combined reminders. Reload to see this invoice\'s next step before sending.',
+        code: 'COMBINED_SCHEDULE_CLOSED',
+        scheduleId: 'sched-1',
+      });
+    });
   });
 
   test('a customer on a schedule: the schedule\'s result as JSON (200 sent, 409 in flight with the copy, 409 dark)', async () => {
@@ -144,5 +194,43 @@ describe('POST /api/admin/invoices/:id/followup/send-now', () => {
       mockSendNextTouchNow.mockResolvedValueOnce({ routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'autopay_hold' });
       expect((await post(base, '/api/admin/invoices/inv-1/followup/send-now')).status).toBe(409);
     });
+  });
+});
+
+describe('GET /api/admin/invoices/:id/followup', () => {
+  const db = require('../models/db');
+  const get = (base, path) => fetch(`${base}${path}`, { headers: { 'x-test-role': 'admin' } });
+  const sequenceRead = (row) => db.mockImplementation((table) => {
+    expect(table).toBe('invoice_followup_sequences');
+    return { where: () => ({ first: async () => row }) };
+  });
+
+  test('a customer on combined reminders: the sequence, the steps, and customerSchedule (the combined step and invoice count)', async () => {
+    sequenceRead({ id: 'seq-1', invoice_id: 'inv-1', customer_id: CUST, status: 'active', step_index: 2 });
+    const summary = {
+      id: 'sched-1', status: 'active', stepIndex: 4, stepLabel: '60-day reminder', invoiceCount: 3, nextTouchAt: '2026-10-08T14:00:00.000Z',
+    };
+    mockSummary.mockResolvedValue(summary);
+    await withServer(async (base) => {
+      const res = await get(base, '/api/admin/invoices/inv-1/followup');
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.customerSchedule).toEqual(summary);
+      expect(body.sequence).toMatchObject({ id: 'seq-1', step_index: 2 });
+      expect(Array.isArray(body.steps)).toBe(true);
+    });
+    expect(mockSummary).toHaveBeenCalledWith(CUST);
+  });
+
+  test('not on combined reminders: customerSchedule is null; no sequence: null without a lookup', async () => {
+    sequenceRead({ id: 'seq-1', invoice_id: 'inv-1', customer_id: CUST, status: 'active', step_index: 2 });
+    mockSummary.mockResolvedValue(null);
+    await withServer(async (base) => {
+      expect((await (await get(base, '/api/admin/invoices/inv-1/followup')).json()).customerSchedule).toBeNull();
+      sequenceRead(undefined);
+      const none = await (await get(base, '/api/admin/invoices/inv-2/followup')).json();
+      expect(none).toMatchObject({ sequence: null, customerSchedule: null });
+    });
+    expect(mockSummary).toHaveBeenCalledTimes(1);
   });
 });

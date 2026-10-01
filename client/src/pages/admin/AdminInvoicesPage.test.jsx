@@ -6,6 +6,9 @@ import {
   batchSendToast,
   buildInvoiceListParams,
   canAddInvoiceAttachments,
+  combinedReminderSummary,
+  followupActionErrorMessage,
+  followupSendNowPlan,
   invoiceAttachmentLimitLabel,
   invoiceCreatedSendFailedToast,
   invoiceCreatedSendToast,
@@ -403,5 +406,66 @@ describe("resendConflictMessage", () => {
     );
     expect(resendConflictMessage({ code: "send_claim_lost" })).toBeNull();
     expect(resendConflictMessage(new Error("boom"))).toBeNull();
+  });
+});
+
+describe("FollowupPanel send-now on combined reminders (Codex #5503 r2 P1)", () => {
+  const customerSchedule = {
+    id: "5b7a2c1e-0000-4000-8000-000000000001",
+    status: "active",
+    stepIndex: 4,
+    stepLabel: "60-day reminder",
+    invoiceCount: 3,
+    nextTouchAt: null,
+  };
+
+  it("an invoice on its own ladder keeps today's confirm and posts no body", () => {
+    expect(followupSendNowPlan({ sequence: { step_index: 2 }, customerSchedule: null })).toEqual({
+      confirmText: "Send the next follow-up SMS right now?",
+      body: undefined,
+    });
+  });
+
+  it("a customer on combined reminders: the confirm names the combined step and the invoice count, and the request confirms that exact step", () => {
+    const request = followupSendNowPlan({ sequence: { step_index: 2 }, customerSchedule });
+    expect(request.confirmText).toBe(
+      "This customer is on combined reminders. Send the 60-day reminder now to all 3 invoices on their balance, not just this one?",
+    );
+    expect(request.body).toEqual({ combined: true, scheduleId: customerSchedule.id, stepIndex: 4 });
+    // never the invoice's own step
+    expect(request.confirmText).not.toMatch(/17-day/);
+  });
+
+  it("one invoice left, or no step label: still plain English", () => {
+    expect(followupSendNowPlan({ customerSchedule: { ...customerSchedule, invoiceCount: 1, stepLabel: null } }).confirmText).toBe(
+      "This customer is on combined reminders. Send the current combined reminder now to the 1 invoice on their balance, not just this one?",
+    );
+  });
+
+  it("the panel line says the invoice is on combined reminders, which step is next and how many invoices", () => {
+    expect(combinedReminderSummary(null)).toBeNull();
+    expect(combinedReminderSummary(customerSchedule)).toBe(
+      "On combined reminders with 3 invoices for this customer. Next: the 60-day reminder.",
+    );
+    expect(combinedReminderSummary({ ...customerSchedule, status: "paused" })).toBe(
+      "On combined reminders with 3 invoices for this customer. Combined reminders are paused.",
+    );
+    const dated = combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-10-05T14:00:00Z" });
+    expect(dated).toMatch(/^On combined reminders with 3 invoices for this customer\. Next: the 60-day reminder on .+\.$/);
+    expect(combinedReminderSummary({ ...customerSchedule, invoiceCount: 1 })).toMatch(/with 1 invoice for/);
+  });
+
+  it("a refused action shows the server's own words, else the generic toast", () => {
+    const refused = Object.assign(new Error("This customer is on combined reminders. Reload to see the combined step before sending."), {
+      status: 409,
+      code: "COMBINED_CONFIRM_REQUIRED",
+      serverError: "This customer is on combined reminders. Reload to see the combined step before sending.",
+    });
+    expect(followupActionErrorMessage(refused)).toBe(
+      "This customer is on combined reminders. Reload to see the combined step before sending.",
+    );
+    expect(followupActionErrorMessage(Object.assign(new Error("HTTP 502"), { status: 502 }))).toBe("Action failed");
+    expect(followupActionErrorMessage(new TypeError("Failed to fetch"))).toBe("Action failed");
+    expect(followupActionErrorMessage(undefined)).toBe("Action failed");
   });
 });

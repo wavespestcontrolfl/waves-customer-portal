@@ -3640,8 +3640,14 @@ const followupConfig = require('../config/invoice-followups');
 router.get('/:id/followup', async (req, res, next) => {
   try {
     const seq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first();
+    // A customer on combined reminders (customer-dunning/wiring.js): the panel shows the combined step
+    // and invoice count, and send-now must confirm that step (Codex #5503 r2 P1). null otherwise.
+    const customerSchedule = seq
+      ? await require('../services/customer-dunning/wiring').customerScheduleSummary(seq.customer_id)
+      : null;
     res.json({
       sequence: seq || null,
+      customerSchedule,
       // Config-field rename: steps now expose daysAfterSend (PR #106
       // anchored the cadence to invoice.sent_at). daysAfterDue is kept
       // as an alias so any pre-update client still renders a number.
@@ -3702,9 +3708,18 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     // Authenticated operator click — "now" means now: the SMS leg is exempt
     // from the 8AM-8PM send window (validators/send-window.js). The 10:16 ET
     // cron path passes nothing and stays fenced.
-    const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true });
-    // A customer on a customer-level reminder schedule: the click sent the
-    // schedule's current step instead (dunning consolidation §8).
+    // A customer on combined reminders: the click sends the schedule's current
+    // step, and only with the operator's explicit confirmation of that step
+    // ({ combined: true, scheduleId, stepIndex } — what GET /:id/followup
+    // showed). Without it nothing is sent: 409 COMBINED_CONFIRM_REQUIRED, so a
+    // stale panel can never send the combined step unseen (Codex #5503 r2 P1).
+    const body = req.body || {};
+    const combined = body.combined === true
+      ? { scheduleId: typeof body.scheduleId === 'string' ? body.scheduleId : null, stepIndex: Number.isInteger(body.stepIndex) ? body.stepIndex : null }
+      : null;
+    const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true, combined });
+    // A customer on a customer-level reminder schedule: the click sent (or
+    // refused to send) the schedule's current step (dunning consolidation §8).
     if (routed?.routedTo === 'customer_schedule') {
       const { status, body } = require('../services/customer-dunning/wiring').httpResult(routed);
       return res.status(status).json(body);
