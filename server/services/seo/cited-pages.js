@@ -264,6 +264,16 @@ function emptyTally() {
   return { answers: 0, named: 0, citingPage: 0, namedWhenCiting: 0 };
 }
 
+// first_live_at's ET calendar day. A value at exactly UTC midnight is a
+// date-only day (link-registry-baseline.js copies seo_backlinks.first_seen, a
+// DATE, into it): that calendar day as written, never shifted to the ET day
+// before.
+function liveDateOf(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().endsWith('T00:00:00.000Z') ? d.toISOString().slice(0, 10) : etDateString(d);
+}
+
 function daysBetween(fromDate, toDate) {
   return Math.round((Date.parse(`${toDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) / 86400000);
 }
@@ -278,8 +288,9 @@ function daysBetween(fromDate, toDate) {
  * answers cited that exact page in the RECHECK_BEFORE_DAYS before the link
  * went live. before = those questions' answers in the
  * RECHECK_BEFORE_DAYS before; after = their answers from that day on.
- * verdict, in order: too_early (under RECHECK_SETTLE_DAYS live, or no answer
- * since) | named_when_cited (an answer since cites the page and names Waves) |
+ * verdict, in order, from `current` (the newest answer per question and
+ * engine since): too_early (under RECHECK_SETTLE_DAYS live, or no answer
+ * since) | named_when_cited (a newest answer cites the page and names Waves) |
  * page_not_cited_now | not_named_yet. A placement with no live_url, or on a
  * page no engine cited before that day, is not returned.
  */
@@ -289,8 +300,8 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
   const out = [];
   for (const pl of placements || []) {
     const host = canonicalProspectDomain(pl.target_domain);
-    if (!host || !pl.first_live_at) continue;
-    const liveOn = etDateString(new Date(pl.first_live_at));
+    if (!host || !pl.first_live_at || !liveDateOf(pl.first_live_at)) continue;
+    const liveOn = liveDateOf(pl.first_live_at);
     // The link's own page, on the placement's own host: another page on the
     // same site (a Yelp listing beside a cited Yelp search) is not this one.
     const liveKey = pl.live_url ? pageKey(pl.live_url) : null;
@@ -302,6 +313,10 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
     const questions = new Set(dated.filter((r) => r.date >= windowStart && r.date < liveOn && cites(r)).map((r) => r.query));
     if (!questions.size) continue; // engines did not cite this page in the window before the link went live
     const tally = { before: emptyTally(), after: emptyTally() };
+    // the newest post-placement answer per question and engine: the verdict
+    // reads these, so a page that stops being cited (or Waves stops being
+    // named) changes it; before/after stay cumulative for context
+    const latestAfter = new Map();
     for (const r of dated) {
       if (!questions.has(r.query) || r.date < windowStart) continue;
       const t = r.date < liveOn ? tally.before : tally.after;
@@ -309,16 +324,23 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
       t.answers += 1;
       if (named) t.named += 1;
       if (cites(r)) { t.citingPage += 1; if (named) t.namedWhenCiting += 1; }
+      if (t === tally.after) {
+        const k = `${r.query}::${r.llm_platform}`;
+        const prev = latestAfter.get(k);
+        if (!prev || r.date > prev.date) latestAfter.set(k, r);
+      }
     }
+    const latest = [...latestAfter.values()];
+    const current = { answers: latest.length, citingPage: latest.filter(cites).length, namedWhenCiting: latest.filter((r) => cites(r) && r.waves_mentioned === true).length };
     const daysLive = daysBetween(liveOn, today);
     // settle first: one early answer is not a result
     let verdict = 'not_named_yet';
     if (daysLive < RECHECK_SETTLE_DAYS || tally.after.answers === 0) verdict = 'too_early';
-    else if (tally.after.namedWhenCiting > 0) verdict = 'named_when_cited';
-    else if (tally.after.citingPage === 0) verdict = 'page_not_cited_now';
+    else if (current.namedWhenCiting > 0) verdict = 'named_when_cited';
+    else if (current.citingPage === 0) verdict = 'page_not_cited_now';
     out.push({
       prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(),
-      before: tally.before, after: tally.after, verdict,
+      before: tally.before, after: tally.after, current, verdict,
     });
   }
   return out.sort((a, b) => compareStrings(b.liveOn, a.liveOn) || compareStrings(a.host, b.host));

@@ -152,7 +152,7 @@ describe('recheckPlacements', () => {
       row({ query: Q1, date: '2026-09-25', urls: [PAGE], named: false }),
       row({ query: Q7, date: '2026-09-25', urls: ['https://www.bbb.org/x'], named: false }), // never cited the page
       row({ query: Q1, date: '2026-10-10', urls: [PAGE], named: true }),
-      row({ query: Q1, date: '2026-10-15', urls: ['https://www.yelp.com/x'], named: false }),
+      row({ query: Q1, platform: 'claude', model: 'claude', date: '2026-10-15', urls: ['https://www.yelp.com/x'], named: false }),
     ];
     const [r] = recheckPlacements([placement()], rows, { now: NOW });
     expect(r).toMatchObject({
@@ -160,6 +160,7 @@ describe('recheckPlacements', () => {
       page: 'floridist.com/best-pest-control-sarasota', questions: [Q1],
       before: { answers: 2, named: 0, citingPage: 2, namedWhenCiting: 0 },
       after: { answers: 2, named: 1, citingPage: 1, namedWhenCiting: 1 },
+      current: { answers: 2, citingPage: 1, namedWhenCiting: 1 },
       verdict: 'named_when_cited',
     });
   });
@@ -180,6 +181,24 @@ describe('recheckPlacements', () => {
     expect(recheckPlacements([placement({ live_url: 'https://floridist.com/partners' })], rows, { now: NOW })).toEqual([]);
     expect(recheckPlacements([placement({ live_url: null })], rows, { now: NOW })).toEqual([]);
     expect(recheckPlacements([placement({ target_domain: 'other.com' })], rows, { now: NOW })).toEqual([]);
+  });
+
+  test('the verdict follows the newest answers — an early named answer does not stick', () => {
+    const rows = [
+      row({ query: Q1, date: '2026-09-25', urls: [PAGE] }),
+      row({ query: Q1, date: '2026-10-05', urls: [PAGE], named: true }),
+      row({ query: Q1, date: '2026-10-18', urls: ['https://www.yelp.com/x'], named: false }),
+    ];
+    const [r] = recheckPlacements([placement()], rows, { now: NOW });
+    expect(r.after).toMatchObject({ answers: 2, namedWhenCiting: 1 });
+    expect(r.current).toEqual({ answers: 1, citingPage: 0, namedWhenCiting: 0 });
+    expect(r.verdict).toBe('page_not_cited_now');
+  });
+
+  test('a date-only first_live_at (UTC midnight) keeps its calendar day', () => {
+    const rows = [row({ query: Q1, date: '2026-09-25', urls: [PAGE] })];
+    expect(recheckPlacements([placement({ first_live_at: new Date('2026-10-01T00:00:00.000Z') })], rows, { now: NOW })[0].liveOn).toBe('2026-10-01');
+    expect(recheckPlacements([placement({ first_live_at: '2026-10-01T03:00:00Z' })], rows, { now: NOW })[0].liveOn).toBe('2026-09-30');
   });
 
   test('a citation older than the placement\'s own 30-day window never defines its questions', () => {

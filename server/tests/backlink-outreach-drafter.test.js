@@ -193,7 +193,7 @@ describe('cited-page pitches', () => {
   const citedPage = (o = {}) => ({
     key: 'floridist.com/best-pest-control-sarasota', host: 'floridist.com', url: 'https://floridist.com/best-pest-control-sarasota',
     tier: 1, rank: 1, currentMisses: 2,
-    questions: [{ id: 'Q1', query: 'Who is the best pest control company in Sarasota FL?', engines: ['claude', 'perplexity'], miss: true, current: true }],
+    questions: [{ id: 'Q1', query: 'Who is the best pest control company in Sarasota FL?', engines: ['claude', 'perplexity'], provider: true, miss: true, current: true }],
     ...o,
   });
   const cited = prospect({ id: 'p9', target_domain: 'floridist.com', link_type: 'editorial', tier: 2, contact_email: 'editor@floridist.com' });
@@ -227,11 +227,11 @@ describe('cited-page pitches', () => {
 
   test('run reads the cited page (not the homepage), drafts with the angle, and notes the page on the report', async () => {
     claims([cited]);
-    const fetchPageFn = jest.fn(async () => ({ title: 'Best Pest Control in Sarasota', snippet: 'Our picks', matches: { waves: false } }));
+    const fetchPageFn = jest.fn(async () => ({ title: 'Best Pest Control in Sarasota', snippet: 'Our picks', text: 'Our picks: Acme Pest, Gulf Bugs' }));
     const create = jest.fn(async () => ({ content: [{ type: 'text', text: '{"subject":"Your Sarasota list","body":"Hi"}' }] }));
     const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn, citedPagesFn: async () => ({ pages: [citedPage()] }) });
     expect(r.drafted).toBe(1);
-    expect(fetchPageFn).toHaveBeenCalledWith('https://floridist.com/best-pest-control-sarasota', { matchers: { waves: expect.any(RegExp) } });
+    expect(fetchPageFn).toHaveBeenCalledWith('https://floridist.com/best-pest-control-sarasota', { withText: true });
     expect(create.mock.calls[0][0].messages[0].content).toMatch(/CITED PAGE/);
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'drafted', notes: expect.stringContaining('cited page https://floridist.com/best-pest-control-sarasota') }));
   });
@@ -239,13 +239,27 @@ describe('cited-page pitches', () => {
   test('a cited page that already names Waves is skipped, never pitched', async () => {
     claims([cited]);
     const create = jest.fn();
-    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', matches: { waves: true } }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', text: 'Top picks … 3. Waves Pest Control (Lakewood Ranch)' }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
     expect(create).not.toHaveBeenCalled();
     expect(r.skipped).toBe(1);
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', notes: expect.stringMatching(/Waves already on the cited page/) }));
   });
 
-  test('a failed cited-page read drafts with the usual angle', async () => {
+  test('a cited page that cannot be read fails the lease (retried) — never pitched unchecked', async () => {
+    claims([cited]);
+    const create = jest.fn();
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: noFetch, citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    expect(create).not.toHaveBeenCalled();
+    expect(r.failed).toBe(1);
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', notes: expect.stringMatching(/cited page could not be read/) }));
+  });
+
+  test('only pages cited for a provider question carry the angle — a cost guide keeps the usual pitch', () => {
+    const costGuide = citedPage({ key: 'floridist.com/cost', url: 'https://floridist.com/cost', questions: [{ id: 'Q3', query: 'How much does pest control cost?', engines: ['claude'], provider: false }] });
+    expect(citedPageFor({ target_domain: 'floridist.com' }, citedPagesByHost([costGuide]))).toBeNull();
+  });
+
+  test('a failed ranking read drafts with the usual angle', async () => {
     claims([cited]);
     const create = jest.fn(async () => ({ content: [{ type: 'text', text: '{"subject":"S","body":"B"}' }] }));
     const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: noFetch, citedPagesFn: async () => { throw new Error('db down'); } });

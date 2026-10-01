@@ -176,11 +176,14 @@ const MAX_CITED_QUESTIONS = 3;
 
 /**
  * citedPagesByHost(pages) → Map host → ranked pages for that host, best first.
- * `pages` is cited-pages.js's ranked list (already ordered).
+ * `pages` is cited-pages.js's ranked list (already ordered). Only pages cited
+ * for a provider question ("who should I hire") are kept: the angle asks to
+ * add Waves to a list, which a cost guide or an informational page is not.
  */
 function citedPagesByHost(pages) {
   const byHost = new Map();
   for (const p of pages || []) {
+    if (!(p.questions || []).some((q) => q.provider)) continue;
     const host = canonicalProspectDomain(p.host);
     if (!host) continue;
     if (!byHost.has(host)) byHost.set(host, []);
@@ -241,15 +244,17 @@ function buildUserPrompt(prospect, profile, loc, page, cited = null) {
 }
 
 /**
- * draftOne → { subject, body } | { skip: reason } | null (no usable draft).
- * With a cited page, the cited page is the one read, and a page that already
- * names Waves is skipped rather than pitched.
+ * draftOne → { subject, body } | { skip: reason } | { fail: reason } | null
+ * (no usable draft). With a cited page, the cited page is the one read: a page
+ * that already names Waves is skipped, and one that cannot be read fails (the
+ * lease retries) rather than being pitched unchecked.
  */
 async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageText, cited = null }) {
   let page = null;
   const url = cited ? cited.url : (prospect.target_url || `https://${prospect.target_domain}/`);
-  try { page = await fetchPageFn(url, cited ? { matchers: { waves: WAVES_LISTED_RE } } : undefined); } catch { page = null; }
-  if (cited && page && page.matches && page.matches.waves) return { skip: `Waves already on the cited page ${cited.url}` };
+  try { page = await fetchPageFn(url, cited ? { withText: true } : undefined); } catch { page = null; }
+  if (cited && !(page && typeof page.text === 'string')) return { fail: `cited page could not be read: ${cited.url}` };
+  if (cited && WAVES_LISTED_RE.test(page.text)) return { skip: `Waves already on the cited page ${cited.url}` };
   const loc = pickLocation(prospect, profile);
   const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({
     model: DRAFT_MODEL,
@@ -343,6 +348,10 @@ async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn, cit
         if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'skipped', lease_token: p.lease_token, notes: draft.skip }).catch(() => {});
         if (dryRun) samples.push({ domain: p.target_domain, skipped: draft.skip });
         skipped++; continue;
+      }
+      if (draft && draft.fail) {
+        if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: draft.fail }).catch(() => {});
+        failed++; continue;
       }
       if (!draft) {
         if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: 'drafter produced no usable draft' }).catch(() => {});
