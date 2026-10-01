@@ -85,6 +85,7 @@
  *   GATE_STAMPED_ZERO_FREE=true (a scheduled_services.estimated_price stamped exactly 0 — not NULL, not '' — bills nothing in EVERY billing lane: per-application, per-visit, monthly_membership, legacy-null, annual prepay; owner ruling 2026-09-28, waves-billing skill invariant #8, "$0 means charge nothing", superseding invariant #6's monthly-fallback note while the gate is on. NULL/blank is unchanged — still falls through to per_application_fee / monthly_rate as today. Off = byte-identical to today on every path; canonical CALL-TIME reader stampedZeroFreeLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
+ *   GATE_RESERVICE_OFFICE_REQUEST=true (New Appointment modal "Customer's words" box on a pest/lawn re-service: suggests the customer's latest inbound text or call note from the last 72 hours with a "Use this" button, saved to scheduled_services.customer_request/_source; the server decides the source — unchanged text/call = quotable text/call, edited or typed = office. Off unless exactly 'true' (isEnabled('reserviceOfficeRequest')); off = the modal shows nothing new, GET /api/admin/schedule/reservice-request-suggestion answers {enabled:false, suggestion:null}, and POST ignores customerRequest. Sends nothing to a customer.)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ZONE_ROUTE_DAYS=true (customer-facing booking + estimate picker lift the self-serve detour cap on a far zone's route day — default Friday for Venice / North Port — so an EMPTY route day can be offered and seeded; config in system_settings key schedule_zone_route_days; phone/office/IB/auto-dispatch untouched; read at call time via zoneRouteDaysLive(); unset = today's cap everywhere)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
@@ -1310,6 +1311,22 @@ const gates = {
   // 20260927100000) are additive and are stamped from the details box
   // regardless of this gate — only the pest-chip normalization is gated.
   reservicePestChips: process.env.GATE_RESERVICE_PEST_CHIPS === 'true',
+
+  // Office-booked re-service "Customer's words" (2026-10-01):
+  // the New Appointment modal, on a pest/lawn re-service, offers the
+  // customer's latest inbound text or call note from the last 72 hours with
+  // a "Use this" button plus an editable box, saved to
+  // scheduled_services.customer_request/_source (migration 20260927100000).
+  // The SERVER decides the source: unchanged text/call keeps 'text'/'call',
+  // anything typed or edited by staff is 'office'. Staff-facing only and
+  // nothing is sent, but it ships DARK in EVERY environment (fail-closed
+  // ==='true'). Read via isEnabled('reserviceOfficeRequest') by the
+  // suggestion route and the POST intake in routes/admin-schedule.js; the
+  // modal learns the gate from the route's {enabled} answer. Kill switch:
+  // unset GATE_RESERVICE_OFFICE_REQUEST — the suggestion route answers
+  // {enabled:false, suggestion:null}, POST /api/admin/schedule ignores
+  // `customerRequest`, and the modal renders byte-identical to before.
+  reserviceOfficeRequest: process.env.GATE_RESERVICE_OFFICE_REQUEST === 'true',
 
   // Re-service ranking demotion (owner ruling 2026-09-24: "prefer new
   // customers over existing — new-customer bookings get first pick of open
