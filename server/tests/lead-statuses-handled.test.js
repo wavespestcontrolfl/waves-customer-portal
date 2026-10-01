@@ -11,7 +11,7 @@ const mockRows = [];
 function mockBuilder() {
   let rows = mockRows;
   const b = {
-    where: () => b, whereNull: () => b, leftJoin: () => b, select: () => b, groupBy: () => b, orderByRaw: () => b,
+    where: () => b, whereNull: () => b, whereNotNull: () => b, leftJoin: () => b, select: () => b, groupBy: () => b, orderByRaw: () => b,
     modify: (fn) => {
       const scope = { whereNotIn: (col, list) => { rows = rows.filter((r) => !list.includes(r.status)); return scope; }, whereRaw: () => scope };
       fn(scope);
@@ -101,7 +101,7 @@ describe("lead status 'handled'", () => {
 
   test('the Intelligence Bar source and funnel reads apply the same prospect scope', () => {
     const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/leads-tools.js'), 'utf8');
-    expect((ib.match(/\.modify\(scopeToProspects\)/g) || []).length).toBe(3);
+    expect((ib.match(/\.modify\(scopeToProspects\)/g) || []).length).toBe(4);
   });
 
   test('the pipeline opportunity list never shows a handled lead as a new lead needing action', () => {
@@ -116,5 +116,31 @@ describe("lead status 'handled'", () => {
     expect(src).toContain(`any row whose status is ${list}`);
     expect(src).toContain(`FROM ai_leads WHERE status ${list} AND first_contact_at`);
     expect(src).toMatch(/status \[[^\]]*handled\|cancelled\|spam\]/);
+  });
+  test('Intelligence Bar response-time buckets never count a handled request (behavior)', async () => {
+    mockRows.length = 0;
+    mockRows.push(
+      { status: 'won', response_time_minutes: 3 },
+      { status: 'lost', response_time_minutes: 4 },
+      { status: 'handled', response_time_minutes: 2 },
+    );
+    const { executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
+    const out = await executeLeadsTool('get_response_times', { days: 30 });
+    expect(out.total_with_response).toBe(2);
+    expect(out.buckets[0]).toMatchObject({ label: 'Under 5 min', count: 2, conversion_rate: 50 });
+  });
+
+  test('every remaining lead denominator applies the prospect scope (codex #5477 r2 P2)', () => {
+    const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+    // IB response-time buckets: the won-per-bucket denominator
+    const ib = read('../services/intelligence-bar/leads-tools.js');
+    expect(ib).toMatch(/\.whereNotNull\('response_time_minutes'\)\s*\.modify\(scopeToProspects\)/);
+    // BI agent customer snapshot: closeRate = won / all leads in the pipeline map
+    expect(read('../services/bi-agent-tools.js')).toMatch(/where\('first_contact_at', '>=', somDate\)\.modify\(scopeToProspects\)\.select\('status'\)/);
+    // campaign actual_leads / actual_conversions
+    expect(read('../routes/admin-leads.js')).toMatch(/\.whereNull\('deleted_at'\)\s*\.modify\(scopeToProspects\)\s*\.where\('first_contact_at', '>=', c\.start_date\)/);
+    // agents hub 30-day response / booked metrics, and the money-model lead count
+    expect(read('../routes/admin-agents.js')).toMatch(/where\('first_contact_at', '>=', since30\)\s*\.modify\(scopeToProspects\)/);
+    expect(read('../services/pricing-intelligence.js')).toMatch(/db\('leads'\)\.whereNull\('deleted_at'\)\.modify\(scopeToProspects\)\.count/);
   });
 });

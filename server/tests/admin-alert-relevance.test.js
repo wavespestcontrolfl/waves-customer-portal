@@ -359,6 +359,17 @@ describe('class rules', () => {
     expect(classify(note({ category: 'new_lead', link: '/admin/leads', metadata: { triggerKey: 'new_lead' } }))).toBeNull();
   });
 
+  test('new lead (codex #5477 r2 P1): a request closed as handled after the bell retires it, even though the lead is unlinked from any customer', async () => {
+    mockTables.leads = [lead({ status: 'handled', customer_id: null, updated_at: AFTER_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBe('Request was handled');
+    // handled BEFORE the bell (a lead already handled when a later submission rang) stays relevant
+    mockTables.leads = [lead({ status: 'handled', customer_id: null, updated_at: BEFORE_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBeNull();
+    // reopened by staff after being handled: relevant again (the sweep puts the bell back)
+    mockTables.leads = [lead({ status: 'new', customer_id: null, updated_at: AFTER_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBeNull();
+  });
+
   test('new lead: the lead\'s state from before the bell never counts — a website submission attached to a lead already quoted, worked or booked stays relevant', async () => {
     // applyLeadAttachUpdate keeps an open lead's status, and the intake trigger rings for the new submission.
     for (const status of ['estimate_sent', 'estimate_viewed', 'contacted', 'spam', 'cancelled', 'won', 'lost', 'duplicate']) {

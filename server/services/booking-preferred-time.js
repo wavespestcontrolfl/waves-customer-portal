@@ -215,7 +215,7 @@ const BOOKING_SLACK_MS = 60 * 1000;
  * booking that commits later than this check finds the committed lead and
  * closes it itself; one that committed earlier is seen here. Never throws.
  */
-async function reconcileBookingSince(db, { phone, since }) {
+async function reconcileBookingSince(db, { phone, since, leadId = null }) {
   try {
     const bookings = await db('self_booked_appointments as sba')
       .leftJoin('customers as c', 'sba.customer_id', 'c.id')
@@ -230,7 +230,13 @@ async function reconcileBookingSince(db, { phone, since }) {
       // The booking's own funnel row may already exist (its attribution ran before
       // this close): then this closer is the second and drops the request's row.
       await dropSupersededPreferredFunnelRows(db, { booking: candidate });
-      if (out.live) return true;
+      // The bell is moot only when the request is now closed: a booking on a
+      // shared phone that does not corroborate this request leaves it open.
+      if (out.closed > 0) return true;
+      if (out.live && leadId) {
+        const row = await db('leads').where({ id: leadId }).first('status');
+        if (row && row.status === CLOSED_STATUS) return true;
+      }
     }
     return false;
   } catch (err) {
@@ -393,7 +399,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   // way (with the admin FYI) and an already-booked customer does not ring the
   // new_lead bell. Best-effort: on any failure the lead simply stays open and
   // rings.
-  const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt });
+  const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt, leadId });
 
   if (created && notify && !alreadyBooked) {
     try {
@@ -417,6 +423,24 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
 }
 
 const CLOSE_REASON = 'booking_on_preferred_request';
+
+// A phone is not an identity: a household or business line is shared by people
+// whose requests are their own (codex #5477 r2 P1). A request closes itself only
+// when something besides the phone ties it to the booked customer: its own
+// customer link, the same email, or the same first AND last name (letters only,
+// case and punctuation ignored). The booking carries no funnel session id and
+// booking_intents are converted by phone alone, so a session match would prove
+// nothing here. Anything else stays open for the office.
+const normName = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^\p{L}]/gu, '');
+const normEmail = (v) => String(v == null ? '' : v).trim().toLowerCase();
+function corroboratesBookedCustomer(lead, customer, customerId) {
+  if (lead.customer_id && String(lead.customer_id) === String(customerId)) return true;
+  const email = normEmail(customer && customer.email);
+  if (email && email === normEmail(lead.email)) return true;
+  const first = normName(customer && customer.first_name);
+  const last = normName(customer && customer.last_name);
+  return !!(first && last && first === normName(lead.first_name) && last === normName(lead.last_name));
+}
 const CLOSED_STATUS = 'handled';
 
 // The one FYI the office gets when a request closes itself. composeAdminAlert
@@ -474,7 +498,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
     if (!visit || visit.is_callback) return none;
     const bookedMs = new Date(booking.created_at).getTime();
     if (Number.isNaN(bookedMs)) return { live: true, closed: 0 };
-    const customer = await db('customers').where({ id: customerId }).first('phone');
+    const customer = await db('customers').where({ id: customerId }).first('phone', 'first_name', 'last_name', 'email');
     const ten = tenDigitPhone(customer && customer.phone);
     if (!ten) return { live: true, closed: 0 };
     const open = (await tenMatch(
@@ -506,7 +530,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
         // to close). The advisory lock only orders closers, so the lead's own
         // state, phone identity and request recency are re-proven right here.
         const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
-          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name',
+          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email',
           trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
         );
         const stillOurs = current
@@ -516,7 +540,8 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
           && !current.deleted_at
           && current.requested_in_time === true
           && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
-          && (!current.customer_id || String(current.customer_id) === String(customerId));
+          && (!current.customer_id || String(current.customer_id) === String(customerId))
+          && corroboratesBookedCustomer(current, customer, customerId);
         if (!stillOurs) return null;
         await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
         await trx('lead_activities').insert({
@@ -561,13 +586,16 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
  * does not matter which closer won the race (the booking's own post-commit close,
  * the submit's reconcileBookingSince, or a replay): each calls this after its
  * own step and whichever runs SECOND, once the booking's row exists, deletes.
- * Idempotent. The replacement (a row keyed to this booking's id, belonging to
- * another lead) is verified in the same statement as the delete, and a row
- * already at booked / completed (revenue attached) is never removed.
+ * Idempotent. The replacement (a row keyed to this booking's id, or the booked
+ * row of a genuine lead this booking converted) belonging to another lead is
+ * verified in the same statement as the delete, and a row already at booked /
+ * completed (revenue attached) is never removed.
  * Best-effort: never throws into the booking. Returns the rows removed.
  */
 async function dropSupersededPreferredFunnelRows(db, { booking = null } = {}) {
   if (!booking || !booking.id) return 0;
+  const bookedMs = new Date(booking.created_at).getTime();
+  const convertedSince = booking.customer_id && !Number.isNaN(bookedMs) ? new Date(bookedMs - BOOKING_SLACK_MS) : null;
   try {
     return (await db('ad_service_attribution')
       .whereIn('lead_id', function closedByThisBooking() {
@@ -580,9 +608,23 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null } = {}) {
       })
       .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
       .whereExists(function replacementRow() {
+        // The booking's own row (keyed to this booking), OR the funnel row of a
+        // genuine lead this booking converted instead (recurring / estimate-
+        // linked bookings convert that lead, so attributeSelfBooking writes no row
+        // of its own): another lead's row, for the booked customer, at booked /
+        // completed and advanced since this booking was made. Persisted facts
+        // only, so either closer finds it whichever runs second.
         this.select(1).from('ad_service_attribution as booked')
-          .whereRaw('booked.self_booked_appointment_id = ?', [booking.id])
-          .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id');
+          .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id')
+          .where((q) => {
+            q.whereRaw('booked.self_booked_appointment_id = ?', [booking.id]);
+            if (convertedSince) {
+              q.orWhere((c) => c.whereRaw('booked.lead_id IS NOT NULL')
+                .whereRaw('booked.customer_id = ?', [booking.customer_id])
+                .whereIn('booked.funnel_stage', ['booked', 'completed'])
+                .where('booked.updated_at', '>=', convertedSince));
+            }
+          });
       })
       .del()) || 0;
   } catch (err) {

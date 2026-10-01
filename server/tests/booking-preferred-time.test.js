@@ -189,7 +189,7 @@ beforeEach(() => {
   mockExistingLead = null;
   mockCustomer = null;
   mockOpenLeads = [];
-  mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, requested_in_time: true };
+  mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample', email: null, requested_in_time: true };
   mockLeadUpdateRows = 1;
   mockRetireError = null;
   mockBookedSince = null;
@@ -489,7 +489,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
 
   test('a booking that won the race (committed while this submit was in flight): the lead closes as handled with ONE audit row and ONE admin FYI, is NOT converted, and NO new_lead bell rings', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: new Date() };
-    mockCustomer = { phone: '+19415550100' };
+    mockCustomer = { phone: '+19415550100', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.test' };
     mockOpenLeads = [{ id: 'lead-1' }];
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
@@ -506,7 +506,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
 
   test('a race booking never wins the lead or touches its funnel row (even with several open requests: each closes as handled, none converted)', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: new Date() };
-    mockCustomer = { phone: '+19415550100' };
+    mockCustomer = { phone: '+19415550100', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.test' };
     mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
@@ -522,7 +522,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
   test('a booking whose only visit is cancelled/skipped/rescheduled (codex #5399 r10 P2): no note, and the lead rings', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: new Date() };
     mockDeadVisit = true;
-    mockCustomer = { phone: '+19415550100' };
+    mockCustomer = { phone: '+19415550100', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.test' };
     mockOpenLeads = [{ id: 'lead-1' }];
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
@@ -535,7 +535,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
   test('a free callback visit inside the reconcile window is not an acquisition: no note, and the lead rings', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: new Date() };
     mockScheduledService = { id: 'ss-1', self_booking_id: 'sba-1', is_callback: true };
-    mockCustomer = { phone: '+19415550100' };
+    mockCustomer = { phone: '+19415550100', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.test' };
     mockOpenLeads = [{ id: 'lead-1' }];
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
@@ -764,10 +764,10 @@ describe('a completed booking closes the customer\'s open preferred-time request
   const activities = () => mockOps.filter((o) => o.table === 'lead_activities' && o.op === 'insert');
   const closeWrites = () => mockOps.filter((o) => o.table === 'leads' && o.op === 'update');
   beforeEach(() => {
-    mockCustomer = { phone: '+1 (941) 555-0100' };
+    mockCustomer = { phone: '+1 (941) 555-0100', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.test' };
     mockOpenLeads = [{ id: 'lead-1' }];
     mockScheduledService = { id: 'visit-7', self_booking_id: 'sba-1', service_type: 'Lawn Care', scheduled_date: '2026-10-08' };
-    mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample', requested_in_time: true };
+    mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample', email: null, requested_in_time: true };
   });
 
   test.each([
@@ -785,6 +785,36 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(activities()).toHaveLength(0);
     expect(closeWrites()).toHaveLength(0);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  describe('a phone alone is not an identity (codex #5477 r2 P1): shared household / business lines', () => {
+    const closeOnce = () => closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+    test.each([
+      ['it is linked to the booked customer', { customer_id: 'cust-1', first_name: 'Someone', last_name: 'Else' }],
+      ['the same email (case and spacing ignored)', { first_name: 'Someone', last_name: 'Else', email: '  PAT@Example.test ' }],
+      ['the same first and last name (case and punctuation ignored)', { first_name: 'pat', last_name: 'SAMPLE-' }],
+    ])('closes when %s', async (_label, change) => {
+      mockLockedLead = { ...mockLockedLead, ...change };
+      expect(await closeOnce()).toMatchObject({ live: true, closed: 1 });
+      expect(closeWrites()).toHaveLength(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    });
+    test.each([
+      ['a different person on the same phone', { first_name: 'Robin', last_name: 'Other' }],
+      ['the same first name only', { first_name: 'Pat', last_name: 'Other' }],
+      ['a different email and name', { first_name: 'Robin', last_name: 'Other', email: 'robin@example.test' }],
+      ['no name and no email at all', { first_name: null, last_name: null, email: null }],
+    ])('stays OPEN for %s: no status write, no audit row, no FYI', async (_label, change) => {
+      mockLockedLead = { ...mockLockedLead, ...change };
+      expect(await closeOnce()).toMatchObject({ live: true, closed: 0 });
+      expect(closeWrites()).toHaveLength(0);
+      expect(activities()).toHaveLength(0);
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    });
+    test('a booked customer with no usable name or email corroborates nothing', async () => {
+      mockCustomer = { phone: '+19415550100', first_name: 'Pat', last_name: null, email: null };
+      expect(await closeOnce()).toMatchObject({ live: true, closed: 0 });
+    });
   });
 
   test('the locked re-read applies the same request-recency cutoff as the candidate query (booking + 60 s slack)', async () => {
@@ -957,7 +987,7 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(normal).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking \}\);/);
     // The request's funnel row is dropped by whichever closer runs SECOND: the normal path after attributeSelfBooking
     // (only when it attributed), the replay path after its close, and the submit's reconcile after its close.
-    expect(normal).toMatch(/if \(selfAttribution\?\.attributed\) await dropSupersededPreferredFunnelRows\(db, \{ booking \}\);/);
+    expect(normal).toMatch(/if \(selfAttribution\?\.attributed \|\| leadConversion\?\.converted\) await dropSupersededPreferredFunnelRows\(db, \{ booking \}\);/);
     expect(normal.indexOf('await attributeSelfBooking(')).toBeLessThan(normal.indexOf('dropSupersededPreferredFunnelRows(db'));
     expect(replaySrc).toMatch(/closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing \}\);\s*[^\n]*\n[^\n]*\n\s*await dropSupersededPreferredFunnelRows\(db, \{ booking: txResult\.existing \}\);/);
     const svc0 = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');

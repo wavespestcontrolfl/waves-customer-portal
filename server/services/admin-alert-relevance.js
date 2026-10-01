@@ -143,7 +143,7 @@ async function loadSubjects(rows, conn = db) {
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
-      .select('id', 'deleted_at', 'customer_id', 'estimate_id'));
+      .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status', 'updated_at'));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
@@ -236,7 +236,8 @@ function seriesMoveMovedOn(s) {
 // happened AFTER the bell counts: the lead deleted, a quote sent (the one it
 // points at, or any to its customer), or a live visit booked for its customer. Timestamped facts only — a status
 // carries no time, and the lead's state can predate the bell (a website
-// submission attached to a lead already quoted or worked). Not converted_at:
+// submission attached to a lead already quoted or worked; a 'handled' lead is
+// timed by its updated_at). Not converted_at:
 // booking the lead stamps it and cancelling that visit never clears it, so
 // the booking itself — while it is live — is the evidence.
 function newLeadMovedOn(s) {
@@ -246,6 +247,11 @@ function newLeadMovedOn(s) {
   if (!lead || !s.bellAt) return null;
   const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();
   if (after(lead.deleted_at)) return 'Lead was deleted';
+  // A /book request closed as 'handled' (its own booking, or staff): a status has
+  // no time of its own, but the transition stamps updated_at, so a lead that IS
+  // handled and was last written after the bell was handled after it. A lead
+  // reopened since reads relevant again (the sweep puts the bell back).
+  if (lead.status === 'handled' && after(lead.updated_at)) return 'Request was handled';
   if (after(s.estimate?.sent_at) || after(s.leadQuotedAt)) return 'Estimate was sent';
   if (after(s.leadBookedAt)) return 'A visit was booked';
   return null;

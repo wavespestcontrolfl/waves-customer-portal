@@ -76,12 +76,12 @@ jest.setTimeout(60000);
       transcript_summary text, extracted_data jsonb, lead_source_id uuid, gclid text, wbraid text, gbraid text, fbclid text, fbc text, fbp text,
       converted_at timestamptz, deleted_at timestamptz, customer_id uuid, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`, [schema]);
     await database.raw('CREATE TABLE ??.funnel_rows (lead_id uuid PRIMARY KEY)', [schema]);
-    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text)', [schema]);
+    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text, first_name text, last_name text, email text)', [schema]);
     await database.raw(`CREATE TABLE ??.self_booked_appointments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status text DEFAULT 'confirmed', created_at timestamptz DEFAULT now())`, [schema]);
     await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, status text DEFAULT \'pending\', is_callback boolean DEFAULT false, service_type text DEFAULT \'Pest Control\', scheduled_date date DEFAULT \'2099-01-08\')', [schema]);
     await database.raw('CREATE TABLE ??.lead_activities (id serial PRIMARY KEY, lead_id uuid NOT NULL, activity_type text, description text, performed_by text, metadata jsonb, created_at timestamptz DEFAULT now())', [schema]);
-    await database.raw('CREATE TABLE ??.ad_service_attribution (id serial PRIMARY KEY, lead_id uuid UNIQUE, customer_id uuid, self_booked_appointment_id uuid UNIQUE, lead_source text DEFAULT \'google_ads\', lead_source_detail text, lead_date date, fbp text, gclid text, wbraid text, gbraid text, fbclid text, fbc text, utm_campaign text, utm_term text, is_paid boolean, service_line text, specific_service text, service_bucket text, funnel_stage text DEFAULT \'lead\')', [schema]);
+    await database.raw('CREATE TABLE ??.ad_service_attribution (id serial PRIMARY KEY, lead_id uuid UNIQUE, customer_id uuid, self_booked_appointment_id uuid UNIQUE, lead_source text DEFAULT \'google_ads\', lead_source_detail text, lead_date date, fbp text, gclid text, wbraid text, gbraid text, fbclid text, fbc text, utm_campaign text, utm_term text, is_paid boolean, service_line text, specific_service text, service_bucket text, updated_at timestamptz DEFAULT now(), funnel_stage text DEFAULT \'lead\')', [schema]);
     ({ recordPreferredTimeRequest } = require('../services/booking-preferred-time'));
     ({ _internals: { withLockedRecoveryIntent } } = require('../services/booking-abandon-recovery'));
   });
@@ -216,7 +216,7 @@ jest.setTimeout(60000);
     const submit = recordPreferredTimeRequest(database, value(), { notify: true });
     await tick();
     // /confirm commits its booking (and its own note step finds no lead yet) while the submit is mid-transaction.
-    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
     const sba = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
     const visit = await database('scheduled_services').insert({ self_booking_id: sba[0].id }).returning('id');
     slow.open();
@@ -243,7 +243,7 @@ jest.setTimeout(60000);
     const { attributeSelfBooking } = require('../services/lead-estimate-link');
     const flow = async ({ attribution, bookingSource = null, customerCreated = false, stage = 'lead' }) => {
       const cust = randomUUID();
-      await database('customers').insert({ id: cust, phone: '+19415550100' });
+      await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
       const req = await recordPreferredTimeRequest(database, value(), { notify: false });
       await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: stage });
       const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
@@ -258,6 +258,18 @@ jest.setTimeout(60000);
     };
     const requestRow = (leadId) => database('ad_service_attribution').where({ lead_id: leadId });
     const bookingRows = (sbaId) => database('ad_service_attribution').where({ self_booked_appointment_id: sbaId });
+    const setupRequestAndBooking = async () => {
+      const cust = randomUUID();
+      await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
+      const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+      await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
+      const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at', 'customer_id']);
+      await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+      return { cust, req, booking: sba[0] };
+    };
+    const attribute = (cust, booking) => attributeSelfBooking({
+      customerId: cust, attribution: captured, serviceInterest: 'Pest Control', customerCreated: false, selfBookedAppointmentId: booking.id, bookingSource: null, leadConverted: false, database,
+    });
     const captured = { utm: { source: 'newsletter', medium: 'email' }, landing_url: 'https://example.test/book', referrer: 'https://example.test/' };
 
     test('a captured organic booking: the request row is deleted and the booking has exactly one booked row (the funnels count one lead reaching booked)', async () => {
@@ -292,7 +304,7 @@ jest.setTimeout(60000);
 
     test('the cleanup verifies the replacement itself: with no row for this booking nothing is deleted even if called; a row already at completed is never removed', async () => {
       const cust = randomUUID();
-      await database('customers').insert({ id: cust, phone: '+19415550100' });
+      await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
       const req = await recordPreferredTimeRequest(database, value(), { notify: false });
       await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
       const sba = await database('self_booked_appointments').insert({ customer_id: cust }).returning(['id']);
@@ -311,16 +323,13 @@ jest.setTimeout(60000);
       const { reconcileBookingSince } = require('../services/booking-preferred-time');
       const setup = async () => {
         const cust = randomUUID();
-        await database('customers').insert({ id: cust, phone: '+19415550100' });
+        await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
         const req = await recordPreferredTimeRequest(database, value(), { notify: false });
         await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
         const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
         await database('scheduled_services').insert({ self_booking_id: sba[0].id });
         return { cust, req, booking: sba[0] };
       };
-      const attribute = (cust, booking) => attributeSelfBooking({
-        customerId: cust, attribution: captured, serviceInterest: 'Pest Control', customerCreated: false, selfBookedAppointmentId: booking.id, bookingSource: null, leadConverted: false, database,
-      });
 
       test('reconcile closes the request FIRST (booking close finds nothing), then the booking row lands: the booking path drops the request row -> one row', async () => {
         const { cust, req, booking } = await setup();
@@ -369,9 +378,94 @@ jest.setTimeout(60000);
       });
     });
 
+    describe('a booking that converted a genuine lead instead (codex #5477 r2 P1)', () => {
+      const withConvertedLead = async ({ stage = 'booked', updatedAt = new Date(), forCustomer = true } = {}) => {
+        const { cust, req, booking } = await setupRequestAndBooking();
+        const genuine = await database('leads').insert({ first_name: 'Pat', last_name: 'Sample', phone: '+19415550100', status: 'won', lead_type: 'web_form', customer_id: cust }).returning('id');
+        await database('ad_service_attribution').insert({ lead_id: genuine[0].id, customer_id: forCustomer ? cust : randomUUID(), funnel_stage: stage, updated_at: updatedAt });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        // convertLeadFromEvent converted the genuine lead, so attributeSelfBooking records nothing for the booking itself
+        const attributed = await attributeSelfBooking({
+          customerId: cust, attribution: captured, serviceInterest: 'Pest Control', customerCreated: false, selfBookedAppointmentId: booking.id, bookingSource: null, leadConverted: true, database,
+        });
+        expect(attributed).toMatchObject({ attributed: false, reason: 'lead_converted' });
+        expect(await bookingRows(booking.id)).toHaveLength(0);
+        await dropSupersededPreferredFunnelRows(database, { booking }); // booking.js calls it on leadConversion.converted
+        return { req, genuineId: genuine[0].id };
+      };
+
+      test('the converted lead\'s booked row is the replacement: the request row is dropped, the genuine lead\'s row stays', async () => {
+        const { req, genuineId } = await withConvertedLead();
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+        expect(await requestRow(genuineId)).toHaveLength(1);
+      });
+      test('a converted lead already at completed counts too', async () => {
+        const { req } = await withConvertedLead({ stage: 'completed' });
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+      });
+      test('another lead\'s booked row from BEFORE this booking (an older journey) is not a replacement', async () => {
+        const { req } = await withConvertedLead({ updatedAt: new Date(Date.now() - 86400000) });
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+      });
+      test('a booked row belonging to a different customer is not a replacement', async () => {
+        const { req } = await withConvertedLead({ forCustomer: false });
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+      });
+      test('a converted lead that has only reached an open stage is not a replacement', async () => {
+        const { req } = await withConvertedLead({ stage: 'contacted' });
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+      });
+    });
+
+    describe('a phone alone is not an identity (codex #5477 r2 P1)', () => {
+      const requestFor = async (phoneOwner) => {
+        const cust = randomUUID();
+        await database('customers').insert({ id: cust, phone: '+19415550100', ...phoneOwner });
+        const req = await recordPreferredTimeRequest(database, value({ firstName: 'Robin', lastName: 'Other' }), { notify: false });
+        await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        return { cust, req, booking: sba[0] };
+      };
+
+      test('a different person on the shared phone: the request stays open, keeps its funnel row, and no FYI goes out', async () => {
+        const { cust, req, booking } = await requestFor({ first_name: 'Pat', last_name: 'Sample', email: 'pat@example.test' });
+        expect(await closeBookedPreferredLeads(database, { customerId: cust, booking })).toMatchObject({ live: true, closed: 0 });
+        await attribute(cust, booking);
+        await dropSupersededPreferredFunnelRows(database, { booking });
+        expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'new' });
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+        expect(await closeRows()).toHaveLength(0);
+        expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      });
+
+      test('the submit\'s reconcile does not silence the new_lead bell for it', async () => {
+        const cust = randomUUID();
+        await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        const { triggerNotification } = require('../services/notification-triggers');
+        triggerNotification.mockClear();
+        const out = await recordPreferredTimeRequest(database, value({ firstName: 'Robin', lastName: 'Other' }), { notify: true });
+        expect(await database('leads').where({ id: out.leadId }).first()).toMatchObject({ status: 'new' });
+        expect(triggerNotification).toHaveBeenCalledTimes(1);
+      });
+
+      test.each([
+        ['linked to the booked customer', { first_name: 'Someone', last_name: 'Else' }, (cust) => ({ customer_id: cust })],
+        ['same email', { first_name: 'Someone', last_name: 'Else', email: 'robin@example.test' }, () => ({ email: 'ROBIN@example.test ' })],
+        ['same first and last name', { first_name: 'Robin', last_name: 'Other' }, () => ({ updated_at: new Date() })],
+      ])('corroborated by %s: closed', async (_label, customerFields, leadFields) => {
+        const { cust, req, booking } = await requestFor(customerFields);
+        await database('leads').where({ id: req.leadId }).update(leadFields(cust));
+        expect(await closeBookedPreferredLeads(database, { customerId: cust, booking })).toMatchObject({ live: true, closed: 1 });
+        expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
+      });
+    });
+
     test('the close itself never touches the request\'s funnel row (the reconcile path, which has no attributeSelfBooking, leaves it)', async () => {
       const cust = randomUUID();
-      await database('customers').insert({ id: cust, phone: '+19415550100' });
+      await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
       const req = await recordPreferredTimeRequest(database, value(), { notify: false });
       await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
       const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
@@ -385,7 +479,7 @@ jest.setTimeout(60000);
     const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
     const first = await recordPreferredTimeRequest(database, value(), { notify: false });
     const cust = randomUUID();
-    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
     const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() + 5000) }).returning(['id', 'created_at']);
     await database('scheduled_services').insert({ self_booking_id: sba[0].id });
     const runs = await Promise.all([1, 2, 3].map(() => closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })));
@@ -415,7 +509,7 @@ jest.setTimeout(60000);
     const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
     const first = await recordPreferredTimeRequest(database, value(), { notify: false });
     const cust = randomUUID();
-    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
     const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() + 5000) }).returning(['id', 'created_at']);
     await database('scheduled_services').insert({ self_booking_id: sba[0].id });
     // Staff holds the lead row mid-edit (reassigning its phone) while the note runs: the note parks on the row lock,
@@ -465,7 +559,7 @@ jest.setTimeout(60000);
     const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
     const first = await recordPreferredTimeRequest(database, value(), { notify: false });
     const cust = randomUUID();
-    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
     const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() + 5000) }).returning(['id', 'created_at']);
     await database('scheduled_services').insert({ self_booking_id: sba[0].id });
     await database('lead_activities').del();
@@ -497,7 +591,7 @@ jest.setTimeout(60000);
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
-    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
     const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() - 3600000) }).returning('id');
     await database('scheduled_services').insert({ self_booking_id: sba[0].id });
     await recordPreferredTimeRequest(database, value(), { notify: true });
@@ -509,7 +603,7 @@ jest.setTimeout(60000);
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
-    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
     const cb = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
     await database('scheduled_services').insert({ self_booking_id: cb[0].id, is_callback: true });
     const out = await recordPreferredTimeRequest(database, value(), { notify: true });

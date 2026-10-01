@@ -666,6 +666,7 @@ router.get('/campaigns', async (req, res, next) => {
       if (c.lead_source_id && c.start_date) {
         const q = db('leads').where('lead_source_id', c.lead_source_id)
           .whereNull('deleted_at')
+          .modify(scopeToProspects)
           .where('first_contact_at', '>=', c.start_date);
         if (c.end_date) q.where('first_contact_at', '<=', c.end_date);
         const counts = await q.clone().select(

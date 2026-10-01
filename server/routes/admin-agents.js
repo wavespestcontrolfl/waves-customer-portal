@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { scopeToProspects } = require('../services/lead-statuses');
 const leadAttribution = require('../services/lead-attribution');
 const agentActivity = require('../services/agent-activity');
 const modelSwitchboard = require('../services/model-switchboard');
@@ -580,6 +581,7 @@ async function loadLeadConversionDetails() {
   const recentRows = await db('leads')
     .whereNull('deleted_at')
     .where('first_contact_at', '>=', since30)
+    .modify(scopeToProspects)
     .select('status', 'response_time_minutes', 'first_contact_at');
 
   const responded = recentRows.filter((row) => row.response_time_minutes != null);

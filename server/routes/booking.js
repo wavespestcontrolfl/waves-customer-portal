@@ -6491,7 +6491,7 @@ async function createSelfBooking(payload = {}) {
         // this booking closed (here or in the submit's reconcile) is a duplicate of
         // the same journey: drop it (resolved from the close audit rows, verified
         // against the booking's row in the same statement; kept when none).
-        if (selfAttribution?.attributed) await dropSupersededPreferredFunnelRows(db, { booking });
+        if (selfAttribution?.attributed || leadConversion?.converted) await dropSupersededPreferredFunnelRows(db, { booking });
       } catch (err) {
         logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
       }

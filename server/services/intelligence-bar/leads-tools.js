@@ -444,6 +444,7 @@ async function getResponseTimes(days) {
     .whereNull('deleted_at')
     .where('first_contact_at', '>=', since)
     .whereNotNull('response_time_minutes')
+    .modify(scopeToProspects)
     .select('response_time_minutes', 'status');
 
   const buckets = [
