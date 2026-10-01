@@ -9173,9 +9173,9 @@ function WeatherPestWidget({ customer, nextService }) {
 
   if (!weather) return null;
 
-  // Localized location label
-  const cityName = customer?.address?.city || '';
-  const localizedLocation = cityName ? `${cityName} Weather` : weather.location;
+  // The server names the place the data is actually for (the customer's own
+  // forecast city, or its fallback) — never label it with a different city.
+  const localizedLocation = weather.location ? `${weather.location.replace(/,\s*FL$/, '')} Weather` : 'Local Weather';
 
   // Build action items per pest pressure indicator
   const getActionItem = (type, level) => {
@@ -9263,7 +9263,7 @@ function WeatherPestWidget({ customer, nextService }) {
             {weather.temp}°
           </div>
           <div style={{ marginTop: compact ? 0 : 4, fontSize: 14, color: muted, textAlign: 'right' }}>
-            Tonight {weather.nightTemp}° · {weather.humidity}% humidity
+            {weather.isDaytime === false ? 'Tonight' : `Tonight ${weather.nightTemp}°`} · {weather.humidity}% humidity
           </div>
         </div>
       </div>
