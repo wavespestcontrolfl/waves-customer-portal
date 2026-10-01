@@ -618,7 +618,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
     let extra = [];
     try {
       const own = evaluate(
-        { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: category || canonicalCategory(fm.category) || null, service, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+        { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: category || canonicalCategory(fm.category) || null, service, targetSites: fm.domains, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
         { index, requireCorpus: false, ownershipOnly: true }
       );
       extra = (own.findings || []).filter((f) => f.code === CODES.CANNIBALIZES_EXISTING || f.code === CODES.SLUG_COLLIDES_LIVE || f.code === CODES.RETIRED_TOPIC);
@@ -632,7 +632,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
   // slug and the coarse service are fallbacks inside evaluate().
   const emittedCategory = category || canonicalCategory(fm.category) || null;
   const own = evaluate(
-    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, city: [city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].filter(Boolean), targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, targetSites: fm.domains, city: [city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].filter(Boolean), targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
     { index, requireCorpus: true }
   );
   return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
@@ -689,7 +689,7 @@ async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLi
   const slug = String(post.slug || '').trim();
   // flatWrite: publishAstro commits src/content/blog/<leaf>.md for a
   // leaf-only slug whatever the category — the same-leaf collision applies.
-  const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, flatWrite: true, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
+  const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, flatWrite: true, targetSites: post.target_sites, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
   // Two stages (the runner's pattern): geo first WITHOUT the corpus — a
   // deterministic geo block never fetches the live corpus and still returns
   // its verdict during a GitHub outage; only a geo-clean row loads it.
@@ -996,7 +996,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // → compare against all (conservative).
   const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   // Retired topics need no corpus: judged in every mode, before any fetch.
-  findings.push(...retiredTopicFindings({ query, title, slug, category, leafOnly: normalizeSlug(slug).split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite) }));
+  if (!spokeOnly(candidate.targetSites)) findings.push(...retiredTopicFindings({ query, title, slug, category, leafOnly: normalizeSlug(slug).split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite) }));
   const idx = index || (corpus ? indexCorpus(corpus) : null);
   if (!idx) {
     // Pre-spend: a geo or retired-topic verdict needs no corpus and stands on its own.
@@ -1103,6 +1103,21 @@ const RETIRED_FILLER = new Set([
   'service', 'company', 'best', 'guide', 'near', 'lawn',
 ]);
 
+const EXTERMINATION_WORDS = new Set(['exterminator', 'extermination', 'exterminate', 'exterminating']);
+
+// The registry retires HUB posts. A candidate published only to spoke
+// domains (spoke seeds carry target_sites; a draft carries frontmatter
+// `domains`) is a different page on a different site, so it is not judged
+// against it. No sites listed = the hub.
+function spokeOnly(targetSites) {
+  const raw = Array.isArray(targetSites) ? targetSites : asStringList(targetSites);
+  const hosts = raw.map((x) => (x && typeof x === 'object' ? x.domain : x))
+    .map((x) => String(x || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0])
+    .filter(Boolean);
+  const { HUB_SITE_KEYS } = require('../content-astro/spoke-sites');
+  return hosts.length > 0 && hosts.every((h) => !HUB_SITE_KEYS.includes(h));
+}
+
 function stem(w) {
   if (w.length > 4 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
   if (/(?:ch|sh|x|ss)es$/.test(w)) return w.slice(0, -2);
@@ -1140,7 +1155,11 @@ function topicKey(text) {
     .filter((w) => !GEO_TOKENS.has(w) && !cities.has(w) && !GENERIC_TOKENS.has(w))
     .map(stem)
     .filter((w) => !RETIRED_FILLER.has(w) && !GENERIC_TOKENS.has(w));
-  return [...new Set(words)].sort().join(' ');
+  // "Exterminator" / "extermination" frame a pest ("paper wasp exterminator")
+  // but ARE the topic when nothing else is left ("what do exterminators get
+  // rid of").
+  const named = words.filter((w) => !EXTERMINATION_WORDS.has(w));
+  return [...new Set(named.length ? named : words)].sort().join(' ');
 }
 
 let retiredIndexCache = null;

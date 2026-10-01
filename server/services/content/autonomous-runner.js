@@ -468,6 +468,9 @@ class AutonomousRunner {
         // served locality like a blog_posts row's city.
         city: ob?.city || brief.city || opp.city || null,
         service: brief.service || opp.service || null,
+        // Spoke-only publications are not judged against the hub's retired
+        // topics (spoke seeds carry target_sites in signal_metadata).
+        targetSites: brief.target_sites || opp.signal_metadata?.target_sites || null,
       };
       let topicResult;
       if (!topicGate) {

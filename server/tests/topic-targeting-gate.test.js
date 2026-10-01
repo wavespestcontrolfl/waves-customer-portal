@@ -1200,6 +1200,29 @@ describe('retired topics', () => {
     }
   });
 
+  test('extermination wording frames a retired pest; "exterminator" alone stays a topic (codex r3)', () => {
+    for (const [query, url] of [
+      ['paper wasp extermination', '/pest-control/get-rid-of-paper-wasps/'],
+      ['bed bug exterminator', '/pest-control/bed-bug-treatment-bradenton/'],
+      ['what do exterminators get rid of', '/pest-control/what-do-exterminators-get-rid-of/'],
+    ]) {
+      expect(gate.evaluate(blog({ query }), { requireCorpus: false }).findings.find((f) => f.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url });
+    }
+  });
+
+  test('hub retirements do not apply to a spoke-only publication; hub or unlisted sites still checked (codex r3)', () => {
+    const retired = (extra) => gate.evaluate(blog({ query: 'carpenter ants Sarasota', ...extra }), { requireCorpus: false }).findings.some((f) => f.code === gate.CODES.RETIRED_TOPIC);
+    expect(retired({ targetSites: ['sarasotaflpestcontrol.com'] })).toBe(false);
+    expect(retired({ targetSites: ['https://www.sarasotaflpestcontrol.com/'] })).toBe(false);
+    expect(retired({ targetSites: ['sarasotaflpestcontrol.com', 'wavespestcontrol.com'] })).toBe(true);
+    expect(retired({ targetSites: [] })).toBe(true);
+    expect(retired({})).toBe(true);
+    const draft = (domains) => gate.evaluateDraftTargeting({ frontmatter: { title: 'Carpenter Ants in Sarasota Live Oaks', slug: '/pest-control/carpenter-ants-sarasota-coastal-live-oaks/', primary_keyword: 'carpenter ants Sarasota', domains } }, { index: gate.indexCorpus(CORPUS) })
+      .findings.some((f) => f.code === gate.CODES.RETIRED_TOPIC);
+    expect(draft([{ domain: 'sarasotaflpestcontrol.com' }])).toBe(false);
+    expect(draft(undefined)).toBe(true);
+  });
+
   test('registry size is deliberate (47: 51 proposed minus 4 kept live)', () => {
     expect(gate._internals.RETIRED_POSTS).toHaveLength(47);
   });
