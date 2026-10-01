@@ -188,7 +188,8 @@ function mapStanding(alert) {
   };
 }
 
-// Every open row, walked in id-keyset pages: area, severity and who are judged in JS, so
+// Every open row, walked newest first in (created_at, id) keyset pages — the
+// bell's own order, served by notifications_admin_open_keyset_idx: area, severity and who are judged in JS, so
 // a newest-N read would drop an older open finding from a filtered list and its totals.
 // SCAN_CAP is a runaway guard only; reaching it is reported as a warning, never silent.
 async function openAlertRows(role) {
@@ -199,16 +200,19 @@ async function openAlertRows(role) {
   let after = null;
   for (;;) {
     const query = NotificationService.scopeAdminFeedToRole(db('notifications').where({ recipient_type: 'admin' }), role);
-    if (after) query.where('id', '>', after);
+    if (after) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [after.at, after.id]);
     // The cron's persisted dashboard_alert rows echo the standing conditions below.
     const page = await query.whereNull('done_at')
       .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
-      .orderBy('id', 'asc').limit(PAGE_SIZE)
-      .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', 'read_at');
+      .orderByRaw('created_at DESC, id DESC').limit(PAGE_SIZE)
+      // created_at::text keeps the microseconds a JS Date would round away, so
+      // rows sharing a millisecond are never skipped or repeated.
+      .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', 'read_at', db.raw('created_at::text AS created_at_cursor'));
     rows.push(...page);
     if (page.length < PAGE_SIZE) return { rows, truncated: false };
     if (rows.length >= SCAN_CAP) return { rows, truncated: true };
-    after = page[page.length - 1].id;
+    const last = page[page.length - 1];
+    after = { at: last.created_at_cursor, id: last.id };
   }
 }
 

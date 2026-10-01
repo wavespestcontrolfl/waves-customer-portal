@@ -15,7 +15,7 @@ let mockRows;
 let mockQueryError;
 let mockPages = null;
 const mockCalls = [];
-jest.mock('../models/db', () => () => {
+jest.mock('../models/db', () => Object.assign(() => {
   const q = new Proxy({}, {
     get(_, name) {
       if (name === 'then') {
@@ -27,7 +27,7 @@ jest.mock('../models/db', () => () => {
     },
   });
   return q;
-});
+}, { raw: (sql) => ({ raw: sql }) }));
 
 const NotificationService = require('../services/notification-service');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
@@ -221,15 +221,18 @@ test('a failing source is reported and the other source still answers', async ()
 });
 
 test('an older open FIX behind more than a page of newer rows is still listed and counted', async () => {
-  const filler = (from) => Array.from({ length: 500 }, (_, i) => row({ id: `p${String(from + i).padStart(5, '0')}`, created_at: '2026-09-30T12:00:00Z' }));
+  const filler = (from) => Array.from({ length: 500 }, (_, i) => row({ id: `p${String(from + i).padStart(5, '0')}`, created_at: '2026-09-30T12:00:00Z', created_at_cursor: `2026-09-30 12:00:00.${String(999999 - from - i).padStart(6, '0')}+00` }));
   const oldFix = row({ id: 'q-old-fix', category: 'ops_digest', created_at: '2026-08-01T12:00:00Z', metadata: { kind: 'FIX', audience: 'engineering' } });
   mockPages = [filler(0), filler(500), [oldFix]];
   const out = await listNeedsMe({ who: 'claude' });
   expect(out.items.map((i) => i.id)).toEqual(['q-old-fix']);
   expect(out.total).toBe(1);
   expect(out.warnings).toEqual([]);
-  // Pages continue strictly after the last id read.
-  expect(mockCalls.filter((c) => c[0] === 'where' && c[1] === 'id').map((c) => c.slice(2))).toEqual([['>', 'p00499'], ['>', 'p00999']]);
+  // Newest first on the indexed (created_at, id) keyset; each page continues
+  // strictly before the last row read, at its exact (microsecond) created_at.
+  expect(mockCalls).toEqual(expect.arrayContaining([['orderByRaw', 'created_at DESC, id DESC']]));
+  expect(mockCalls.filter((c) => c[0] === 'whereRaw' && /^\(created_at, id\) </.test(c[1])).map((c) => c[2]))
+    .toEqual([['2026-09-30 12:00:00.999500+00', 'p00499'], ['2026-09-30 12:00:00.999000+00', 'p00999']]);
 });
 
 test('a scan that reaches the runaway cap says so instead of answering short', async () => {
@@ -376,4 +379,11 @@ test('a standing condition names its dashboard check as its subject', async () =
   computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'overdue_60', severity: 'critical', count: 1, label: '1 invoice 60+ days overdue', href: '/admin/invoices' }] });
   const { items } = await listNeedsMe({});
   expect(items[0].subject).toEqual({ type: 'check', id: 'overdue_60' });
+});
+
+test('the bar tool refuses an unknown who or area instead of answering "nothing open"', async () => {
+  const { executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
+  expect((await executeNeedsMeTool('needs_me', { who: 'Claude' })).error).toMatch(/who must be one of/);
+  expect((await executeNeedsMeTool('needs_me', { area: 'billing' })).error).toMatch(/area must be one of/);
+  expect((await executeNeedsMeTool('needs_me', { area: 'Billing' })).error).toBeUndefined();
 });

@@ -61,6 +61,10 @@ function toBarItem(item) {
 async function needsMe(input = {}) {
   try {
     const limit = Number.isInteger(input.limit) ? Math.min(Math.max(input.limit, 1), MAX_ITEMS) : 25;
+    // The legacy bar path skips schema validation: an unknown filter would
+    // silently match nothing and read as "nothing open".
+    if (input.who != null && !WHO.includes(input.who)) return { error: `who must be one of: ${WHO.join(', ')}` };
+    if (input.area != null && !AREAS.includes(input.area)) return { error: `area must be one of: ${AREAS.join(', ')}` };
     const after = input.after ? decodeCursor(input.after) : null;
     if (input.after && !after) return { error: 'after must be the next_cursor from a previous needs_me call' };
     const result = await listNeedsMe({ who: input.who, area: input.area, limit, after });
