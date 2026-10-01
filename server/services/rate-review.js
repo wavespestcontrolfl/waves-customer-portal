@@ -2578,6 +2578,7 @@ module.exports = {
   LEDGER_FAMILIES_FOR_LINE,
   anniversaryInWindow,
   familyOfCoverage,
+  matchPrepayTerm,
   visitsPerYearFor,
   buildBatch,
   summarizeBatch,

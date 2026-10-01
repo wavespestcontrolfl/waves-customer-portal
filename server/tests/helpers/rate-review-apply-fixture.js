@@ -285,12 +285,20 @@ function createFakeDb(tables = {}) {
   db.rawHandlers = [];
   db.raw = jest.fn(async (sql, bindings = []) => {
     for (const [re, fn] of db.rawHandlers) if (re.test(sql)) return fn(bindings, sql);
+    if (/SELECT count\(DISTINCT/.test(sql)) {
+      const [customerId, fromDate] = bindings;
+      const lines = new Set(db.store.scheduled_services
+        .filter((s) => same(s.customer_id, customerId) && s.scheduled_date >= fromDate && ['pending', 'confirmed', 'rescheduled'].includes(s.status)
+          && (s.is_recurring === true || (s.is_recurring == null && s.recurring_parent_id)) && !s.is_callback && !s.followup_included)
+        .map((s) => s._line));
+      return { rows: [{ n: lines.size }] };
+    }
     if (/SELECT s\.id, s\.customer_id, s\.scheduled_date/.test(sql)) {
       const [customerId, fromDate, familyKey, cadence] = bindings;
       const rows = db.store.scheduled_services
         .filter((s) => same(s.customer_id, customerId) && s.scheduled_date >= fromDate && ['pending', 'confirmed', 'rescheduled'].includes(s.status)
           && (s.is_recurring === true || (s.is_recurring == null && s.recurring_parent_id)) && !s.is_callback && !s.followup_included
-          && s._line === familyKey && s._cadence === cadence)
+          && s._line === familyKey && (cadence == null || s._cadence === cadence))
         .sort((a, b) => compare(a.scheduled_date, b.scheduled_date) || compare(a.id, b.id))
         .map((s) => ({ ...s }));
       return { rows };

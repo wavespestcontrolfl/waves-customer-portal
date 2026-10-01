@@ -339,11 +339,35 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
     expect(ok.created).toBe(1);
     expect(notices()[0].effective_date).toBe('2026-12-05');
   });
-  test('annual_prepay: two live terms that could carry the line hold rather than guess', async () => {
+  test('annual_prepay: two live terms that could carry the line hold rather than guess — unless the line\'s own visits link one of them (the ranking\'s precedence)', async () => {
     const book = prepayBook();
     book.annual_prepay_terms.push({ ...book.annual_prepay_terms[0], id: TERM(2), coverage_service_type: 'Pest' });
-    const out = await scheduleBook(book);
+    let out = await scheduleBook(book);
     expect(out.held.map((h) => h.reason)).toEqual(['prepay_term_ambiguous']);
+    // the open visits of the line carry annual_prepay_term_id → that term, no ambiguity
+    const linked = prepayBook();
+    linked.annual_prepay_terms.push({ ...linked.annual_prepay_terms[0], id: TERM(2), coverage_service_type: 'Pest', prepay_amount: '500.00' });
+    linked.scheduled_services.forEach((v) => { if (v.recurring_parent_id) v.annual_prepay_term_id = TERM(1); });
+    out = await scheduleBook(linked);
+    expect(out.created).toBe(1);
+    expect(JSON.parse(notices()[0].metadata).term_id).toBe(TERM(1));
+    // visits linked to BOTH terms → ambiguous again
+    const twice = prepayBook();
+    twice.annual_prepay_terms.push({ ...twice.annual_prepay_terms[0], id: TERM(2), coverage_service_type: 'Pest' });
+    twice.scheduled_services[1].annual_prepay_term_id = TERM(1);
+    twice.scheduled_services[2].annual_prepay_term_id = TERM(2);
+    out = await scheduleBook(twice);
+    expect(out.held.map((h) => h.reason)).toEqual(['prepay_term_ambiguous']);
+  });
+  test('annual_prepay: an unlabeled term is matched only on a single-line ACCOUNT — a second line outside the batch still counts', async () => {
+    const book = prepayBook({ coverage_service_type: null });
+    let out = await scheduleBook(book);
+    expect(out.created).toBe(1); // one plan line on the account → the unlabeled term is this line's
+    const twoLines = prepayBook({ coverage_service_type: null });
+    // a lawn series on the same account, NOT in this batch's rows
+    twoLines.scheduled_services.push({ ...twoLines.scheduled_services[1], id: VISIT(701), scheduled_date: '2026-12-20', _line: 'lawn_care', _cadence: 'monthly', recurring_parent_id: VISIT(700) });
+    out = await scheduleBook(twoLines);
+    expect(out.held.map((h) => h.reason)).toEqual(['prepay_term_ambiguous']); // the ranking's own verdict: an unresolved unlabeled term is ambiguous, never guessed
   });
 });
 

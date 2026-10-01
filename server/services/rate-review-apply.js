@@ -103,7 +103,7 @@ const PlanRateLedger = require('./plan-rate-ledger');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
-  PLAN_LINE_SQL, LEDGER_FAMILIES_FOR_LINE, anniversaryInWindow, familyOfCoverage, visitsPerYearFor, lockBatch,
+  PLAN_LINE_SQL, LEDGER_FAMILIES_FOR_LINE, anniversaryInWindow, familyOfCoverage, matchPrepayTerm, visitsPerYearFor, lockBatch,
 } = require('./rate-review');
 
 const LANE_PER_APPLICATION = 'per_application';
@@ -249,7 +249,7 @@ function laneForRow(row) {
 // the visits the snapshot priced. Includes 'rescheduled' rows (a parked
 // reschedule request) so the apply can refuse rather than leave one at the
 // old price.
-async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDate }) {
+async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence = null, fromDate }) {
   const { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(`
     SELECT s.id, s.customer_id, s.scheduled_date, s.status, s.estimated_price, s.primary_line_price,
@@ -262,10 +262,28 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDat
       AND s.status IN ('pending', 'confirmed', 'rescheduled')
       AND ${PLAN_ROW_SQL}
       AND ${LINE_SQL} = ?
-      AND ${CADENCE_SQL} = ?
+      AND (?::text IS NULL OR ${CADENCE_SQL} = ?)
     ORDER BY s.scheduled_date ASC, s.id ASC
-  `, [customerId, fromDate, familyKey, cadence]);
+  `, [customerId, fromDate, familyKey, cadence, cadence]);
   return rows.map((r) => ({ ...r, scheduled_date: ymd(r.scheduled_date) }));
+}
+
+// How many plan lines the WHOLE account runs (distinct lines with an open
+// plan-row visit from `fromDate`) — the ranking's account_lines, needed by
+// matchPrepayTerm's unlabeled-term rule; never the batch's approved rows
+// alone (a second line outside the batch is still a second line).
+async function loadAccountPlanLineCount(dbh, { customerId, fromDate }) {
+  const { LINE_SQL, PLAN_ROW_SQL } = PLAN_LINE_SQL;
+  const { rows } = await dbh.raw(`
+    SELECT count(DISTINCT ${LINE_SQL})::int AS n
+    FROM scheduled_services s
+    LEFT JOIN services sv ON sv.id = s.service_id
+    WHERE s.customer_id = ?
+      AND s.scheduled_date >= ?
+      AND s.status IN ('pending', 'confirmed', 'rescheduled')
+      AND ${PLAN_ROW_SQL}
+  `, [customerId, fromDate]);
+  return Math.max(1, Number(rows[0] && rows[0].n) || 0);
 }
 
 // Every UNFINISHED visit of the customer with its plan line — anything a
@@ -302,10 +320,14 @@ function consumesPerApplicationFee(visit) {
   return true;
 }
 
-// The live prepaid term that carries this line (the ranking's matchPrepayTerm
-// posture: the family named by the coverage text; one unlabeled live term
-// can only mean the line on a single-line account; two candidates = held).
-async function resolvePrepayTerm(dbh, { customerId, familyKey, accountLines, today, termId = null }) {
+// The live prepaid term that carries this line — the ranking's OWN
+// resolution (rate-review.js matchPrepayTerm, reused): the term the line's
+// open visits link (annual_prepay_term_id) first, else the one live term
+// whose coverage names the family, else one unlabeled live term on a
+// single-line account (account_lines = the whole account's plan lines);
+// two candidates = ambiguous, held, never guessed. `termId` pins a term
+// the notice already recorded (apply time).
+async function resolvePrepayTerm(dbh, { customerId, familyKey, cadence = null, today, termId = null }) {
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
   const terms = await coveredTermsAsOf(dbh, today)
     .where('t.customer_id', customerId)
@@ -315,12 +337,14 @@ async function resolvePrepayTerm(dbh, { customerId, familyKey, accountLines, tod
     const pinned = live.find((t) => String(t.id) === String(termId));
     return pinned ? { term: pinned } : { term: null, reason: 'term_not_live' };
   }
-  const byFamily = live.filter((t) => familyOfCoverage(t.coverage_service_type) === familyKey);
-  if (byFamily.length === 1) return { term: byFamily[0] };
-  if (byFamily.length > 1) return { term: null, reason: 'prepay_term_ambiguous' };
-  const unlabeled = live.filter((t) => !familyOfCoverage(t.coverage_service_type));
-  if (unlabeled.length === 1 && (accountLines || 1) === 1) return { term: unlabeled[0] };
-  return { term: null, reason: unlabeled.length > 1 ? 'prepay_term_ambiguous' : 'prepay_term_not_found' };
+  const visits = await loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDate: today });
+  const planLine = {
+    prepay_term_ids: [...new Set(visits.map((v) => v.annual_prepay_term_id).filter(Boolean).map(String))],
+    account_lines: await loadAccountPlanLineCount(dbh, { customerId, fromDate: today }),
+  };
+  const { term, ambiguous } = matchPrepayTerm(live, planLine, familyKey);
+  if (term) return { term };
+  return { term: null, reason: ambiguous ? 'prepay_term_ambiguous' : 'prepay_term_not_found' };
 }
 
 // A live or pending term of the same coverage family that starts after
@@ -347,8 +371,8 @@ function termRenewalNoticed(term) {
 // customer row lock before any lane's apply, so a notice priced on one
 // basis never moves the money of another (a per-application line that
 // moved to dues, a line now under a prepaid term, …).
-async function resolveLiveLane(dbh, { customer, familyKey, today }) {
-  const found = await resolvePrepayTerm(dbh, { customerId: customer.id, familyKey, accountLines: null, today });
+async function resolveLiveLane(dbh, { customer, familyKey, cadence = null, today }) {
+  const found = await resolvePrepayTerm(dbh, { customerId: customer.id, familyKey, cadence, today });
   if (found.term || found.reason === 'prepay_term_ambiguous') return LANE_PREPAY;
   if (customer.billing_mode === LANE_MONTHLY) return LANE_MONTHLY;
   if (customer.billing_mode === LANE_PER_APPLICATION) return LANE_PER_APPLICATION;
@@ -417,7 +441,7 @@ async function flagSnapshotHold(dbh, row, code) {
 }
 
 // One approved ranking row → one draft notice row (or a HoldError).
-async function scheduleRow(dbh, row, { batch, customer, lane, accountLines, today, plannedSend, noticeFloor, batchId, batchKey, actorId }) {
+async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend, noticeFloor, batchId, batchKey, actorId }) {
   if (!customer) throw hold('lane_unknown', 'customer missing');
   if (!lane) throw hold('lane_cleanup', { billingLane: row.billing_lane });
   if (row.family_key === 'termite') throw hold('termite_program');
@@ -436,7 +460,7 @@ async function scheduleRow(dbh, row, { batch, customer, lane, accountLines, toda
   if (lane === LANE_PER_APPLICATION) {
     visits = await loadLineOpenVisits(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, fromDate: today });
   } else if (lane === LANE_PREPAY) {
-    const found = await resolvePrepayTerm(dbh, { customerId: row.customer_id, familyKey: row.family_key, accountLines, today });
+    const found = await resolvePrepayTerm(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, today });
     if (!found.term) throw hold(found.reason);
     term = found.term;
     const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : visitsPerYearFor(row.cadence, row.visits_per_year);
@@ -537,15 +561,13 @@ async function scheduleUnderLock(dbh, { batchKey, plannedSend, today, actorId })
 
   const customerIds = [...new Set(candidates.map((r) => r.customer_id))];
   const customers = new Map((await dbh('customers').whereIn('id', customerIds).select('id', 'billing_day', 'billing_mode', 'per_application_fee', 'monthly_rate')).map((c) => [c.id, c]));
-  const linesPerCustomer = new Map();
-  for (const r of rows) linesPerCustomer.set(r.customer_id, (linesPerCustomer.get(r.customer_id) || 0) + 1);
   const noticeFloor = addDaysYmd(plannedSend, MIN_NOTICE_DAYS);
 
   for (const row of candidates) {
     if (row.notice_id) { result.alreadyScheduled += 1; continue; }
     try {
       const notice = await scheduleRow(dbh, row, {
-        batch, customer: customers.get(row.customer_id), lane: laneForRow(row), accountLines: linesPerCustomer.get(row.customer_id),
+        batch, customer: customers.get(row.customer_id), lane: laneForRow(row),
         today, plannedSend, noticeFloor, batchId: result.batchId, batchKey, actorId,
       });
       if (notice.alreadyScheduled) { result.alreadyScheduled += 1; continue; }
@@ -939,7 +961,8 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       if (daysBetweenYmd(sentDay, ymd(notice.effective_date)) < MIN_NOTICE_DAYS) throw hold('notice_too_recent', { sentDay, effectiveDate: ymd(notice.effective_date) });
       const activeHold = await activePlanHold(trx, customer.id);
       if (activeHold) throw hold('plan_on_hold', { holdId: activeHold.id, familyKey: activeHold.family_key, resumeOn: ymd(activeHold.resume_on) });
-      const liveLane = await resolveLiveLane(trx, { customer, familyKey: notice.family_key, today });
+      const snapshot = await trx('rate_review_snapshots').where({ id: notice.rate_review_row_id }).first('cadence');
+      const liveLane = await resolveLiveLane(trx, { customer, familyKey: notice.family_key, cadence: snapshot ? snapshot.cadence : null, today });
       if (liveLane !== notice.billing_lane) throw hold('billing_lane_changed', { noticed: notice.billing_lane, live: liveLane });
       const ctx = { notice, customer, today, metadata: parseMetadata(notice.metadata) };
       let outcome;
@@ -1160,6 +1183,6 @@ module.exports = {
   noticedRenewalAmountConflict,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
-    loadLineOpenVisits, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
+    loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };
