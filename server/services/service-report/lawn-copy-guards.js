@@ -584,6 +584,19 @@ function stripApprovedSentences(text, approved) {
   return splitSentences(text).filter((s) => !keys.has(sentenceKey(s))).join(' ');
 }
 
+// Sub-day durations (hours, minutes, seconds) in MODEL copy. Every lawn
+// expectation window is in days or weeks, and anything shorter is re-entry or
+// watering timing, which the banner owns. So no hour/minute figure is allowed
+// in model copy at all, whatever the facts list says or which verb sits beside
+// it ("return after fourteen minutes"). Absolute: no allowlist, no approved
+// sentence waives it (codex pre-push P1 on #5527-era guards).
+const SUB_DAY_UNITS = new Set(['hour', 'minute', 'second']);
+function checkSubDayDuration(text) {
+  return extractNumericTokens(text)
+    .filter((t) => SUB_DAY_UNITS.has(t.unit))
+    .map((t) => ({ rule: 'sub_day_duration', match: t.key }));
+}
+
 function checkLawnModelCopy(text, facts = {}) {
   if (typeof text !== 'string' || !text.trim()) {
     return { ok: false, reasons: [{ rule: 'empty', match: '' }] };
@@ -598,6 +611,7 @@ function checkLawnModelCopy(text, facts = {}) {
     ...checkWeekdayClockDeny(text),
     ...checkProgressCoupling(unapproved, f),
     ...checkReentryPattern(text),
+    ...checkSubDayDuration(text),
     ...checkBannedCopy(text),
     ...checkOverpromise(text),
     ...checkSafetyClaim(text),
@@ -612,6 +626,7 @@ module.exports = {
   checkWeekdayClockDeny,
   checkProgressCoupling,
   checkReentryPattern,
+  checkSubDayDuration,
   checkBannedCopy,
   checkOverpromise,
   checkSafetyClaim,

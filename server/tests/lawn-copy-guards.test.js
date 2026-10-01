@@ -196,7 +196,9 @@ describe('numeric whitelist (G3)', () => {
     test('digits and spelled numbers are the only values normalized together', () => {
       accepts('Expect a change in 3 to 7 days.', allow('A change shows in three to seven days.'));
       accepts('Expect a change in 3–7 days.', allow('A change shows in 3 - 7 days.'));
-      accepts('Expect a change in HALF AN HOUR.', allow('A change shows in half an hour.'));
+      // Sub-day units never pass the full check (sub_day_duration); the numeric
+      // normalization itself still keys them by value.
+      expect(checkNumericWhitelist('Expect a change in HALF AN HOUR.', allow('A change shows in half an hour.'))).toEqual([]);
       rejects('Expect a change in 30 minutes.', 'numeric', allow('A change shows in half an hour.'));
     });
   });
@@ -779,5 +781,24 @@ describe('entry point', () => {
     expect(() => checkLawnModelCopy('Nice and even.', null)).not.toThrow();
     expect(() => checkLawnModelCopy('Nice and even.', { allowedText: 'x', allowedNumbers: 'y', approvedSentences: 5 })).not.toThrow();
     expect(checkLawnModelCopy('Nice and even.', null).ok).toBe(true);
+  });
+});
+
+describe('sub-day durations never appear in model copy', () => {
+  const { checkLawnModelCopy, checkSubDayDuration } = require('../services/service-report/lawn-copy-guards');
+  const ALL_FACTS = { allowedText: ['14 minutes', 'two hours', '30 minutes'], allowedNumbers: [14, 2, 30], approvedSentences: ['Return to the treated area after fourteen minutes.'], progress: 'up', droughtFlagged: true };
+  test.each([
+    'Return to the treated area after fourteen minutes.',
+    'You can enter the lawn in 2 hours.',
+    'Let the kids back out after half an hour.',
+    'Pets can go back on the grass in a few hours.',
+    'Results show within 30 minutes.',
+  ])('%s is rejected even with every fact allowing it', (line) => {
+    const out = checkLawnModelCopy(line, ALL_FACTS);
+    expect(out.ok).toBe(false);
+    expect(out.reasons.map((r) => r.rule)).toContain('sub_day_duration');
+  });
+  test('day and week windows are unaffected', () => {
+    expect(checkSubDayDuration('Weeds yellow in about 3–7 days and brown over 2–3 weeks.')).toEqual([]);
   });
 });
