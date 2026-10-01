@@ -296,7 +296,9 @@ function daysBetween(fromDate, toDate) {
  */
 function recheckPlacements(placements, rows, { now = new Date() } = {}) {
   const today = etDateString(now);
-  const dated = (rows || []).filter(isMeasuredAnswer).map((r) => ({ ...r, date: String(r.check_date instanceof Date ? r.check_date.toISOString() : r.check_date).slice(0, 10), keys: new Set(cleanUrls(r.cited_urls).map(pageKey).filter(Boolean)) }));
+  // every row, measured or not: a failed newest probe must stay the newest
+  // answer for its question and engine; only measured rows are tallied
+  const dated = (rows || []).map((r) => ({ ...r, measured: isMeasuredAnswer(r), date: String(r.check_date instanceof Date ? r.check_date.toISOString() : r.check_date).slice(0, 10), keys: new Set(isMeasuredAnswer(r) ? cleanUrls(r.cited_urls).map(pageKey).filter(Boolean) : []) }));
   const out = [];
   for (const pl of placements || []) {
     const host = canonicalProspectDomain(pl.target_domain);
@@ -320,22 +322,25 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
     for (const r of dated) {
       if (!questions.has(r.query) || r.date < windowStart) continue;
       const t = r.date < liveOn ? tally.before : tally.after;
-      const named = r.waves_mentioned === true;
-      t.answers += 1;
-      if (named) t.named += 1;
-      if (cites(r)) { t.citingPage += 1; if (named) t.namedWhenCiting += 1; }
       if (t === tally.after) {
         const k = `${r.query}::${r.llm_platform}`;
         const prev = latestAfter.get(k);
         if (!prev || r.date > prev.date) latestAfter.set(k, r);
       }
+      if (!r.measured) continue;
+      const named = r.waves_mentioned === true;
+      t.answers += 1;
+      if (named) t.named += 1;
+      if (cites(r)) { t.citingPage += 1; if (named) t.namedWhenCiting += 1; }
     }
-    const latest = [...latestAfter.values()];
+    // a newest answer that failed or could not resolve its sources says
+    // nothing either way: it is left out of `current`, never replaced by an older one
+    const latest = [...latestAfter.values()].filter((r) => r.measured);
     const current = { answers: latest.length, citingPage: latest.filter(cites).length, namedWhenCiting: latest.filter((r) => cites(r) && r.waves_mentioned === true).length };
     const daysLive = daysBetween(liveOn, today);
     // settle first: one early answer is not a result
     let verdict = 'not_named_yet';
-    if (daysLive < RECHECK_SETTLE_DAYS || tally.after.answers === 0) verdict = 'too_early';
+    if (daysLive < RECHECK_SETTLE_DAYS || current.answers === 0) verdict = 'too_early';
     else if (current.namedWhenCiting > 0) verdict = 'named_when_cited';
     else if (current.citingPage === 0) verdict = 'page_not_cited_now';
     out.push({

@@ -195,6 +195,18 @@ describe('recheckPlacements', () => {
     expect(r.verdict).toBe('page_not_cited_now');
   });
 
+  test('a failed newest probe stays newest — the older named answer is not current', () => {
+    const rows = [
+      row({ query: Q1, date: '2026-09-25', urls: [PAGE] }),
+      row({ query: Q1, date: '2026-10-05', urls: [PAGE], named: true }),
+      row({ query: Q1, date: '2026-10-18', answered: false }),
+    ];
+    const [r] = recheckPlacements([placement()], rows, { now: NOW });
+    expect(r.after).toMatchObject({ answers: 1, namedWhenCiting: 1 });
+    expect(r.current).toEqual({ answers: 0, citingPage: 0, namedWhenCiting: 0 });
+    expect(r.verdict).toBe('too_early');
+  });
+
   test('a date-only first_live_at (UTC midnight) keeps its calendar day', () => {
     const rows = [row({ query: Q1, date: '2026-09-25', urls: [PAGE] })];
     expect(recheckPlacements([placement({ first_live_at: new Date('2026-10-01T00:00:00.000Z') })], rows, { now: NOW })[0].liveOn).toBe('2026-10-01');

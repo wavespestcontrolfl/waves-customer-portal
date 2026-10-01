@@ -253,7 +253,8 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
   let page = null;
   const url = cited ? cited.url : (prospect.target_url || `https://${prospect.target_domain}/`);
   try { page = await fetchPageFn(url, cited ? { withText: true } : undefined); } catch { page = null; }
-  if (cited && !(page && typeof page.text === 'string')) return { fail: `cited page could not be read: ${cited.url}` };
+  // unreadable or cut short: "Waves is not on it" cannot be known
+  if (cited && !(page && typeof page.text === 'string')) return { fail: `cited page could not be read in full: ${cited.url}` };
   if (cited && WAVES_LISTED_RE.test(page.text)) return { skip: `Waves already on the cited page ${cited.url}` };
   const loc = pickLocation(prospect, profile);
   const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({

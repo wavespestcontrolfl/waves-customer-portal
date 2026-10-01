@@ -355,9 +355,11 @@ async function findContact(domain, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TI
  * private-IP/redirect guards, timeout, fail-soft). Strips scripts/styles/tags.
  */
 // `withText` also returns the whole visible text (`text`), not only the
-// 400-character snippet.
+// 400-character snippet — and `text: null` when the body was cut short (size
+// cap / early close), so a caller never reads a partial page as complete.
 async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, withText = false } = {}) {
-  const html = await fetchText(url, { fetchFn, timeoutMs });
+  const page = await fetchPage(url, { fetchFn, timeoutMs });
+  const html = page.html && page.status >= 200 && page.status < 300 ? page.html : null;
   if (!html) return null;
   const title = (html.match(/<title[^>]*>([\s\S]{1,200}?)<\/title>/i) || [])[1]?.replace(/\s+/g, ' ').trim() || null;
   const text = html
@@ -367,7 +369,7 @@ async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIM
     .replace(/\s+/g, ' ')
     .trim();
   const out = { title, snippet: text.slice(0, 400) || null };
-  if (withText) out.text = text;
+  if (withText) out.text = page.truncated ? null : text;
   return out;
 }
 

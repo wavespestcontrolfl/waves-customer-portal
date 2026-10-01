@@ -254,6 +254,14 @@ describe('cited-page pitches', () => {
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', notes: expect.stringMatching(/cited page could not be read/) }));
   });
 
+  test('a cited page cut short (text null) fails the lease too', async () => {
+    claims([cited]);
+    const create = jest.fn();
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', text: null }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    expect(create).not.toHaveBeenCalled();
+    expect(r.failed).toBe(1);
+  });
+
   test('only pages cited for a provider question carry the angle — a cost guide keeps the usual pitch', () => {
     const costGuide = citedPage({ key: 'floridist.com/cost', url: 'https://floridist.com/cost', questions: [{ id: 'Q3', query: 'How much does pest control cost?', engines: ['claude'], provider: false }] });
     expect(citedPageFor({ target_domain: 'floridist.com' }, citedPagesByHost([costGuide]))).toBeNull();
