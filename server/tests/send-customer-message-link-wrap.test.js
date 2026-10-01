@@ -152,6 +152,14 @@ test('an accepted send returns the body the provider was handed (sentBody), wrap
   expect(result.sentBody).toBe(providerInput().body);
 });
 
+test('accepted but the audit insert throws: the error carries the provider-handed body (sentBody)', async () => {
+  persistAudit.mockRejectedValueOnce(new Error('audit insert failed'));
+  const err = await sendCustomerMessage(BASE_INPUT).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err.providerOutcome).toMatchObject({ sent: true });
+  expect(err.sentBody).toBe(WRAPPED_BODY);
+});
+
 test('an accepted send stamps the minted code with the sms_log row (after the send, off the send path)', async () => {
   await sendCustomerMessage(BASE_INPUT);
   await flush();

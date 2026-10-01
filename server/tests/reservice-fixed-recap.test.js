@@ -360,3 +360,23 @@ describe('review fixes (#5363 r2)', () => {
     expect(MODE).toBe('reservice_fixed');
   });
 });
+
+describe('review fixes (#5363 r3)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+
+  test('the record is created with the fixed-text marker (no window without it)', () => {
+    expect(src).toMatch(/const structuredNotes = \{\s*\n[^\n]*propertyServiceArea[^\n]*\n(?:\s*\/\/[^\n]*\n)+\s*\.\.\.\(reserviceFixedRecap \? \{ completionSmsRecapMode: ReserviceFixedRecap\.MODE \} : \{\}\),/);
+  });
+
+  test('a facts read failure leaves the closeout open for retry instead of finalizing', () => {
+    const at = src.indexOf('reserviceFixedFacts = await ReserviceFixedRecap.loadReserviceFixedRecapFacts(db, {');
+    expect(at).toBeGreaterThan(0);
+    expect(src.slice(at, at + 900)).toContain('return exitForCompletionSmsResume(factsErr);');
+  });
+
+  test('an accepted send whose audit threw still stores the provider-handed body', () => {
+    expect(src).toContain('fixedRecap: !!reserviceFixedBody,');
+    expect(src).toContain("if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;");
+    expect(src).toContain('...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),');
+  });
+});

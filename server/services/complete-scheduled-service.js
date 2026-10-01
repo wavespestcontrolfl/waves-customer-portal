@@ -5841,6 +5841,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
+            // Frozen with the record itself, so no reader (recap-delivery's
+            // video-recap refusal) can ever see this visit's record without
+            // the fixed-text marker: the record and the marker commit together.
+            ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -12779,13 +12783,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // chain below: exactly one text, built from the saved facts.
         let reserviceFixedBody = null;
         if (reserviceFixedRecap) {
-          reserviceFixedBody = ReserviceFixedRecap.buildReserviceFixedRecap(
-            await ReserviceFixedRecap.loadReserviceFixedRecapFacts(db, {
+          let reserviceFixedFacts;
+          try {
+            reserviceFixedFacts = await ReserviceFixedRecap.loadReserviceFixedRecapFacts(db, {
               svc,
               recordId: record.id,
               reportUrl: reportSmsUrl || reportUrl,
-            }),
-          );
+            });
+          } catch (factsErr) {
+            // A read outage before any send: nothing went out and no send
+            // fence is written yet, so the closeout stays open and the tech's
+            // retry composes and sends the text (finalizing here would replay
+            // a stored result with no text, for good).
+            logger.warn(`[dispatch] fixed re-service text facts read failed for ${record.id}; closeout left open for retry: ${factsErr.message}`);
+            return exitForCompletionSmsResume(factsErr);
+          }
+          reserviceFixedBody = ReserviceFixedRecap.buildReserviceFixedRecap(reserviceFixedFacts);
           if (!reserviceFixedBody) throw new Error('Re-service completion text has no report link');
         }
         if (reserviceFixedBody) {
@@ -13065,6 +13078,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             type: sentSmsType,
             channel: sentSmsChannel,
             reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            // The fixed text adopts the provider-handed body (link wrap) even
+            // when the send was accepted but its audit insert threw.
+            fixedRecap: !!reserviceFixedBody,
             // Block-scoped inside this try; the accepted-error catch reads it
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
@@ -13409,7 +13425,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
         } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
+          if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
           const acceptedDelta = {
+            ...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),
             completionSmsStatus: 'sent',
             completionSmsDeliveryUnverifiedAt: null,
             ...(snap.body ? { sentSmsBody: snap.body } : {}),

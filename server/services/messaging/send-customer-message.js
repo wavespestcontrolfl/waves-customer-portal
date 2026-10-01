@@ -1302,6 +1302,8 @@ async function sendCustomerMessageCore(input) {
     });
   } catch (auditErr) {
     auditErr.providerOutcome = providerOutcome;
+    // Accepted-but-unaudited callers still need the body that went out.
+    auditErr.sentBody = sendInput.body;
     throw auditErr;
   }
 
