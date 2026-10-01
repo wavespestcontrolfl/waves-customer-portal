@@ -190,8 +190,6 @@ async function railwayGraphQL(query, variables = {}, { forWrite = false } = {}) 
     if (!res.ok) {
       const err = new Error(`Railway API returned HTTP ${res.status}`);
       err.status = res.status;
-      // A 4xx is a definitive refusal; a 5xx may have applied.
-      err.rejected = res.status < 500;
       throw err;
     }
     const json = await res.json();
@@ -201,9 +199,7 @@ async function railwayGraphQL(query, variables = {}, { forWrite = false } = {}) 
         err.writeAccessRequired = true;
         throw err;
       }
-      const err = new Error(`Railway API error: ${json.errors[0].message}`);
-      err.rejected = true;
-      throw err;
+      throw new Error(`Railway API error: ${json.errors[0].message}`);
     }
     return json.data;
   } catch (err) {
@@ -723,9 +719,10 @@ async function commitRailwayGate(input) {
       { forWrite: true },
     );
   } catch (err) {
-    // A refusal changed nothing; a timeout, network drop or 5xx after the
-    // request went out may have applied it — never report that as failed.
-    if (err.rejected || err.writeAccessRequired) throw err;
+    // Only a permission refusal proves nothing changed. Any other error once
+    // the request went out (timeout, drop, 5xx, even a GraphQL error raised
+    // after the variable saved) may have applied it — never report "failed".
+    if (err.writeAccessRequired) throw err;
     return {
       outcome_unknown: true,
       warning: `Railway did not confirm the change to ${name}. Check the variable in the Railway dashboard before trying again.`,

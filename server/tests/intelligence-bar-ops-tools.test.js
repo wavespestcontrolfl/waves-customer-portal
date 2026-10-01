@@ -894,15 +894,17 @@ describe('intelligence bar set_railway_gate', () => {
     expect(executionOutcome(result)).toBe('outcome_unknown');
   });
 
-  test('a GraphQL rejection of the upsert is a definite failure (nothing applied)', async () => {
+  // Pass-2: a GraphQL error can be raised after the variable saved (e.g. while
+  // triggering the deploy), so it is not proof nothing changed.
+  test('a GraphQL error on the upsert is outcome_unknown too', async () => {
     configure();
     global.fetch
       .mockResolvedValueOnce(ENVIRONMENT())
       .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false' }))
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ errors: [{ message: 'Invalid variable name' }] }) });
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ errors: [{ message: 'Failed to trigger deploy' }] }) });
     const result = await commit();
-    expect(result.outcome_unknown).toBeUndefined();
-    expect(result.error).toMatch(/Invalid variable name/);
+    expect(result.outcome_unknown).toBe(true);
+    expect(result.error).toBeUndefined();
   });
 
   test('a read-only token on the upsert: write_access_required, no success', async () => {

@@ -225,14 +225,16 @@ describe('set_growthbook_feature_environment', () => {
     expect(executionOutcome(result)).toBe('outcome_unknown');
   });
 
-  test('a 4xx refusal of the toggle is a definite failure (nothing applied)', async () => {
+  // Pass-2: GrowthBook maps an error raised AFTER the toggle applied to HTTP
+  // 400, so a 4xx other than a permission refusal is not proof either.
+  test('a 400 on the toggle is outcome_unknown (it may have applied)', async () => {
     process.env.GROWTHBOOK_API_KEY = 'secret_test';
     global.fetch
       .mockResolvedValueOnce(jsonResponse(featureBody()))
-      .mockResolvedValueOnce(jsonResponse({ message: 'needs approval' }, 422));
+      .mockResolvedValueOnce(jsonResponse({ message: 'audit failed' }, 400));
     const result = await commit();
-    expect(result.outcome_unknown).toBeUndefined();
-    expect(result.error).toMatch(/HTTP 422/);
+    expect(result.outcome_unknown).toBe(true);
+    expect(result.error).toBeUndefined();
   });
 
   test('a key without Publish access on the toggle: write_access_required, no success', async () => {

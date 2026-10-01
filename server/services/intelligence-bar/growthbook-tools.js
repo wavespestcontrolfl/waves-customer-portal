@@ -136,12 +136,7 @@ async function gbPost(path, body) {
       err.writeAccessRequired = true;
       throw err;
     }
-    if (!res.ok) {
-      const err = new Error(`GrowthBook API returned HTTP ${res.status}`);
-      // A 4xx is a definitive refusal; a 5xx may have applied.
-      err.rejected = res.status < 500;
-      throw err;
-    }
+    if (!res.ok) throw new Error(`GrowthBook API returned HTTP ${res.status}`);
     return await res.json();
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`GrowthBook API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
@@ -434,9 +429,11 @@ async function commitGrowthbookFeatureEnvironment(input) {
       comment: `Intelligence Bar: ${word} in ${environment} (owner-confirmed card)`,
     });
   } catch (err) {
-    // A refusal changed nothing; a timeout, network drop or 5xx after the
-    // request went out may have applied it — never report that as failed.
-    if (err.rejected || err.writeAccessRequired) throw err;
+    // Only a permission refusal proves nothing changed. GrowthBook applies a
+    // toggle before its audit/response work and maps an untyped error after
+    // it to HTTP 400, so any other error once the request went out may have
+    // applied it — never report "failed".
+    if (err.writeAccessRequired) throw err;
     return {
       outcome_unknown: true,
       warning: `GrowthBook did not confirm the toggle of ${featureId} in ${environment}. Check the feature in GrowthBook before trying again.`,
