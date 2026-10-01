@@ -576,12 +576,29 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
   if (line.capturedConversationVisits > 0) flags.push('conversation_minutes_captured');
 
   const current = line.currentRateCents || 0;
-  const classified = current > 0
-    ? classifyBand({ currentCents: current, listCents: line.listRateCents, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config })
-    : { band: null, gapPct: null, proposedCents: 0, deltaCents: 0, noChange: true, flags: ['no_current_rate'] };
+  const monthlyUnit = line.rateUnit === 'month';
+  const vpy = line.visitsPerYear || 0;
+  let classified;
+  if (current <= 0) {
+    classified = { band: null, gapPct: null, proposedCents: 0, deltaCents: 0, noChange: true, flags: ['no_current_rate'] };
+  } else if (!monthlyUnit) {
+    classified = classifyBand({ currentCents: current, listCents: line.listRateCents, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config });
+  } else if (vpy > 0) {
+    // Monthly dues are a cadence's annual price spread over 12 months; the
+    // bands, the $ cap and the minimum are PER APPLICATION. Normalize to the
+    // per-application equivalent (monthly × 12 ÷ visits), classify there,
+    // then spread the whole-dollar per-application proposal back over 12.
+    const perAppCurrent = Math.round((current * 12) / vpy);
+    const perAppList = line.listRateCents != null ? Math.round((line.listRateCents * 12) / vpy) : null;
+    const perApp = classifyBand({ currentCents: perAppCurrent, listCents: perAppList, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config });
+    const proposedMonthly = perApp.noChange ? current : Math.round((perApp.proposedCents * vpy) / 12);
+    classified = { ...perApp, proposedCents: proposedMonthly, deltaCents: proposedMonthly - current, perApplication: { current: perAppCurrent, list: perAppList, proposed: perApp.proposedCents, delta: perApp.deltaCents } };
+  } else {
+    classified = { band: null, gapPct: null, proposedCents: current, deltaCents: 0, noChange: true, flags: ['no_visits_per_year'] };
+  }
   for (const flag of classified.flags) if (!flags.includes(flag)) flags.push(flag);
 
-  const unitMultiplier = line.rateUnit === 'month' ? 12 : (line.visitsPerYear || 0);
+  const unitMultiplier = monthlyUnit ? 12 : vpy;
   let status;
   if (current <= 0 || (classified.band == null && !exceptions.length)) status = 'skipped';
   else if (exceptions.length) status = 'exception';

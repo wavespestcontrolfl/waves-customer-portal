@@ -303,11 +303,28 @@ describe('exception rules', () => {
     expect(noList.status).toBe('skipped');
     expect(noList.flags).toContain('no_list_rate');
   });
-  test('computeSnapshot: monthly lane annualizes by 12, application lane by visits per year', () => {
+  test('computeSnapshot: monthly dues are normalized to per-application dollars before the bands, cap and minimum apply', () => {
+    // 12 visits/yr billed monthly: $55/mo = $55/application; list $60 → C → to list $60/application = $60/mo
     const monthly = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'monthly', visitsPerYear: 12, billingLane: 'monthly_membership', currentRateCents: 5500, rateUnit: 'month', listRateCents: 6000 });
     expect(monthly.band).toBe('C');
     expect(monthly.delta_cents).toBe(500);
     expect(monthly.annual_delta_cents).toBe(6000);
+    // quarterly service billed monthly: $100/mo = $300/application vs $150/mo = $450/application → D →
+    // per-application step min(12% × 300 = 36, $15) = $15 → $315/application → $105/mo (+$5/mo, +$60/yr), never +$12/mo
+    const quarterlyDues = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'monthly_membership', currentRateCents: 10000, rateUnit: 'month', listRateCents: 15000 });
+    expect(quarterlyDues).toMatchObject({ band: 'D', proposed_rate_cents: 10500, delta_cents: 500, annual_delta_cents: 6000, status: 'green' });
+    expect(quarterlyDues.flags).toContain('capped');
+    // the $3 per-application minimum: $38.67/mo quarterly = $116/application vs list $117 → B → $120/app → $40/mo (+$1.33/mo = +$4/app) is a change …
+    const smallB = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'monthly_membership', currentRateCents: 3867, rateUnit: 'month', listRateCents: 3900 });
+    expect(smallB).toMatchObject({ band: 'B', proposed_rate_cents: 4000, delta_cents: 133, status: 'green' });
+    // … while a $70/application line (pass-through $2) is not
+    const tiny = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'monthly_membership', currentRateCents: 2333, rateUnit: 'month', listRateCents: 2400 });
+    expect(tiny.status).toBe('no_change');
+    expect(tiny.flags).toContain('below_min_delta');
+    // a monthly line with an unknown cadence cannot be normalized → skipped, flagged
+    const unknown = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'other', visitsPerYear: null, billingLane: 'monthly_membership', currentRateCents: 5500, rateUnit: 'month', listRateCents: 6000 });
+    expect(unknown.status).toBe('skipped');
+    expect(unknown.flags).toContain('no_visits_per_year');
     const quarterly = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', visitsPerYear: 4, currentRateCents: 11300, rateUnit: 'application', listRateCents: 11700 });
     expect(quarterly.annual_delta_cents).toBe(1600);
     expect(quarterly.status).toBe('green');
