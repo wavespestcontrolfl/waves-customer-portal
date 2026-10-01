@@ -178,9 +178,11 @@ async function syncCampaigns({ throwOnError = false } = {}) {
     // mark anything we hold that Google did not return as removed — with the
     // same freshness fence as the upsert: a row a local writer touched after
     // this fetch began is left for tomorrow's sync. Rows with a NULL
-    // platform_campaign_id are untouched (NOT IN never matches NULL).
+    // platform_campaign_id are untouched (explicit whereNotNull: knex compiles an
+    // empty NOT IN list to always-true).
     const removed = await db('ad_campaigns')
       .where({ platform: 'google_ads' })
+      .whereNotNull('platform_campaign_id')
       .whereNotIn('platform_campaign_id', results.map((r) => String(r.platform_campaign_id)))
       .whereNot('status', 'removed')
       .where('updated_at', '<', fetchStartedAt)

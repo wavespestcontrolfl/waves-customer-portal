@@ -5,11 +5,13 @@ let firstByTable = {};
 const insertCalls = [];
 const updateCalls = [];
 const whereNotInCalls = [];
+const whereNotNullCalls = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
   b.where = jest.fn(() => b);
   b.whereNot = jest.fn(() => b);
+  b.whereNotNull = jest.fn((col) => { whereNotNullCalls.push({ table, col }); return b; });
   b.whereNotIn = jest.fn((col, ids) => { whereNotInCalls.push({ table, col, ids }); return b; });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
@@ -39,6 +41,7 @@ beforeEach(() => {
   insertCalls.length = 0;
   updateCalls.length = 0;
   whereNotInCalls.length = 0;
+  whereNotNullCalls.length = 0;
   process.env = { ...env, META_ADS_ACCESS_TOKEN: 'tok', META_ADS_ACCOUNT_ID: '1234567890' };
 });
 afterAll(() => { process.env = env; });
@@ -238,7 +241,21 @@ describe('syncCampaigns removed-campaign reconcile', () => {
     await MetaAds.syncCampaigns();
 
     expect(whereNotInCalls).toEqual([{ table: 'ad_campaigns', col: 'platform_campaign_id', ids: [] }]);
+    // An empty NOT IN compiles to always-true, so manual NULL-id rows need this fence.
+    expect(whereNotNullCalls).toEqual([{ table: 'ad_campaigns', col: 'platform_campaign_id' }]);
     expect(removedUpdates()).toHaveLength(1);
+  });
+
+  test.each([
+    ['unparseable JSON', { ok: true, json: async () => { throw new SyntaxError('bad json'); } }],
+    ['a 200 page with no data array', { ok: true, json: async () => ({ paging: {} }) }],
+  ])('does NOT reconcile on %s, and the scheduler path fails', async (_label, resp) => {
+    global.fetch = jest.fn().mockResolvedValue(resp);
+
+    await expect(MetaAds.syncCampaigns()).resolves.toEqual([]);
+    await expect(MetaAds.syncCampaigns({ throwOnError: true })).rejects.toThrow(/Meta API campaigns/);
+    expect(whereNotInCalls).toHaveLength(0);
+    expect(removedUpdates()).toHaveLength(0);
   });
 
   test('follows paging before reconciling, so a campaign on page 2 is not removed', async () => {

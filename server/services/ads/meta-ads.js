@@ -61,11 +61,16 @@ async function graphGetPaged(edge, { fields, params = {} } = {}) {
   while (next && pages < MAX_PAGES) {
     pages += 1;
     const resp = await fetch(next);
-    const json = await resp.json().catch(() => ({}));
-    if (!resp.ok || json.error) {
-      throw new Error(`Meta API ${edge}: ${json.error?.message || `HTTP ${resp.status}`}`);
+    const json = await resp.json().catch(() => null);
+    if (!resp.ok || !json || json.error) {
+      throw new Error(`Meta API ${edge}: ${json?.error?.message || `HTTP ${resp.status}`}`);
     }
-    if (Array.isArray(json.data)) out.push(...json.data);
+    // A 200 page without a data array is malformed, not empty: treating it as
+    // "no rows" would let the campaign reconcile retire every campaign.
+    if (!Array.isArray(json.data)) {
+      throw new Error(`Meta API ${edge}: malformed page (no data array)`);
+    }
+    out.push(...json.data);
     next = json.paging?.next || null;
   }
   return { rows: out, complete: !next };
@@ -214,7 +219,7 @@ async function syncCampaignsLocked() {
     // After a COMPLETE fetch, anything we hold that Meta did not return is gone.
     // An incomplete walk (page backstop hit) or an errored fetch (we never get
     // here) must not reconcile. Rows with a NULL platform_campaign_id are left
-    // alone (NOT IN never matches NULL).
+    // alone (explicit whereNotNull: knex compiles an empty NOT IN to always-true).
     if (complete) {
       const removed = await markMissingCampaignsRemoved(rows.map((r) => String(r.id)));
       if (removed > 0) logger.info(`[meta-ads] Marked ${removed} campaign(s) removed (no longer returned by Meta)`);
@@ -233,6 +238,7 @@ async function syncCampaignsLocked() {
 async function markMissingCampaignsRemoved(returnedIds) {
   const n = await db('ad_campaigns')
     .where({ platform: PLATFORM })
+    .whereNotNull('platform_campaign_id')
     .whereNotIn('platform_campaign_id', returnedIds)
     .whereNot('status', 'removed')
     .update({ status: 'removed', updated_at: new Date() });

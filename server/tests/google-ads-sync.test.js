@@ -6,9 +6,11 @@ const mockUpdate = jest.fn();
 // .whereNot(status).where(updated_at < fence).update(...) — kept on its own
 // chain/mock so the upsert's mockUpdate assertions stay about the upsert.
 const mockWhereNotIn = jest.fn();
+const mockWhereNotNull = jest.fn();
 const mockReconcileUpdate = jest.fn(() => Promise.resolve(0));
 const mockWhere = jest.fn(() => {
   const chain = { first: mockQueryFirst, update: mockUpdate, forUpdate: jest.fn(() => chain) };
+  chain.whereNotNull = (col) => { mockWhereNotNull(col); return chain; };
   chain.whereNotIn = (...args) => {
     mockWhereNotIn(...args);
     const rc = { whereNot: () => rc, where: () => rc, update: mockReconcileUpdate };
@@ -406,6 +408,8 @@ describe('sync failure propagation + removed-campaign reconcile', () => {
 
     expect(mockWhere).toHaveBeenCalledWith({ platform: 'google_ads' });
     expect(mockWhereNotIn).toHaveBeenCalledWith('platform_campaign_id', ['111']);
+    // knex compiles an empty NOT IN to always-true; NULL-id (manual) rows must be fenced explicitly.
+    expect(mockWhereNotNull).toHaveBeenCalledWith('platform_campaign_id');
     expect(mockReconcileUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'removed' }));
   });
 
