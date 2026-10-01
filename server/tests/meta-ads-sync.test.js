@@ -4,10 +4,13 @@
 let firstByTable = {};
 const insertCalls = [];
 const updateCalls = [];
+const whereNotInCalls = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
   b.where = jest.fn(() => b);
+  b.whereNot = jest.fn(() => b);
+  b.whereNotIn = jest.fn((col, ids) => { whereNotInCalls.push({ table, col, ids }); return b; });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
   b.insert = jest.fn((row) => {
@@ -22,7 +25,8 @@ const mockDb = jest.fn((table) => {
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: (_n, fn) => fn() }));
+const mockRunExclusive = jest.fn((_n, fn) => fn());
+jest.mock('../utils/cron-lock', () => ({ runExclusive: (...a) => mockRunExclusive(...a) }));
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'uuid-1') }));
 
 const MetaAds = require('../services/ads/meta-ads');
@@ -34,6 +38,7 @@ beforeEach(() => {
   firstByTable = {};
   insertCalls.length = 0;
   updateCalls.length = 0;
+  whereNotInCalls.length = 0;
   process.env = { ...env, META_ADS_ACCESS_TOKEN: 'tok', META_ADS_ACCOUNT_ID: '1234567890' };
 });
 afterAll(() => { process.env = env; });
@@ -170,5 +175,101 @@ describe('syncDailyPerformance', () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({ error: { message: 'Invalid token' } }) });
     const results = await MetaAds.syncDailyPerformance(7);
     expect(results).toEqual([]);
+  });
+});
+
+describe('sync failure propagation (scheduler opt-in)', () => {
+  const graphError = () => jest.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({ error: { message: 'Invalid token' } }) });
+
+  test('syncCampaigns: default caller gets [] but { throwOnError } rethrows', async () => {
+    global.fetch = graphError();
+    await expect(MetaAds.syncCampaigns()).resolves.toEqual([]);
+    await expect(MetaAds.syncCampaigns({ throwOnError: true })).rejects.toThrow('Invalid token');
+  });
+
+  test('syncDailyPerformance: default caller gets [] but { throwOnError } rethrows', async () => {
+    global.fetch = graphError();
+    await expect(MetaAds.syncDailyPerformance(7)).resolves.toEqual([]);
+    await expect(MetaAds.syncDailyPerformance(7, { throwOnError: true })).rejects.toThrow('Invalid token');
+  });
+
+  test('the runExclusive body throws, so job_health records a failure (not success)', async () => {
+    const seen = [];
+    mockRunExclusive.mockImplementation(async (name, fn) => {
+      try { return await fn(); } catch (err) { seen.push({ name, message: err.message }); throw err; }
+    });
+    global.fetch = graphError();
+    await MetaAds.syncCampaigns();
+    await MetaAds.syncDailyPerformance(7);
+    mockRunExclusive.mockImplementation((_n, fn) => fn());
+    expect(seen).toEqual([
+      { name: 'meta-ads-campaigns', message: expect.stringContaining('Invalid token') },
+      { name: 'meta-ads-performance', message: expect.stringContaining('Invalid token') },
+    ]);
+  });
+
+  test('not configured stays a silent no-op even with throwOnError', async () => {
+    delete process.env.META_ADS_ACCESS_TOKEN;
+    global.fetch = jest.fn();
+    await expect(MetaAds.syncCampaigns({ throwOnError: true })).resolves.toEqual([]);
+    await expect(MetaAds.syncDailyPerformance(7, { throwOnError: true })).resolves.toEqual([]);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('syncCampaigns removed-campaign reconcile', () => {
+  const page = (data, next) => ({ ok: true, json: async () => ({ data, paging: next ? { next } : {} }) });
+  const removedUpdates = () => updateCalls.filter((u) => u.table === 'ad_campaigns' && u.row.status === 'removed');
+
+  test('marks facebook rows Meta no longer returns as removed after a complete fetch', async () => {
+    global.fetch = jest.fn().mockResolvedValue(page([{ id: 'c1', name: 'Lead Gen', effective_status: 'ACTIVE' }]));
+    firstByTable.ad_campaigns = undefined;
+
+    await MetaAds.syncCampaigns();
+
+    expect(whereNotInCalls).toEqual([{ table: 'ad_campaigns', col: 'platform_campaign_id', ids: ['c1'] }]);
+    expect(removedUpdates()).toHaveLength(1);
+    expect(removedUpdates()[0].row.updated_at).toBeInstanceOf(Date);
+  });
+
+  test('an empty successful response marks every facebook row removed', async () => {
+    global.fetch = jest.fn().mockResolvedValue(page([]));
+
+    await MetaAds.syncCampaigns();
+
+    expect(whereNotInCalls).toEqual([{ table: 'ad_campaigns', col: 'platform_campaign_id', ids: [] }]);
+    expect(removedUpdates()).toHaveLength(1);
+  });
+
+  test('follows paging before reconciling, so a campaign on page 2 is not removed', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(page([{ id: 'c1', name: 'A', effective_status: 'ACTIVE' }], 'https://graph.facebook.com/next'))
+      .mockResolvedValueOnce(page([{ id: 'c2', name: 'B', effective_status: 'PAUSED' }]));
+    firstByTable.ad_campaigns = undefined;
+
+    await MetaAds.syncCampaigns();
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(whereNotInCalls[0].ids).toEqual(['c1', 'c2']);
+  });
+
+  test('does NOT reconcile when the fetch errors', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ error: { message: 'boom' } }) });
+
+    await MetaAds.syncCampaigns();
+
+    expect(whereNotInCalls).toHaveLength(0);
+    expect(removedUpdates()).toHaveLength(0);
+  });
+
+  test('does NOT reconcile when pagination hits the page backstop (incomplete list)', async () => {
+    // Every response advertises another page; the 25-page backstop ends the walk early.
+    global.fetch = jest.fn().mockResolvedValue(page([], 'https://graph.facebook.com/more'));
+
+    await MetaAds.syncCampaigns();
+
+    expect(global.fetch).toHaveBeenCalledTimes(25);
+    expect(whereNotInCalls).toHaveLength(0);
+    expect(removedUpdates()).toHaveLength(0);
   });
 });

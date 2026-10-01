@@ -18,7 +18,87 @@ function adminFetch(path) {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
-  }).then((r) => r.json());
+  }).then((r) => {
+    // A 401/403/500 body is JSON too ({error}); without this check it was
+    // rendered as empty data instead of a failed load.
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  });
+}
+
+// --- SYNC HEALTH ---
+const SYNC_STALE_MS = 36 * 60 * 60 * 1000;
+const SYNC_PLATFORM_LABELS = { google_ads: "Google Ads", facebook: "Meta Ads" };
+// One entry per configured platform from the per-job rows /sync-status returns
+// (Meta has two jobs: it shows the older success and any failure).
+function summarizeSyncs(syncs, now = Date.now()) {
+  const byPlatform = new Map();
+  for (const row of syncs || []) {
+    if (!row.configured) continue;
+    const entry = byPlatform.get(row.platform) || {
+      platform: row.platform,
+      times: [],
+      failed: false,
+      error: null,
+    };
+    entry.times.push(
+      row.last_success_at ? new Date(row.last_success_at).getTime() : null,
+    );
+    if (row.last_status === "failed") {
+      entry.failed = true;
+      entry.error = entry.error || row.last_error || null;
+    }
+    byPlatform.set(row.platform, entry);
+  }
+  return [...byPlatform.values()].map((e) => {
+    // A platform is only as fresh as its oldest job; a job that never
+    // succeeded makes it "never".
+    const lastSuccessAt = e.times.includes(null) ? null : Math.min(...e.times);
+    return {
+      ...e,
+      lastSuccessAt,
+      label: SYNC_PLATFORM_LABELS[e.platform] || e.platform,
+      stale: lastSuccessAt == null || now - lastSuccessAt > SYNC_STALE_MS,
+    };
+  });
+}
+
+function SyncHealthNotice({ loadErrors, syncs }) {
+  const lines = summarizeSyncs(syncs);
+  if (loadErrors.length === 0 && lines.length === 0) return null;
+  return (
+    <div className="[margin-bottom:16px]">
+      {loadErrors.length > 0 && (
+        <div
+          role="alert"
+          className="rounded-md bg-red-100 text-red-800 text-ui-body [padding:8px_12px] [margin-bottom:8px]"
+        >
+          Couldn&apos;t load {loadErrors.join(", ")}. What&apos;s shown may be
+          missing or out of date -- reload to try again.
+        </div>
+      )}
+      {lines.map((l) => {
+        const warn = l.failed || l.stale;
+        return (
+          <div
+            key={l.platform}
+            data-qa={`sync-${l.platform}`}
+            className={`text-ui-body ${warn ? "text-amber-700 font-medium" : "text-ink-secondary"}`}
+          >
+            {l.label} last synced:{" "}
+            {l.lastSuccessAt
+              ? new Date(l.lastSuccessAt).toLocaleString()
+              : "never"}
+            {l.failed
+              ? ` -- latest sync failed${l.error ? ` (${l.error})` : ""}`
+              : l.stale
+                ? " -- over 36 hours ago"
+                : ""}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 // V2 token pass: non-semantic accents (blue/purple/orange/cyan/gold) fold to
@@ -299,20 +379,30 @@ export default function WavesPPCDashboard() {
   const [campaigns, setCampaigns] = useState([]);
   const [funnelData, setFunnelData] = useState(null);
   const [revenueData, setRevenueData] = useState(null);
+  const [syncStatus, setSyncStatus] = useState([]);
+  const [loadErrors, setLoadErrors] = useState([]);
   useEffect(() => {
     setLoading(true);
+    const failed = [];
+    const guard = (label, fallback) => () => {
+      failed.push(label);
+      return fallback;
+    };
     Promise.all([
-      adminFetch("/admin/ads/campaigns").catch(() => ({
-        campaigns: [],
-      })),
-      adminFetch("/admin/ads/funnel?period=30d").catch(() => null),
-      adminFetch("/admin/ads/revenue-attribution?period=month").catch(
-        () => null,
+      adminFetch("/admin/ads/campaigns").catch(
+        guard("campaigns", { campaigns: [] }),
       ),
-    ]).then(([campRes, funnel, revenue]) => {
-      setCampaigns(campRes.campaigns || []);
+      adminFetch("/admin/ads/funnel?period=30d").catch(guard("funnel", null)),
+      adminFetch("/admin/ads/revenue-attribution?period=month").catch(
+        guard("revenue attribution", null),
+      ),
+      adminFetch("/admin/ads/sync-status").catch(guard("sync status", null)),
+    ]).then(([campRes, funnel, revenue, sync]) => {
+      setCampaigns(campRes?.campaigns || []);
       setFunnelData(funnel);
       setRevenueData(revenue);
+      setSyncStatus(sync?.syncs || []);
+      setLoadErrors(failed);
       setLoading(false);
     });
   }, []);
@@ -399,6 +489,10 @@ export default function WavesPPCDashboard() {
   }
   if (campaigns.length === 0) {
     return (
+      <>
+        <SyncHealthNotice loadErrors={loadErrors} syncs={syncStatus} />
+        {/* A failed load is not "no campaigns" — the banner above says so. */}
+        {!loadErrors.includes("campaigns") && (
       <UiCard className="[padding:60px] text-center">
         {" "}
         <div className="text-ui-body [margin-bottom:16px]"></div>{" "}
@@ -410,6 +504,8 @@ export default function WavesPPCDashboard() {
           PPC performance.
         </div>{" "}
       </UiCard>
+        )}
+      </>
     );
   }
   return (
@@ -435,6 +531,7 @@ export default function WavesPPCDashboard() {
           Google Ads + Local Service Ads -- Live data from campaign tracker
         </div>{" "}
       </div>
+      <SyncHealthNotice loadErrors={loadErrors} syncs={syncStatus} />
       {/* Tab Switcher */}
       <div className="ppc-tab-bar mx-auto flex max-w-full max-sm:w-full [justify-content:safe_center] [&_button]:shrink-0 [gap:4px] [margin-bottom:24px] bg-zinc-100 rounded-md [padding:4px] [width:fit-content] overflow-x-auto">
         {[

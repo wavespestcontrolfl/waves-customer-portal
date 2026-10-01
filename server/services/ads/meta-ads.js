@@ -37,12 +37,15 @@ function isConfigured() {
 }
 
 // ---------------------------------------------------------------------------
-// Graph API GET with cursor pagination. Returns the concatenated `data` rows.
+// Graph API GET with cursor pagination. graphGetPaged returns the concatenated
+// `data` rows plus whether the walk reached the end of the cursor chain
+// (`complete: false` = the MAX_PAGES backstop cut it short). graphGet keeps the
+// rows-only shape for existing callers.
 // ---------------------------------------------------------------------------
-async function graphGet(edge, { fields, params = {} } = {}) {
+async function graphGetPaged(edge, { fields, params = {} } = {}) {
   const token = process.env.META_ADS_ACCESS_TOKEN;
   const acct = accountId();
-  if (!token || !acct) return [];
+  if (!token || !acct) return { rows: [], complete: false };
 
   const first = new URL(`${GRAPH}/${apiVersion()}/${acct}/${edge}`);
   if (fields) first.searchParams.set('fields', fields);
@@ -65,7 +68,11 @@ async function graphGet(edge, { fields, params = {} } = {}) {
     if (Array.isArray(json.data)) out.push(...json.data);
     next = json.paging?.next || null;
   }
-  return out;
+  return { rows: out, complete: !next };
+}
+
+async function graphGet(edge, opts) {
+  return (await graphGetPaged(edge, opts)).rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,19 +163,31 @@ function dateStr(d) {
 // ---------------------------------------------------------------------------
 // syncCampaigns — upsert into ad_campaigns (platform='facebook')
 // ---------------------------------------------------------------------------
-async function syncCampaigns() {
+// Options on every sync* entry point:
+//   throwOnError — opt-in for the scheduler: a failed fetch/write rethrows so
+//     runExclusive records job_health 'failed' (and ops-queue surfaces it).
+//     Default callers (admin route, tests) keep the historical "[] on failure"
+//     contract. Either way the runExclusive body now throws on error, so the
+//     job_health row for these jobs no longer reads 'success' after an API
+//     failure.
+async function syncCampaigns({ throwOnError = false } = {}) {
   if (!isConfigured()) return [];
   // Serialize across overlapping Railway instances / the admin /sync/meta
   // endpoint: ad_campaigns has no unique (platform, platform_campaign_id), so two
   // concurrent first-time syncs could both insert and duplicate a campaign.
-  const out = await runExclusive('meta-ads-campaigns', () => syncCampaignsLocked());
-  return Array.isArray(out) ? out : [];
+  try {
+    const out = await runExclusive('meta-ads-campaigns', () => syncCampaignsLocked());
+    return Array.isArray(out) ? out : [];
+  } catch (err) {
+    if (throwOnError) throw err;
+    return [];
+  }
 }
 
 async function syncCampaignsLocked() {
   try {
     logger.info('[meta-ads] Syncing campaigns');
-    const rows = await graphGet('campaigns', {
+    const { rows, complete } = await graphGetPaged('campaigns', {
       fields: 'id,name,status,effective_status,objective,daily_budget',
     });
 
@@ -188,21 +207,50 @@ async function syncCampaignsLocked() {
         results.push(inserted);
       }
     }
+
+    // /act_X/campaigns omits deleted/archived campaigns, so a campaign removed
+    // in Meta never comes back to be flipped by the upsert above and would stay
+    // 'active' here forever (the PPC dashboard filters status != 'removed').
+    // After a COMPLETE fetch, anything we hold that Meta did not return is gone.
+    // An incomplete walk (page backstop hit) or an errored fetch (we never get
+    // here) must not reconcile. Rows with a NULL platform_campaign_id are left
+    // alone (NOT IN never matches NULL).
+    if (complete) {
+      const removed = await markMissingCampaignsRemoved(rows.map((r) => String(r.id)));
+      if (removed > 0) logger.info(`[meta-ads] Marked ${removed} campaign(s) removed (no longer returned by Meta)`);
+    } else {
+      logger.warn('[meta-ads] campaigns pagination incomplete — skipping removed-campaign reconcile');
+    }
+
     logger.info(`[meta-ads] Synced ${results.length} campaigns`);
     return results;
   } catch (err) {
     logger.error(`[meta-ads] syncCampaigns failed: ${err.message}`);
-    return [];
+    throw err;
   }
+}
+
+async function markMissingCampaignsRemoved(returnedIds) {
+  const n = await db('ad_campaigns')
+    .where({ platform: PLATFORM })
+    .whereNotIn('platform_campaign_id', returnedIds)
+    .whereNot('status', 'removed')
+    .update({ status: 'removed', updated_at: new Date() });
+  return Number(n) || 0;
 }
 
 // ---------------------------------------------------------------------------
 // syncDailyPerformance — per-campaign daily insights into ad_performance_daily
 // ---------------------------------------------------------------------------
-async function syncDailyPerformance(days = 7) {
+async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
   if (!isConfigured()) return [];
-  const out = await runExclusive('meta-ads-performance', () => syncDailyPerformanceLocked(days));
-  return Array.isArray(out) ? out : [];
+  try {
+    const out = await runExclusive('meta-ads-performance', () => syncDailyPerformanceLocked(days));
+    return Array.isArray(out) ? out : [];
+  } catch (err) {
+    if (throwOnError) throw err;
+    return [];
+  }
 }
 
 async function syncDailyPerformanceLocked(days = 7) {
@@ -241,7 +289,7 @@ async function syncDailyPerformanceLocked(days = 7) {
     return results;
   } catch (err) {
     logger.error(`[meta-ads] syncDailyPerformance failed: ${err.message}`);
-    return [];
+    throw err;
   }
 }
 

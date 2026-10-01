@@ -71,7 +71,10 @@ function mapStatus(googleStatus) {
 // ---------------------------------------------------------------------------
 // syncCampaigns — pull all campaigns, upsert into ad_campaigns
 // ---------------------------------------------------------------------------
-async function syncCampaigns() {
+// Every sync* below takes `{ throwOnError }`: the scheduler opts in so a failed
+// sync rethrows into runExclusive (job_health 'failed' → ops-queue alert);
+// default callers (admin /sync route, tests) keep the "[] on failure" contract.
+async function syncCampaigns({ throwOnError = false } = {}) {
   const customer = getCustomer();
   if (!customer) return [];
 
@@ -168,10 +171,29 @@ async function syncCampaigns() {
       });
     }
 
+    // The GAQL above filters REMOVED campaigns out, so a campaign removed in
+    // Google Ads never comes back to be flipped by the upsert and would stay
+    // 'active'/'paused' locally (the dashboard filters status != 'removed' and
+    // the budget loop would keep acting on it). After the successful fetch,
+    // mark anything we hold that Google did not return as removed — with the
+    // same freshness fence as the upsert: a row a local writer touched after
+    // this fetch began is left for tomorrow's sync. Rows with a NULL
+    // platform_campaign_id are untouched (NOT IN never matches NULL).
+    const removed = await db('ad_campaigns')
+      .where({ platform: 'google_ads' })
+      .whereNotIn('platform_campaign_id', results.map((r) => String(r.platform_campaign_id)))
+      .whereNot('status', 'removed')
+      .where('updated_at', '<', fetchStartedAt)
+      .update({ status: 'removed', updated_at: new Date() });
+    if (Number(removed) > 0) {
+      logger.info(`[google-ads] Marked ${removed} campaign(s) removed (no longer returned by Google Ads)`);
+    }
+
     logger.info(`[google-ads] Synced ${results.length} campaigns`);
     return results;
   } catch (err) {
     logger.error(`[google-ads] syncCampaigns failed: ${err.message}`);
+    if (throwOnError) throw err;
     return [];
   }
 }
@@ -189,7 +211,7 @@ function gaqlDateRange(days, now = new Date()) {
   return { since: fmt(since), until: fmt(now) };
 }
 
-async function syncDailyPerformance(days = 7) {
+async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
   const customer = getCustomer();
   if (!customer) return [];
 
@@ -267,6 +289,7 @@ async function syncDailyPerformance(days = 7) {
     return results;
   } catch (err) {
     logger.error(`[google-ads] syncDailyPerformance failed: ${err.message}`);
+    if (throwOnError) throw err;
     return [];
   }
 }
@@ -274,7 +297,7 @@ async function syncDailyPerformance(days = 7) {
 // ---------------------------------------------------------------------------
 // syncSearchTerms — pull search term report for last N days
 // ---------------------------------------------------------------------------
-async function syncSearchTerms(days = 30) {
+async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
   const customer = getCustomer();
   if (!customer) return [];
 
@@ -342,6 +365,7 @@ async function syncSearchTerms(days = 30) {
     return results;
   } catch (err) {
     logger.error(`[google-ads] syncSearchTerms failed: ${err.message}`);
+    if (throwOnError) throw err;
     return [];
   }
 }
