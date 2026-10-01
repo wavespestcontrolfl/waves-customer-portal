@@ -265,6 +265,11 @@ describe('writerRulesRejection', () => {
     ['We treated twelve square yards around the building.', 'footage'],
     ['Another treatment is on the house.', 'price'],
     ['We treated twelve LF along the fence.', 'footage'],
+    ["According to you, 'ants are back by the sink'.", 'quote'],
+    ["Per the customer, 'roaches in the pantry again'.", 'quote'],
+    ['Both follow-ups are on the house.', 'price'],
+    ['The next two treatments are on the house.', 'price'],
+    ['We treated thirteen LF along the fence.', 'footage'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -308,6 +313,8 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('We found a mud tube on the house foundation.')).toBeNull();
     expect(writerRulesRejection("The customer's kitchen and the tech's truck were checked.")).toBeNull();
     expect(writerRulesRejection('We treated the two yards.')).toBeNull();
+    expect(writerRulesRejection("We placed the 'no-see-um' trap.")).toBeNull();
+    expect(writerRulesRejection('Mud tubes were on the house siding.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();

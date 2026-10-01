@@ -315,7 +315,7 @@ function shoutedSentence(sentence) {
 // Access details never reach the writer: a sentence about getting in (a
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
 // lowercase code ("blue", "open sesame") looks like any other word.
-const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|into|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?|house|home|unit|apartment|condo|building))\b/i;
+const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|into|inside|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?|house|home|unit|apartment|condo|building))\b/i;
 // So is a sentence about working a gate, door or lock ("blue works at the
 // side gate where the ants are", "use the side gate", "punch it in at the
 // door"), pest talk or not; "ants come in under the back door" stays.
