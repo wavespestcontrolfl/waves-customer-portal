@@ -14221,6 +14221,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       try {
         const InvoiceService = require('../services/invoice');
         const runDelivery = () => InvoiceService.sendViaSMSAndEmail(invoiceId, {
+          // The customer's own accept: dispute-hold exempt.
+          holdExempt: 'customer',
           payUrlParams: estimateInvoicePayUrlParams({
             billingTerm,
             saveCard: !treatAsOneTime,

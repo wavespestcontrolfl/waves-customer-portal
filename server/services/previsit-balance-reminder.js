@@ -648,7 +648,12 @@ async function deliverLegacySms({ visit, amount, duesCents, fresh, smsPolicyPerm
       metadata: { scheduled_service_id: visit.id, amount },
     });
     const delivered = !result.blocked && result.sent !== false;
-    if (!delivered) await ContactLedger.markSendFailed(smsLedger, { code: result.code || 'blocked' });
+    if (!delivered) {
+      // A dispute hold that landed after the preflight is a WAIT: release the reservation, no failed
+      // row; the claim is released by the caller so the reminder is retried after the release.
+      if (require('./collections/collection-hold').isHoldSuppression(result)) await ContactLedger.releaseHeldReservation(smsLedger);
+      else await ContactLedger.markSendFailed(smsLedger, { code: result.code || 'blocked' });
+    }
     return delivered;
   } catch (smsErr) {
     logger.warn(`[previsit-balance] SMS failed for visit ${visit.id}: ${smsErr.message}`);
@@ -670,7 +675,9 @@ async function deliverLegacyEmail({ visit, amount, fresh, emailLegAvailable }) {
     });
     const delivered = emailResult?.ok === true;
     if (!delivered) {
-      await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+      // Dispute hold after the preflight: a WAIT (see deliverLegacySms) - release, do not stamp failed.
+      if (require('./collections/collection-hold').isHoldSuppression(emailResult)) await ContactLedger.releaseHeldReservation(emailLedger);
+      else await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
     }
     return delivered;
   } catch (emailErr) {
