@@ -90,6 +90,7 @@ function scriptedDb(scenario) {
     if (/AS first_visit/.test(sql)) return { rows: scenario.firstVisits || [] };
     if (/WITH te AS/.test(sql)) return { rows: scenario.completedVisits || [] };
     if (/is_callback = true/.test(sql)) return { rows: (signalsFor(bindings[0]).callbacks || []).map((line) => ({ line, n: 1 })) };
+    if (/WaveGuard Monthly/.test(sql)) return { rows: Object.entries(scenario.settledDues || {}).map(([customer_id, settled]) => ({ customer_id, settled })) };
     if (/^\?$/.test(sql.trim())) return bindings[0];
     throw new Error(`rate-review fixture: unexpected raw SQL ${sql.slice(0, 60)}`);
   });

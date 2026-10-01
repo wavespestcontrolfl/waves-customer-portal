@@ -218,6 +218,17 @@ describe('treatment minutes from the customer_interaction flag', () => {
     expect(mixed.rphFromNotHome).toBe(false);
     expect(mixed.revenuePerHourCents).toBe(Math.round((351 * 100) / ((40 + 42 + 50.5) / 60)));
   });
+  test('settled dues per application: the customer\'s settled dues × the family\'s ledger share ÷ completed visits, never today\'s rate', () => {
+    const ledger = new Map([['c|pest_control', { family_key: 'pest_control', monthly_rate: 40 }], ['c|lawn_care', { family_key: 'lawn_care', monthly_rate: 60 }]]);
+    // $1,000 settled over the lookback, pest is 40% of the dues, 4 completed pest visits → $100 per application
+    expect(P.duesPerVisitCents({ settledCents: 100000, ledger, customerId: 'c', familyKey: 'pest_control', accountLines: 2, completedVisits: 4 })).toBe(10000);
+    // single-line account with no ledger row → the whole settled amount is the line's
+    expect(P.duesPerVisitCents({ settledCents: 46800, ledger: new Map(), customerId: 'c', familyKey: 'pest_control', accountLines: 1, completedVisits: 4 })).toBe(11700);
+    // multi-line account with no attribution, nothing settled, or nothing completed → unavailable
+    expect(P.duesPerVisitCents({ settledCents: 46800, ledger: new Map(), customerId: 'c', familyKey: 'pest_control', accountLines: 2, completedVisits: 4 })).toBeNull();
+    expect(P.duesPerVisitCents({ settledCents: 0, ledger, customerId: 'c', familyKey: 'pest_control', accountLines: 2, completedVisits: 4 })).toBeNull();
+    expect(P.duesPerVisitCents({ settledCents: 100000, ledger, customerId: 'c', familyKey: 'pest_control', accountLines: 2, completedVisits: 0 })).toBeNull();
+  });
   test('a monthly member\'s visits carry no invoice: settled dues are attributed per application for $/hr', () => {
     const away = (m) => fixture.visit('x', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: null });
     const noDues = P.lineDurationStats([away(40), away(42), away(44)]);
@@ -513,6 +524,21 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(P.listReplayInputs(inputs, { familyKey: 'mosquito', cadence: 'monthly' }).services.pest.frequency).toBe('quarterly');
     expect(inputs.services.pest.frequency).toBe('quarterly'); // never mutates the stored inputs
   });
+  test('historical pins come off: a v1-pinned pest quote, frozen floors and minimums reprice at today\'s list', () => {
+    const saved = {
+      homeSqFt: 2100, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 89, lawnProgramMinimumMonthly: 45, useLawnCostFloor: true,
+      commercialFloorsArmedServices: ['pest_control'], rodentWaveguardPostureReplay: { tierQualifier: false }, termitePricingKnobs: { x: 1 },
+      services: { pest: { frequency: 'quarterly', version: 'v1', pricingVersion: 'v1' }, lawn: { track: 'st_augustine', tier: 'enhanced', programMinimumMonthly: 45, useLawnCostFloor: true } },
+    };
+    const clean = P.listReplayInputs(saved, { familyKey: 'pest_control', cadence: 'quarterly' });
+    expect(clean.services.pest).toEqual({ frequency: 'quarterly' });
+    expect(clean.services.lawn).toEqual({ track: 'st_augustine', tier: 'enhanced' });
+    for (const key of ['pestProgramFloorArmed', 'pestProgramFloorPerVisit', 'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs']) {
+      expect(clean[key]).toBeUndefined();
+    }
+    expect(clean.homeSqFt).toBe(2100);
+    expect(saved.services.pest.version).toBe('v1');
+  });
   test('engine inputs come from the admin V2 engineRequest (translated), then engineInputs, then a public `inputs` with a services map', () => {
     const translate = jest.fn((profile, selected, options) => ({ homeSqFt: profile.squareFootage, lotSqFt: profile.lotSqFt, services: { pest: { frequency: options.pestFrequency || 'quarterly' } }, selected }));
     const admin = { id: 'e-admin', estimate_data: { engineRequest: { profile: { squareFootage: 2400, lotSqFt: 9000 }, selectedServices: ['pest_control'], options: { pestFrequency: 'bimonthly' } }, inputs: { squareFootage: '2400', frequency: 'Bi-monthly' } } };
@@ -797,9 +823,12 @@ describe('buildBatch over the synthetic December book', () => {
   test('a monthly-billed line with no estimate takes the cadence mode spread over 12 months', async () => {
     const dues = fixture.customer(12, { member_since: '2024-12-15', billing_mode: 'monthly_membership', monthly_rate: 30, last_name: 'Dues' });
     const lines = [...book.planLines, fixture.planLine(dues.id, 'pest_control', 'quarterly', null, { priced_visits: 0 })];
+    const duesVisits = [40, 42, 44].map((m, i) => fixture.visit(dues.id, 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: null, date: `2026-0${i + 3}-10` }));
     const scenario = {
       planLines: lines, customers: [...book.customerRows, dues], firstVisits: [...book.firstVisits, { customer_id: dues.id, line: 'pest_control', first_visit: '2026-05-05', completed_visits: 2 }],
-      completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+      completedVisits: [...book.completedVisits, ...duesVisits], estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+      // $270 of dues settled over the lookback (9 × $30) → $90 per completed application
+      settledDues: { [dues.id]: 270 },
     };
     const db3 = fixture.scriptedDb(scenario);
     db.mockImplementation((table) => db3(table));
@@ -811,7 +840,9 @@ describe('buildBatch over the synthetic December book', () => {
     // quarterly pest mode $117/application → $39/mo; $30/mo = $90/application → 23% under → D →
     // per-application step min(12% × 90 = 10.80, 15) → floor($100.80) = $100/application → $33.33/mo (+$3.33/mo, +$39.96/yr)
     expect(row).toMatchObject({ rate_unit: 'month', current_rate_cents: 3000, current_rate_source: 'monthly_rate', list_rate_cents: 3900, list_rate_source: 'cadence_mode', band: 'D', proposed_rate_cents: 3333, delta_cents: 333, annual_delta_cents: 3996, status: 'green' });
-    expect(JSON.parse(row.flags)).toContain('list_from_cadence_mode');
+    expect(JSON.parse(row.flags)).toEqual(expect.arrayContaining(['list_from_cadence_mode', 'rph_from_dues', 'rph_from_not_home_visits']));
+    // $90 × 3 applications over 126 treatment minutes
+    expect(row.revenue_per_hour_cents).toBe(Math.round((270 * 100) / (126 / 60)));
     db.mockImplementation((table) => scripted(table));
     db.raw.mockImplementation((...args) => scripted.raw(...args));
     db.transaction.mockImplementation((fn) => scripted.transaction(fn));

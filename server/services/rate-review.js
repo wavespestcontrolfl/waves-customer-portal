@@ -448,10 +448,11 @@ function revenuePerHour(paired) {
 // visits gets $/hr from those alone (pure treatment time, no allowance
 // guesswork); otherwise every paired visit counts with the allowance
 // applied to the home ones.
-// `duesRevenueCents`: for a monthly-billed line, the family's settled dues
-// attributed to each application (slice × 12 ÷ visits per year) — monthly
-// members pay at account level, so their visits carry no invoice of their
-// own. Used only for a visit with no paired revenue; flagged rph_from_dues.
+// `duesRevenueCents`: for a monthly-billed line, the SETTLED dues of the
+// lookback attributed to each completed application (duesPerVisitCents) —
+// monthly members pay at account level, so their visits carry no invoice of
+// their own. Used only for a visit with no paired revenue; flagged
+// rph_from_dues.
 function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0, duesRevenueCents = null } = {}) {
   const usable = [];
   let duesAttributed = 0;
@@ -764,9 +765,23 @@ const LAWN_TIER_FOR_CADENCE = Object.freeze({ every_6_weeks: 'enhanced', monthly
 // same property, services and (engine-derived) tier — at the cadence the
 // line actually runs on (pest frequency / lawn tier), which can differ from
 // the cadence the estimate was sold at.
+// Saved-estimate replay pins that would reprice the quote AS SOLD rather
+// than at today's list: the retired pest curve (services.pest.version),
+// frozen floors/minimums, legacy rodent posture, termite knob snapshots.
+const REPLAY_PIN_KEYS = ['manualDiscount', 'serviceSpecificDiscounts', 'serviceSpecificCredits', 'pestProgramFloorArmed', 'pestProgramFloorPerVisit',
+  'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs'];
+const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersion'], lawn: ['programMinimumMonthly', 'useLawnCostFloor'] });
+
 function listReplayInputs(inputs, { familyKey = null, cadence = null } = {}) {
   const clean = JSON.parse(JSON.stringify(inputs));
-  for (const key of ['manualDiscount', 'serviceSpecificDiscounts', 'serviceSpecificCredits']) delete clean[key];
+  for (const key of REPLAY_PIN_KEYS) delete clean[key];
+  if (clean.services && typeof clean.services === 'object') {
+    for (const [service, keys] of Object.entries(REPLAY_PIN_SERVICE_KEYS)) {
+      if (clean.services[service] && typeof clean.services[service] === 'object') {
+        for (const key of keys) delete clean.services[service][key];
+      }
+    }
+  }
   if (familyKey === 'pest_control' && clean.services && clean.services.pest && PEST_FREQUENCY_FOR_CADENCE[cadence]) {
     clean.services.pest = { ...clean.services.pest, frequency: PEST_FREQUENCY_FOR_CADENCE[cadence] };
   }
@@ -968,6 +983,56 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       AND s.scheduled_date >= ?
   `, [...notSettled, customerIds, sinceYmd]);
   return rows;
+}
+
+// Settled membership dues per customer over the lookback — the monthly
+// lane's revenue (facts.js posture: both rails carry chargeMonthly's
+// "WaveGuard Monthly" marker and can double-count one payment, so the
+// LARGER rail counts, never the sum).
+async function loadSettledDues(dbh, customerIds, { sinceYmd }) {
+  if (!customerIds.length) return new Map();
+  const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
+  const { rows } = await dbh.raw(`
+    WITH inv AS (
+      SELECT customer_id, sum(total) AS amount FROM invoices
+      WHERE customer_id = ANY(?::uuid[]) AND archived_at IS NULL
+        AND (paid_at IS NOT NULL OR status IN ('paid', 'prepaid'))
+        AND status NOT IN (${notSettled.map(() => '?').join(', ')})
+        AND title ILIKE '%WaveGuard Monthly%'
+        AND (COALESCE(paid_at, created_at) AT TIME ZONE 'America/New_York')::date >= ?
+      GROUP BY customer_id
+    ), pay AS (
+      SELECT customer_id, sum(amount) AS amount FROM payments
+      WHERE customer_id = ANY(?::uuid[]) AND status = 'paid'
+        AND (description ILIKE '%WaveGuard Monthly%' OR metadata->>'type' = 'monthly_autopay')
+        AND (created_at AT TIME ZONE 'America/New_York')::date >= ?
+      GROUP BY customer_id
+    )
+    SELECT COALESCE(inv.customer_id, pay.customer_id) AS customer_id,
+      GREATEST(COALESCE(inv.amount, 0), COALESCE(pay.amount, 0)) AS settled
+    FROM inv FULL OUTER JOIN pay ON pay.customer_id = inv.customer_id
+  `, [customerIds, ...notSettled, sinceYmd, customerIds, sinceYmd]);
+  return new Map(rows.map((r) => [r.customer_id, Math.round((finite(r.settled) || 0) * 100)]));
+}
+
+// A monthly-billed line's settled dues per application over the lookback:
+// the customer's settled dues × this family's share of the ledger (1 on a
+// single-line account) ÷ the line's completed visits in the window. Null
+// when nothing settled or nothing was completed — revenue/hour then stays
+// unavailable rather than invented from today's rate.
+function duesPerVisitCents({ settledCents, ledger, customerId, familyKey, accountLines, completedVisits }) {
+  if (!(settledCents > 0) || !(completedVisits > 0)) return null;
+  let share = null;
+  const own = ledgerSliceForLine(ledger, customerId, familyKey);
+  if (own) {
+    let total = 0;
+    for (const [key, row] of ledger) if (key.startsWith(`${customerId}|`)) total += finite(row.monthly_rate) || 0;
+    share = total > 0 ? own.monthly_rate / total : null;
+  } else if (accountLines === 1) {
+    share = 1;
+  }
+  if (share == null || !(share > 0)) return null;
+  return Math.round((settledCents * share) / completedVisits);
 }
 
 async function loadEstimates(dbh, estimateIds) {
@@ -1251,13 +1316,16 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
   const config = await loadConfig(dbh);
   const planLines = consolidatePlanLines(await loadActivePlanLines(dbh, { today }));
   const customerIds = [...new Set(planLines.map((p) => p.customer_id))];
+  const sinceYmd = daysAgoYmd(now, LOOKBACK_DAYS);
   const [customers, firstVisits, completedRows, liveTerms, ledger] = await Promise.all([
     loadCustomers(dbh, customerIds),
     loadFirstCompletedVisits(dbh, customerIds),
-    loadCompletedVisitRows(dbh, customerIds, { sinceYmd: daysAgoYmd(now, LOOKBACK_DAYS) }),
+    loadCompletedVisitRows(dbh, customerIds, { sinceYmd }),
     loadLiveTerms(dbh, customerIds, { today }),
     loadLedgerSlices(dbh, customerIds),
   ]);
+  const monthlyIds = [...customers.values()].filter((c) => c.billing_mode === 'monthly_membership').map((c) => c.id);
+  const settledDues = await loadSettledDues(dbh, monthlyIds, { sinceYmd });
   const estimateIds = [...new Set(planLines.flatMap((p) => p.source_estimate_ids || []))];
   const estimates = await loadEstimates(dbh, estimateIds);
 
@@ -1281,10 +1349,13 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     const cadence = planLine.cadence;
     const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice: ledgerSliceForLine(ledger, customer.id, familyKey) });
     const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
-    const stats = lineDurationStats(visitsByLine.get(`${customer.id}|${familyKey}`) || [], {
+    const lineVisits = visitsByLine.get(`${customer.id}|${familyKey}`) || [];
+    const stats = lineDurationStats(lineVisits, {
       config,
       allowanceMinutes: allowanceFor(allowances, familyKey),
-      duesRevenueCents: current.unit === 'month' && current.cents > 0 && visitsPerYear > 0 ? Math.round((current.cents * 12) / visitsPerYear) : null,
+      duesRevenueCents: current.unit === 'month'
+        ? duesPerVisitCents({ settledCents: settledDues.get(customer.id) || 0, ledger, customerId: customer.id, familyKey, accountLines: planLine.account_lines, completedVisits: lineVisits.length })
+        : null,
     });
     const first = firstVisits.get(`${customer.id}|${familyKey}`) || null;
 
@@ -1698,6 +1769,7 @@ module.exports = {
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,
     resolveAnniversary, resolveCurrentRate, matchPrepayTerm, familyOfCoverage, consolidatePlanLines, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer, engineInputsFromEstimate,
     loadActivePlanLines, loadFirstCompletedVisits, loadCompletedVisitRows, loadExceptionSignals, loadPriorReviews, loadLedgerSlices, ledgerSliceForLine, loadEstimates, loadCustomers,
+    loadSettledDues, duesPerVisitCents,
     LEDGER_FAMILIES_FOR_LINE,
     MAX_USABLE_MINUTES, MIN_TREATMENT_MINUTES, MAX_ALLOWANCE_MINUTES, MIN_LINE_RPH_SAMPLE, CADENCE_VISITS, CONVERSATION_MINUTES_KEYS, INTERACTION_HOME, INTERACTION_NOT_HOME,
   },
