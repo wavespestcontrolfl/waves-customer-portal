@@ -555,6 +555,15 @@ async function resendCloseNotices(db, { booking }) {
       .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
       .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
       .where('l.status', CLOSED_STATUS)
+      // ...and only while that close is the request's CURRENT one (codex #5477 r17):
+      // a request reopened and closed again by a later booking is that booking's to
+      // announce, so this booking's missed FYI is stale and never replayed.
+      .whereNotExists(function laterClose() {
+        this.select(1).from('lead_activities as later')
+          .whereRaw('later.lead_id = a.lead_id AND later.id > a.id')
+          .where('later.activity_type', 'status_change')
+          .whereRaw("later.metadata->>'reason' = ?", [CLOSE_REASON]);
+      })
       .select('a.lead_id', 'a.metadata', 'l.first_name', 'l.last_name')) || [];
     for (const row of audits) {
       let meta = row.metadata;

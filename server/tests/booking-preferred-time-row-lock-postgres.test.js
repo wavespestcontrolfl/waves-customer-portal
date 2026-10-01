@@ -861,6 +861,24 @@ jest.setTimeout(60000);
         expect(delivered.size).toBe(0);
       });
 
+      test('a stale FYI is never replayed after a later booking closed the request again (codex #5477 r17)', async () => {
+        const { cust, req, booking: a } = await setupRequestAndBooking();
+        failTimes = 2; // booking A's close and its in-run retry both miss the FYI
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: a })).closed).toBe(1);
+        expect(delivered.size).toBe(0);
+        // staff reopen it; booking B closes it again (its FYI goes out)
+        await database('leads').where({ id: req.leadId }).update({ status: 'new', extracted_data: database.raw("COALESCE(extracted_data, '{}'::jsonb) || jsonb_build_object('last_requested_at', now()::text)") });
+        const later = new Date(Date.now() + 120000);
+        const sbb = await database('self_booked_appointments').insert({ customer_id: cust, created_at: later }).returning(['id', 'created_at']);
+        await database('scheduled_services').insert({ self_booking_id: sbb[0].id });
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: sbb[0] })).closed).toBe(1);
+        expect(delivered.size).toBe(1);
+        // a replay of A: its FYI is stale now, never sent
+        await closeBookedPreferredLeads(database, { customerId: cust, booking: a });
+        expect(delivered.size).toBe(1);
+        expect([...delivered][0]).not.toContain(':' + (await database('scheduled_services').where({ self_booking_id: a.id }).first('id')).id);
+      });
+
       test('a request staff reopened is not announced again by a retry', async () => {
         const { cust, req, booking } = await setupRequestAndBooking();
         failTimes = 2; // the close and its in-run retry both fail
