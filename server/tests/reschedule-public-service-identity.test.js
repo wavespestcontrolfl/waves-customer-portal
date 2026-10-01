@@ -27,11 +27,17 @@ const mockNormalizeBookingServiceKey = jest.fn((value) => {
   const text = String(value || '').trim().toLowerCase().replace(/ /g, '_');
   return known.has(text) ? text : '';
 });
+// Unrelated to this file's own identity assertions (owner 2026-09-28) — a
+// stub is enough so buildAvailabilityForService's capacityPlacement param
+// doesn't throw; its value is asserted in booking-capacity-placement-wiring
+// .test.js, not here.
+const mockBookInsertionOffersLive = jest.fn(() => false);
 jest.mock('../routes/booking', () => ({
   _internals: {
     resolveBookingCoords: (...args) => mockResolveBookingCoords(...args),
     buildBookingAvailability: (...args) => mockBuildBookingAvailability(...args),
     normalizeBookingServiceKey: (...args) => mockNormalizeBookingServiceKey(...args),
+    bookInsertionOffersLive: (...args) => mockBookInsertionOffersLive(...args),
   },
 }));
 

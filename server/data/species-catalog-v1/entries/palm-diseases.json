@@ -92,8 +92,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "da0c06ae1f13c275a11d70dd5c91f34accbb8389c5cbb39d38f90aafeb079d19"
     },
     "condition": {
       "hosts": [
@@ -223,8 +224,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Peak months for new symptoms are an estimate tied to warm-season vector activity; UF/IFAS gives only a latent period of about 4-5 months and a 'highly variable' 2-3 month symptom-progression period, not a Florida-specific monthly calendar."
+      "status": "owner_approved",
+      "notes": "Peak months for new symptoms are an estimate tied to warm-season vector activity; UF/IFAS gives only a latent period of about 4-5 months and a 'highly variable' 2-3 month symptom-progression period, not a Florida-specific monthly calendar.",
+      "approval_hash": "c5086ab9d9e9342b2f2731eadf4896d9d667982a94943a7d7effe7e1aa094c32"
     },
     "condition": {
       "hosts": [
@@ -367,8 +369,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Whether lethal yellowing occurs in Charlotte County specifically is unconfirmed in the source reviewed; UF/IFAS documents it in Sarasota and Manatee counties since 2007, so range is set to occasional rather than rare."
+      "status": "owner_approved",
+      "notes": "Whether lethal yellowing occurs in Charlotte County specifically is unconfirmed in the source reviewed; UF/IFAS documents it in Sarasota and Manatee counties since 2007, so range is set to occasional rather than rare.",
+      "approval_hash": "58b5a55bfe994af81a636bcec14c83042dfcbf17b7144a7e2e1768e8fa0cfb0d"
     },
     "condition": {
       "hosts": [
@@ -499,8 +502,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b716d3fe9212934afb17b9b84b72106a21a1832c72d99a402d941ce9fb7e0a08"
     },
     "condition": {
       "hosts": [
@@ -634,8 +638,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "36b582d694803b324043e022612cb9a0729ee053b2f81f3c9f7a8e5c6dda1eac"
     },
     "condition": {
       "hosts": [
@@ -664,7 +669,7 @@
         {
           "slug": "boron-deficiency-palm",
           "difference": "Boron deficiency keeps the spear leaf small or hooked but it stays attached; bud rot leaves discolor, wilt and pull free easily.",
-          "next_observation": "Gently check whether the spear leaf pulls free, or have a technician check it.",
+          "next_observation": "A technician checks whether the spear leaf pulls free; don't climb a ladder to reach it yourself.",
           "photo_can_confirm": false
         },
         {
@@ -776,8 +781,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Peak months are an estimate tied to the humid rainy season; UF/IFAS confirms the disease is mostly cosmetic on Phoenix species but gives no Florida-specific monthly calendar, so season_basis is set to unverified."
+      "status": "owner_approved",
+      "notes": "Peak months are an estimate tied to the humid rainy season; UF/IFAS confirms the disease is mostly cosmetic on Phoenix species but gives no Florida-specific monthly calendar, so season_basis is set to unverified.",
+      "approval_hash": "f75428fad8865fcfd5bb7b8757f22e89029b1cbbe48d655e4138b302497af59c"
     },
     "condition": {
       "hosts": [
@@ -913,8 +919,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2fbff0d9a0c670d5c89e02448b18d91553d5e06b62257fe917de1142a1747c0c"
     },
     "condition": {
       "hosts": [
@@ -952,6 +959,141 @@
       ],
       "outcome": "manageable",
       "recovery_note": "Spotted leaflets do not clear up, but new growth is usually unaffected within a few weeks."
+    }
+  },
+  {
+    "slug": "thielaviopsis-trunk-rot",
+    "kind": "disease",
+    "common_name": "Thielaviopsis Trunk Rot",
+    "aka": [],
+    "aliases": [
+      "thielaviopsis trunk rot",
+      "thielaviopsis",
+      "thielaviopsis paradoxa",
+      "palm trunk rot"
+    ],
+    "scientific_name": "Thielaviopsis paradoxa",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "A trunk that suddenly collapses on itself, or a canopy that falls off the trunk",
+      "A canopy that can look green and healthy right up until the failure",
+      "Soft, dark rot in the trunk at a wound such as a pruning cut or climbing-spike scar"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": "A weakened palm can fall without warning; keep people, pets and vehicles clear until an arborist has assessed it.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A palm trunk that collapses or a canopy that drops, even with green fronds, can suggest Thielaviopsis trunk rot, a fungus that enters through fresh wounds. A photo cannot confirm it. An arborist urgently checks the palm, and the area beneath it should be kept clear.",
+      "fact": "UF/IFAS says the fungus infects a palm only through a fresh wound, such as a bad pruning cut or a climbing-spike scar, and there may be no sign until the trunk fails."
+    },
+    "tech_notes": "Look for soft, dark trunk rot at wounds. Urgent safety assessment by an arborist; keep people clear. UF/IFAS says all palms are potential hosts (coconut and date palms are common examples). Discuss wound-avoidance with the owner.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pp143"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). PP143 says all palm species are potential hosts (coconut, date and Washington palms are named); the owner brief also lists queen palm, which the source does not name. no_cure text avoids the banned treatment words by design."
+    },
+    "verification": [
+      {
+        "claim": "Queen palm as a commonly affected host",
+        "note": "From the owner brief. PP143 names coconut, date, Canary Island date and Washington palms and says all palms are potential hosts; queen palm is not named."
+      }
+    ],
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [
+        "Soft, dark rot in the trunk at a pruning cut or wound"
+      ],
+      "symptoms": [
+        "The trunk collapses on itself, or the canopy suddenly falls off the trunk",
+        "The canopy can look normal and green until the failure"
+      ],
+      "required_signature": {
+        "text": "A photo of a soft, dark trunk wound can raise concern, but an arborist confirms it. Because failure can be sudden, safety comes first.",
+        "elements": [
+          "Soft, dark rot in the trunk at a pruning cut or wound"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "palmetto-weevil",
+          "difference": "Palmetto weevil grubs kill the growing point, so the crown wilts and droops; Thielaviopsis rots the trunk and can drop a green canopy suddenly.",
+          "next_observation": "A wide shot of the whole crown and a close-up of any wound or frass at the trunk.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "south-american-palm-weevil",
+          "difference": "Palm weevil damage shows crown collapse with larvae and frass in the crown; Thielaviopsis shows a rotting trunk at a wound with no crown larvae.",
+          "next_observation": "A wide shot of the whole crown and a close-up of the trunk wound.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "wounding"
+      ],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once the trunk is rotted; a palm with a rotted trunk is usually removed."
     }
   }
 ]

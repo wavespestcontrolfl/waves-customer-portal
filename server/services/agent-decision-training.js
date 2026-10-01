@@ -43,10 +43,15 @@ function redactText(value, context = {}) {
     context?.estimate?.customer_name,
     context?.lead?.first_name,
     context?.lead?.last_name,
+    // Callers that hold names outside a customer/lead record pass them here.
+    ...(Array.isArray(context?.names) ? context.names : []),
   ].map((item) => String(item || '').trim()).filter((item) => item.length >= 3);
 
   for (const name of names) {
-    text = text.replace(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), '[name]');
+    // Unicode-aware edges: `\b` is ASCII-only, so a name ending in a letter
+    // like "é" (José, Chloé) had no boundary after it and never matched.
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    text = text.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'giu'), '[name]');
   }
 
   return text

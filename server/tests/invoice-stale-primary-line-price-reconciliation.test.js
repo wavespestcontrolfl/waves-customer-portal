@@ -133,3 +133,28 @@ describe('buildScheduledServiceInvoiceLines — stale primary_line_price beside 
     expect(netTotal(lineItems)).toBe(0);
   });
 });
+
+// Codex r1 P1 on #5256: under GATE_STAMPED_ZERO_FREE a BARE stamped $0 (no
+// primary_line_price) is authoritative too, so a stored add-on reconciles
+// down to it instead of topping up to a stale fee fallback. Gate off keeps
+// today's behavior.
+describe('buildScheduledServiceInvoiceLines — bare stamped $0 under GATE_STAMPED_ZERO_FREE', () => {
+  afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+  const scheduled = { id: 'sched-z', service_type: 'Rodent Trapping', estimated_price: 0, primary_line_price: null };
+  const addons = [{ id: 'a1', service_name: 'Bait station refill', base_price: 40, estimated_price: 40 }];
+
+  test('gate on: a stale fee fallback never re-bills the stamped $0 — add-on and fee reconcile to $0', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const { lineItems } = await InvoiceService.buildLineItemsForScheduledService('sched-z', {
+      fallbackAmount: 97.2, fallbackDescription: 'Service visit', database: fakeConn({ scheduled, addons }),
+    });
+    expect(netTotal(lineItems)).toBe(0);
+  });
+
+  test('gate off: unchanged — the fee fallback still wins over a bare $0', async () => {
+    const { lineItems } = await InvoiceService.buildLineItemsForScheduledService('sched-z', {
+      fallbackAmount: 97.2, fallbackDescription: 'Service visit', database: fakeConn({ scheduled, addons }),
+    });
+    expect(netTotal(lineItems)).toBe(97.2);
+  });
+});

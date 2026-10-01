@@ -450,6 +450,18 @@ const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 // would otherwise have filled in — it fires only where R5's table already
 // would have — so it reuses 'default_kind' rather than add a migration and
 // an enum value for a rendering distinction no surface asks for.
+// End of the business day on an ET calendar date (8 PM ET matches the
+// follow-up SLA's 8 AM–8 PM ET window). Less than an hour after the text
+// (it lands after ~7 PM ET) pushes the deadline to 9 AM ET the next morning
+// instead of bell-in-an-hour. parseETDateTime does the DST-correct
+// wall-clock -> instant conversion; never hand-roll the offset here.
+function endOfBusinessDay(day, messageDate) {
+  const endOfDay = parseETDateTime(`${day}T20:00`);
+  return endOfDay.getTime() - messageDate.getTime() < 3600000
+    ? parseETDateTime(`${etDateString(addETDays(endOfDay, 1))}T09:00`)
+    : endOfDay;
+}
+
 function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
   // Defaults are Waves' own service windows. A customer-owned promise ("I'll
@@ -470,6 +482,13 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // this obligation only when its own quote states a clock ("Call me at 3
   // and send the estimate" leaves the estimate its default — Codex #4816 r31).
   const unresolvedClock = item.timing_unverified && statesClock(item.quote);
+  // A staff promise naming a day but no clock ("I'll stop by today",
+  // "tomorrow", "Wednesday", "this weekend"): the extraction names the day
+  // and groundExtraction checked it (due_date). Due at the end of that
+  // business day (owner-approved staff-promise plan, 2026-09-28).
+  if (item.basis === 'promise' && item.due_date && !unresolvedClock) {
+    return { due_at: endOfBusinessDay(item.due_date, new Date(messageCreatedAt)).toISOString(), due_basis: 'default_kind' };
+  }
   // Quotes are short excerpts; the cap keeps the timing regexes bounded.
   const strippedQuote = withoutTopics(String(item.quote || '').slice(0, 500));
   if (item.due_text || unresolvedClock || STATED_TIMING.test(strippedQuote)) {
@@ -494,17 +513,7 @@ function resolveDueDeadline(item, messageCreatedAt) {
       && sameDayRemainderClear(item.due_text);
     if (!sameDayOnly) return { due_at: null, due_basis: null };
     const messageDate = new Date(messageCreatedAt);
-    // End of the business day on the message's own ET calendar date (8 PM
-    // ET matches the follow-up SLA's 8 AM–8 PM ET window). Less than an
-    // hour away (the text lands after ~7 PM ET) pushes the deadline to 9 AM
-    // ET the next morning instead of bell-in-an-hour. parseETDateTime does
-    // the DST-correct wall-clock -> instant conversion; never hand-roll the
-    // offset here.
-    const endOfDay = parseETDateTime(`${etDateString(messageDate)}T20:00`);
-    const dueAt = endOfDay.getTime() - messageDate.getTime() < 3600000
-      ? parseETDateTime(`${etDateString(addETDays(messageDate, 1))}T09:00`)
-      : endOfDay;
-    return { due_at: dueAt.toISOString(), due_basis: 'default_kind' };
+    return { due_at: endOfBusinessDay(etDateString(messageDate), messageDate).toISOString(), due_basis: 'default_kind' };
   }
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
@@ -577,15 +586,9 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
           // admissibility and the event page read it, since an ask's words
           // never change after intake (Codex #4996 r6).
           ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}),
-          // Whether a plain human staff reply can answer this ask at all
-          // (owner ruling 2026-09-28, partly reversing R3 2026-09-24): the
-          // extraction's own judgement (answered_by_reply), stamped once
-          // here exactly like money_answerable (Codex #5088 precedent) — an
-          // unstamped row (extracted before this lane, or any kind other
-          // than 'other') is never reply-answerable, so it keeps R3: only a
-          // visit event or a payment landing closes it (sms-commitment-
-          // fulfillment.js witnessTypes).
-          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { reply_answerable: item.answered_by_reply === true } : {}) },
+          // The day a staff promise named (groundExtraction checked it): the
+          // completion check reads it, since due_at alone is a UTC instant.
+          ...(item.basis === 'promise' && item.due_date ? { due_date: item.due_date } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -738,19 +741,43 @@ const KIND_LABELS = {
   send_appointment_confirmation: 'A promised appointment confirmation needs attention',
   other: 'An SMS request needs follow-up',
 };
+// A promise staff texted (basis 'promise') carries its own title, whatever its
+// kind (owner-approved staff-promise plan, 2026-09-28).
+const PROMISE_LABEL = 'A promise texted to a customer needs follow-up';
 
-// Only the customer profile opts into SMS rows. Call queues and workers
-// continue using their call-scoped reader and implicit deadline rules.
+// An ask row's emails.customer_id, else the row's own email_customer_id —
+// the same resolution email-operational-actions.js uses; both follow a
+// customer merge.
+const RESOLVED_EMAIL_CUSTOMER_ID_SQL = 'COALESCE(e.customer_id, cc.email_customer_id)';
+
+// Only the customer profile opts into SMS/email rows. Call queues and
+// workers continue using their call-scoped reader and implicit deadline
+// rules. Coordinator correction #4, 2026-09-29: the SMS branch's own
+// query/columns are UNCHANGED (a plain UNION ALL with a second, email-
+// sourced branch, kept to compatible column names) — an SMS row's output
+// shape is byte-identical to before. `channel` distinguishes the two for a
+// reader (e.g. the customer-profile panel's own label).
 async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, now = new Date() }) {
-  const rows = await conn('call_commitments as cc')
+  const smsRows = conn('call_commitments as cc')
     .join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id')
     .where({ 's.customer_id': customerId, 'cc.status': 'open' }).whereNull('c.deleted_at')
-    .orderByRaw('cc.due_at ASC NULLS LAST, s.created_at ASC, cc.id ASC')
-    .limit(Math.max(1, Math.min(201, Number(limit) || 20)))
-    .offset(Math.max(0, Number(offset) || 0))
     .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at',
-      'cc.sms_log_id', 's.created_at as sms_started_at', 's.customer_id');
+      'cc.sms_log_id', conn.raw('NULL::uuid as email_id'), 's.created_at as sms_started_at',
+      's.customer_id', conn.raw("'sms' as channel"));
+  const emailRows = conn('call_commitments as cc')
+    .join('emails as e', 'e.id', 'cc.email_id')
+    .whereRaw(`${RESOLVED_EMAIL_CUSTOMER_ID_SQL} = ?`, [customerId]).where({ 'cc.status': 'open' })
+    .whereExists(function availableCustomer() {
+      this.select(1).from('customers as c').whereRaw(`c.id = ${RESOLVED_EMAIL_CUSTOMER_ID_SQL}`).whereNull('c.deleted_at');
+    })
+    .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at',
+      conn.raw('NULL::uuid as sms_log_id'), 'cc.email_id', 'e.received_at as sms_started_at',
+      conn.raw('?::uuid as customer_id', [customerId]), conn.raw("'email' as channel"));
+  const rows = await conn.unionAll([smsRows, emailRows], true)
+    .orderByRaw('due_at ASC NULLS LAST, sms_started_at ASC, id ASC')
+    .limit(Math.max(1, Math.min(201, Number(limit) || 20)))
+    .offset(Math.max(0, Number(offset) || 0));
   return rows.map((row) => ({ ...row, overdue: !!row.due_at && new Date(row.due_at) <= now }));
 }
 
@@ -758,27 +785,55 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
   if (!['fulfill', 'dismiss'].includes(action)) throw Object.assign(new Error('SMS follow-up supports Mark done or Dismiss'), { status: 400 });
   if (note !== undefined && typeof note !== 'string') throw Object.assign(new Error('note must be text'), { status: 400 });
   return conn.transaction(async (trx) => {
-    const initial = await trx('call_commitments').where({ id }).first('sms_log_id');
-    if (!initial?.sms_log_id) throw Object.assign(new Error('SMS follow-up not found'), { status: 404 });
+    const initial = await trx('call_commitments').where({ id }).first('sms_log_id', 'email_id', 'kind');
+    if (!initial?.sms_log_id && !initial?.email_id) throw Object.assign(new Error('SMS follow-up not found'), { status: 404 });
+    // A reschedule-link promise's office verdict also retires a call-log-
+    // ONLY delivery ledger inside applyHumanUpdate (reschedule-link-
+    // promises.js, reached by call_log_id alone) — no email analog exists.
+    // Refused here rather than risk that path with a null call_log_id
+    // (coordinator correction #4, 2026-09-29 — the one deliberate scope
+    // limit on this generalization, reported rather than patched around).
+    if (initial.email_id && initial.kind === 'send_reschedule_link') {
+      throw Object.assign(new Error('This follow-up needs staff review outside this panel'), { status: 409 });
+    }
     // Match intake/watcher lock order. The requested profile must still own
     // the source after a merge or relink while its controls were open.
     const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
     if (!customer) throw Object.assign(new Error('Customer unavailable'), { status: 409 });
-    const source = await trx('sms_log').where({ id: initial.sms_log_id }).forUpdate().first();
-    if (source?.customer_id !== customerId) throw Object.assign(new Error('SMS follow-up moved; reload this profile'), { status: 409 });
-    const current = await trx('call_commitments').where({ id }).forUpdate().first();
-    if (current?.sms_log_id !== source.id || current.status !== 'open') {
-      throw Object.assign(new Error('SMS follow-up changed; reload this profile'), { status: 409 });
+    let sourceId;
+    if (initial.sms_log_id) {
+      const source = await trx('sms_log').where({ id: initial.sms_log_id }).forUpdate().first();
+      if (source?.customer_id !== customerId) throw Object.assign(new Error('SMS follow-up moved; reload this profile'), { status: 409 });
+      sourceId = source.id;
+    } else {
+      const source = await trx('emails').where({ id: initial.email_id }).forUpdate().first();
+      if (!source) throw Object.assign(new Error('Email follow-up moved; reload this profile'), { status: 409 });
+      const row = await trx('call_commitments').where({ id }).first('email_customer_id');
+      // An ask row's emails.customer_id follows a merge; a staff promise's
+      // SENT row never carries one (email-sync.js never sets it on a SENT
+      // row), so its own email_customer_id does — same rule as refresh.
+      const resolvedCustomerId = source.customer_id || row?.email_customer_id;
+      if (resolvedCustomerId !== customerId) throw Object.assign(new Error('Email follow-up moved; reload this profile'), { status: 409 });
+      sourceId = source.id;
     }
-    if (!smsCommitmentsEnabled()) throw Object.assign(new Error('SMS follow-up is disabled'), { status: 409 });
+    const current = await trx('call_commitments').where({ id }).forUpdate().first();
+    if (initial.sms_log_id) {
+      if (current?.sms_log_id !== sourceId || current.status !== 'open') {
+        throw Object.assign(new Error('SMS follow-up changed; reload this profile'), { status: 409 });
+      }
+    } else if (current?.email_id !== sourceId || current.status !== 'open') {
+      throw Object.assign(new Error('Email follow-up changed; reload this profile'), { status: 409 });
+    }
+    const gateOpen = initial.sms_log_id ? smsCommitmentsEnabled() : gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
+    if (!gateOpen) throw Object.assign(new Error(initial.sms_log_id ? 'SMS follow-up is disabled' : 'Email follow-up is disabled'), { status: 409 });
     const { applyHumanUpdate } = require('./call-commitments');
     const updated = await applyHumanUpdate(trx, id, { action, note, reviewedBy });
     // Staff tokens resolve to technicians rows, including the admin role.
     await recordAuditEvent({ trx, critical: true, actor_type: 'technician', actor_id: reviewedBy,
-      action: `sms.commitment.${action}`, resource_type: 'call_commitment', resource_id: id,
-      metadata: { sms_log_id: source.id, customer_id: customerId } });
+      action: `${initial.sms_log_id ? 'sms' : 'email'}.commitment.${action}`, resource_type: 'call_commitment', resource_id: id,
+      metadata: { sms_log_id: initial.sms_log_id || null, email_id: initial.email_id || null, customer_id: customerId } });
     await trx('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [`sms-commitment:${id}`]).update({ read_at: trx.fn.now() });
+      .whereRaw("metadata->>'dedupeKey' = ?", [initial.sms_log_id ? `sms-commitment:${id}` : `email-commitment:${id}`]).update({ read_at: trx.fn.now() });
     return updated;
   });
 }
@@ -872,20 +927,39 @@ async function lockLiveCommitment(trx, row, message) {
 const OVERDUE_BELL_BODY = {
   uncertain: (when) => `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
   open: (when) => `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
+  late: (when) => `Promised in the ${when} ET conversation. The records show it done only after the promised deadline. Open the customer profile to follow up.`,
 };
 
+// Owner ruling 2026-09-28: a staff promise kept late rings the bell, then
+// clears. The deadline tick normally rings before the late record lands; when
+// verification runs only after both (Codex #5248 r3), the late record rings
+// the bell first and closes the row on a later tick.
+function keptLate(row, verdict) {
+  return verdict.verdict === 'fulfilled' && row.sms_context?.basis === 'promise' && row.due_at != null
+    && new Date(verdict.matched_at) > new Date(row.due_at);
+}
+
 // The deadline passed and the records do not establish completion.
-async function ringOverdueBell(trx, { row, message, verdict, dedupeKey }) {
+// title/body/sourceIdField/triggerKey are optional overrides, added so
+// email-operational-actions.js can reuse this exact bell/dedupe/close
+// mechanics with its own titles and its own source column (email_id) —
+// coordinator correction #3, 2026-09-29: "export and reuse ringOverdueBell
+// ... through small exports only". Every existing SMS caller omits them, so
+// the computed defaults below reproduce today's exact title/body/metadata
+// shape; this function's SMS behavior is unchanged.
+async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, title, body, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup' }) {
   const when = new Date(message.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
-  const body = (OVERDUE_BELL_BODY[verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
-  const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
+  const resolvedBody = body || (OVERDUE_BELL_BODY[verdict.late ? 'late' : verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
+  const resolvedTitle = title || (row.sms_context?.basis === 'promise' ? PROMISE_LABEL : (KIND_LABELS[row.kind] || KIND_LABELS.other));
+  const notification = await NotificationService.notifyAdmin('alert', resolvedTitle, resolvedBody,
     { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
-      metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
-        sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
+      metadata: { triggerKey, customerId: message.customer_id,
+        [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  return notification;
 }
 
 // One open row: skip, verify, and close or bell. Returns what happened so
@@ -951,6 +1025,12 @@ async function refreshSmsCommitment(conn, row, now, verify) {
       sms_context: { ...current.sms_context, fulfillment_check: verdict },
     });
     persisted = true;
+    if (keptLate(live, verdict) && !await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')) {
+      // A suppressed bell leaves no row to find next tick: close now instead.
+      const bell = await ringOverdueBell(trx, { row, message, verdict: { ...verdict, late: true }, dedupeKey });
+      if (!bell.suppressed) return;
+    }
     if (verdict.verdict === 'fulfilled') {
       await trx('call_commitments').where({ id: row.id }).update({
         status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
@@ -1128,4 +1208,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline };
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

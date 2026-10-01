@@ -9,8 +9,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
-      "approval_hash": "3fd84d9cf3428d47fe8630012e0e4208e94f03dcd7b7d00cfe95ab818ab4ed3c"
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106). Owner re-approved 2026-09-28: customer copy says a licensed trapper can \"remove\" it (was \"live-trap and relocate\"); tech_notes unchanged.",
+      "approval_hash": "2bf934dbec579cfef8b4dac2c61cb91a7dbec932dc55df3e2faf5c9b84b094a4"
     },
     "slug": "armadillo",
     "common_name": "Nine-banded Armadillo",
@@ -85,9 +85,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "It's likely digging for grubs and earthworms in soft soil, but digging alone doesn't prove which — armadillos eat both, so removing grubs isn't a reliable way to send it elsewhere. Florida allows a licensed nuisance-wildlife trapper to live-trap and relocate it under FWC rules; don't handle one bare-handed.",
+      "what_it_means": "It's likely digging for grubs and earthworms in soft soil, but digging alone doesn't prove which — armadillos eat both, so removing grubs isn't a reliable way to send it elsewhere. A licensed nuisance-wildlife trapper can remove it under FWC rules; don't handle one bare-handed.",
       "fact": "When startled it jumps straight up — a reflex that surprises people more than it protects the armadillo.",
-      "blurb": "Digs overnight for grubs and earthworms in soft soil. A wildlife trapper can live-trap and relocate it under FWC rules — don't handle one bare-handed."
+      "blurb": "Digs overnight for grubs and earthworms in soft soil. A licensed wildlife trapper can remove it under FWC rules — don't handle one bare-handed."
     },
     "tech_notes": "Armadillo digging correlates with grub/earthworm presence, but removing grubs is not a documented reliable deterrent per UF/IFAS. Refer to a licensed nuisance-wildlife trapper; FWC rules allow live-trap and release on-site, in-county relocation, or euthanasia. Advise against bare-hand contact (Hansen's disease association in Florida armadillos).",
     "sources": [

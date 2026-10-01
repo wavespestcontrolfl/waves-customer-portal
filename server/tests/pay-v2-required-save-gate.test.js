@@ -10,8 +10,8 @@ const db = require('../models/db');
 const {
   invoiceRequiresSavedMethod,
   invoiceCaptureNeeded,
-  invoiceCreditWouldFullyCover,
 } = require('../routes/pay-v2');
+const { invoiceCreditWouldFullyCover } = require('../services/pay-combined');
 
 // Chainable query mock: builder methods return `this`; `.first()` resolves
 // (or rejects) the configured value.

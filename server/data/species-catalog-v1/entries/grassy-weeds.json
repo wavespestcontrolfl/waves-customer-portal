@@ -97,8 +97,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "570abb4528b73e249a60472f967854802d095c6d5aee3c9a6c07a393ac71e6a6"
     },
     "role": "weed",
     "risk": "low",
@@ -222,8 +223,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "df9685bc08f4c183b06738b0a2aa3474b8e0c0c453818d0c8f78bfddc0b4277a"
     },
     "role": "weed",
     "risk": "low",
@@ -272,13 +274,13 @@
       {
         "slug": "st-augustinegrass",
         "difference": "Torpedograss has coarser, grayish-green blades and hard, sharp rhizome tips; St. Augustine has wide, blunt blades on soft surface runners, no sharp points.",
-        "next_photo": "A close-up comparing blade texture and color, plus a dug-up rhizome tip checked for a hard, sharp point.",
+        "next_photo": "A close-up comparing blade texture and color, plus a dug-up rhizome tip checked for a hard, sharp point; wear sturdy gloves, since the tip can pierce skin.",
         "photo_can_confirm": true
       },
       {
         "slug": "bermudagrass",
         "difference": "Torpedograss has stiffer blades and sharply pointed rhizome tips that can pierce skin; bermudagrass has fine, soft blades and blunt, thin rhizomes throughout.",
-        "next_photo": "A close-up of a dug-up rhizome tip — a hard, sharp point (torpedograss) versus a blunt, thin rhizome (bermuda).",
+        "next_photo": "Wearing sturdy gloves, a close-up of a dug-up rhizome tip — a hard, sharp point that can pierce skin (torpedograss) versus a blunt, thin rhizome (bermuda).",
         "photo_can_confirm": true
       }
     ],
@@ -344,8 +346,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "982f6356b025c9793cb998f4435e50620c11bb18bbc6f6aa12f178ff4280d833"
     },
     "role": "weed",
     "risk": "low",
@@ -401,7 +404,7 @@
       {
         "slug": "tropical-signalgrass",
         "difference": "Alexandergrass has broader, hairier, yellow-green blades; tropical signalgrass has narrower blades and low, mat-forming stems rooting densely at every node.",
-        "next_photo": "A close-up of leaf width and hairiness, and how densely the stems root along the ground.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
         "photo_can_confirm": false
       }
     ],
@@ -465,8 +468,9 @@
       "https://plant-directory.ifas.ufl.edu/plant-directory/urochloa-plantaginea"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d84ff7fbd6ab23cf48241eedd973ca2485fbf9eebc0422ec4b3fa88399e28f45"
     },
     "role": "weed",
     "risk": "low",
@@ -586,8 +590,9 @@
       "https://florida.plantatlas.usf.edu/plant/species/429"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "816ab67d7ff3f0e4395b857c25b52c7bf9c4a6cafefd12520ded118501e7f2e1"
     },
     "role": "weed",
     "risk": "low",
@@ -712,8 +717,9 @@
       "https://plants.sc.egov.usda.gov/DocumentLibrary/factsheet/pdf/fs_pase5.pdf"
     ],
     "review": {
-      "status": "draft",
-      "notes": "SWFL-specific range and seasonal peak are a best-estimate judgment call; the cited USDA NRCS fact sheet gives only a broad Atlantic/Gulf Coastal Plain range with no Florida county-level detail."
+      "status": "owner_approved",
+      "notes": "SWFL-specific range and seasonal peak are a best-estimate judgment call; the cited USDA NRCS fact sheet gives only a broad Atlantic/Gulf Coastal Plain range with no Florida county-level detail.",
+      "approval_hash": "637da06f7933be4e88c3894b6c169416fc4fe7c0d0bfa3a691964d1cdbcda9b5"
     },
     "role": "weed",
     "risk": "low",
@@ -831,8 +837,9 @@
       "https://ask.ifas.ufl.edu/publication/aa261"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bbfb873a1611b3db408aadee4f6044a651f2e1c57fe352440b37ed24946bd0cb"
     },
     "role": "weed",
     "risk": "low",
@@ -881,7 +888,7 @@
       {
         "slug": "alexandergrass",
         "difference": "Tropical signalgrass has narrow blades and low, densely rooting, mat-forming stems; alexandergrass has broader, hairier, yellow-green blades, a looser habit.",
-        "next_photo": "A close-up of leaf width and hairiness, and how densely the stems root along the ground.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
         "photo_can_confirm": false
       },
       {
@@ -951,8 +958,9 @@
       "https://ask.ifas.ufl.edu/ep141"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f584084083e5c8c24634a0f6ebbb4465fee50807ac823cfbb9e2cd79c6427f6a"
     },
     "role": "weed",
     "risk": "low",
@@ -971,6 +979,131 @@
         "Narrow blades on creeping, branching stems just above the soil",
         "Small seed head with several angled branches on a slender stalk",
         "Forms a dense, tangled mat easy to mistake for turf at first glance"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "kind": "weed",
+    "aka": [
+      "Poa annua",
+      "Winter Grass"
+    ],
+    "stages": [],
+    "sign_of": [],
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [
+      {
+        "claim": "Leaf-tip and seed-head description",
+        "note": "General botany, not stated in the EP141 lawn weed guide. Confirm against a UF/IFAS page at review."
+      }
+    ],
+    "slug": "annual-bluegrass",
+    "common_name": "Annual Bluegrass",
+    "aliases": [
+      "annual bluegrass",
+      "poa annua",
+      "winter grass"
+    ],
+    "scientific_name": "Poa annua",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "traits": [
+      "Light green, soft-bladed clumps that stand out against darker turf",
+      "White to pale seed heads showing up in winter, even on very short growth",
+      "Boat-shaped leaf tips, with blades often crinkled across the blade",
+      "Most common in compacted or continuously wet soil"
+    ],
+    "look_alikes": [
+      {
+        "slug": "crabgrass",
+        "difference": "Annual bluegrass is a light green winter clump with pale seed heads; crabgrass is a warm-season sprawler with finger-like seed branches.",
+        "next_photo": "A close-up of the seed head and a note of the month the photo was taken.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "goosegrass",
+        "difference": "Goosegrass is a warm-season weed with a flattened, silvery-white base; annual bluegrass is a cool-season, light green tuft with pale seed heads.",
+        "next_photo": "A close-up of the base of the plant and a note of the month.",
+        "photo_can_confirm": true
+      }
+    ],
+    "active_months": [
+      11,
+      12,
+      1,
+      2,
+      3
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "copy": {
+      "what_it_means": "A light green winter grass that forms soft clumps with pale seed heads in bermudagrass and zoysia while those lawns are dormant or slow. A technician checks soil moisture, compaction, the season and coverage before recommending an approach.",
+      "fact": "Annual bluegrass is a winter annual: it sprouts in fall, sets seed through winter, and is gone by spring, but the seed stays behind for next year.",
+      "blurb": "A light green winter grass with pale seed heads, most common in wet or compacted soil."
+    },
+    "tech_notes": "Winter annual grass; UF/IFAS advises a pre-emergent when night temperatures drop to 55-60 F for several days, late October to early November in central and south Florida. Compaction and constant moisture favor it. Per label if herbicide is used.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep141"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). EP141 confirms the winter-annual life cycle, the wet or compacted soil preference and the late-October pre-emergent window. Owner brief listed bermuda and zoysia as the affected lawns; EP141 says it is a problem in multiple Florida turf types."
+    },
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "annual_cool",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Light green, soft-bladed clumps",
+        "White to pale seed heads in winter",
+        "Boat-shaped leaf tips",
+        "Common in compacted or wet soil"
       ],
       "common_problems": [],
       "frond_pattern_note": null

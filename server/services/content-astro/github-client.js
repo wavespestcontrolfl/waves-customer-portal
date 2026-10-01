@@ -14,6 +14,7 @@
  * No octokit dependency — plain fetch keeps the footprint small.
  */
 
+const { AsyncLocalStorage } = require('node:async_hooks');
 const logger = require('../logger');
 
 const API = 'https://api.github.com';
@@ -25,6 +26,22 @@ function env() {
   const defaultBranch = process.env.GITHUB_ASTRO_DEFAULT_BRANCH || 'main';
   if (!token) throw new Error('GITHUB_TOKEN not set');
   return { token, owner, repo, defaultBranch };
+}
+
+// An optional absolute deadline for every GitHub call made inside
+// runWithRequestDeadline(). The citability page-edit lock uses it so a hung
+// GitHub request cannot hold that lock (and every page-edit producer waiting
+// on it) without bound. Calls outside a deadline scope are unchanged.
+const requestDeadline = new AsyncLocalStorage();
+
+function runWithRequestDeadline(deadlineAt, fn) {
+  return requestDeadline.run({ deadlineAt }, fn);
+}
+
+function deadlineExceeded(method, url) {
+  const err = new Error(`GitHub ${method} ${url} → request deadline exceeded (timeout)`);
+  err.code = 'GITHUB_REQUEST_DEADLINE_EXCEEDED';
+  return err;
 }
 
 async function ghFetch(pathOrUrl, { method = 'GET', body, headers = {}, retries = 1 } = {}) {
@@ -45,12 +62,28 @@ async function ghFetch(pathOrUrl, { method = 'GET', body, headers = {}, retries 
     init.body = typeof body === 'string' ? body : JSON.stringify(body);
   }
 
-  const res = await fetch(url, init);
+  const deadlineAt = requestDeadline.getStore()?.deadlineAt;
+  if (Number.isFinite(deadlineAt)) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw deadlineExceeded(method, url);
+    init.signal = AbortSignal.timeout(remaining);
+  }
+
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (err) {
+    if (init.signal?.aborted) throw deadlineExceeded(method, url);
+    throw err;
+  }
 
   if (res.status === 404 && method === 'GET') return null;
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
+    // A deadline abort while reading the error body is still a deadline: the
+    // write may have landed, so callers must reconcile rather than retry.
+    if (init.signal?.aborted) throw deadlineExceeded(method, url);
     // Retry once on 5xx — transient GitHub blips are common.
     if (res.status >= 500 && retries > 0) {
       logger.warn(`[github] ${method} ${url} → ${res.status}, retrying (${text.slice(0, 200)})`);
@@ -64,7 +97,12 @@ async function ghFetch(pathOrUrl, { method = 'GET', body, headers = {}, retries 
   }
 
   const ct = res.headers.get('content-type') || '';
-  return ct.includes('json') ? res.json() : res.text();
+  try {
+    return await (ct.includes('json') ? res.json() : res.text());
+  } catch (err) {
+    if (init.signal?.aborted) throw deadlineExceeded(method, url);
+    throw err;
+  }
 }
 
 // ── Contents API ──────────────────────────────────────────────────
@@ -529,6 +567,7 @@ async function verifyAccess() {
 }
 
 module.exports = {
+  runWithRequestDeadline,
   listPrFiles,
   env,
   listDir,

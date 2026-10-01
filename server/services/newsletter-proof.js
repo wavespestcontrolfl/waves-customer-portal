@@ -26,6 +26,8 @@ const { requiresClaimValidation, isFlagshipType } = require('../config/newslette
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
+const { pestInsiderProofLive } = require('../config/feature-gates');
+const { PEST_INSIDER_TYPE } = require('./pest-insider-autopilot');
 
 /**
  * Internal diagnostics panel rendered ABOVE the recipient preview in the
@@ -365,15 +367,27 @@ async function renderSendPreview(send, toEmail) {
   return { html, text, unsubscribeUrl: demoUrl };
 }
 
-function proofBannerHtml(recipientCount) {
+// The flagship's calendar-linked target is a future Tuesday 6:00 AM ET —
+// approval only QUEUES it, the scheduler tick dispatches it later. Every
+// other type (Pest Insider included) schedules for approval time itself
+// (newsletter-proof.js's own `scheduledFor = new Date()` when
+// !eventSelection.flagship), so the very next scheduler tick — at most a
+// minute later — sends it. Codex P1: the banner promised the Tuesday
+// target unconditionally, so an approver of a non-flagship proof could
+// think they had until Tuesday and instead broadcast within a minute.
+function proofTimingCopy(flagship) {
+  return flagship ? 'Tuesday at 6:00 AM ET' : 'immediately (the next scheduler check, usually within a minute)';
+}
+
+function proofBannerHtml(recipientCount, flagship) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Proof — not yet sent to the list</p>
-<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to queue this issue for <strong>Tuesday at 6:00 AM ET</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to send this issue <strong>${proofTimingCopy(flagship)}</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
 </div>\n`;
 }
 
-function proofBannerText(recipientCount) {
-  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to queue this issue for Tuesday at 6:00 AM ET to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
+function proofBannerText(recipientCount, flagship) {
+  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to send this issue ${proofTimingCopy(flagship)} to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
 }
 
 async function countRecipients(send) {
@@ -383,12 +397,20 @@ async function countRecipients(send) {
   return NewsletterSender.countSegmentRecipients(send.segment_filter);
 }
 
+// Returns whether the notification was actually delivered — a caller that
+// records "the owner was told" must not take a swallowed failure for a
+// delivery (Pest Insider catch-up, codex round 6 P1).
 async function notifyProof(type, payload) {
   try {
     const { triggerNotification } = require('./notification-triggers');
-    await triggerNotification(type, payload);
+    const result = await triggerNotification(type, payload);
+    // triggerNotification resolves with the delivery outcome rather than
+    // throwing — { bellWritten: false, push: null, prefsUnavailable: true }
+    // is a failure. Delivered = a bell row was written or a push went out.
+    return !!(result && (result.bellWritten === true || Number(result.push?.sent) > 0));
   } catch (e) {
     logger.warn(`[newsletter-proof] ${type} notification failed: ${e.message}`);
+    return false;
   }
 }
 
@@ -397,7 +419,8 @@ async function notifyProof(type, payload) {
  * proof_sent_at (or isn't a draft anymore) is skipped, so the Monday/early-
  * Tuesday catch-up jobs can call this safely every tick.
  *
- * @returns {{ sent?: boolean, skipped?: boolean, reason?: string }}
+ * @returns {{ sent?: boolean, skipped?: boolean, reason?: string, notified?: boolean }} — `notified`
+ *   says whether the owner's blocked notice was actually delivered.
  */
 async function sendNewsletterProof(sendId) {
   if (!isProofApprovalEnabled()) return { skipped: true, reason: 'gate_off' };
@@ -421,31 +444,31 @@ async function sendNewsletterProof(sendId) {
   // blocked from sending gets no proof, it gets a "fix me" notification.
   const recipientCount = await countRecipients(send);
   if (recipientCount === 0) {
-    await notifyProof('newsletter_proof_blocked', {
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Segment matches 0 active subscribers'],
     });
-    return { skipped: true, reason: 'zero_recipients' };
+    return { skipped: true, reason: 'zero_recipients', notified };
   }
   if (requiresClaimValidation(send.newsletter_type)) {
     const lockedPrices = await lockedPricesForSend(send, db);
     const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
-      await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
-      return { skipped: true, reason: 'validation_failed', errors };
+      const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
+      return { skipped: true, reason: 'validation_failed', errors, notified };
     }
   }
   const calendarContext = await resolveFlagshipCalendarContext(send);
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
-    return { skipped: true, reason: 'calendar_target_invalid', errors };
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
+    return { skipped: true, reason: 'calendar_target_invalid', errors, notified };
   }
   const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
   const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
   if (!eventSelection.valid) {
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors: eventSelection.errors });
-    return { skipped: true, reason: 'event_selection_invalid', errors: eventSelection.errors };
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors: eventSelection.errors });
+    return { skipped: true, reason: 'event_selection_invalid', errors: eventSelection.errors, notified };
   }
   // Live official-page recheck (dark behind NEWSLETTER_LIVE_REVERIFY):
   // don't proof a lineup carrying a confirmed-dead event — the owner
@@ -455,8 +478,8 @@ async function sendNewsletterProof(sendId) {
     const errors = proofRecheck.failures.map((f) => `Locked event failed live recheck: ${f.title} — ${f.reason}`);
     const suggestion = await alternateSuggestionLine(send);
     if (suggestion) errors.push(suggestion);
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
-    return { skipped: true, reason: 'live_reverify_failed', errors };
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
+    return { skipped: true, reason: 'live_reverify_failed', errors, notified };
   }
 
   // Atomic proof claim BEFORE the external SendGrid call: overlapping
@@ -496,8 +519,8 @@ async function sendNewsletterProof(sendId) {
     );
     const { html, text } = await renderSendPreview({
       ...send,
-      html_body: proofBannerHtml(recipientCount) + diagnosticsHtml + (send.html_body || ''),
-      text_body: send.text_body ? proofBannerText(recipientCount) + send.text_body : send.text_body,
+      html_body: proofBannerHtml(recipientCount, calendarContext.flagship) + diagnosticsHtml + (send.html_body || ''),
+      text_body: send.text_body ? proofBannerText(recipientCount, calendarContext.flagship) + send.text_body : send.text_body,
     }, to);
 
     const result = await sendgrid.sendOne({
@@ -519,7 +542,7 @@ async function sendNewsletterProof(sendId) {
       // silently swallow it.
     });
 
-    await notifyProof('newsletter_proof_sent', {
+    await notifyProof('newsletter_proof_sent', { sendId: send.id,
       subject: send.subject,
       recipient: maskEmail(to),
       recipientCount,
@@ -588,6 +611,20 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
 
+  // The Pest Insider kill switch governs APPROVAL, not only proofing. A
+  // proof that went out while GATE_PEST_INSIDER_PROOF was on must not be
+  // approvable once the gate is off: off means draft-only. The draft and
+  // its proof are left untouched, so turning the gate back on and replying
+  // again approves the same proof.
+  if (send.newsletter_type === PEST_INSIDER_TYPE && !pestInsiderProofLive()) {
+    logger.info(`[newsletter-proof] send ${send.id} is a Pest Insider issue and GATE_PEST_INSIDER_PROOF is off — approval refused, draft untouched`);
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+      subject: send.subject,
+      errors: ['Approved, but Pest Insider proof approval is switched off — nothing sent and the draft is unchanged. Turn the switch back on and reply APPROVED again, or send the issue from the Newsletter page.'],
+    });
+    return true;
+  }
+
   // Drafts ONLY. A 'scheduled' row means the operator already picked a
   // future send time — an approval reply must not overwrite that schedule
   // and broadcast immediately.
@@ -603,7 +640,7 @@ async function maybeHandleProofApproval(email) {
   if (send.proof_sent_at && send.updated_at
       && new Date(send.updated_at).getTime() > new Date(send.proof_sent_at).getTime()) {
     logger.info(`[newsletter-proof] send ${send.id} was edited after its proof — refusing stale approval, re-proofing`);
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Draft was edited after the proof went out — approval refused. A fresh proof of the edited draft is on its way; reply APPROVED to that one.'],
     });
@@ -622,7 +659,7 @@ async function maybeHandleProofApproval(email) {
   // have been edited between proof and approval.
   const recipientCount = await countRecipients(send);
   if (recipientCount === 0) {
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Approved, but segment matches 0 active subscribers — nothing sent'],
     });
@@ -632,17 +669,29 @@ async function maybeHandleProofApproval(email) {
     const lockedPrices = await lockedPricesForSend(send, db);
     const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
-      await notifyProof('newsletter_proof_blocked', {
+      await notifyProof('newsletter_proof_blocked', { sendId: send.id,
         subject: send.subject,
         errors: ['Approved, but validation now fails — nothing sent', ...errors],
       });
+      // Release the proof claim (token-scoped, as the live-recheck branch
+      // below does): a fact withdrawn or the claim scan tightened since the
+      // proof means the CORRECTED draft needs a fresh proof, and
+      // sendNewsletterProof skips any row with proof_sent_at set (codex
+      // round 17 P2).
+      try {
+        await db('newsletter_sends')
+          .where({ id: send.id, proof_token: token })
+          .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+      } catch (clearErr) {
+        logger.error(`[newsletter-proof] failed to release proof claim after validation failure for ${send.id}: ${clearErr.message}`);
+      }
       return true;
     }
   }
 
   const calendarContext = await resolveFlagshipCalendarContext(send);
   if (!calendarContext.valid) {
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Approved, but the linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET. The draft was left unscheduled.'],
     });
@@ -651,7 +700,7 @@ async function maybeHandleProofApproval(email) {
   const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
   const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
   if (!eventSelection.valid) {
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Approved, but the locked event lineup is no longer eligible — nothing scheduled', ...eventSelection.errors],
     });
@@ -666,7 +715,7 @@ async function maybeHandleProofApproval(email) {
     ];
     const suggestion = await alternateSuggestionLine(send);
     if (suggestion) errors.push(suggestion);
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
     // Invalidate the proof claim (token-scoped, same shape as the
     // stale-approval branch): the draft needs an event swap and a FRESH
     // proof, but sendNewsletterProof skips any row with proof_sent_at set —
@@ -729,9 +778,15 @@ async function maybeHandleProofApproval(email) {
 
   logger.info(`[newsletter-proof] send ${send.id} approved by ${maskEmail(from)} — scheduled for ${scheduledFor.toISOString()}`);
 
-  // The weekly flagship always waits for Tuesday's scheduler tick. Preserve
-  // the legacy fast path only for any non-flagship proof flow.
-  if (!eventSelection.flagship) {
+  // The weekly flagship always waits for Tuesday's scheduler tick, and so
+  // does a Pest Insider issue: processScheduledSends re-reads the row, re-runs
+  // the gates and the validator against what is stored THEN, and a PATCH
+  // that lands after this approval has already returned the row to 'draft'
+  // (off the scheduler's 'scheduled' query). Dispatching straight from here
+  // could hand sendCampaign an edited, unapproved row — it accepts draft or
+  // scheduled and does not re-validate. Preserve the legacy fast path only
+  // for any other non-flagship proof flow.
+  if (!eventSelection.flagship && send.newsletter_type !== PEST_INSIDER_TYPE) {
     NewsletterSender.sendCampaign(send.id).catch((err) => {
       logger.error(`[newsletter-proof] approved campaign ${send.id} failed: ${err.message}`, { stack: err.stack });
     });

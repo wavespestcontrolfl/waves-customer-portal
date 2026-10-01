@@ -22,7 +22,9 @@ PR/audit reference and date, newest first within its section.
   negativity is a reviewed boundary; scoping tone scans to business tables only
   was rebutted. The directed/target-scoped disparagement design is a deliberate
   precision boundary — phrasing-permutation recall gaps are known and accepted;
-  named-competitor drafts never auto-publish anyway. (2026-07-11)
+  named-competitor drafts never auto-publish anyway. (2026-07-11) Since
+  #3508 they can; from 2026-09-28 only drafts naming owner-approved
+  competitors (competitor-facts `OWNER_APPROVED_AUTOPUBLISH_IDS`) do.
 - SMS brand-voice r5 auto-demote proposal: rebutted — do not re-propose. (2026-07)
 
 ## By-design behaviors (not bugs)

@@ -4,12 +4,13 @@
  * Without a window the key dedupes forever (unchanged behavior); with one,
  * only rows younger than the window count, under the same stable lock.
  */
-const mockCalls = { where: [], whereRaw: [], raw: [], locks: [] };
+const mockCalls = { where: [], whereRaw: [], orderBy: [], raw: [], locks: [] };
 const mockState = { existingRow: null };
 jest.mock('../models/db', () => {
   const builder = {
     where: jest.fn((...a) => { mockCalls.where.push(a); return builder; }),
     whereRaw: jest.fn((...a) => { mockCalls.whereRaw.push(a); return builder; }),
+    orderBy: jest.fn((...a) => { mockCalls.orderBy.push(a); return builder; }),
     modify: jest.fn((fn) => { fn(builder); return builder; }),
     first: jest.fn(async () => mockState.existingRow),
   };
@@ -26,7 +27,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const NotificationService = require('../services/notification-service');
 
 beforeEach(() => {
-  mockCalls.where.length = 0; mockCalls.whereRaw.length = 0; mockCalls.raw.length = 0; mockCalls.locks.length = 0;
+  mockCalls.where.length = 0; mockCalls.whereRaw.length = 0; mockCalls.orderBy.length = 0; mockCalls.raw.length = 0; mockCalls.locks.length = 0;
   mockState.existingRow = null;
   jest.spyOn(NotificationService, 'create').mockResolvedValue({ id: 'n-new' });
 });
@@ -38,6 +39,8 @@ test('dedupeKey alone dedupes forever (no created_at predicate) under the admin:
   expect(mockCalls.locks).toEqual(['admin:estimate_hot_view:est-1']);
   expect(mockCalls.whereRaw).toEqual([["metadata->>'dedupeKey' = ?", ['estimate_hot_view:est-1']]]);
   expect(mockCalls.where.some((a) => a[0] === 'created_at')).toBe(false);
+  // The standing row is the NEWEST one for the key.
+  expect(mockCalls.orderBy).toEqual([['created_at', 'desc']]);
 });
 
 test('dedupeWindowMs narrows the existence check to rows younger than the window', async () => {
@@ -65,7 +68,7 @@ test('trx: the lock + probe + insert run on the CALLER\'s transaction, and error
   const db = require('../models/db');
   db.transaction.mockClear();
   const callerTrx = jest.fn(() => ({
-    where: () => ({ whereRaw: () => ({ first: async () => null }) }),
+    where: () => ({ whereRaw: () => ({ orderBy: () => ({ first: async () => null }) }) }),
   }));
   callerTrx.raw = jest.fn(async (expr, bindings) => { mockCalls.locks.push(`caller:${bindings[0]}`); return {}; });
   const out = await NotificationService.notifyAdmin('service', 't', 'b', { dedupeKey: 'k', trx: callerTrx });

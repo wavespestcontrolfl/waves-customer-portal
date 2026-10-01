@@ -851,6 +851,13 @@ function customerLabelForValue(fieldKey, value) {
 const COMPANION_REQUIRED_FINDINGS_FIELDS = {
   tree_shrub: ['treatments_completed'],
 };
+// Companion-context fields that stay tappable but optional: cockroach
+// work_completed is derived from products on the primary form only (the one
+// shared products list can't be attributed to a companion line), so a
+// companion cockroach section keeps the chips as before (codex P1, #5365).
+const COMPANION_EDITABLE_FINDINGS_FIELDS = {
+  cockroach: ['work_completed'],
+};
 
 function requiredFindingsFieldsFor(type, { companion = false } = {}) {
   const base = REQUIRED_FINDINGS_FIELDS[type] || [];
@@ -4149,7 +4156,10 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
         detail: !!f.detail,
         // Companion sections must collect what the server can't derive there —
         // the companion-required extras render as normal inputs.
-        autoFilled: !!f.autoFilled && !(companion && (COMPANION_REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key)),
+        autoFilled: !!f.autoFilled && !(companion && [
+          ...(COMPANION_REQUIRED_FINDINGS_FIELDS[projectType] || []),
+          ...(COMPANION_EDITABLE_FINDINGS_FIELDS[projectType] || []),
+        ].includes(f.key)),
         pesticideOnly: !!f.pesticideOnly,
       })),
     photoCategories: config.photoCategories || [],
@@ -4267,6 +4277,8 @@ module.exports = {
   SUMMARY_TEMPLATE_VERSION,
   ACTIVITY_INDICATORS,
   REQUIRED_FINDINGS_FIELDS,
+  COMPANION_REQUIRED_FINDINGS_FIELDS,
+  requiredFindingsFieldsFor,
   SCORE_LEVEL_WORDS,
   TECH_SCORE_LABELS,
   getActivityIndicator,

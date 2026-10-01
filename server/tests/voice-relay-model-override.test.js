@@ -444,6 +444,47 @@ describe('effort is sent only to models that accept it', () => {
   });
 });
 
+// Sonnet 5.5 (`claude-sonnet-5-5`) — rejects `thinking: { type: 'disabled' }`;
+// its floor is `between_tools` (no up-front thinking), which the lane sends
+// instead. Same containment as Opus 5.5: sandbox / eval harness only.
+describe('Sonnet 5.5 sandbox candidate (between_tools floor)', () => {
+  const SONNET_55 = 'claude-sonnet-5-5';
+
+  test('catalog entry is deep-only with a between_tools voice floor, and the registry predicate agrees', () => {
+    expect(MODELS.MODEL_CATALOG[SONNET_55]).toMatchObject({ provider: 'anthropic', status: 'current', requires: 'deep', voice: { thinking: 'between_tools' } });
+    expect(MODELS.anthropicThinkingAlwaysOn(SONNET_55)).toBe(true);
+    expect(MODELS.anthropicThinkingAlwaysOn('claude-sonnet-5')).toBe(false);
+    expect(MODELS.anthropicAcceptsEffort(SONNET_55, 'low')).toBe(true);
+  });
+
+  test('sandbox and eval harness only — never production inbound or the shared chain', () => {
+    const { ALLOWED_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds } = require('../services/voice-agent/relay-conversation');
+    expect(ALLOWED_OVERRIDE_MODEL_IDS.has(SONNET_55)).toBe(false);
+    expect(ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS.has(SONNET_55)).toBe(true);
+    expect(allowedOverrideModelIds().has(SONNET_55)).toBe(false);
+    expect(allowedOverrideModelIds({ openaiContext: true }).has(SONNET_55)).toBe(true);
+    process.env.VOICE_RELAY_INBOUND_MODEL = SONNET_55;
+    expect(resolveSessionModel({ sandbox: false }).model).toBe(MODEL);
+    expect(resolveSessionModel({ sandbox: false, evalHarness: true })).toEqual({ model: SONNET_55, fallbackReason: null });
+  });
+
+  test('a sandbox request sends thinking between_tools at low effort with the thinking floor cap', async () => {
+    process.env.VOICE_RELAY_SANDBOX_MODEL = SONNET_55;
+    mockScriptedMessages.push({ content: [{ type: 'text', text: 'Sandbox reply.' }], stop_reason: 'end_turn' });
+    const convo = new RelayConversation({ callSid: 'CA-sonnet55-sandbox', from: '+19415551234', send: jest.fn(), sandbox: true });
+    expect(convo.model).toBe(SONNET_55);
+    await convo._runLoop('hello').catch(() => {});
+    expect(mockStreamCalls.length).toBeGreaterThanOrEqual(1);
+    for (const p of mockStreamCalls) {
+      expect(p.model).toBe(SONNET_55);
+      expect(p.thinking).toEqual({ type: 'between_tools' });
+      expect(p.output_config).toEqual({ effort: 'low' });
+      expect(p.max_tokens).toBe(THINKING_FLOOR_TOKENS); // progress-update thinking blocks spend from it (shared floor)
+      expect(p).not.toHaveProperty('tool_choice');
+    }
+  });
+});
+
 // Opus 5.5 (`claude-opus-5-5`) — thinking always on, rejects
 // `thinking: { type: 'disabled' }`. Reachable ONLY for a sandbox test call
 // or the eval/benchmark harness, never production inbound and never the

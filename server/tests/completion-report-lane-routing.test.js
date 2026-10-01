@@ -1,4 +1,4 @@
-const { completionUsesReportLane, reportV1InvoiceBodyCarriesPayLink, completionSmsWithheldForMissingReportToken } = require('../services/complete-scheduled-service');
+const { completionUsesReportLane, reportV1InvoiceBodyCarriesPayLink, completionSmsWithheldForMissingReportToken, adoptRecoveredReportToken } = require('../services/complete-scheduled-service');
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const { serviceReportV1SmsType } = require('../services/service-report/delivery');
 
@@ -167,5 +167,45 @@ describe('completionSmsWithheldForMissingReportToken', () => {
     expect(completionSmsWithheldForMissingReportToken({
       serviceReportV1Delivery: true, typedDeliveryMode: 'disabled', reportToken: null,
     })).toBe(false);
+  });
+});
+
+// The lawn write gate mints its own report token. When the handler's earlier
+// mint failed and the gate's retry succeeded, the handler adopts that token
+// BEFORE the missing-token branch, so the text is not withheld and the office
+// is not alerted for a token that now exists.
+describe('adoptRecoveredReportToken', () => {
+  const portalUrl = 'https://portal.example.test';
+  const token = 'b'.repeat(32);
+
+  test('no token yet + the gate minted one → adopted, with the report URL; the withhold predicate then clears', () => {
+    const recovered = adoptRecoveredReportToken({ reportToken: null, gateToken: token, portalUrl });
+    expect(recovered).toEqual({ reportToken: token, reportUrl: `${portalUrl}/report/${token}` });
+    expect(completionSmsWithheldForMissingReportToken({
+      serviceReportV1Delivery: true, typedDeliveryMode: 'auto_send', reportToken: recovered.reportToken,
+    })).toBe(false);
+  });
+
+  test('an existing token is never replaced; a missing or malformed gate token recovers nothing (the withhold stands)', () => {
+    expect(adoptRecoveredReportToken({ reportToken: 'a'.repeat(32), gateToken: token, portalUrl })).toBeNull();
+    for (const gateToken of [undefined, null, '', 'not-a-token', 42]) {
+      expect(adoptRecoveredReportToken({ reportToken: null, gateToken, portalUrl })).toBeNull();
+    }
+    expect(completionSmsWithheldForMissingReportToken({
+      serviceReportV1Delivery: true, typedDeliveryMode: 'auto_send', reportToken: null,
+    })).toBe(true);
+  });
+
+  test('wiring: the handler adopts the gate token ahead of the withhold branch and refreshes the SMS link', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const adopt = source.indexOf('adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken');
+    const withheld = source.indexOf('if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit\n      && completionSmsWithheldForMissingReportToken(');
+    expect(adopt).toBeGreaterThan(0);
+    expect(adopt).toBeLessThan(withheld);
+    const block = source.slice(adopt, adopt + 900);
+    expect(block).toContain('reportToken = recovered.reportToken');
+    expect(block).toContain('reportUrl = recovered.reportUrl');
+    expect(block).toContain('reportTokenMintError = null');
+    expect(block).toContain('reportSmsUrl = await shortenOrPassthrough(reportUrl');
   });
 });

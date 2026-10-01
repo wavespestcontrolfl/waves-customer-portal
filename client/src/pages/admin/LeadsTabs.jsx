@@ -2144,6 +2144,15 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           </span>
                                         </div>
                                       )}
+                                      {lead.heard_about_prompt && (
+                                        <div>
+                                          Asked:{" "}
+                                          <span className="text-zinc-900">
+                                            &ldquo;{lead.heard_about_prompt}
+                                            &rdquo;
+                                          </span>
+                                        </div>
+                                      )}
                                       {(() => {
                                         const ex = parseLeadExtractedData(
                                           lead.extracted_data,

@@ -436,7 +436,11 @@ describe('codex r5 — IB idempotent retry re-park + atomic reason (source contr
     const trxBlock = fn.slice(fn.indexOf('await db.transaction(async (trx) => {'));
     expect(trxBlock.indexOf('transitionJobStatus({')).toBeGreaterThan(-1);
     expect(trxBlock).toContain('trx,');
-    expect(trxBlock.indexOf("await trx('scheduled_services')")).toBeGreaterThan(trxBlock.indexOf('transitionJobStatus({'));
+    // The reason-append notes UPDATE (not the round-3 P1a identity-lock
+    // READ, which runs BEFORE transitionJobStatus by design — see
+    // intelligence-bar-cancel-appointment-impact-drift.test.js's own
+    // source-contract test for that ordering) comes after the transition.
+    expect(trxBlock.indexOf('notes: trx.raw(')).toBeGreaterThan(trxBlock.indexOf('transitionJobStatus({'));
     // No stray post-commit notes write remains.
     expect(fn).not.toContain("await db('scheduled_services').where('id', appointment_id).update({");
   });

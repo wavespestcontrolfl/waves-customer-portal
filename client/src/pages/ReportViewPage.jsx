@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
@@ -7,7 +7,7 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
-import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
+import { LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -55,7 +55,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import ServiceReportDocument from './ServiceReportDocument';
+import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -63,6 +63,7 @@ import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -1525,6 +1526,13 @@ function applicationManufacturer(app = {}) {
   return app.product?.manufacturer || '';
 }
 
+// GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) — the server omits
+// `report_copy` entirely when the gate is off or the product has no
+// approved wording, so this reads as absent, never a placeholder.
+function applicationReportCopy(app = {}) {
+  return app.product?.report_copy || null;
+}
+
 // Product-specific watering guidance for the lawn report, sourced ONLY from the
 // approved per-product irrigation note (label-derived `irrigation_notes`). We do
 // not synthesize watering intervals from product category/name — that would
@@ -2660,8 +2668,32 @@ function PlanSummaryCard({ data, mode }) {
     : `This year: ${visits} ${visitWord}`;
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
-      <div className="section-eyebrow">Your plan</div>
+      {/* h2, not .section-eyebrow: the glass theme hides every
+          .section-eyebrow outside the hero kicker, which left this card
+          with no visible title (codex P2 on #5177; same fix as
+          UpcomingVisitsCard). */}
+      <h2>Your plan</h2>
       <p className="map-context-copy">{yearLine}</p>
+    </section>
+  );
+}
+
+// "Near you" line on a lawn report (owner ask 2026-09-28, "lawn only",
+// GATE_REPORT_NEAR_YOU): the lawn pest most often found around the
+// customer's city this past month. The server sends it only for a live lawn
+// report once enough other customers there had that pest, and strips it from
+// pdf/static/sms_preview renders; `mode` is the same belt-and-braces check
+// as PlanSummaryCard.
+function NearYouCard({ data, mode }) {
+  const nearYou = data.nearYou;
+  if (mode !== 'live' || !nearYou?.city || !nearYou?.pest) return null;
+  return (
+    <section data-glass="card" className="sr-section near-you-section" id="near-you">
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>Near you</h2>
+      <p className="map-context-copy">
+        Around {nearYou.city} this past month, {nearYou.pest} were the lawn pest we found most often.
+      </p>
     </section>
   );
 }
@@ -3447,14 +3479,6 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
-      {/* GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
-          a findings/season-picked offer ("We noted roach activity today...").
-          Absent for the unchanged ladder pick. */}
-      {offer.reason && (
-        <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14, lineHeight: 1.5, textAlign: 'center' }}>
-          {offer.reason}
-        </p>
-      )}
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -3626,6 +3650,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);
             const manufacturer = applicationManufacturer(app);
+            const reportCopy = applicationReportCopy(app);
             const watering = isLawn ? lawnWateringGuidance(app) : null;
             const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
@@ -3685,6 +3710,32 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                   <div className="product-why">
                     <div className="sr-cell-label">Product note</div>
                     <p>{productSummary}</p>
+                  </div>
+                )}
+                {/* Owner-approved product wording (GATE_REPORT_PRODUCT_COPY,
+                    2026-09-28) — customer-display only, never fed into the
+                    AI report writer. also_labeled_for describes the LABEL,
+                    never what was treated on this visit, so it never reads
+                    next to "Why used today" above. Since 2026-09-29 the
+                    line itself is a full sentence ("Labeled for 75+
+                    Bradenton pests") rather than a named pest list, so the
+                    cell label reads "On the label" instead of "Also labeled
+                    for" to avoid "Also labeled for: Labeled for ..."
+                    (owner ruling 2026-09-29). Narrow products (gel baits,
+                    granular bait, IGRs) and LESCO carry no also_labeled_for
+                    key at all (owner ruling). */}
+                {reportCopy && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">How it works</div>
+                    <p>{reportCopy.how_it_works}</p>
+                    {reportCopy.also_labeled_for && (
+                      <>
+                        <div className="sr-cell-label">On the label</div>
+                        <p>{reportCopy.also_labeled_for}</p>
+                      </>
+                    )}
+                    <div className="sr-cell-label">Pets &amp; kids</div>
+                    <p>{sanitizeReentryCopy(reportCopy.pets_kids)}</p>
                   </div>
                 )}
               <details className="solution-detail report-accordion" open={mode !== 'live'}>
@@ -4400,7 +4451,7 @@ function ServiceCoverageMap({
       !hasRenderableCoverageGeometry(location)
       || hasRenderableCoverageGeometry(coverageImageDisplayLocation(location))
     ));
-  const activeMapBackgroundUrl = canUseImageGeometry ? mapBackgroundUrl : null;
+  const activeMapBackgroundUrl = canUseImageGeometry ? resolveApiAssetUrl(mapBackgroundUrl) : null;
   const displayLocations = useMemo(
     () => locations.map((location) => coverageDisplayLocation(location, canUseImageGeometry)),
     [locations, canUseImageGeometry],
@@ -8983,7 +9034,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
+        {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
+            under the visit status, ahead of everything else the customer
+            reads; the lawn section below no longer repeats it. */}
+        {isLawnReport && data.reportV2?.banner && (
+          <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+            {/* The report's 16px section rhythm (.sr-section margin-top). */}
+            <LawnWateringBanner banner={data.reportV2.banner} style={{ marginTop: 16 }} />
+          </LawnPrintContext.Provider>
+        )}
+
         <PlanSummaryCard data={data} mode={mode} />
+
+        <NearYouCard data={data} mode={mode} />
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
@@ -9613,6 +9676,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   );
 }
 
+function reportDataUrl(token, mode, pinnedAssessment) {
+  return `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+    + (pinnedAssessment
+      ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
+        + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
+        + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
+        + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
+      : '');
+}
+
+// The report's satellite images are signed proxy links that expire (2 h). A
+// page left open (or restored from the background) past this re-requests just
+// the map fields, silently, instead of leaving a dead map behind.
+const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
+
 export default function ReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -9655,17 +9733,22 @@ export default function ReportViewPage() {
   const glassActive = mode === 'live';
   useGlassSurface(glassActive);
 
+  const mapsLoadedAt = useRef(0);
+  const mapsRefreshing = useRef(false);
+  const mapErrorRefetched = useRef(false);
+  // Identity of the report on screen: an in-flight map refresh for a report the
+  // reader has since navigated away from must not touch the new one.
+  const reportKey = `${token}|${mode}`;
+  const currentReportKey = useRef(reportKey);
+  currentReportKey.current = reportKey;
+  useEffect(() => {
+    mapErrorRefetched.current = false; // one error-retry per report, not per SPA session
+  }, [reportKey]);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
-      + (pinnedAssessment
-        ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
-          + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
-          + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
-          + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
-        : '');
+    const dataUrl = reportDataUrl(token, mode, pinnedAssessment);
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -9710,6 +9793,7 @@ export default function ReportViewPage() {
           if (d.staffViewer) staffViewTokens.add(token);
           else staffViewTokens.delete(token);
         }
+        mapsLoadedAt.current = Date.now();
         setData(d);
       })
       .catch(() => {
@@ -9727,6 +9811,66 @@ export default function ReportViewPage() {
     if (!data || data.error) return;
     applyReportDocumentMetadata(data);
   }, [data]);
+
+  // Silent refresh of ONLY the map fields (fresh signed links); never touches
+  // the loading state or any other part of the rendered report.
+  const dataHasMaps = Boolean(data && !data.error
+    && (data.treatmentMap?.satellite?.live?.url || data.stationMap?.image?.url));
+  const refreshReportMaps = useCallback(() => {
+    if (mode !== 'live' || mapsRefreshing.current) return;
+    mapsRefreshing.current = true;
+    const requestedFor = `${token}|${mode}`;
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
+    fetch(reportDataUrl(token, mode, pinnedAssessment), {
+      cache: 'no-store',
+      headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((fresh) => {
+        if (!fresh || fresh.error || currentReportKey.current !== requestedFor) return;
+        mapsLoadedAt.current = Date.now();
+        setData((prev) => (prev && !prev.error ? {
+          ...prev,
+          treatmentMap: prev.treatmentMap
+            ? { ...prev.treatmentMap, satellite: fresh.treatmentMap?.satellite ?? prev.treatmentMap.satellite }
+            : prev.treatmentMap,
+          stationMap: fresh.stationMap ?? prev.stationMap,
+        } : prev));
+      })
+      .catch(() => {})
+      .finally(() => { mapsRefreshing.current = false; });
+  }, [token, mode, pinnedAssessment]);
+  useEffect(() => {
+    if (mode !== 'live' || !dataHasMaps) return undefined;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - mapsLoadedAt.current > REPORT_MAP_STALE_MS) {
+        refreshReportMaps();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [mode, dataHasMaps, refreshReportMaps]);
+  // Once per page load: if the map image cannot load (an already-expired link,
+  // e.g. a restored tab), fetch fresh links a single time.
+  const mapProbeUrl = data?.treatmentMap?.satellite?.live?.url || data?.stationMap?.image?.url || null;
+  useEffect(() => {
+    if (mode !== 'live' || !mapProbeUrl || typeof Image === 'undefined') return undefined;
+    let done = false;
+    const probe = new Image();
+    probe.onerror = () => {
+      if (done || mapErrorRefetched.current) return;
+      mapErrorRefetched.current = true; // a single retry per page load, never a loop
+      refreshReportMaps();
+    };
+    probe.src = resolveApiAssetUrl(mapProbeUrl);
+    return () => { done = true; probe.onerror = null; };
+    // Only the URL identity matters: a refreshed URL re-probes exactly once.
+  }, [mode, mapProbeUrl]);
 
   // The browser resolves the URL fragment against the loading skeleton —
   // anchor targets (e.g. #visit-recap from recap SMS links) don't exist

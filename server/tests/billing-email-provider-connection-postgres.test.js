@@ -106,6 +106,10 @@ postgres('billing Email provider preparation on its held connection', () => {
     await mockPg.schema.createTable('leads', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.text('email');
     });
+    // The bounce-recovery phase marker (dispatch_started_at) is written on the marker connection at the provider boundary.
+    await mockPg.schema.createTable('email_bounce_recoveries', (table) => {
+      table.uuid('recovery_message_id'); table.jsonb('metadata'); table.timestamp('updated_at');
+    });
     await mockPg.schema.createTable('email_messages', (table) => {
       table.uuid('id').primary();
       for (const key of ['template_key', 'recipient_type', 'recipient_id', 'recipient_email_snapshot',
@@ -116,6 +120,9 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.boolean('has_attachments').notNullable().defaultTo(false);
       for (const key of ['sent_at', 'queued_at', 'updated_at', 'provider_retry_next_at', 'provider_retry_exhausted_at']) table.timestamp(key);
     });
+    // The billing email authority reads the collections hold at the provider boundary (any active
+    // collection_hold waits): the real table's shape.
+    await mockPg.raw('CREATE TABLE collections_flags (LIKE public.collections_flags INCLUDING ALL)');
     await ownershipMigration.up(mockPg);
     await mockPg.raw('CREATE TABLE retry_commit_guard (message_id uuid REFERENCES email_messages(id) DEFERRABLE INITIALLY DEFERRED)');
     await mockPg('customers').insert({ id: customerId, email: 'qa@example.invalid' });

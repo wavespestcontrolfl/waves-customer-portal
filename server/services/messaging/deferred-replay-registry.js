@@ -75,6 +75,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./scheduled-sms-limits');
 
 // Sequence-ending states a customer REPLY produces — 'completed' is the
 // final step's own natural advance (it marks completed right after queueing
@@ -119,6 +120,12 @@ async function checkRecruitingApplicationEligibility(meta, conn, lock) {
     return { refusal: { eligible: false, reason: `application-${status || 'unknown'}` } };
   }
   return { app };
+}
+
+// A deferred invoice-followup SMS that was a bank-verification re-nudge
+// (invoice-followups mdPending), not an overdue reminder.
+function followupReplayIsVerification(meta) {
+  return meta?.original_message_type === 'bank_verification_incomplete' || meta?.billingDeliveryCategory === 'payment_issue';
 }
 
 // Stage supersession: for the interview stages only, the application must
@@ -185,6 +192,121 @@ function checkRecruitingBookingVersion(meta, app, stage) {
   if (!pinned || pinned !== current) return { eligible: false, reason: 'interview-rebooked' };
   if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
   return null;
+}
+
+// A dispute-hold withhold that could not queue its invoice onto the
+// scheduled-invoice sender: a durable office alert (best-effort itself - a
+// failed alert is logged, and the caller still retries the queue write).
+async function raiseHeldInvoiceQueueAlert({ invoiceId, customerId, error }) {
+  try {
+    await require('../dispatch-alerts').createAlert({
+      type: 'collection_hold_invoice_queue_failed',
+      severity: 'warn',
+      payload: {
+        invoiceId: String(invoiceId),
+        customerId: customerId ? String(customerId) : null,
+        error: String(error?.message || error).slice(0, 300),
+        action: 'A dispute hold withheld this invoice\'s pay link but the invoice could not be queued to send once the hold ends. Send it from the invoice page after the hold is released.',
+      },
+    });
+  } catch (alertErr) {
+    logger.error(`[deferred-replay] office alert for the un-queued held invoice ${invoiceId} also failed: ${alertErr.message}`);
+  }
+}
+
+// A completion replay that died terminally (attempt cap, terminal block) while
+// the customer's dispute hold stands and its invoice is still an unqueued
+// draft: the replay's own strip-and-queue never landed (a persistent queue
+// write failure walks the row to the cap), so nothing will ever send that
+// invoice after the hold is released. Raise the same durable office alert the
+// other queue-failure exits raise, once per invoice (the terminal hook can
+// re-run from the sweep). Never throws - the hook's own restore must not fail
+// because an alert could not be written.
+async function alertHeldInvoiceNeverQueued(meta) {
+  try {
+    if (!meta.invoice_id || !meta.pay_url) return;
+    const inv = await db('invoices').where({ id: meta.invoice_id }).first('id', 'status', 'customer_id', 'payer_id');
+    if (!inv || inv.status !== 'draft' || inv.payer_id) return;
+    const customerId = meta.customer_id || inv.customer_id;
+    if (!await require('../collections/collection-hold').shouldWithholdPayLink(customerId)) return;
+    const open = await db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' })
+      .whereNull('resolved_at').whereRaw("payload->>'invoiceId' = ?", [String(inv.id)]).first('id');
+    if (open) return;
+    await raiseHeldInvoiceQueueAlert({
+      invoiceId: inv.id, customerId,
+      error: new Error('the deferred completion text ran out of attempts before its invoice could be queued behind the dispute hold'),
+    });
+  } catch (err) {
+    logger.error(`[deferred-replay] could not check/alert the never-queued held invoice ${meta.invoice_id || 'unknown'}: ${err.message}`);
+  }
+}
+
+// A deferred decline notice that died terminally (attempt cap after failed hold
+// lookups, or any terminal block): when the completion text was disabled or
+// already handled it was the invoice's ONLY pay-link delivery, and
+// terminalDeferredDeclineNotice only resets the record's notice status, so the
+// invoice would stay an unqueued draft forever. Hand it to the scheduled-invoice
+// sender (queueHeldInvoiceForSender is guarded to an unpaid, unsent, self-pay
+// draft; the sender then applies its own live dispute-hold check, consent and
+// suppression rules, so this is safe with a hold standing). A queue failure
+// raises the collection_hold_invoice_queue_failed office alert (once per
+// invoice) and rethrows so the terminal sweep retries the hook.
+async function queueInvoiceOfDeadDeclineNotice(meta) {
+  if (!meta.invoice_id) return;
+  try {
+    // The queue write AND the completion's `invoiceSenderOwnsPayLinkFor` ownership marker land in ONE
+    // transaction (handOverHeldInvoiceToSender, the same pairing every completion hand-over uses): a
+    // retried closeout then sees the sender owns the pay link and goes report-only instead of
+    // texting a second one (Codex #5424 r15 P1).
+    await require('../dispatch-completion-deferred').handOverHeldInvoiceToSender({
+      invoiceId: meta.invoice_id, serviceRecordId: meta.service_record_id || null,
+      // the deferred sms_log row carries the one-time re-arm grant for a recordless hand-over (Codex #5459 r6 P2)
+      smsLogId: meta.deferred_sms_log_id || null,
+    });
+  } catch (err) {
+    try {
+      const open = await db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' })
+        .whereNull('resolved_at').whereRaw("payload->>'invoiceId' = ?", [String(meta.invoice_id)]).first('id');
+      if (!open) await raiseHeldInvoiceQueueAlert({ invoiceId: meta.invoice_id, customerId: meta.customer_id, error: err });
+    } catch (alertErr) {
+      logger.error(`[deferred-replay] could not check/raise the queue-failure alert for invoice ${meta.invoice_id}: ${alertErr.message}`);
+    }
+    throw err;
+  }
+}
+
+// A delayed pay-link text/email queued BEFORE a customer's collections dispute
+// hold was placed must wait, not send, while it stands (owner ruling
+// 2026-09-30). A recheck answer with a named retry time: the scheduler
+// reschedules to it and REFUNDS the claimed attempt, so a hold that outlasts the
+// bounded ladder never terminates the row - it sends after the release. Fail
+// closed: an unanswerable lookup waits the same way. Null = no hold.
+//
+// A row queued for a notice the customer's OWN action produced (meta.customer_initiated === true,
+// the marker the scheduler forwards to sendCustomerMessage as customerInitiated) is exempt from the
+// DISPUTE part, the same way the live send boundary exempts it: the recheck must not delay it for the
+// whole dispute. A fallback hold still waits.
+async function disputeHoldRecheck(customerId, meta = null) {
+  // The customer-initiated marker skips a plain dispute hold only; a wrong-number / wrong-party
+  // fallback hold (an all-channel outreach block) still waits (Codex #5424 r13).
+  const held = await require('../collections/collection-hold').messagingHeldByCollectionHold(customerId, undefined,
+    { ignoreDisputeHold: Boolean(meta && meta.customer_initiated === true) });
+  if (!held.held) return null;
+  return {
+    eligible: false,
+    reason: held.reason === 'lookup_failed' ? 'collection-hold-lookup-failed' : 'collection-hold',
+    retryable: true,
+    retryAt: new Date(Date.now() + require('../collections/collection-hold').HOLD_DEFER_MS),
+  };
+}
+
+// True when the completion's service record carries the `invoiceSenderOwnsPayLinkFor` marker for
+// this text's invoice (see dispatch-completion-deferred markInvoiceSenderOwnsPayLink).
+async function completionInvoiceOwnedBySender(meta, database = db) {
+  const row = await database('service_records').where({ id: meta.service_record_id })
+    .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'invoiceSenderOwnsPayLinkFor' = ?", [String(meta.invoice_id)])
+    .first('id');
+  return Boolean(row);
 }
 
 const REGISTRY = {
@@ -326,6 +448,16 @@ const REGISTRY = {
     async recheck(meta) {
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) return collectible;
+      // A dispute hold placed after this reminder queued: wait, send after
+      // release (the customer is resolved once and reused below).
+      let followupCustomerId;
+      try {
+        followupCustomerId = await resolveFollowupCustomerId(meta);
+        const holdWait = followupCustomerId ? await disputeHoldRecheck(followupCustomerId, meta) : null;
+        if (holdWait) return holdWait;
+      } catch (err) {
+        return failClosed('invoice-followup-hold', meta.invoice_id, err);
+      }
       // Collections policy re-consult at ACTUAL delivery time (codex
       // 2026-08-14 P1): a do_not_text/collection_hold flag or a live
       // conversation landing during the quiet-hours hold must suppress the
@@ -339,7 +471,7 @@ const REGISTRY = {
       // byte-identical replay.
       if (!gateOn && !meta.ledger_reservation_key) return { eligible: true };
       try {
-        const customerId = await resolveFollowupCustomerId(meta);
+        const customerId = followupCustomerId;
         if (!customerId) return { eligible: false, reason: 'customer-unresolved' };
         if (gateOn) {
           const { collectionsChannelPermitted } = require('../collections/rail-guard');
@@ -348,6 +480,15 @@ const REGISTRY = {
             invoiceId: meta.invoice_id,
             channel: 'sms',
             purpose: 'late_payment',
+            // Shadow spacing only: a deferred bank-verification re-nudge is
+            // not an overdue reminder (Codex #5189 r6), so it names no rail;
+            // an overdue replay excludes its own standing reservation and
+            // the rest of its touch (the delivered email sibling).
+            ...(followupReplayIsVerification(meta) ? {} : {
+              source: 'invoice_followup_replay',
+              ...(meta.ledger_reservation_key ? { spacingExcludeKey: `followup-replay:${meta.ledger_reservation_key}` } : {}),
+              ...(meta.notificationEventKey ? { spacingExcludeEventKey: meta.notificationEventKey } : {}),
+            }),
             logTag: 'invoice-followup-replay',
           });
           if (!permitted) return { eligible: false, reason: 'collections-policy-denied' };
@@ -375,6 +516,11 @@ const REGISTRY = {
               followup_sequence_id: meta.followup_sequence_id || null,
               original_block_code: meta.original_block_code || null,
               replay: true,
+              // The touch this leg belongs to, so spacing groups it with its
+              // delivered email sibling (Codex #5189 r6).
+              ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+              // Spacing evidence skips a verification re-nudge (Codex #5189 r7).
+              ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
             },
           });
         }
@@ -409,6 +555,8 @@ const REGISTRY = {
           followup_sequence_id: meta.followup_sequence_id || null,
           original_block_code: meta.original_block_code || null,
           replay: true,
+          ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+          ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
         },
       });
     },
@@ -428,6 +576,44 @@ const REGISTRY = {
       // Most completion replays carry no pay link at all (report-only,
       // already-paid completions) — cheap no-op before any DB read.
       if (!meta.invoice_id || !meta.pay_url) return { eligible: true };
+      // A dispute hold that landed after this text was frozen (owner ruling
+      // 2026-09-30): the report still goes, the pay link does not. Fail
+      // closed - shouldWithholdPayLink answers true when its lookup fails.
+      // Checked BEFORE invoice collectibility.
+      // A hold-LOOKUP (or customer-resolution) failure is not a confirmed hold: strip is one-way, so a
+      // DB hiccup on the first attempt must not permanently drop a pay link
+      // the customer is entitled to. Hold the row for the rail's bounded
+      // 15-minute retry (fresh read each time) and fail closed to a strip
+      // only on the last attempt - never a pay link sent unverified.
+      const holdReader = require('../collections/collection-hold');
+      try {
+        // The scheduler enriches meta.customer_id from sms_log.customer_id; a
+        // row with neither must not read as "no hold" - resolve the customer
+        // from the invoice the pay link belongs to.
+        // The scheduled-invoice SENDER already owns this invoice's pay link once a completion
+        // attempt handed it over (the service-record marker handOverInvoiceToSender /
+        // persistStrippedPayLink write in the SAME transaction as the queue write). A frozen
+        // link-bearing text that survived a crash between the hand-over and its own terminal
+        // update (or a retried closeout) must go report-only whether or not the hold has since
+        // been released: the sender sends the one pay link (Codex #5424 r13). No hand-over here -
+        // the sender already owns it.
+        if (meta.service_record_id && await completionInvoiceOwnedBySender(meta)) {
+          return { eligible: true, stripPayLink: true, reason: 'invoice-sender-owns-pay-link' };
+        }
+        const holdCustomerId = meta.customer_id || await resolveFollowupCustomerId(meta);
+        // ANY active hold (dispute or wrong-number / wrong-party fallback) withholds the link.
+        if (await holdReader.customerHasActiveMessagingHoldChecked(holdCustomerId)) {
+          return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
+        }
+      } catch (err) {
+        const attempts = Number(meta.scheduled_sms_attempts) || 1;
+        if (attempts < SCHEDULED_SMS_MAX_ATTEMPTS) {
+          logger.warn(`[deferred-replay] completion hold recheck failed for customer ${meta.customer_id || 'unknown'} (attempt ${attempts}/${SCHEDULED_SMS_MAX_ATTEMPTS}, holding for retry): ${err.message}`);
+          return { eligible: false, reason: 'hold-recheck-failed', retryable: true };
+        }
+        logger.warn(`[deferred-replay] completion hold recheck still failing for customer ${meta.customer_id || 'unknown'} at the attempt cap - sending report-only: ${err.message}`);
+        return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
+      }
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) {
         // A transient read failure (DB outage mid-recheck) is NOT a
@@ -510,6 +696,7 @@ const REGISTRY = {
         restoreErr = err;
         logger.warn(`[deferred-replay] completion terminal status restore failed for record ${meta.service_record_id || 'unknown'} — will retry via terminal sweep: ${err.message}`);
       }
+      await alertHeldInvoiceNeverQueued(meta);
       // The completion text (and the bundled review link inside it) will
       // never deliver — arm the standalone review sender. Armed ONLY here,
       // never on a timer, so it can't race a still-retryable replay.
@@ -557,6 +744,29 @@ const REGISTRY = {
         if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
           return { eligible: false, reason: 'payer-billed-withdrawn' };
         }
+        // A dispute hold that landed after this notice was queued (owner
+        // ruling 2026-09-30): the customer was told all billing follow-up is
+        // on hold, and the notice IS a pay-link billing text - suppress it
+        // whole (terminalDeferredDeclineNotice restores the record's status;
+        // the completion route re-arms nothing while the hold stands). A
+        // lookup failure throws the coded refusal into failClosed below:
+        // retryable, then suppressed at the attempt cap.
+        if (await require('../collections/collection-hold').customerHasActiveMessagingHoldChecked(meta.customer_id || inv.customer_id)) {
+          // The suppressed notice was the invoice's only pay-link delivery:
+          // queue the invoice onto the scheduled-invoice sender (owner ruling
+          // 2026-09-30). The sender defers it while the hold stands and sends
+          // it on the first tick after the release. The suppression is
+          // terminal, so a queue write that fails must not be swallowed:
+          // raise a durable office alert and rethrow into failClosed (retried
+          // on the bounded ladder before the notice is suppressed for good).
+          try {
+            await require('../collections/collection-hold').queueHeldInvoiceForSender(inv.id);
+          } catch (queueErr) {
+            await raiseHeldInvoiceQueueAlert({ invoiceId: inv.id, customerId: meta.customer_id || inv.customer_id, error: queueErr });
+            throw queueErr;
+          }
+          return { eligible: false, reason: 'collections-dispute-hold' };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('decline-notice', meta.invoice_id, err);
@@ -568,7 +778,17 @@ const REGISTRY = {
     },
     async onTerminal(meta) {
       const { terminalDeferredDeclineNotice } = require('../dispatch-completion-deferred');
-      await terminalDeferredDeclineNotice(meta);
+      // Restore the record's status FIRST, then hand the invoice to the sender;
+      // whichever fails is rethrown after the other ran so the terminal sweep
+      // retries the hook without losing either half.
+      let restoreErr = null;
+      try {
+        await terminalDeferredDeclineNotice(meta);
+      } catch (err) {
+        restoreErr = err;
+      }
+      await queueInvoiceOfDeadDeclineNotice(meta);
+      if (restoreErr) throw restoreErr;
     },
     durableFinalize: true,
   },
@@ -718,6 +938,9 @@ const REGISTRY = {
         if ([DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, DISPOSITIONS.SELF_SUPERSEDE].includes(resolution.disposition)) {
           return { eligible: false, reason: resolution.reason };
         }
+        // The failure notice carries the pay link: wait out a dispute hold.
+        const holdWait = await disputeHoldRecheck(meta.customer_id, meta);
+        if (holdWait) return holdWait;
         return { eligible: true };
       } catch (err) {
         return failClosed('billing-failure', meta.payment_id, err);
@@ -870,7 +1093,12 @@ const REGISTRY = {
           }
           return { eligible: true };
         }
-        return invoiceStillCollectible({ invoice_id: invoiceId });
+        const collectibleVerdict = await invoiceStillCollectible({ invoice_id: invoiceId });
+        if (collectibleVerdict?.eligible === false) return collectibleVerdict;
+        // An ACH failure / action-required notice for this invoice points the
+        // customer at paying it: wait out a collections dispute hold.
+        const holdWait = await disputeHoldRecheck(meta.customer_id, meta);
+        return holdWait || collectibleVerdict;
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
       }
@@ -1953,7 +2181,8 @@ async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}, { alrea
       logger.warn(`[deferred-replay] terminal_pending stamp failed for ${msgId}: ${err.message}`);
     });
   }
-  const res = await onTerminalDeferredReplay(entryPoint, claimMeta);
+  // The hook learns which sms_log row it is finishing, so it can persist one-time grants on that row.
+  const res = await onTerminalDeferredReplay(entryPoint, msgId ? { ...claimMeta, deferred_sms_log_id: msgId } : claimMeta);
   if (res.ok && msgId) {
     await db('sms_log').where({ id: msgId }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', false)"),
@@ -2046,6 +2275,14 @@ function requiresDurableFinalize(entryPoint) {
 // for these (same contract as finalize_pending: the obligation must be
 // durable BEFORE the hook runs, or a crash/throw between the flip and the
 // hook loses it where no sweep can see it).
+// True for any entry point this registry owns — the deferred-replay executor
+// drives the row, whether or not it registers an onTerminal hook (an
+// invoice_send_deferred row, for one, holds its invoice's send claim). The
+// Intelligence Bar never cancels such a row itself.
+function isDeferredReplayEntryPoint(entryPoint) {
+  return !!entryFor(entryPoint);
+}
+
 function requiresTerminalHook(entryPoint) {
   const entry = entryFor(entryPoint);
   return !!(entry && typeof entry.onTerminal === 'function');
@@ -2079,6 +2316,7 @@ module.exports = {
   sweepPendingTerminalHooks,
   requiresDurableFinalize,
   requiresTerminalHook,
+  isDeferredReplayEntryPoint,
   DURABLE_FINALIZE_ENTRY_POINTS,
   TERMINAL_HOOK_ENTRY_POINTS,
   _registry: REGISTRY,

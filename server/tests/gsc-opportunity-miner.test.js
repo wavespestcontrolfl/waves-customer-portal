@@ -51,6 +51,7 @@ const {
   materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
+  filterActiveCitabilityReservations,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
@@ -1820,7 +1821,7 @@ describe('listicle_family scoring + action mapping', () => {
     expect(src).toMatch(/\$\{ROUTE_IDENTITY_SQL\} NOT IN/);
     const auditSrc = require('fs').readFileSync(require.resolve('../services/seo/refresh-audit'), 'utf8');
     expect(auditSrc).toMatch(/pg_advisory_xact_lock\(hashtext\('opportunity_page_edit'\)\)/);
-    expect(auditSrc).toMatch(/const inflightNow = await inflightRefreshFor\(trx\);/);
+    expect(auditSrc).toMatch(/const inflightNow = await findInflightPageEdit\(trx, \{ path, targetDomain \}\);/);
     expect(mineSrc).toMatch(/pageCityByUrl\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);
@@ -2267,6 +2268,187 @@ describe('arbitrateCityServiceTargets — one row per (service, city) across buc
   });
 });
 
+describe('_revalidateFamilyBatch — citability page-edit fence under the persist lock', () => {
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+  const featureGates = require('../config/feature-gates');
+  const oldMaxAttempts = process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS;
+  let citabilityOpen;
+  let gateSpy;
+
+  beforeEach(() => {
+    process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS = '5';
+    citabilityOpen = true;
+    gateSpy = jest.spyOn(featureGates, 'isEnabled').mockImplementation((gate) => (
+      gate === 'citabilityBackfill' ? citabilityOpen : true
+    ));
+  });
+
+  afterEach(() => gateSpy.mockRestore());
+
+  afterAll(() => {
+    if (oldMaxAttempts == null) delete process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS;
+    else process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS = oldMaxAttempts;
+  });
+
+  const candidate = (bucket, action_type, page_url, dedupe_key = bucket) => ({
+    bucket, action_type, page_url, dedupe_key, score: 80, signal_metadata: {},
+  });
+
+  const fakeTrx = (citabilityRows) => {
+    const trx = jest.fn(() => {
+      let bucket = null;
+      const chain = {
+        where: jest.fn((value) => {
+          if (value && typeof value === 'object') bucket = value.bucket || bucket;
+          return chain;
+        }),
+        whereIn: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn().mockReturnThis(),
+        select: jest.fn(() => Promise.resolve(bucket === 'citability_backfill' ? citabilityRows : [])),
+      };
+      return chain;
+    });
+    trx.raw = jest.fn((sql) => sql);
+    return trx;
+  };
+
+  test('decay, answer-gap, and CTR edits defer to a canonical-domain-and-path citability row', async () => {
+    const miner = new GscOpportunityMiner();
+    const trx = fakeTrx([{
+      page_url: 'https://www.wavespestcontrol.com/blog/termite-guide/?utm_source=seed',
+      status: 'pending',
+      attempt_count: 4,
+    }]);
+    const out = await miner._revalidateFamilyBatch(trx, [
+      candidate('decay_refresh', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/termite-guide', 'decay'),
+      candidate('answer_gap', 'refresh_existing_page', 'https://www.wavespestcontrol.com/blog/termite-guide/#faq', 'answer'),
+      candidate('ctr_rewrite', 'rewrite_title_meta', 'https://wavespestcontrol.com/blog/termite-guide/?ref=gsc', 'ctr'),
+      candidate('decay_refresh', 'refresh_existing_page', 'https://sarasota.wavespestcontrol.com/blog/termite-guide/', 'spoke'),
+      candidate('decay_refresh', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/other-guide/', 'other'),
+    ]);
+
+    expect(out.map((row) => row.dedupe_key)).toEqual(['spoke', 'other']);
+    expect(trx.raw).toHaveBeenCalledWith("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(trx.mock.invocationCallOrder[1]);
+  });
+
+  test('an exhausted pending citability row no longer owns the page', async () => {
+    const miner = new GscOpportunityMiner();
+    const row = candidate('answer_gap', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/termite-guide/', 'answer');
+    const out = await miner._revalidateFamilyBatch(fakeTrx([{
+      page_url: 'https://www.wavespestcontrol.com/blog/termite-guide',
+      status: 'pending',
+      attempt_count: 5,
+    }]), [row]);
+
+    expect(out).toEqual([row]);
+  });
+
+  test.each([
+    ['pending', 4],
+    ['claimed', 50],
+  ])('a legacy root-relative %s citability row still owns its hub page', async (status, attempt_count) => {
+    const miner = new GscOpportunityMiner();
+    const out = await miner._revalidateFamilyBatch(fakeTrx([{
+      page_url: '/blog/termite-guide/?legacy=1',
+      status,
+      attempt_count,
+    }]), [candidate('answer_gap', 'refresh_existing_page', 'https://www.wavespestcontrol.com/blog/termite-guide', 'answer')]);
+
+    expect(out).toEqual([]);
+  });
+
+  test.each(['claimed', 'pending_review'])('%s citability work keeps owning the page after the claim budget', async (status) => {
+    const miner = new GscOpportunityMiner();
+    const out = await miner._revalidateFamilyBatch(fakeTrx([{
+      page_url: 'https://wavespestcontrol.com/blog/termite-guide/',
+      status,
+      attempt_count: 50,
+    }]), [candidate('decay_refresh', 'refresh_existing_page', 'https://www.wavespestcontrol.com/blog/termite-guide', 'decay')]);
+
+    expect(out).toEqual([]);
+  });
+
+  test.each([
+    ['pending', 0],
+    ['claimed', 50],
+    ['pending_review', 50],
+  ])('a disabled citability lane releases an existing %s page reservation', async (status, attempt_count) => {
+    citabilityOpen = false;
+    const miner = new GscOpportunityMiner();
+    const row = candidate('answer_gap', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/termite-guide/', 'answer');
+    const trx = fakeTrx([{
+      page_url: '/blog/termite-guide/', status, attempt_count,
+    }]);
+
+    await expect(miner._revalidateFamilyBatch(trx, [row])).resolves.toEqual([row]);
+    expect(trx.mock.calls.filter(([table]) => table === 'opportunity_queue')).toHaveLength(1);
+  });
+});
+
+describe('citability reservations outside the persist lock', () => {
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+  const featureGates = require('../config/feature-gates');
+  let citabilityOpen;
+  let gateSpy;
+
+  beforeEach(() => {
+    citabilityOpen = true;
+    gateSpy = jest.spyOn(featureGates, 'isEnabled').mockImplementation((gate) => (
+      gate === 'citabilityBackfill' ? citabilityOpen : true
+    ));
+  });
+
+  afterEach(() => gateSpy.mockRestore());
+
+  function queryRecorder(rows = []) {
+    const calls = [];
+    const query = {
+      where: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      whereNot: jest.fn((...args) => { calls.push(args); return query; }),
+      whereNotIn: jest.fn().mockReturnThis(),
+      select: jest.fn(async () => (calls.some(([column, value]) => (
+        column === 'bucket' && value === 'citability_backfill'
+      )) ? rows.filter((row) => row.bucket !== 'citability_backfill') : rows)),
+    };
+    return { query, calls };
+  }
+
+  test.each([['gate on', true], ['gate off', false]])('the pre-mine listicle fence with %s filters dormant citability rows correctly', (_label, open) => {
+    citabilityOpen = open;
+    const { query, calls } = queryRecorder();
+    expect(filterActiveCitabilityReservations(query)).toBe(query);
+    expect(calls).toEqual(open ? [] : [['bucket', 'citability_backfill']]);
+    expect(query.where).toHaveBeenCalledTimes(open ? 2 : 0);
+  });
+
+  test('the pre-mine listicle read uses the shared kill-switch filter', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const mineAll = src.slice(src.indexOf("['listicle_family', async () =>"), src.indexOf('// In-flight FAMILY work blocks'));
+    expect(mineAll).toMatch(/filterActiveCitabilityReservations\(inflightQuery\)/);
+  });
+
+  test.each([['gate on', true], ['gate off', false]])('companion protection with %s follows the citability lane state', async (_label, open) => {
+    citabilityOpen = open;
+    const { query, calls } = queryRecorder([{
+      bucket: 'citability_backfill',
+      page_url: 'https://wavespestcontrol.com/blog/termite-guide/',
+      service: 'termite',
+      city: null,
+    }]);
+    const runner = jest.fn(() => query);
+    const keys = await new GscOpportunityMiner()._companionProtection(runner);
+
+    expect(keys.size).toBe(open ? 1 : 0);
+    expect(calls).toEqual(open ? [] : [['bucket', 'citability_backfill']]);
+  });
+});
+
 describe('_revalidateCityServiceBatch — in-flight target fence under the persist lock', () => {
   const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
   const candidate = (bucket, dedupe_key, { service = 'termite', city = 'sarasota' } = {}) => ({
@@ -2678,7 +2860,10 @@ describe('local_gap representative query + label validation (Codex P1s on #3378)
   test('the brief builder falls back to representative_query for SERP + target_keyword', () => {
     const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
     expect(bb).toMatch(/const serpKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
-    expect(bb).toMatch(/target_keyword: opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null,/);
+    // The fallback is named once (#5216: the photo slots resolve the SAME
+    // topic string) and the brief's target_keyword is that value.
+    expect(bb).toMatch(/const targetKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
+    expect(bb).toMatch(/target_keyword: targetKeyword,/);
   });
 });
 
@@ -2918,6 +3103,7 @@ describe('local_gap anchoring + sweep provenance + segment coverage (round-8 clo
   test('local_gap is PAGE-ANCHORED — the router cannot reroute it to an article', () => {
     const dr = fs.readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
     expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\['answer_gap', 'listicle_family', 'local_gap'(, '[a-z_]+')*\]\)/);
+    expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\([^)]*'citability_backfill'/);
   });
 
   test('the sweep consumes PRE-arbitration keys — an arbitration loss is not "signal gone"', () => {

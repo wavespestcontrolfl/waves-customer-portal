@@ -97,6 +97,7 @@ const {
   recordInspectionCreditOffer,
   markBookingForInspectionCredit,
   reverseInspectionCreditForBooking,
+  previewInspectionCreditReversalForBooking,
   sweepInspectionCreditRedemptions,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
@@ -545,6 +546,22 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-other', reversal_alerted_at: null });
   });
 
+  it('a card-confirmed cancel takes back credit only for the offers the card showed', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    const skipped = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: [] });
+    expect(skipped).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates).toEqual([]);
+
+    const taken = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'] });
+    expect(taken).toEqual({ reversed: 1 });
+    expect(mockPostCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: -75 }), expect.anything());
+  });
+
   it('a lapsed offer closes out instead of dangling reopened', async () => {
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
@@ -759,6 +776,63 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
       // No alert marker claimed either — the offer stays clean for retry.
       expect(mockUpdates.some((p) => p.reversal_alerted_at instanceof Date)).toBe(false);
     });
+  });
+});
+
+describe('previewInspectionCreditReversalForBooking — the read-only mirror the IB cancel card pins', () => {
+  const InvoiceService = require('../services/invoice');
+  const redeemed = () => [{
+    id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+    created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+    credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+  }];
+  let unresolvedSpy;
+  beforeEach(() => {
+    unresolvedSpy = jest.spyOn(InvoiceService, 'previewUnresolvedInvoiceAfterCancelVoid').mockResolvedValue(false);
+  });
+  afterEach(() => unresolvedSpy.mockRestore());
+
+  it('nothing redeemed against the booking → null, and the invoice gate is never read', async () => {
+    mockOffers = [];
+    expect(await previewInspectionCreditReversalForBooking('svc-2')).toBeNull();
+    expect(unresolvedSpy).not.toHaveBeenCalled();
+  });
+
+  it('would reverse when nothing still earns it — and writes nothing', async () => {
+    mockOffers = redeemed();
+    const res = await previewInspectionCreditReversalForBooking('svc-2');
+    expect(res).toEqual([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
+    expect(mockUpdates).toEqual([]);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('a live alternate booking in the window reads as a rebind (not reversed, not deferred)', async () => {
+    mockOffers = redeemed();
+    mockAlternates = [{ id: 'svc-other' }];
+    const res = await previewInspectionCreditReversalForBooking('svc-2');
+    expect(res).toEqual([{ id: 'offer-1', amount: 75, would_reverse: false, deferred: false }]);
+    expect(mockUpdates).toEqual([]);
+  });
+
+  it('judges the invoice gate AFTER the void: the ids the void would resolve are passed through', async () => {
+    mockOffers = redeemed();
+    await previewInspectionCreditReversalForBooking('svc-2', { voidedInvoiceIds: ['inv-1'] });
+    expect(unresolvedSpy).toHaveBeenCalledWith('svc-2', { voidedInvoiceIds: ['inv-1'] });
+  });
+
+  it('a failed read throws instead of reading as "no credit"', async () => {
+    unresolvedSpy.mockRejectedValue(new Error('invoice gate unavailable'));
+    mockOffers = redeemed();
+    await expect(previewInspectionCreditReversalForBooking('svc-2')).rejects.toThrow('invoice gate unavailable');
+  });
+
+  it('an invoice still holding money after the void defers the offer (the real reversal alerts the office instead)', async () => {
+    mockOffers = redeemed();
+    unresolvedSpy.mockResolvedValue(true);
+    const res = await previewInspectionCreditReversalForBooking('svc-2', { voidedInvoiceIds: [] });
+    expect(res).toEqual([{ id: 'offer-1', amount: 75, would_reverse: false, deferred: true }]);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 });
 

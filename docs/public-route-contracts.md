@@ -48,6 +48,28 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Routes
 
+Customer page-view log (no payload, gate, or header change): the data GET of
+`/api/public/appointment/:token`, `/api/public/reschedule/:token`,
+`/api/public/reservice/:token`, `/api/public/secure-card/:token`, and
+`/api/public/inspection/:token` records one `customer_page_views` row once
+the token has resolved to a row (never for a malformed, unknown, or
+dark-gated token; a resolved-but-closed page such as a completed visit or a
+closed card request still counts as a view), through
+`server/services/customer-page-views.js`. Those GETs are not contractually
+read-only (their entries below describe POST writes and, for secure-card,
+render-time stamps), and none names a sole write companion, so the view write
+rides the GET. `/api/public/track/:token` is the exception: its GET stays
+strictly read-only (see its entry), so its view is recorded by the dedicated
+`POST /api/public/track/:token/view` companion instead. The log is
+fire-and-forget (never awaited, never throws, never alters the response),
+skips bot/preview user agents, staff browsers (`waves_admin` marker cookie),
+and `WAVES_ADMIN_IPS`, and stores only a sha256 of the IP and a 500-char user
+agent. The same page + subject + ip hash is deduped inside a fixed 10-minute
+lookback from its latest row, so a page left open past the window logs one
+more row per window. A failed insert or lookup logs only the page name,
+subject type and error code, never the error message (a Knex message carries
+SQL text and bound values, which can include a bearer token).
+
 Invoice/receipt address preservation: a saved `invoices.customer_address_snapshot`
 supplies the displayed customer address on `/api/pay/:token`, `/invoice.pdf`,
 `/api/receipt/:token` and its PDF. Legacy rows retain their existing address
@@ -126,7 +148,18 @@ for the PDF and any other static render or an older live reopen, so the
 PDF/static payload's `rain.lines` can only ever be the trailing-week fact +
 optional rainfast clause, never the forecast sentence, and a customer who
 reopens a weeks-old live report link never gets a heavy-rain caveat dated
-to TODAY's weather framed as being about that old treatment — a PDF/static
+to TODAY's weather framed as being about that old treatment. On a LIVE
+render, the forecast caveat fires INDEPENDENTLY of whether the trailing-week
+total is settled (codex P2 #5137 deferred finding c): a same-day live report
+with an open trailing-week window has no settled weekly rain fact at all
+(`settledWeekWeatherForRender` — see below — passes `weekWeather: null` on
+every render, live included), so the caveat is its own standalone line
+rather than a clause appended to a sentence that, on that render, never
+exists; when a settled trailing-week fact IS present, the caveat still
+appends to that sentence exactly as before, so there is never a redundant
+second line for the same signal. Either way the caveat is a treatment claim,
+so it appears only when the visit recorded at least one application; an
+inspection- or sweep-only visit gets no caveat (codex r2 on #5265). A PDF/static
 render carries the trailing-week fact
 ONLY once that 7-day window has closed (`application-conditions.js` stamps
 each result with `windowClosed`; `reports-public.js`
@@ -203,6 +236,22 @@ expectations — skips the resolution entirely (no fetch, no pin write, and
 `pestWeekWeatherUncacheable` stays false), so a cold provider outage can
 never hold a request that has no use for the weather. Live requests bound
 the lookup at 1.2 s; PDF pre-renders stay unbounded.
+Inside `reports-public.js`, `buildServiceReportV1ResponseData`'s own
+`pestWeekWeather` param (`pestExpectationsWeather`, mirroring the
+`upcomingVisitsCard`/`nearYou` opt-in pattern) is what threads that value
+down to `buildReportV1Data` above AND gates the separate live heavy-rain NWS
+forecast fetch (`fetchPestRainForecastHeavySafe`, its own ~1.2 s deadline)
+further down the same function — the direct PDF route and the `/data` route
+both pass `pestExpectationsWeather: true`; `POST /:token/ask` (the Q&A
+endpoint) does not (codex P2 2026-09-28 round 4 originally scoped the
+opt-in to `report-data.js` only, which left the WRAPPER passing
+`pestWeekWeather: true` unconditionally for every one of its own callers,
+`/ask` included — codex P2 #5137 deferred finding a). `/ask` calls the
+builder purely for report CONTEXT and `answerServiceReportQuestion` never
+reads `data.pestReportV2.expectations`, so it was paying up to ~1.2 s for
+the week-weather lookup and another ~1.2 s for the forecast on every
+customer question, under the general report limiter, for a field it never
+serves.
 The first successful render freezes the settled week onto
 `service_records.structured_notes.pestWeekWeather` (first-writer-wins, an
 atomic conditional UPDATE guarded on the key's absence — no preceding
@@ -266,7 +315,22 @@ non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 that eaves were treated — the tech may have tagged it while applying it
 somewhere else entirely) is a recorded COMPLETED eave/web/soffit protocol
 action; no such action recorded → no spider section at all, regardless of
-any spider-targeted product. `whatWeDid` / `expectation` / `nextStep` are
+any spider-targeted product. That gate alone is not enough to CLAIM webs
+were knocked down, though (codex P2 #5137 deferred finding b): the
+completedActions "serviced-eaves" choice, "Completed the recorded eave and
+soffit service." (`client/src/lib/service-completion-choices.js`), names the
+eaves/soffit and so opens the section, but records no web-removal work of
+any kind — it could just as easily be a residual application or a plain
+inspection. Every wording below opens with "We knocked down webs...", so
+that specific claim additionally requires an action that actually says a web
+was removed: either it names web(s)/webbing/a cobweb directly (the
+completedActions "removed-webs" choice, "Removed accessible webs from the
+recorded exterior areas.") or it explicitly SWEPT (the protocol library's
+"Swept eaves, window frames, door frames, and lanai" — sweeping IS the
+web-removal act). A location-only eave/soffit action with neither gets NO
+card at all, gate on or off, residual evidence or not — an unproven "we
+knocked down webs" claim is never invented just because a treatment
+happened to reach the eaves. `whatWeDid` / `expectation` / `nextStep` are
 ALWAYS one of two fixed combinations: (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
 product-name map below) was also applied, OR was applied with no evidence
@@ -381,6 +445,103 @@ price, no "at no charge" claim (a callback can be billed; see
 token. `stripLiveOnlyScheduleFields` also
 deletes it from every non-live render (PDF, static, sms_preview), the same
 staleness rule as `nextAppointment`. No new route and no write; auth, headers
+and rate limits are unchanged.
+
+Report near-you line (owner ask 2026-09-28, "lawn only"):
+`GATE_REPORT_NEAR_YOU` (off unless exactly `true`, read at startup). On, the
+LIVE service-report payload (`/api/reports/:token/data` only — the one caller
+that opts in with `nearYou: true`; the `/ask` Q&A build and every other build
+neither read nor carry it) may carry `nearYou: { city, pest }` on a LAWN report
+only: the lawn pest most often recorded among OTHER lawn customers in this
+report's own service city over the last 30 ET days. A visit's city is the one
+its own report shows: the frozen `reportIdentitySnapshot` city when the record
+has one, else the stamped service address city, else the customer's (the
+report query's `COALESCE(ss.service_address_city, customers.city)`), so a
+customer who later moved never carries old findings to the new city; compared
+trimmed and case-blind. Records count only when completed, performed
+(not inspection-only, customer-declined or incomplete) and customer-visible;
+the pest comes only from each visit's closeout form snapshot
+(`structured_notes.formObservations`, server-allowlisted at completion), matched
+exactly to a definite-live-pest observation — never from `service_findings`
+titles, which can be free text — and is shown as a fixed customer noun
+(`LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS`).
+A pest is named only once at least 3 distinct customers
+(`NEAR_YOU_MIN_CUSTOMERS`) had it — the privacy floor, so one household's
+problem is never broadcast; ties go to the label that sorts first; below the
+floor the field is omitted. `city` echoes the report's own city; there is no
+count, customer name, or address in it. `stripLiveOnlyScheduleFields` also
+deletes it from every non-live render (PDF, static, sms_preview). No new route
+and no write; auth, headers and rate limits are unchanged.
+
+Report product wording (owner-approved 2026-09-28, verbatim from the reviewed
+wording page): `GATE_REPORT_PRODUCT_COPY` (off unless exactly `true`, read at
+CALL time via `reportProductCopyGateOn()` in
+`server/services/service-report/report-product-copy.js` — the
+`reportProductCopy` feature-gates map entry is for `logGateStatus` only).
+Unlike `planSummary`/`nearYou` above, this field is attached unconditionally
+by `buildReportV1Data` (not behind an opt-in param) but IS live-view-only in
+its own right (codex P1 2026-09-28): the PDF/static/sms_preview cache keys
+never varied on this gate, so caching it under the worker's own gate state
+(rather than what the browser actually rendered, on a rolling deploy where
+old and new workers disagree) would serve stale or mismatched copy. It is
+therefore stripped from every non-live mode at the same payload boundary
+`stripLiveOnlyScheduleFields` uses —
+`stripLiveOnlyReportProductCopy(data)` (`server/services/service-report/
+report-data.js`), called from `buildServiceReportV1ResponseData`'s
+`mode !== 'live'` block (covers the `/data` route's pdf/static/sms_preview
+modes and the direct PDF route, which shares that function) and
+unconditionally from `pdf-queue.js`'s queued renderer (which builds its
+payload outside that function, mirroring how it also calls
+`stripLiveOnlyScheduleFields` directly). On a live render, an applied
+product that matches the static reviewed config
+(`server/config/report-product-copy.js`) — by EPA registration number
+primarily (`product.epa_reg_number`, resolved off the catalog join the same
+way the existing product-safety fields are; a NON-EMPTY EPA reg is
+authoritative and never falls back to a name alias) and NOT on a
+termite-family report (`serviceLine !== 'termite'`, `detectServiceLine` /
+`service.service_line` from `service-line-configs.js` — Taurus SC and other
+pest-line products carry ant/roach-specific wording that does not belong on
+a termite liquid/trench/bait visit), or by an explicit normalized-name alias
+list when no EPA reg is recorded at all (a hand-entered row with no catalog
+`product_id` still carries its snapshotted `product_name`) — gets
+`applications[N].product.report_copy: { how_it_works, also_labeled_for,
+pets_kids }`. Since owner ruling 2026-09-29, `also_labeled_for` is a single
+composed sentence — `Labeled for {N}+ {City} pests` (e.g. "Labeled for 75+
+Bradenton pests"), or `Labeled for {N}+ pests` when no usable city is
+available — never a named pest list. `N` is the product's raw label pest
+count (`alsoLabeledForPestCount` in `server/config/report-product-copy.js`,
+each with a source/date comment) floored to a multiple of 25
+(`floorToMultipleOf25`); `City` is the visit's own city — `service.city` as
+`buildReportV1Data` already resolves it (the visit's stamped service address
+city via `COALESCE(ss.service_address_city, customers.city)`, i.e. the
+property serviced, falling back to the customer's own city), normalized for
+display (`normalizeReportCity`: trimmed, internal whitespace collapsed, and
+title-cased when the raw value is entirely upper-case or entirely lower-case; mixed case is kept as entered — never invented)
+before it is composed into the sentence (`buildAlsoLabeledForText`); a
+blank/unusable city (or none at all) drops to the no-city wording rather
+than blocking the rest of the copy. `also_labeled_for` is OMITTED (never a
+null/empty string) for products with no `alsoLabeledForPestCount` at all —
+narrow products (gel baits, granular bait, IGRs) and the LESCO 90/10
+Nonionic Surfactant (an adjuvant, not a pesticide). Matching is exact only —
+never a substring/fuzzy match, same posture as
+`pest-report-expectations.js`'s `PRODUCT_EXPECTATION_CLASS` — so a product
+absent from the config (every catalog product not on the owner-approved
+page) gets NO `report_copy` key at all, fail closed. Every line clears the
+shared banned-copy screen (`premium-experience.js`'s `validateCustomerCopy`)
+before it can render, and `pets_kids` is sanitized through
+`stripFixedReentryTiming` (the same AGENTS.md fixed-minute-reentry-figure
+guard `precaution_summary`/`reentry_summary` are swept with, reused from
+`social-media.js`) BEFORE the banned-copy screen runs on it — the sanitized
+text is what gets screened, so a fixed-minute claim is replaced with the
+safe idiom rather than dropping the whole copy block — at the SOURCE inside
+`reportProductCopyForApplicationProduct`, live included, so the live report
+gets the same guard the PDF does. Customer-display only: this copy is never
+read by the AI report writer's grounding (`report-copy-context.js` builds
+its own product-evidence list independently of `buildReportV1Data`'s
+`applications`, so it never sees `report_copy`), and it never reaches the
+PDF's rendered document at all (`ServiceReportDocument.jsx` carries no
+`report_copy` render) — the PDF's content-insensitive storage key is
+therefore unaffected by this gate. No new route and no write; auth, headers
 and rate limits are unchanged.
 
 Invoice line-item ownership metadata: `/api/pay/:token` and
@@ -503,12 +664,129 @@ provider legs or exact route coordinates. Scheduling traffic lookups share a
 HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Existing stops are planned at the owner planning
 minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
-window span; the visit being offered keeps its own resolved allowance. Detour
+window span; the visit being offered keeps its own resolved allowance.
+`/book`'s self-booking offers (`/api/booking/availability`, `/find-slots`,
+the `/capture-intent` revalidation, public re-service, and inspection
+booking) evaluate the new visit at every position in the technician's route,
+including BETWEEN two existing stops, not only appended after the stored
+order, only while `GATE_BOOK_CAPACITY_COMMIT` AND `GATE_SCHEDULING_CAPACITY`
+are both live (`bookInsertionOffersLive()`, routes/booking.js) — the same
+condition the estimate routes' own insertion already required (owner
+2026-09-28). That commit (`createSelfBooking`) re-verifies with live traffic
+and saves the certified route order, so an inserted offer it confirms is
+exactly what gets persisted. The voice agent keeps append-only offers
+because its own commit does not save a route order: it inserts the new row
+with no `route_order` at all, so an inserted offer would commit as an
+unnumbered stop sorted after the route, not at the position it was offered
+at. `/book` offers minted with mid-route insertion carry a signed policy tag
+(`BOOK_INSERTION_OFFER_POLICY`, `utils/slot-offer-token.js`) inside their
+`slot_sig`, so an offer can't be confirmed under a different
+`GATE_BOOK_CAPACITY_COMMIT`/`GATE_SCHEDULING_CAPACITY` state than the one it
+was minted under (a rollback or a mixed rolling deploy inside the 45-minute
+offer window) — the customer gets the standard "pick your time again" 409
+instead of a silently mis-ordered commit. The staff save probe
+(`checkArrivalPlacement`) stays append-only too.
+
+Public self-serve reschedule (`/api/public/reschedule/:token`,
+`routes/reschedule-public.js`) joined the certified-order group for its
+SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
+same day). Its one picker (`buildAvailabilityForService`, behind the GET
+summary, the AI find-slots search, and the commit route's own anti-forgery
+re-check) passes `capacityPlacement: bookInsertionOffersLive() &&
+!pickerMayReanchor(svc, rangeFrom, rangeTo)` — the same reader /book's
+self-booking offers use, ANDed with a check that this build's date range
+can't need a series re-anchor (see the re-anchor paragraph below). Its
+single-visit commit (`SmartRebooker.reschedule` → `rescheduleOnce`,
+`services/rebooker.js`) opts in by passing `capacityPlacement: true`, which
+is what scopes this to reschedule-public.js alone — every other
+`SmartRebooker.reschedule` caller (admin dispatch, auto-dispatch, rain-out,
+SMS reply) omits it and is byte-identical, even with the gate live.
+`rescheduleOnce` re-reads `bookInsertionOffersLive()` itself rather than
+trusting that flag or anything client-supplied — this surface verifies no
+`slot_sig` at all, so there is no signed-policy-tag mechanism to replicate;
+the anti-forgery re-check that guards it instead is a fresh
+`buildAvailabilityForService` rebuild in the SAME request as the commit, a
+few lines before `SmartRebooker.reschedule` is called, so that rebuild's
+`capacityPlacement` and the commit's own gate read are microseconds apart
+rather than spanning a stored offer's lifetime.
+
+When a day, technician, OR WINDOW move would otherwise leave the stored
+`route_order` wrong — a day/tech change nulls it (the existing append-only
+rule); a same-day, same-tech window-only move used to silently KEEP the old
+number even though the stop's place in the route had changed (Codex round 1
+P1) — and the row has a technician, is ungrouped (`visit_id` null), and the
+gate is live, `rescheduleOnce` runs the SAME `prepareArrivalCapacity`
+(before any lock, using the row's OWN current stored state — it already
+handles a row staying on its own route, nothing extra needed for a
+window-only move) → `lockTechDays` (already taken at the same rung the
+plain occupancy checks use) → a `SELECT ... FOR UPDATE` on the moving row
+itself, immediately before verify (Codex round 1 P1: `verifyArrivalCapacity`
+only locks the DESTINATION day/tech, never the row's own OLD date, and the
+CAS predicate never pins duration/address/service_type — without this lock
+a concurrent edit to any of those could commit a route order certified
+against data that was already stale) → `verifyArrivalCapacity` (under that
+lock, now reading the row fresh) → `persistArrivalOrder` (after the row's
+own CAS write lands) sequence `createSelfBooking` runs. A changed route
+fingerprint or an infeasible live fit refuses with the standard
+`capacityError` 409 (`SLOT_UNAVAILABLE`) and writes nothing; success
+persists the certified order instead of nulling it. A GROUPED visit's move
+never attempts this — `moveVisitAsUnit` forwards its caller's options,
+`capacityPlacement` included, unchanged into its own per-member
+`rebooker.reschedule()` calls (each tagged `visitPolicy: 'single'`), and
+`evaluateArrivalPlacement` refuses any row still sharing a `visit_id` with
+another live stop, which would fail the whole unit move on its first
+member — so this lane checks `!service.visit_id` before attempting it, a
+deliberate skip rather than an oversight. The picker mirrors that skip: any
+row carrying a `visit_id` (a singleton group included) is offered append-only
+slots only, so it is never shown a position its commit won't certify (Codex
+round 2 P1).
+
+**Series re-anchor never offers or commits an insertion** (Codex round 1
+P1, corrects the original design's assumption): a big-pull-forward re-anchor
+commits through `SmartRebooker.rescheduleSeries`, which always clears
+`route_order` on a move and never reads `capacityPlacement` — it does NOT
+"refuse and re-validate" an inserted offer the way the commit's capacity
+verify does, it would silently commit append-only under a route order that
+was never certified for that position. So the offer must never be minted in
+the first place: `pickerMayReanchor(svc, rangeFrom, rangeTo)` mirrors
+`shouldReanchor`'s own predicate — for a SINGLE-day range (the commit's own
+anti-forgery rebuild always uses one) it is the EXACT same check
+`shouldReanchor` runs for that date, so the two can never disagree; for a
+multi-day range (the GET picker, the find-slots search) it conservatively
+disables `capacityPlacement` for the WHOLE build whenever the range's
+EARLIEST candidate (the one with the largest pull-forward, under
+`GATE_COLLECTIVE_SERIES_ANCHOR` effectively any date but the visit's own
+current one) falls inside the re-anchor zone — under-offering insertion for
+a same-build date that wouldn't individually re-anchor, never over-offering
+one the commit would have to silently mis-order.
+
+A capacity verify failure's `SLOT_UNAVAILABLE` code (Codex round 1 P2) is
+rewritten into the SAME `SLOT_TAKEN` 409 response shape (message +
+refreshed availability) the anti-forgery slot-miss already returns before
+reaching this deep — the client (`ScheduleFlowPage.jsx`) only clears the
+stale selection and refreshes the calendar on `code === 'SLOT_TAKEN'`; any
+other code falls through to a bare error line with the stale slot still
+selected. Detour
 cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
 `SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
-from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+from HQ). Staff and phone booking see every fit. **Zone route days**
+(`GATE_ZONE_ROUTE_DAYS`, owner 2026-09-29, default OFF): when on, that cap is
+lifted per candidate for an address in a configured zone on that zone's route
+weekday, so an empty route day can be offered and seeded (default: Friday for
+Venice / North Port, lifted cap 150 minutes; override with the
+`system_settings` key `schedule_zone_route_days`, e.g.
+`{"venice":{"weekdays":[5],"max_detour_minutes":150,"technician_id":null}}`;
+`{}` switches the lift off, a `technician_id` pins it to one technician). The
+zone is resolved from the request's coordinates (nearest `service_zones`
+center within 35 miles, so 'North Venice' / 'Northport' resolve), passed to the
+finder as `zoneSlug` by `/api/booking/availability` (and everything sharing its
+builder) and the estimate slot routes, and only ever raises the cap — route
+feasibility (return time, overcommit, arrival window, travel gap) is still
+checked. The estimate picker's south-zone funnel seeds the route day first. The phone
+agent, office Find-a-Time, the Intelligence Bar and auto-dispatch are not
+customer-facing and never had the cap. The finder's per-slot `return_time`
 (modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
 fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
@@ -536,6 +814,32 @@ point, even when both points share the public rounded grid.
 A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
+
+Tech-aware confirm conflict checks for a second field technician
+(`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; needs
+`GATE_SCHEDULING_CAPACITY` live too). The offer side (`buildBookingAvailability`'s
+occupancy mirror) already keeps an occupied row only when it is unassigned or on
+the offered slot's own technician; the confirm side used to be tech-blind (built
+for one active technician), so a slot offered on technician B's day could be
+refused at confirm because technician A had an overlapping or nearby stop. With
+both gates on, `createSelfBooking` (`/api/booking/confirm`, the re-service commit
+and the consultation-page commit) scopes its whole conflict check to the booked
+technician: the zone/city/hold fast-path legs are AND-ed with "technician_id is
+NULL or equals the booked technician", and the global backstop
+(`findConflictingVisits`, which takes an opt-in `technicianId`) counts only the
+same technician's rows plus unassigned ones. Unassigned rows still block every
+technician, so the offer/commit predicates stay identical. The public reschedule
+commit (`SmartRebooker.reschedule` with `capacityPlacement: true`, the same
+offer builder) opts into the same scope for its kept technician. Either gate
+off, or a booking with no technician, is byte-for-byte the tech-blind check
+above. Every other caller — admin schedule/leads, rebooker series and
+rain-out/SMS moves, the phone agent, the zone-engine confirm, estimate slot
+reserve (which already verifies per technician in capacity mode), auto-dispatch
+and follow-up seeders — never passes `technicianId` and is unchanged. The
+date-wide occupancy advisory lock (rung 1) that every one of these writers takes
+still serializes concurrent confirms per calendar day regardless of technician,
+so two technicians' bookings and an unassigned insert cannot race past each
+other's probe.
 
 Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
@@ -573,6 +877,105 @@ absent bearer also keeps public behavior. An expired
 access token gets the refreshable 401 only when the customers-only gate needs
 that identity. An estimate-linked request keeps the estimate account instead
 of inheriting an ambient portal session.
+Quote-wizard handoff identity at `/api/booking/confirm` (customers-only gate
+on): the wizard links its draft estimate to any existing customer matching
+the unverified phone/email the anonymous quoter typed, and hands the token
+back to that same caller, so a token-verified pricing handoff (`pricing_
+estimate_id` + `estimate_token`) whose draft is linked to an ESTABLISHED
+customer is not identity. The gate binds it exactly as before (same address
+fix-it when the street matches no account property), and the refusal — 409
+telling the customer to sign in with the portal code — is applied inside the
+booking transaction under the customer row lock, after the address bind and
+signed-slot validation and against the customer's CURRENT stage (a lead
+promoted meanwhile is caught), so it is not an early "is this contact a
+customer" probe and a typed phone plus a street match never books on someone
+else's account. Residual: a caller who already holds the phone, the street
+and a valid signed slot can still see the 409 for an established customer
+versus the normal flow for a lead. Preserved: a verified portal bearer still
+books (identity from the token, address-bound to the account); the
+staff/system accept link (`source_estimate_id` + namespaced `accept_token`)
+still books as the estimate's customer; a draft linked to a row still in a
+pre-customer pipeline stage (the quoter's own freshly minted lead) or to no
+customer keeps the quoter's own booking; an identical retry of a booking that
+already committed (same draft, slot and customer, and the typed phone — or the
+email that linked the draft — is the customer's) still reaches the idempotent
+replay. No message is sent on the refusal: the refusal retires the open
+abandoned-booking recovery intents carrying that HMAC-verified draft id (only the id — neither the typed nor the stored contact ever widens it), and
+`/api/booking/capture-intent` writes such a handoff's row already suppressed
+(and retires any staged for the draft). Every accepted capture-intent request
+answers one constant `200 {"ok": true}` — no `skipped`, `created`/`updated` or
+`intent_id` fields — whatever was staged, skipped, suppressed or errored (the
+clients are fire-and-forget and read no body), so it is no probe for whether a
+contact is a customer or has a recent booking; only the request-shape 400
+(`valid phone required`) differs. "Blocked" is judged account-wide by one
+shared classifier used by confirmation, capture-intent and the recovery worker:
+the draft-linked customer row or any sibling property row on its account being
+an established customer, ARCHIVED (archiving never re-opens the handoff), or the
+draft's customer row being missing (fail closed) blocks it. The
+suppression writes are best effort: the abandoned-booking recovery worker
+re-checks at send time (SMS and email) and skips, marking suppressed, any intent
+whose draft is so linked — a lookup error skips that tick — so a failed
+suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
+`/book` "Can't find a time?" request (owner 2026-09-29, dark behind
+`GATE_BOOK_PREFERRED_TIME`, strict opt-in read at call time via
+`bookPreferredTimeLive()`; `GET /api/booking/config` reports it as
+`preferred_time`): `POST /api/booking/preferred-time` is guarded by a pre-router
+mount in `server/index.js` (above the global cors(), the global `/api/` limiter
+and the body parsers): while the gate is off EVERY method answers the generic
+unknown-route 404, and every response (404, 400, 429, success) carries
+`Cache-Control: no-store`, `X-Robots-Tag: noindex` and `Referrer-Policy:
+no-referrer`. Its two limiters key by the /64-collapsed client IP. On: the same IP-bound funnel token
+`/availability` mints for capture-intent is required (`400 session_expired`
+otherwise), a hidden honeypot field answers success and stores nothing, and
+two per-IP limiters apply (5/min, 15/hour). A valid request files ONE internal
+lead (`lead_type = 'book_preferred_time'`, status `new`, the preferred days /
+time of day / note as plain English in `transcript_summary` and structured in
+`extracted_data`) that the office answers by hand and rings one `new_lead`
+admin bell (the /book first-touch attribution — click ids, UTMs, referrer — is
+resolved through `resolveLeadSource` onto the lead like every other funnel's);
+lookup and write run under a per-phone advisory lock, so a repeat or overlapping
+submit from the same phone inside 24h refreshes that still-open lead (no second
+row or bell). Recency is `extracted_data.last_requested_at`, written only by a
+submit — office edits (status, notes, assignment) never extend the dedupe
+window or the suppression. Filing a lead also stamps its
+`ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
+public lead. A booking NEVER closes a preferred-time request (owner ruling
+2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
+on both the first commit and the `txResult.existing` replay; a free re-service
+callback visit is skipped) never marks the lead won and never touches its funnel
+row — the booking's own attribution runs exactly as for any other booking.
+Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
+booked customer's open preferred-time leads (phone match) whose
+`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
+booked <service> for <date> (visit <id>) on /book — close this request if
+nothing else is needed" — deduped per (lead, visit) through
+`lead_activities.metadata`, so a replay never stacks notes; a newer request is
+new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+is `booking`, so the shared customer-originated-contact allowlist
+(`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
+booking that committed while a submit was still in flight (its note ran before
+the lead was visible) is reconciled by the submit after its commit: the lead gets
+the same note and NO `new_lead` bell rings; with no live booking since the
+request began the bell rings as usual. A repeat submit inside 24h merges only that
+request's own fields into `extracted_data`; the lead's first-touch UTM /
+referrer / landing URL are written once at creation and kept. The service line
+`address_line2` (apartment unit) is kept inline with the street line and in
+`extracted_data.address_line2`. It sends NOTHING to the customer — no SMS, no email — and
+retires every open abandoned-booking intent for the same phone or session, and
+capture-intent skips a phone that filed a request in the last day, and the
+recovery worker itself re-checks for a request filed since the intent was
+captured (fail closed on a lookup error) immediately before every text and
+email. The fence with the worker is the `booking_intents` ROW lock, not the
+per-phone advisory lock: the submit's suppression UPDATE and the worker's final
+check + dispatch (`withLockedRecoveryIntent`, which runs `SELECT ... FOR UPDATE`
+on the intent row and holds it through the send) contend on the same row, so
+exactly one goes first — the worker never takes the advisory lock, which only
+de-duplicates concurrent SUBMITS from one phone. A submit that waited out a
+send commits after it; a worker that arrives after the submit's commit reads the
+row as suppressed and its re-check sees the request. Neither a failed
+suppression write nor a racing capture nor a racing submit can lead to a message
+after the visitor's confirmation. Success is a constant
+`{"ok": true}`.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -604,6 +1007,180 @@ IS this window, replacing the flat 120-minute same-day lead). The old
 `max_self_books_per_day` cap is retired: its offer-time day filtering and
 commit-time re-checks run only while `GATE_SELF_BOOK_DAY_CAP` is set. Staff,
 admin and the voice agent's booking tools are unaffected.
+Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
+lenient than strict" — the Parrish live miss: a Tuesday 11:00 candidate hid
+because the strict travel-gap buffer measured a prior lawn stop's raw window
+rather than the whole-route simulation's actual ~6-minute arrival delay),
+`scheduling/policy.js`'s `selfServeArrivalGraceMinutes`,
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES`, default 0, capped at 120, capacity-mode
+only and never for a same-day pick: a self-serve (customer-picked) time
+names an ARRIVAL window, not a promised start, so a candidate the strict
+travel-gap buffer would reject is still offered — `find-time.js`'s
+`packCapacityEnds` — when the day's own route simulation already certifies
+the technician arrives within grace minutes of that slot's start (never for
+a live estimate hold neighbour, which may evaporate before it is ever
+committed, and never on the other side of that gap — the next customer's
+promised start is not this one's to spend; Codex r2 P1 on #5314: EVERY live
+hold on that tech/date is checked this way, not only the single nearest
+committed-or-unassigned anchor `capacityGapNeighbours` picks per side — a
+hold's stored window is a promise rather than a fixed slot, so an
+earlier-starting hold can still end later than a later-starting committed
+stop that the anchor scan chose instead, and grace must never overlook it),
+and still accepted at commit — `arrival-route.js`'s `verifyArrivalCapacity`
+— only while its certified delay stays within that same grace, tighter than
+but never wider than the existing 120-minute arrival promise every capacity
+booking already carries.
+**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314; `/book` later joined under its own
+gate and opt-in — see "Online-booking arrival grace" below — narrowed from an earlier
+draft that also covered `/book` and public reschedule): those two surfaces'
+commit paths (`createSelfBooking`, the rebooker's single-visit move) each
+run a STRICT pre-verify travel probe ahead of their capacity check, so a
+grace-kept slot there would already 409 SLOT_TAKEN before `verifyArrivalCapacity`
+ever ran it — the estimate picker's own commit (`slot-reservation.js`) has
+no such probe under capacity, which is what makes it safe to grant grace
+there in the first place. Concretely: `packCapacityEnds` only reads grace
+for a caller that explicitly passes `arrivalGrace: true` — `estimate-slot-
+availability.js`'s `getAvailableSlots`/`getSlotDebug` are the only two call
+sites (guard-tested), even though `/book`'s `buildBookingAvailability`
+shares the SAME `packEnds: true` admission and is otherwise byte-identical.
+**A hold is certified ONCE, at reserve** (Codex r2 P0 on #5314): grace is
+never re-applied at accept. `slot-reservation.js`'s `reserveSlot` is the
+ONLY `verifyArrivalCapacity` caller that passes `arrivalGraceMinutes`
+(guard-tested — `/book`'s `createSelfBooking`, the rebooker, and this same
+file's own `commitReservation` never do), and it reads the EXACT grace that
+justified the offer, not a fresh live env read: `arrivalGrace` rides as its
+own field in the estimate surface's signed slot offer
+(`utils/slot-offer-token.js`), carried in cleartext inside the slotId so
+`reserveSlot` can read it back and `verifySlotOffer` still catches any
+tamper. **Opt-in PER OFFER, not a blanket format bump** (Codex round 3,
+#5314 — the first cut bumped the canonical string and slotId shape for
+EVERY offer unconditionally, which broke every in-flight estimate offer at
+deploy even with grace dark, violating "default 0 = byte-identical to
+before this lane" for the wire format itself): an ungraced offer
+(`arrivalGrace` 0 or omitted — every `/book` offer, and every estimate
+offer while capacity/grace is off or the date is excluded) signs and
+appends the EXACT `<base>.<exp>.<sig>` v2 shape this module always
+produced, byte for byte identical to origin/main's minting for the same
+inputs — it verifies under both the old and new code, so an offer straddling
+this deploy never breaks. Only a genuinely graced offer (`arrivalGrace` > 0)
+takes the new `<base>.<exp>.<arrivalGrace>.<sig>` v3 shape, since only it
+needs somewhere for the extra field to ride; a graced offer in flight at
+the exact deploy instant fails once, the same accepted trade the file's
+original v1→v2 bump made for every offer — but that window is now only the
+rare graced case. `signCustomerFacingSlots` signs a non-zero grace only for a slot
+carrying `routeMode: 'arrival_windows'` (stamped by `classifySlot` from
+find-time's own `route_mode`, stripped before the slot ever reaches the
+client) — the one marker proving a slot actually passed through
+`packCapacityEnds`' grace-aware filter; anything else (today, nothing under
+capacity mode — `buildAsapCapacitySlots` self-guards to `[]` — but signing
+must not depend on staying correct by accident in a different function)
+signs 0, so a future non-route-mode generator's slot can never inherit a
+leniency it was never checked against. `commitReservation` keeps only the
+pre-existing 120-minute arrival
+promise as its bound, byte-identical to before this whole lane — a hold
+reserved at grace 90 with an 80-minute delay is accepted regardless of what
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES` reads by the time the customer taps
+Accept. A grace change between the OFFER and the RESERVE tap is likewise
+inert for that specific offer (its signed `arrivalGrace` is fixed at mint
+time); only a FRESH availability fetch picks up a changed env value.
+Redeeming a graced offer at RESERVE also re-checks the strict travel-gap
+buffer against every CURRENT live hold on the same technician's route or
+unassigned (excluding the estimate's own hold): a rival estimate may have
+taken a nearby hold during the offer's lifetime, and a live hold never
+receives the waiver, so any buffer violation refuses the reserve with the
+usual 409 SLOT_UNAVAILABLE (`refuseGracedOfferOnRivalHoldConflict`; grace 0
+never queries).
+`extendReservation` (the 15-minute hold countdown) never re-verifies
+whole-route capacity fitness at all under capacity mode — a pre-existing gap
+unrelated to grace (a live hold's certified route order is trusted as-is
+rather than re-simulating the whole day's route on every extend, which was
+judged not cheap enough to add for this lane) — so a hold's grace
+certification is fixed at reserve time and is not re-checked if grace or the
+route changes before a later extend. Staff, admin, voice and the assistant's
+booking tools never opt in and are unaffected. Default 0 is byte-identical
+to before this lane. A slotId minted before this v3 bump fails verification
+once (the same accepted trade the v1→v2 canonical-string bump already made)
+— the client's existing "pick another time" 409 recovery re-signs fresh.
+**Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
+2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
+and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the
+surfaces whose commit is `createSelfBooking`: `/api/booking/availability`,
+`/find-slots`, the `/capture-intent` revalidation, public re-service and
+inspection booking — each passes `bookArrivalGrace: true` to
+`buildBookingAvailability`, which takes effect only with mid-route insertion
+(`capacityPlacement`, i.e. `bookInsertionOffersLive()`: `GATE_BOOK_CAPACITY_
+COMMIT` + `GATE_SCHEDULING_CAPACITY`), the new gate, and a positive
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES` for the slot's date (0 on a same-day pick).
+The **phone agent** (its commit stays end-of-day only), **public reschedule**
+(its rebooker commit still runs the strict pre-verify travel probe), office
+Find-a-Time, the Intelligence Bar and auto-dispatch never opt in and are
+byte-identical. Gate off (or grace 0) is today's strict drive+15-minute
+travel-gap offer and commit, byte for byte, on every surface.
+
+*Why.* Fable's read-only production runs found find-time seeing 8 bookable
+Parrish days at cap 30 while `/book` showed 3: every dropped slot failed
+`/book`'s own both-neighbour travel-gap mirror, because
+`find-time.js`'s `packCapacityEnds` tested each group's earliest pick against
+the previous stop ONLY and its latest pick against the next stop ONLY, so a
+pick that cleared its own neighbour but crowded the other survived find-time
+and was then dropped by the mirror — often emptying 4-7-stop days. The commit
+side had the mirror image: `findConflictingVisits`' strict travel probe ran
+before `verifyArrivalCapacity` and refused any buffer shortfall, so a
+grace-kept offer would have 409'd.
+
+*The one rule* (`services/scheduling/book-arrival-grace.js`, read by find-time's
+`packCapacityEnds`, `/book`'s offer mirror in `buildBookingAvailability`, and
+`createSelfBooking`'s commit probe — so offer and commit cannot drift):
+1. A real window overlap is never waived (the commit's own SQL overlap probe
+   and the raw-window check in `travel-gap.js` keep refusing it).
+2. Only the travel BUFFER against the PREVIOUS stop may be waived, and only
+   when that stop is committed and assigned to THIS technician and the
+   whole-route arrival simulation's own delay for this slot is within grace
+   (`arrival_delay_minutes` at offer, `verifyArrivalCapacity`'s fit at commit).
+   The NEXT stop's side is never waived — the next customer's promised start is
+   not this customer's to spend — nor an unassigned or other-technician stop, a
+   live hold (every hold on the route must clear the strict gap), or an
+   interview.
+3. `packCapacityEnds` (`/book` mode) checks every candidate against EVERY
+   route neighbour under rule 1-2 BEFORE a group picks its earliest/latest
+   endpoint, so a later candidate that clears both sides is never lost to an
+   earlier one that crowds the far side. Without the gate the default
+   one-neighbour-per-side pick is unchanged (the estimate picker's grace
+   still opts in through `arrivalGrace: true` and keeps its own rule).
+4. Independently of any gap, a graced build never offers a slot whose
+   simulated arrival delay is past the grace, because the commit's
+   `verifyArrivalCapacity(…, { arrivalGraceMinutes })` would refuse it:
+   `createSelfBooking` now passes the OFFER's grace (the guard test
+   `verify-arrival-capacity-grace-callers-guard.test.js` counts it).
+
+*Commit.* `createSelfBooking` tolerates a strict-probe clash only when the
+offer was graced, a prepared capacity proof exists, and EVERY clash is a
+previous-side `travel_gap` row (a row that starts before the candidate;
+`findConflictingVisits` itself is unchanged and stays tech-blind) on the same
+assigned committed technician;
+everything else stays `SLOT_TAKEN`. The grace it enforces is the exact value
+that justified the offer: a signed `/book` offer carries it as an HMAC-bound
+field (`slot_sig` = `<exp>.<grace>.<sig>`, only when grace > 0; a zero-grace
+offer keeps the exact `<exp>.<sig>` shape), never a live re-read; an internal
+callback booking (re-service, inspection — no signed field, offer proof is a
+same-request rebuild) reads the live grace for its date.
+
+*Zero grace is the gate off.* Grace mode applies only where the applicable
+grace is positive: a build whose range has no positive-grace date (env unset/0)
+is plain insertion mode, and per slot a zero-grace date (a same-day pick)
+keeps the old one-neighbour packing, the strict mirror, the
+`BOOK_INSERTION_OFFER_POLICY` tag and the `<exp>.<sig>` field.
+
+*Flip safety.* Every `/book` offer for a positive-grace date carries
+`BOOK_ARRIVAL_GRACE_OFFER_POLICY` (`utils/slot-offer-token.js`) instead of
+`BOOK_INSERTION_OFFER_POLICY`, and `/confirm` verifies with
+`bookOfferPolicyLive(date)`, so a gate flip in either direction between mint and
+confirm fails the signature into the standard "pick your time again" 409
+(same mechanism as `GATE_BOOK_CAPACITY_COMMIT`, #5231). Tests:
+`book-arrival-grace-parity.test.js` (real whole-route simulation +
+find-time + commit probe, both directions, gate on and off),
+`booking-availability-arrival-grace.test.js` (offer mirror + signing),
+`booking-confirm-signed-offer.test.js` (commit matrix), `slot-offer-token.test.js`.
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.
@@ -737,6 +1314,26 @@ accept-active estimate with a contact gap always gets the React view: the
 `/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
+
+Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
+dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:
+true` ONLY when the gate is exactly `'true'`, the recurring card-on-file lane is on,
+and the policy the accept would resolve puts this customer on the card rail
+(a card is captured at accept, or a consented method is already saved/Auto Pay is
+active). It is OMITTED (never `false`) in every other case, so a gate-off response is
+byte-identical to before. A plan member whose Auto Pay is already active DOES carry it
+(that policy resolves to `autopay_already_active`, an on-rail state: the saved method is
+charged after the visit). Plan members NOT on Auto Pay (`existing_plan_customer`),
+payer-billed, invoice-mode, commercial manual billing, one-time and paused-Auto-Pay
+never carry it. It is a boolean about the viewer's own estimate only: no customer, payer, or
+payment-method data rides it. SCOPE: it describes the PAY-PER-APPLICATION option only.
+`/data` resolves the policy before the viewer picks a payment option
+(`paymentMethodPreference: null`), so it says nothing about annual prepay: a viewer who
+later selects annual prepay is resolved again at accept (with `GATE_PREPAY_CARD_AND_CHARGE`
+off that is the `prepay_annual` exemption and its pay-link path). A client must not show
+the after-first-visit promise on the annual-prepay option on the strength of this field.
+Informational only for now: no client reads it, and it moves no money and sends no
+message.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
@@ -931,81 +1528,37 @@ multi-property account's report can never list another property's visits.
 Gate off (default): the field is absent and the payload is byte-identical
 to today.
 
-Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
-rewritten structurally 2026-09-28 after FOUR rounds of "claim inferred
-from free text" findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark,
-off unless exactly `true`, read at call time; inert unless
-`GATE_REPORT_CROSS_SELL` is also on — there is no card to prioritize
-without it) layers a priority on top of the existing `crossSell` offer
-ladder (`services/service-report/cross-sell.js`'s `buildReportCrossSell`).
-On, the payload's existing `crossSell` object may additionally carry
-`reason` — one short, honest, reason-tied FIXED sentence rendered above
-the CTA button, one per branch below, never composed from or naming a
-location or severity the structured field itself doesn't state (roach:
-"We noted roach activity during this visit — our cockroach control
-program is a focused two-treatment cleanout."; rodent: "We noted signs of
-rodent activity during this visit — …"; termite: "We noted possible
-termite activity during this visit — …" ("during this visit", never
-"today" — reopening an older report recomputes these reasons from the
-same visit's saved snapshot, so a same-day claim would misdate historical
-findings as current); season-mosquito: "Mosquito season is here in SW Florida — …";
-season-termite: "It's termite swarm season in SW Florida — …") — and
-`serviceKey` may resolve to two targets the ladder itself never picks:
-`rodent_bait` and `mosquito`, priced through the SAME
-`buildCustomerPricingResponse` estimator path and per-application-only
-serialization rule as the existing ladder targets. Their prompts/labels
-live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
-deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
-vocabulary the portal offer card and the photo-triage lane
-(`buildPortalOffer`, `buildOfferForFamily`) also read by
-`requestedTargetKey` — those two surfaces are unaffected by this gate and
-still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
-may also resolve to `cockroach_control` — the one target priced OUTSIDE
-the estimator (a fixed one-time catalog price; `mode` is always
-`quote_cta`, `option` is always `null`) — gated on the live `services`
-catalog row (`is_active`, `!is_archived`, `customer_visible`,
-`booking_enabled`) and on the customer having no already-open
-(pending/confirmed/en_route/on_site) visit linked to it.
-
-Findings priority reads ONLY structured, fixed-vocabulary fields from THIS
-visit's typed report snapshots (`service_records.service_data`'s
-`typedReportSnapshot` / `companionReportSnapshots`, primary or companion —
-`server/services/project-types.js` is the one source of truth for these
-keys/options) — free-text parsing of `service_findings`
-(category/title/detail/recommendation) and any negation handling over it
-was REMOVED ENTIRELY 2026-09-28 rather than refined a fourth time: those
-rows carry a technician's RECOMMENDATION and CATEGORY LABEL alongside the
-observation, text no regex could reliably separate from an actual finding.
-`technician_notes` was never read (raw notes must never egress on a
-customer surface) and still isn't. An UNTYPED (general pest) visit carries
-no typed snapshot at all — no findings signal, season/ladder decides. The
-surviving structured checks, each "unknown/empty value → no signal": roach
-— a COMPANION (never the primary — a primary cockroach report means the
-customer is already mid-program today) typed `cockroach` snapshot's
-`activity_level` is anything other than `'None observed'`; rodent — a
-`rodent_trapping` snapshot's `captures` count is > 0, OR a
-`rodent_bait_station` snapshot's `bait_consumption` is anything other than
-`'None'`, OR a `rodent_inspection` snapshot's `activity_found` is
-`'Yes'` (primary or companion, no exclusion); termite — a
-`termite_bait_station` snapshot's `termite_activity` is `'Active termites
-present'` or `'Previous feeding noted'`, OR a `termite_inspection`
-snapshot's `activity_status` is `'Active infestation'` (primary or
-companion, no exclusion; a merely historical `'Old / inactive damage'`
-value is NOT current activity and is not a signal). Mosquito has NO
-findings branch at all (removed 2026-09-28, a prior round: a mention count
-in short structured text could not be tied reliably to genuine severity)
-— it is offered ONLY by season (America/New_York May–Oct) or the
-unchanged ladder. Season (May–Oct mosquito, Feb–May termite swarm season)
-runs only when no findings branch fired; May favors mosquito when neither
-is already owned. Never offers a family the customer already owns —
-reuses the ladder's own property-scoped ownership + plan-rate evidence,
-including the `termite_bait` → `termite` ownership mapping (this also
-covers a typed rodent/termite report's OWN identity — a `rodent_trapping`
-visit's own family is already counted owned by the ladder's existing
-report-identity corroboration, so no separate primary-exclusion rule is
-needed for rodent/termite the way roach's is). Gate off (default):
-`crossSell` is byte-identical to today's unchanged ladder pick and carries
-no `reason` field.
+Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
+`services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
+report payload's `crossSell` object offers the ONE next family the
+customer doesn't have, walking `OFFER_LADDER` =
+`pest_control → lawn_care → tree_shrub` (owner ruling 2026-09-28: report
+offers push the three pillars only — termite left the ladder). A customer
+owning pest, lawn, AND tree & shrub gets no card at all. The SAME owner
+ruling applies to EVERY offer surface, not only the report ("three
+pillars is fine for now, yes applies there too"): the portal offer card
+and the photo-triage lane (`buildPortalOffer` / `buildPortalPurchaseBasis`
+/ `resolvePortalOfferTarget`, and `buildOfferForFamily`) share the
+identical `OFFER_LADDER` and `pickOfferTarget` — a customer owning all
+three pillars gets no ladder-picked offer on any surface, and the
+portal's one-tap termite purchase path is gone with it. `termite`/
+`termite_bait` ownership still counts as "has a plan, not the anchor" via
+the ownership vocabulary's mapping — it is simply never the offered rung.
+An explicit `requestedTargetKey: 'termite'` (e.g. a photo-triage
+identification of termite activity) is a DIFFERENT, deliberate code path
+— never the ladder's own pick — and is unaffected: `OFFER_PROMPTS`/
+`OFFER_LABELS`/`PREFERRED_OPTION_IDS` still carry `termite` so that
+request still prices normally. Never offers a family the customer already
+owns — the ladder's own property-scoped ownership + plan-rate evidence
+decide it (this also covers a typed rodent/termite report's OWN identity —
+a `rodent_trapping` visit's own family is already counted owned by the
+ladder's existing report-identity corroboration). A recent, uncorroborated
+report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
+(`OFFER_LADDER` plus `termite`, kept there for exactly this ambiguity even
+though termite left the ladder itself) fails the WHOLE report card closed
+— the unseeded-next-visit gap and a just-cancelled plan are
+indistinguishable, so offering the family and advancing past it are each
+wrong in one of those worlds.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
@@ -1038,15 +1591,99 @@ advice retains its `area_estimated` label.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots
-retain their existing behavior. A current watering snapshot can originate from
+retain their existing behavior.
+Lawn `reportV2.aftercare` permits a watering-in credit only when
+`creditableWaterIn` is exactly `true`, `evidenceSource` is
+`product_instruction`, and neither `wateringHold` nor `needsReview` is true.
+That same rule governs the live plan, insight actions, report assistant,
+narrative overlay, and PDF. A historical non-neutral watering object without
+evidence provenance is normalized to review-required: its recorded note remains
+visible beside confirmation guidance, while the former inferred “normal watering
+within 24 hours” instruction is removed. Historical neutral fallbacks retain
+their existing shape and wording.
+`GATE_LAWN_WATERING_RULE` (dark; gate off leaves this payload unchanged, key for
+key) expands the lawn payload with the visit's one watering instruction, built
+from the per-product rules frozen with the visit, the completion time and the
+customer's own irrigation entries (withheld after a move). When it resolves to
+hold, water-in or hold-then-water-in: `reportV2.banner`
+`{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
+`hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
+finished customer sentences with absolute Eastern clock times; `holdUntil`,
+`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+has dried" hold has no printed duration and `expiresAt: null` (dryness is a
+condition, so no instruction that waits for drying, including one followed by a
+water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
+`holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
+"ended" note past it; the key is absent when there is no claim).
+`reportV2.aftercare` is a record of the visit and never changes by the clock
+(owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
+`wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
+is a hold), `holdTask` (the banner's first line verbatim, or its first two lines
+for hold-then-water-in), `waterInTask` (the banner's first line verbatim, for a
+water-in that earns no plan credit; it stays the customer's task in the hero,
+the follow-up card and the assistant within the visit's plan week), `ruleSource`,
+`holdUntil` and `waterInBy`; and
+`reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
+`{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
+end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
+never reaches the payload). Provenance: `ruleSource` is `label`, `owner` or
+`default`, the weakest source among the rules that drive the instruction; state
+`none` is asserted only when every applied product resolved to a rule and at
+least one is label- or owner-sourced; any applied product with no rule makes
+the whole visit no claim (no banner, no product_instruction aftercare, the
+existing fail-closed aftercare stays), whatever the other products say. The rule itself
+(`wateringRule` / `post_application_watering`) never appears on
+`applications[].product` or anywhere else in the public payload. The complete
+instruction is frozen at completion under `structured_notes.lawnWateringFreeze`
+(first writer wins, atomically) and later reads replay it, so an edit to the customer's
+sprinkler entries after the visit never changes the minutes or times an existing
+report showed; a record with no frozen instruction regenerates it. Only the treatment-specific sentences are frozen; the one
+sentence that depends on the weekly plan ("follow this week's plan", or "that
+counts toward this week's watering" for a water-in shallower than the plan's
+run) is composed on each render from the plan present on that render.
+Label mow hold (P2b, same gate): when an applied product's frozen facts carry a
+label-sourced `mowHoldDays` (from `products_catalog.mow_hold_days`, 1..14; no
+default, no derivation), the banner gains `mowHold`
+`{ days, untilAt, untilDate, untilLabel, line }` for the longest hold: a label
+day is 24 elapsed hours, so `untilAt` is the completion instant plus `days` x 24
+hours rounded UP to the hour (ISO), `untilDate` its Eastern calendar date
+(YYYY-MM-DD), `untilLabel` its Eastern weekday and clock time ("Fri 4 PM";
+"Wed, Jan 6 at 12 PM" six or more days out), `line` one finished sentence
+("Mowing: hold off until Fri 4 PM, 1 day after today's treatment."). The key is
+absent when no product has a value. A visit with a mow hold but no watering
+claim gets a banner `{ state: null, lines: [], holdUntil: null, waterInBy: null,
+expiresAt: null, ruleSource, mowHold }`; that is the only case `state` is
+`null`, and the client then titles the card "Mowing after today's visit".
+`mowHold.line` is never in `lines` (so the lawn watering text and the PDF's one
+watering line are unchanged), it is frozen with a frozen instruction and
+otherwise rebuilt from the frozen product facts (a state-null instruction is
+never frozen), it never changes by the clock (the live banner's "ended" note
+replaces only the watering lines), and `mowHoldDays` never appears on
+`applications[].product`. Facts frozen before the column existed make no mow
+claim. The value is part of the lawn render cache signature.
+`reportV2.aftercare.watering` carries every treatment sentence. A render whose
+watering inputs could not be read (customer preferences or the catalog) omits
+the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
+such a render is served but never cached, and a pinned delivery defers. The gate is
+part of the lawn PDF cache signature.
+`GATE_LAWN_WATERING_SMS` (dark, strict `true`; also requires
+`GATE_LAWN_WATERING_RULE`) adds no public payload field: it sends the frozen
+instruction (`state` hold, water_in or hold_then_water_in, never none) as one
+separate customer text right after the lawn completion text, rendered from the
+`lawn_watering_instruction` SMS template with the instruction's `lines` joined
+by single spaces, at most once per visit
+(`structured_notes.lawnWateringSmsStatus`).
+A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
 (or the original email timestamp on older snapshots), with the same policy,
 plan-week and service-premise checks. Unpublished drafts remain unavailable.
 The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
-is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
-older cached PDFs to match this evidence rule),
+is retained before narrative cache/model access. Review-required or restricted
+aftercare also keeps the deterministic report before cache/model access. Lawn
+PDF render strategy `p7-watering-instruction-20260929` regenerates older cached PDFs
+to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
 Visit, in Motion" recap and consumes `/api/reports/:token/recap` +
@@ -1277,7 +1914,21 @@ validated against a FIXED allowlist (`server/routes/lead-webhook.js`
 SILENTLY DROPPED (never stored; the request still succeeds as if the field
 were absent). A valid value is stored verbatim in `leads.heard_about`
 (nullable column, migration `20260928020000_leads_heard_about.js`) and
-surfaced on the admin lead detail. It is DELIBERATELY SEPARATE from
+surfaced on the admin lead detail. Both endpoints also accept an OPTIONAL
+`heard_about_prompt` — the quote form's "What did you ask it?" follow-up,
+shown only when the visitor picked `chatgpt` or `other_ai`. It is read from
+that exact key, must be a string, and is kept ONLY when `heard_about`
+resolves to `chatgpt` or `other_ai`; control characters and whitespace runs
+collapse to single spaces, the result is trimmed and capped at 500
+characters (`sanitizeHeardAboutPrompt`), and a non-string, blank, or
+non-AI-`heard_about` value is SILENTLY DROPPED (request still succeeds).
+Stored as typed — no redaction — in `leads.heard_about_prompt` (nullable
+varchar(500), migration `20260930220000_leads_heard_about_prompt.js`) and
+shown on the admin lead card as `Asked: "…"`; STAFF-ONLY, it never joins
+`message`, the AI triage prose or any customer-facing text. Safe in either
+deploy order: a portal without this change ignores the unknown key, and an
+Astro form without it simply omits the key. `heard_about` itself is
+DELIBERATELY SEPARATE from
 `leads.lead_source_id` / the classified `lead_source` — self-reported, never
 merged into technically-observed attribution, and "unknown" (the field
 omitted or invalid) stores NULL rather than a guess. Separately and
@@ -1442,7 +2093,22 @@ buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
 token format gate, generic 404, isEstimateCustomerViewable gate identical
 to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
 draft can never produce a customer-facing document), serviceKey must be
-BOTH a known guide key and a recurring service actually on this estimate,
+BOTH a known guide key and a recurring service actually on this estimate —
+one exception: `lawn_care` is also served when the estimate's only lawn work
+is a one-time lawn row (`one_time_lawn`, `plugging`, `dethatching`,
+`top_dressing`), read from the same replayed pricing bundle `/data` sends
+(`pricingBundle.oneTimeBreakdown`, stored breakdown as fallback; malformed
+data fails closed), and that estimate gets the ONE-TIME variant of the guide
+(no visit count, re-service, or recurring-program content). An estimate with
+BOTH a recurring lawn line and a one-time lawn row serves the recurring guide
+unless the request carries the one-time card's hint (`?scope=one_time` on the
+GET, `scope: 'one_time'` in the send body; the texted link keeps it) — the
+hint only picks the variant when a one-time lawn row is present and never
+widens membership; no other guide
+widens for one-time rows, and the Bermuda-removal sections render only when
+the estimate carries the bermudaSuppression add-on with
+GATE_BERMUDA_SUPPRESSION on. The same membership rule gates
+`POST /api/estimates/:token/service-details/send`;
 60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
 service guide plus PUBLIC product-registry fields only — active
 ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
@@ -1457,13 +2123,63 @@ builder is fail-closed, so a config where the rental cannot actually
 price 404s instead of rendering a one-column comparison; 60 req/min
 limit, `no-store`/`no-referrer` headers; no product-registry, vendor, or
 cost data — customer-priced figures only).
+`/api/estimates/:token/map/satellite` and `/api/estimates/:token/map/overlay`
+(read-only token-scoped satellite image proxy, B12; the ONLY way a customer
+surface gets a map image — /data, the SSR page, the PDF render pass and the
+show-your-work payload carry these paths and never a maps.googleapis.com URL,
+because that URL carried the server's Google Maps key, the same key Geocoding
+and Routes use, which cannot be referrer-restricted; `/data` and the SSR HTML
+also run a last-line scrub that strips any maps.googleapis.com `key=` (raw or
+HTML/JSON-escaped separators: `&amp;`, `&#38;`, `&#x26;`, `\u0026`), any
+`key=AIza...` token or bare Google-key shape (so a rotated or staff-pasted key
+that differs from the configured one is caught too) and blanks the literal key
+— the SSR path scrubs its SOURCE values before renderPage escapes them, then
+scrubs the finished HTML as a backstop, and stored `estimates.satellite_url` rows that already
+hold a keyed URL are redacted on output — no migration). A small guard (`mapImagePreGuard`) is mounted in
+`server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter,
+scoped to exactly what Express routes to these two handlers (GET and HEAD,
+case-insensitive path, optional trailing slash): it stamps `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` and `Cross-Origin-Resource-Policy:
+cross-origin` first — so the router.param malformed-token 404 and the global
+and route limiters' 429s inherit them, and a successful image overwrites
+Cache-Control — and answers the dark overlay's generic 404 there, before the
+global limiter can turn it into a 429. Token format gate
+(router.param) + ONE generic 404 body (`Estimate not found`, `no-store`) for
+every refusal — malformed/unknown token, callSideBlock, a row that is not
+`isEstimateCustomerViewable` (drafts, expired, archived, send_failed 404; the
+group-link view bypass matches `/:token/data`; there is NO staff-preview or
+signed-pdf-pin bypass because an <img> carries neither), no usable stored map,
+and upstream failure — so the route is not an existence oracle. The route
+reads NOTHING from the caller's query string: `/map/satellite` rebuilds a
+keyless Static Maps URL from the estimate's OWN stored `satellite_url`
+(`estimate_data.satelliteUrl` fallback), keeping only allow-listed,
+range-checked params (center, zoom 1-22, size <=640x640, maptype
+satellite|hybrid, format, scale 1|2; markers/path/signature dropped) and
+refusing any non-`https://maps.googleapis.com/maps/api/staticmap` value, so it
+cannot become an open proxy or an SSRF vector; `/map/overlay` rebuilds the
+parcel-outline URL from the cached property_lookups row (dark while
+`estimateShowYourWork` is off: the gate check runs BEFORE the limiter and any
+DB work, so a dark route answers the generic 404, never 429). The server key
+is appended only inside the fetch (8 s timeout, image/* content-type and 4 MB
+cap enforced, nothing logged but a URL-free warn); a bounded in-memory cache
+(64 entries, 10 min) keeps one token from fanning out into unlimited Google
+fetches, and a 30 req/min per-IP limiter fronts it. Success streams the bytes
+with `Cache-Control: private, max-age=3600`, `Referrer-Policy: no-referrer`,
+`X-Content-Type-Options: nosniff`, and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img>
+when the SPA is built against a separate API origin via VITE_API_URL).
+Admin-only surfaces keep their direct URLs).
 `/api/estimates/:token/service-details/send` (write; emails or texts that
 same packet to the contact info ALREADY ON the estimate — the destination
-is NEVER caller-supplied (body carries only `service` + `channel`), so
+is NEVER caller-supplied (body carries only `service` + `channel`, plus
+the optional one-time lawn hint `scope: 'one_time'`, which only picks the
+lawn guide's one-time variant as described on the GET above), so
 the token cannot be used to spray documents at arbitrary addresses; same
 gate-404 + token format gate + customer-viewable + service-on-estimate
 checks as the GET, 6 req/hour limit, email sends idempotent per
-estimate+service+day, suppression-blocked addresses return 409 with no
+estimate+service+day (the lawn guide's one-time variant is its own packet:
+its idempotency key and SMS dedup claim carry a `:one_time` suffix and its
+texted link keeps `?scope=one_time`; every other guide keeps one key), suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
@@ -1484,8 +2200,8 @@ hit, and the email per-day idempotency dedup all funnel through it, so a
 changed or never-delivered annual offer can never surface through a
 shortcut that skips the check — mapping a blocked verdict to the same
 generic 404, with the SMS dedup claim stamped/released exactly like the
-customer-viewable/call-side-hold case; no new request shape, no new
-payload).
+customer-viewable/call-side-hold case; the only request-shape addition
+is the optional `scope` hint above).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -1663,6 +2379,26 @@ responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
 headers do NOT apply to them. `/nearest` is the exception: its answer is
 per visitor, so it stays `private, no-store`).
+`/api/public/yard-calendar` (read-only, no auth, no token, no DB access,
+no LLM call, no PII, no request body — the SWFL yard pressure calendar: a
+monthly lawn / shrubs & trees / weeds guide derived at request time from the
+owner-approved species catalog (`server/data/species-catalog-v1`, via
+`server/services/pest-forecast/landscape-calendar.js`). Query: `month` (1-12,
+default the current ET month) and `grass` (`all|sta|bah|zoy|ber`, default
+`all`); anything else is a 400 (`invalid_month` / `invalid_grass`). The
+payload is items with name, host text, level (0-3) for the month plus the
+12-month `levels`, a trend flag, the homeowner sign and look-alike copy, the
+catalog service line and site link, and the month's plan-ahead notes; no
+customer, pricing or account data. Level comes only from the catalog's
+`active_months` / `peak_months`; a slug that is missing or not
+owner-approved is left out with a warning (never a boot crash), and the
+overlay test fails CI, so a thinner calendar never ships unnoticed. Intentionally CORS-open
+(`Access-Control-Allow-Origin: *`, same app-level preflight handler as
+`/pest-forecast`) so the guide can be embedded on other sites; inherits the
+global `/api/` IP rate limit. Cacheable and indexable: an explicit month is
+`public, max-age=3600, s-maxage=86400`, a defaulted month
+`public, max-age=300, s-maxage=900` (it flips at ET midnight on the 1st).
+No feature gate: it is read-only reference content.)
 `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
 access, no PII — compatibility shim that always returns
 `{ portalGlass: true }`. The glass release gate is retired and current
@@ -1706,6 +2442,48 @@ Operational `meta.providerStatus` (credential configuration and attempted-provid
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
 `publicLookupErrors` removes provider failures and internal diagnostic messages.
+The response's `satellite.closeUrl` / `microCloseUrl` / `wideUrl` are ABSOLUTE
+short-lived signed proxy URLs (`https://<portal>/api/public/map-image/<token>`),
+never Google Static Maps URLs: the lookup builds keyed URLs internally (the
+server Maps key, which also serves Geocoding/Routes and so cannot be
+referrer-restricted), `publicSatellitePayload` re-signs only their
+center/zoom/size, and the whole success body also runs the shared Maps-key
+scrub (`scrubMapsKeysDeep`) as a last line. The marketing site's quote form
+renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
+`/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
+proxy; the ONLY way the public lookup, the customer service report
+(`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
+portal `/api/property/station-map` get a map image — none of those payloads
+carries a maps.googleapis.com URL or a key any more; staff-only surfaces such
+as admin dispatch keep direct URLs). The token is
+`v1.<base64url(lat|lng|zoom|WxH|scale|maptype|exp)>.<base64url(HMAC-SHA256)>`,
+keyed on `REPORT_PIN_SECRET` (falls back to `JWT_SECRET`) through a
+purpose-derived key, 2 h expiry for report/portal links (24 h for the lead-form lookup, whose marketing-site form cannot re-request; never more than 24 h), constant-time compare,
+fail-closed when no secret is configured (the map is omitted, never sent
+keyed). The route reads NOTHING but the path token — no query param — and
+rebuilds a keyless Static Maps URL only from the signed, range-checked values
+(lat +-90, lng +-180, zoom 1-22, size <=640x640, scale 1|2, maptype
+satellite|hybrid), appends the key inside the fetch (8 s timeout, image/*
+content-type, 4 MB cap; a dedicated `GOOGLE_STATIC_MAPS_API_KEY` is preferred,
+matching the basemap provider), and streams the bytes, so it cannot become an
+open proxy or SSRF vector. Every refusal (malformed/forged/expired token, no
+key, upstream failure) is ONE generic 404 body — including the empty token,
+`//x`, extra path segments and every non-GET/HEAD method, which a terminal
+catch-all in the router answers with the same 404 (the header stamp and the
+route limiter run router-wide, ahead of the route, so no request under the
+mount falls through to the global limiter or the app notFound; the mount is
+case-insensitive and ignores a trailing slash; a last error handler in the router answers any error raised under the mount, such as a malformed percent-encoding like `/%E0%A4%A`, with the same 404 instead of the global 500); every response including the
+404 and the 429 carries `Cache-Control: no-store` (success: `private,
+max-age=900`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
+nosniff`, `X-Robots-Tag: noindex` and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img> on
+the marketing site or a separate API origin). No server-side image cache
+(provider terms are display-only); a 60 req/min per-IP limiter (IPv6 /64
+collapsed) fronts the whole mount, which sits in `server/index.js` ABOVE the global `cors()` (it would otherwise answer an OPTIONS preflight with a bare 204 ahead of the router), the global `/api/` limiter and the body parsers.
+Regression guard: `server/tests/customer-map-no-key.test.js` fails if any
+server module outside an explicit server-only/staff-only allowlist references
+the Static Maps endpoint, and asserts the touched customer payloads carry no
+key).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,
@@ -2173,6 +2951,23 @@ target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
 per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
 legacy 5-char codes still resolve).
+`/go/:code` (outside-link click redirect for prep-guide links to third-party
+sites — 302 to the registered destination / generic 404 with no enumeration
+leak; `noindex`, `no-store`, `Referrer-Policy: no-referrer` on EVERY status
+(302/404/429/500 — set before the limiter); mounts OUTSIDE
+the global `/api/` limiter so it carries its own 120/min per-key limiter (the
+`/l` budget). **Not an open redirect**: the destination is ONLY a
+pre-registered `outbound_links` row looked up by a 20-hex code that is the
+sha256 of the target URL (row must hash back to its code, http(s) only);
+nothing in the request names or changes the target. The query carries only an
+HMAC-signed attribution context (template key, customer id, visit or project
+id, surface — row ids only, NEVER the bearer prep token, which would land in
+the request log; it is resolved to ids at render time) — an invalid signature is ignored, never trusted. Human clicks log
+to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs and staff — the
+`waves_admin` marker cookie or `WAVES_ADMIN_IPS`, the same `shouldRecord`
+filter `/l` uses — still redirect but log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
+is on, but the route stays live regardless of the gate so links already sent
+keep working. Destinations are never tagged or altered.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
 (`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
 picture iMessage/SMS/email crawlers show under a texted or emailed customer
@@ -2712,6 +3507,9 @@ AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
 API/PDF responses must never be claimed by the app).
+`/.well-known/security.txt` (RFC 9116 vulnerability-disclosure contact — static
+plain text, no auth, no PII, not gated; `Expires` is computed per request 180
+days ahead so it never goes stale; cached 1 day).
 `/api/public/track/:token` (read-only live service tracker; the
 `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
 rate limit. In ANY state it returns the customer property block — first name,
@@ -2725,11 +3523,26 @@ tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
 `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
 to the report / receipt / rate surfaces. Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
-read-only; `POST /api/public/track/:token/stops-ahead` is the ONE write
-companion — same token gate + rate limit, ignores its body, and only
-persists the stops-ahead display-clamp floor (monotone LEAST,
-skip-unchanged) via `computeStopsAhead` before returning the displayable
-count; it must never grow beyond that single bounded metadata write).
+read-only; it has exactly TWO write companions, both bounded.
+`POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
+ignores its body, and only persists the stops-ahead display-clamp floor
+(monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
+displayable count. `POST /api/public/track/:token/view` — same token format
+gate, expiry fence (unknown / malformed / expired = the same generic 404, no
+write), privacy headers and router rate limit; ignores its body; records ONE
+`customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff
+skipped, 10-minute dedupe) fire-and-forget and answers 204 with no body. The
+page calls it once per token on its first successful load, never on the 30 s
+poll. A lookup failure on `/view` is logged code-only (`logViewFailure`,
+never `err.message`, which can carry the bound token) and still answers 204;
+it is never forwarded to the global error handler. The privacy headers are
+also stamped by the `trackPublicPreparser` mount
+(`server/middleware/track-public-preparser.js`) in `server/index.js` AHEAD of
+the global `/api/` limiter and the shared body parsers, so a limiter 429 on the
+bearer URL carries them too. The same guard answers `/view`'s malformed-token
+404 before any body parsing and drops the request Content-Type so the ignored
+body is never parsed (a malformed / oversized body cannot become a 400/413). Neither companion may grow beyond its single
+bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking
 confirmation texts link to. Gated by `scheduled_services.reschedule_token`
@@ -2760,7 +3573,17 @@ reader and hands a third party an identity they were never told. Do not
 reintroduce it. window_end is never returned — customer surfaces quote
 start + 2h only, and the range is derived server-side with
 `arrivalWindowRange()` so the page cannot drift from the reminders.
-The ONLY write is the confirm: a status-only `pending -> confirmed`
+`rescheduleToken` (the "See open times" CTA's destination, `/reschedule/
+:token`) is null — suppressing the card — for a grouped/frozen visit, a
+dispatch-owned unreviewed booking, or an inactive/cancelled account.
+`canMoveOnline` (dead-link guard, C3/C6, 2026-09-28) is an additional
+boolean, false when the visit itself already starts inside the self-serve
+MOVE notice window (`SELF_SERVE_MOVE_NOTICE_HOURS`, `visitInsideMoveNoticeWindow`)
+— the CTA's own destination would refuse the move — and the client hides
+the card when either is falsy. The separate missed-visit "pick a new time"
+recovery link (a different, `state: 'past'` branch of this same GET) is
+unaffected; it is not gated on either field.
+The confirm write is a status-only `pending -> confirmed`
 transition guarded on the status AND the date/window that were read, plus
 a `job_status_history` row. The client posts the slot it rendered and the
 server confirms ONLY that slot — the office bulk reschedule moves
@@ -2768,7 +3591,140 @@ date/window while LEAVING the row pending, so a status-only guard would
 bless a replacement slot the customer never saw. It never touches
 date/window/tech and sends NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
 the same visit, UID-stable per visit so re-downloading updates rather
-than duplicates).
+than duplicates.
+`POST /:token/photos` (dark server foundation, `GATE_VISIT_PREP_PHOTOS`,
+layered on `GATE_APPOINTMENT_PAGE` — this route rides the same router, so
+BOTH must be on): lets the customer attach up to 3 photos + a short note to
+THIS specific upcoming visit before the tech arrives (`server/services/
+visit-prep.js` owns storage). Guard order: the router-level gate/noStore/
+60-per-min limiter, then `visitPrepPreParserGuard` — ONE function mounted
+twice: by `server/index.js` on the `/api/public/appointment` prefix AHEAD
+of the shared `express.json`/`urlencoded` parsers (so a dark or malformed
+photos request 404s before a parser can answer an oversized or malformed
+`application/json` body with its own 413/400), and again as the route's
+own first step. It applies the SAME `TOKEN_RE` format check the GET uses,
+the sub-gate, and a multipart-only body rule (the route accepts nothing
+else, so a JSON / urlencoded / other body never reaches the shared parsers
+even for a well-formed token it cannot yet know is unknown — Codex r4 P0);
+any of them failing answers the identical generic 404, BEFORE
+this route's own limiter runs (the house dark-`GATE_*` contract: a probe
+never sees a revealing 429). THEN a dedicated 6-per-min limiter keyed by
+the shared `/64`-collapsing `unauthenticatedAuthLimitKey` (never the raw
+IP), THEN `loadByToken` (additionally selects `s.property_id`) with the
+same missing-row/deleted-customer 404, THEN eligibility — the SAME generic
+404 again (an ineligible valid token is deliberately indistinguishable from
+an unknown one: this route has no 409 for a past, inactive, one-time, or
+office-owned visit; the GET already tells a legitimate holder whether
+photos can be added) unless the SAME
+grouped/ungrouped state the GET computes is `'upcoming'`, the token's
+membership is known (not `visitUnknown`), `customers.active === true`, the
+visit is recurring-lineage (a one-time visit is out of scope for this lane),
+and the visit is not `dispatchOwnedUnreviewed` (the office hasn't reviewed
+it yet — same invariant the confirm write enforces; the eligibility RULE
+is one function, `visitPrepEligibility`, that both this pre-check and the
+late recheck below feed — only the way `state` is READ differs, see below).
+The photo CAP is deliberately NOT pre-checked before the body is parsed: it
+is decided only under the lock, after dedupe (below), so a retry of an
+already-stored submission on a visit that is now full still answers the
+idempotent 200 rather than a misleading "limit reached". ONLY THEN does `multer`
+(memory storage; 5 MB/file, 3 files, 6 fields, 2 KB field size, 10 parts)
+parse the body — a multer size limit is 413, every other multer limit is
+400, both customer-safe and generic. Each file's declared mimetype AND its
+magic bytes (JPEG/PNG/WebP/HEIC-HEIF `ftyp` box) must agree on
+JPEG/PNG/WebP/HEIC/HEIF; HEIC/HEIF goes through `convertHeicToJpeg` first
+(converter saturation is a retryable 503 `PREP_CONVERTER_BUSY`, a genuine
+conversion failure a 400 `PREP_INVALID_PHOTO`); then EVERY accepted image
+is fully decoded and re-encoded as JPEG through `sharp` (25 MP input
+ceiling, longest edge bounded to 2560 px, EXIF orientation applied,
+metadata dropped) — a payload sharp cannot decode end to end (a truncated
+file, header-only bytes) is refused 400 `PREP_INVALID_PHOTO` rather than
+stored as something the technician cannot render; an unrecognized `topic`/`locationOnProperty`
+is its own code, `PREP_INVALID_FIELD`. Within-request duplicates (the same
+photo attached twice in one submission) fold to one candidate before upload.
+
+The write is NEVER trusted to the pre-check alone. `uploadFunnelPhotoToS3`
+runs first — storage must succeed for the request to succeed (a failure is
+503 `PREP_STORAGE_UNAVAILABLE`, no rows written, any already-uploaded
+objects for that request deleted) — and ONLY THEN does the write take the
+CANONICAL stop lock (`visit-groups.js`'s `lockStopForRow`, the same
+advisory lock every other stop writer takes, retried up to twice on a
+concurrent stop move before answering the generic 404) and re-run,
+under that lock, on FRESH state: (1) a late recheck, run ENTIRELY on the
+write's own transaction connection (never the global pool — a locked
+writer already holds a connection plus the stop's advisory lock, and a
+second pool checkout from inside that hold is how concurrent uploads
+exhaust the pool), and holding ROW locks as well as the advisory lock:
+the token row is taken `FOR UPDATE` first, then reloaded with
+`loadByToken(token, trx)`, and a grouped visit's live members are read
+with `visit-groups.js`'s `openMembers(trx, visit_id, { forUpdate: true })`
+(the confirm path's own locked-membership read) — status writers such as
+`transitionJobStatus` update `scheduled_services` WITHOUT the advisory
+lock, so only the row locks make an en-route tap or a cancellation wait
+for this transaction instead of landing between the recheck and the
+insert — and judged by the SAME pure rules the page applies
+(`membersOneStop`, `groupedState`, `pageState` precedence) — NOT via
+`visitServicesFor`, which resolves member labels through other
+global-pool services the recheck needs none of — and the result feeds the
+same `visitPrepEligibility` rule; refused (the generic 404, nothing
+written) if the row is gone, its
+customer deleted, it is no longer the row the pre-check saw, or it is no
+longer eligible (a status change — en route, cancelled, a grouped sibling
+moving the stop's state — landing between the two reads); (2) the dedupe
+check itself, by `sha256` of the STORED bytes per `scheduled_service_id` —
+run HERE, not before upload, so two concurrent identical submissions can
+both upload and the loser is recognized under the lock rather than racing
+the unique index; a photo found to already exist is dropped and its
+just-uploaded object deleted — an all-duplicate resubmit stores no photo and
+answers 200 (idempotent), but any non-empty `note`/`topic`/`locationOnProperty`
+it carries is written onto the submission that owns the first duplicate
+photo (there is no separate note endpoint, so a corrected note must not be
+silently dropped); (3) the real cap re-count (`capReached()` again,
+with the actual number of new photos), which a GROUPED visit computes
+across every `scheduled_services` row CURRENTLY sharing the stop's
+`visit_id` — membership is resolved fresh from `scheduled_services` at
+count time, never from the `visit_id` stored on a submission (visit-groups
+attaches, detaches and regroups rows without rewriting old submissions, so
+that column is a point-in-time record only) — so two members racing to
+add photos to the same stop can never together exceed the cap, photos added
+before a visit was grouped still count against the stop, and a member moved
+out of a stop takes its photos with it — the loser
+gets 409 `PREP_CAP_REACHED` (the visit already has 3 submissions, or the new
+photos would push it past 6) and its uploaded object is deleted. `property_id`,
+`customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
+row, never the pre-lock read and never the request body. The response is
+`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining, photosAdded } }`
+— 201 when a submission was created, 200 on the idempotent duplicate-only
+case (`photosAdded` is the number of NEW photos this request stored, 0 on
+that case; the other two counts are stop-wide) —
+and NEVER carries a photo URL, an S3 key, the note, or any customer
+identity: the token is shared with whoever received the visit text, so
+nothing submitted through it is ever shown back. The counts in the
+response are computed INSIDE the write transaction — no post-commit read
+can turn a durably stored submission into a 500 that invites a retry.
+Only the route's OWN
+errors (visit-prep.js's `prepError`, marked internally so the route can
+tell them apart) are ever echoed to the caller; any other error — a library
+error that happens to carry a `statusCode` included — goes to the generic
+error handler, never its raw message. On a NEW submission only (never a
+duplicate-only resubmit), the route writes ONE admin in-app notification —
+a detached, best-effort `NotificationService.notifyAdmin` call written after
+the response is sent (never awaited, so a slow or stalled insert cannot hold
+the customer's request open), category
+`visit_prep_photos`, direct (never through the `notification-triggers.js`
+registry, so it never pushes), linking to the customer; the category is on
+`notification-bell-policy.js`'s `DEFAULT_ON_CATEGORIES` (rings by default,
+owner-silenceable from Settings → Notifications) and a failed insert is
+caught and logged, never surfaced to the caller. This is STILL nothing to
+the customer or the technician — no SMS, email, native push, or socket
+event, to either, ever — and the route still never touches
+`scheduled_services.status`, date, window, or technician. Additive on the
+existing GET: gate on adds a
+top-level `prepPhotos: { eligible, photoCount, photosRemaining }` (the same
+shape, computed whether or not the visit is currently eligible, so the
+client can render the right empty/full state); gate off, the key is absent
+and the GET payload is byte-identical to before this lane. A prepPhotos
+lookup failure on GET fails soft — the key is omitted and a warning is
+logged, never a 500).
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`
@@ -2798,11 +3754,14 @@ the earliest after the previous one — never a mid-gap hour; an empty day still
 lists every grid hour); only the separate recommendations are curated. Moving an existing self-booked visit
 excludes that booking from its own day-cap count (the per-day cap runs only
 while `GATE_SELF_BOOK_DAY_CAP` is set — retired 2026-09-23). Self-serve notice
-window (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`,
-`SELF_SERVE_NOTICE_HOURS` default 24): GET answers `not_reschedulable` with
-reason `self_serve_notice` for a visit that itself starts within the window
-(a MISSED visit is being rebooked and is exempt), no offered target starts
-within the window, and POST refuses such a visit with 409 code
+windows (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`; split
+into a book window and a move window 2026-09-28, `SELF_SERVE_MOVE_NOTICE_HOURS`,
+default 24, independent of `SELF_SERVE_NOTICE_HOURS` — no fallback to it):
+GET answers `not_reschedulable` with reason `self_serve_notice` for a visit
+that itself currently starts within the MOVE window (a MISSED visit is being
+rebooked and is exempt); no offered target/destination starts within the
+BOOK window (`SELF_SERVE_NOTICE_HOURS`, default 24); and POST refuses such a
+visit with 409 code
 `SELF_SERVE_NOTICE`. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
@@ -3045,7 +4004,12 @@ a raw `resolveServiceAddress` — a directly supplied out-of-area address
 422s `{ error: 'out_of_area', county, waitlist_ticket }` or 503s
 `{ error: 'service_area_unavailable' }` instead of returning slot
 availability for a location that could never survive the commit handler's
-own area check. `resolveServiceAddress` has no callers anywhere in this file outside
+own area check. A linked customer's durable `needs_details`, `needs_pin`, or
+`outside_area` review quarantines that saved address from automatic geocoding:
+GET reports `needs_address: true`, and a commit that tries to reuse the same
+saved address answers 422 `{ error: 'address_unresolved' }`. A supplied address
+that is affirmatively a different property can still proceed through the usual
+validation and area checks. `resolveServiceAddress` has no callers anywhere in this file outside
 `finalizeBookingLocation`'s own body, and `checkServiceArea` has none outside
 `serviceAreaFailure` — reached from `finalizeBookingLocation` and from the
 commit route's own recheck of a verified lead's adopted property (the one
@@ -3066,8 +4030,12 @@ against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
-`{ error: 'service_area_unavailable' }`, recoverable), else the box test
-`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
+DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
+is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
+DeSoto ZIP); elsewhere in the box is in. Out of area 422s
 `{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
 address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day
@@ -3133,26 +4101,37 @@ contract as security-critical).
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).
 `/api/review/:token` (GET + POST; token-gated customer review flow — GET
-returns the review-request context by token, POST submits the customer's
-review. No auth beyond the review-request token. Baseline guards
+returns the review-request context by token. POST is RETIRED (owner ruling
+2026-09-29, the 1-10 rating is gone): it answers 410 Gone with no DB access
+(it used to be an unauthenticated rating write that stamped the click fields and
+fired a referral invite). No auth beyond the review-request token. Baseline guards
 (`server/routes/review-public.js`): `REVIEW_TOKEN_RE` format gate (the
 shape `services/review-request.js` mints — 32-64 url-safe chars) via
 `router.param` before any DB read, one generic 404 body for malformed,
-unknown, and expired tokens on both verbs, a router-wide 30 req/min limiter
+unknown, and expired tokens on GET, a router-wide 30 req/min limiter
 on the shared IPv6-safe `rateLimitKey`, and the shared `noStore` privacy
 headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
 stamps open state and returns customer name data, so those guards are the
 whole defense.)
-`/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-`/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
-rating flow from a review-request link — high → the nearest GBP
-write-a-review URL, low → private feedback capture. Router-wide url-safe
+`/api/rate/:token` (+ `/:token/go`) (review-gate; token-scoped thank-you
+page from a review-request link. The 1-10 rating, its feedback form and the AI
+review writer are retired (owner ruling 2026-09-29): the page GET returns
+`reviewUrl` — ALWAYS the tracked `/api/rate/:token/go` link (whatever
+GATE_REVIEW_DIRECT_LINK says), null for a customer already
+marked as a reviewer — and the page shows one "Open Google" button; going to
+Google is always the customer's own click. `POST /:token/score`, `/:token/submit`
+and `/:token/generate-review` no longer exist (404). Finalized (legacy-rated)
+requests answer `alreadySubmitted` with no button. Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
-GET and score/submit writes carry a 30/min limiter. `/:token/go` is the
-GATE_REVIEW_DIRECT_LINK tracked redirect: the same 32–64 URL-safe token format gate, 30
+GET carries a 30/min limiter. `/:token/go` is the
+tracked redirect (ALWAYS live, not gate-dependent; GATE_REVIEW_DIRECT_LINK now only decides whether ask texts and emails link here or to the /rate thank-you page): the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
-the customer's active review cadence, and 302s to the location's GBP review
+EVERY later review-ask path for the customer in one click (`ReviewService.stopFutureAsks`: the clicked request's cadence and any active/deferred cadence, a cadence parked for visit-summary recovery, queued one-off asks, due Day-3 follow-ups; run best-effort under the per-customer `review-send:<customerId>` lock with a bounded ~2 s wait; the stamp/claim lands first and every review sender re-checks `redirected_at` at SEND time (`services/review-click-guard.js`), so the customer is never kept from Google: `/go` always 302s once the click is recorded. A send already past its guard when the click lands may still deliver that one in-flight text), fire-and-forgets the referral invite
+email on the FIRST tracked click only (`sendReferralInviteEmail`, trigger
+`google_review_click`, once per customer; owner ruling 2026-09-29; never
+delays or breaks the redirect; bot fetches, expired, finalized and
+already-reviewed requests send nothing), and 302s to the location's GBP review
 URL — every failure path degrades to the /rate page, and the ONLY redirect
 targets are config/locations.js googleReviewUrl values (never
 request-derived). ONE deliberate non-failure carve-out (owner ruling,
@@ -3634,7 +4613,96 @@ be `/admin`-relative; subject/body/metadata size-capped) or marks rows
 read + `metadata.resolved` — never deletes, never touches customer rows.
 No customer PII may be posted here (the ops-cron contract is id prefixes
 and masked phones). Treat the auth ordering and the exceptions-only kind
-allowlist as security/ruling-critical).
+allowlist as security/ruling-critical.
+Admin-alerts-brevity scope (owner ruling 2026-09-28): the payload also
+accepts optional `headline` (string, ≤60 chars), `summary` (string, ≤110
+chars), and `audience` (`'owner'`|`'engineering'`|`'fyi'`), each validated
+and trimmed the same way as `subject`/`body` (blank → `null`, oversized or
+wrong-typed → 400). The submitted `body` no longer becomes the bell's
+displayed body: it persists verbatim to `notifications.detail` (the
+Activity feed's expander and the destination page read `detail || body`;
+the bell itself never reads `detail`) and the bell title never carries the
+`KIND: ` prefix any more (kind rides in `metadata.kind` only). The stored
+title is the caller's own `headline`, else `${area} — ${subject}` (or that
+check's own parsed headline, e.g. the data-hygiene sweep's fixed subject
+shape) from the server-side check → destination map
+(`server/config/ops-alert-routes.js`, keyed on the check id — `key` up to
+its first `:`, regex-matchable), cut to 60 chars at a word boundary; the
+bell body is the caller's `summary`, else null (never the whole report).
+`link` substitution: the caller's own `/admin`-relative link is kept
+verbatim UNLESS it is absent or is literally the Activity feed
+(`/admin/agents?tab=activity`), in which case the map's own page for that
+check is used instead (falling back to the Activity feed itself for an
+unmapped check). `audience` resolves from the caller's own value, else the
+map's audience for that check, else FIX→`engineering`/ACT→`owner` for an
+unmapped one; a non-`owner` audience stamps `metadata.feed = 'activity'`
+and that row is excluded from the admin bell's list, unread count, and
+mark-all-read (it still lists in the Activity feed). `audience` and `feed`
+join the reserved metadata keys the caller's own `metadata` object cannot
+override (alongside the existing `opsKey`/`subject`/`kind`/`source`/
+`dedupeKey`/`dedupeVersion`/`resolved`/`resolvedAt`/`resolvedBy`/
+`observedAt`). None of this changes the auth ordering, the FIX/ACT-only
+kind allowlist, the 404/401/409/400/503 status layering, or `/resolve`,
+which are unchanged from the paragraph above).
+Admin-alerts-ring scope (owner ruling 2026-09-28, "ring only when something
+changed"): the payload also accepts optional `count` and `newCount`, each a
+non-negative integer no larger than `Number.MAX_SAFE_INTEGER` (any other
+type, an explicit `null`, or a negative/oversized value → 400); both are optional and resolve
+INDEPENDENTLY — a caller-supplied value always wins for that field alone,
+and only a field the caller left out falls back. `count` falls back to the
+check-map's own `counts(subject)` for that check (data-hygiene: its parsed
+"N fixed, M exceptions (K new)" subject), then to the first LEADING integer
+in the subject; `newCount` falls back to the check-map's own `counts()`
+only — never to a bare number in the subject, whose meaning isn't safely
+guessable for an unconverted check. Effect: for an `owner`-audience row
+only, these feed the same ring-only-on-change test the in-process digests
+use — the bell rings again when `newCount` is greater than zero, when
+`count` is higher than the most recent matching row's own count (by alert
+class, ops-crons scoped, within its last 7-day ring), or when that row has
+no recorded count at all. An equal `count` also rings when the finding
+is about a different set of items: for a fresh row, the two ops-cron keys
+with their run dates removed differ (the key names the items — a mapped
+check with a stable class such as data-hygiene is compared by its counts
+only, since its key carries run counters); for any row, a stored
+`metadata.itemKeys` list (in-process senders) that gains an id. Otherwise
+an equal or lower `count` keeps the refresh quiet. A quiet NEW row is written to the
+Activity feed only (`metadata.quiet = true`, `metadata.feed = 'activity'`)
+— never the bell (unread count, list, mark-all-read) until something
+actually grows. A quiet REFRESH of a standing row updates its
+title/body/detail but keeps that row's current visibility and read state:
+a row already in the bell stays there (an unread alert the owner has not
+opened must not vanish because the list shrank), and a row already
+Activity-only stays there. Only a ring re-surfaces a row as unread. A non-`owner` audience is never gated by
+this test (`metadata.feed` is already `'activity'` unconditionally for
+those rows). Every ring also stamps `metadata.rungAt` (an ISO timestamp) —
+the 7-day comparison window is measured from a row's own last ring, not
+its `created_at`. `count`, `newCount`, `rungAt`, `itemKeys`, and
+`itemSetHash` join the reserved metadata keys above.
+Date-only key follow-up (2026-09-28, codex r8 P1): the date-stripped-key
+comparison above only counts as proof of "the same set" when that key
+still carries something BEYOND the alert class itself — a check whose key
+is shaped exactly `<check-id>:<finding>-<date>`, nothing else variable
+(e22's "N overlapping visits" is the production example), collapses to the
+alert class once its date is stripped and proves nothing about which items
+the finding names. Such a key's identity is UNKNOWN: the ring decision
+falls back to `count`/`newCount` (an equal or absent count with no item
+evidence on either side still RINGS — the pre-admin-alerts-ring behavior
+for these checks — rather than silently reading a different day's finding
+as the same one). A check that wants a quiet re-run for a genuinely
+repeated finding despite a date-only key sends the new `itemIds` field
+instead: an array of strings, at most 2000 entries, each 1-200 chars after
+trim (any other shape, or an explicit `null`, → 400; omitted leaves any
+previously stored identity alone, same convention as `count`/`newCount`).
+It carries the finding's own item identity — deduped, sorted, and capped
+at 500 for the stored `metadata.itemKeys` list exactly like an in-process
+sender's own `itemKeys` above; the full-set SHA-256 (`metadata.itemSetHash`)
+is kept regardless of size, so a set past the cap still proves a swap at an
+equal count. It feeds the SAME ring test as `metadata.itemKeys`, on both
+the fresh-insert and the refresh path — a current id absent from the prior
+list rings even at an equal or smaller `count`; the same set at an equal
+count stays quiet. `itemIds` itself is never stored; only its derived
+`metadata.itemKeys`/`metadata.itemSetHash` are (already reserved keys,
+above).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

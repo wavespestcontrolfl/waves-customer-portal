@@ -600,6 +600,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
 function ConversationViewV2({
   thread,
   messages,
+  highlightMessageId,
   onReply,
   onBack,
   onOpenProfile,
@@ -688,12 +689,14 @@ function ConversationViewV2({
           return (
             <div
               key={m.id}
+              id={`sms-message-${m.id}`}
               className={cn("flex", isOut ? "justify-end" : "justify-start")}
             >
               {" "}
               <div
                 className={cn(
                   "max-w-[75%] px-3.5 py-2.5 rounded-md border-hairline",
+                  m.id === highlightMessageId && "ring-2 ring-zinc-900",
                   isOut
                     ? "bg-zinc-900 text-white border-zinc-900 rounded-br-xs"
                     : "bg-zinc-50 text-zinc-900 border-zinc-200 rounded-bl-xs",
@@ -770,19 +773,31 @@ function ConversationViewV2({
 // 70 chars. Dynamic values (name, service type) pass through untouched: a
 // customer named José still gets greeted correctly, and the operator sees
 // the resulting body (and char count) before sending.
+// Say "Waves" once (owner ruling 2026-09-28). These bodies send as custom
+// copy, so the server's template brand dedupe never sees them: a service
+// name that itself starts with "Waves " (the catalog's "Waves Assessment")
+// drops the prefix, and a clause that already names Waves skips the
+// "it's Waves." intro.
+const SAYS_WAVES_RE = /\bWaves\b/;
+function withoutBrandPrefix(value) {
+  return String(value || "").replace(/^Waves\s+/, "");
+}
+
 export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Reschedule your ${day}${
-    serviceType ? ` ${serviceType}` : ""
+  const service = withoutBrandPrefix(serviceType);
+  return `Hi ${first}, it's Waves. Reschedule your ${day}${
+    service ? ` ${service}` : ""
   } visit here: ${url}`;
 }
 
 export function buildReservicePrefill({ firstName, laneLabel, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Book your free${
-    laneLabel ? ` ${laneLabel}` : ""
+  const lane = withoutBrandPrefix(laneLabel);
+  return `Hi ${first}, it's Waves. Book your free${
+    lane ? ` ${lane}` : ""
   } re-service here: ${url}`;
 }
 
@@ -839,7 +854,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   const first = String(firstName || "").trim();
   const line = String(clause || "").trim();
   if (!first || !line) return null;
-  return `Hi ${first}, it's Waves Pest Control. ${line}`;
+  return SAYS_WAVES_RE.test(line) ? `Hi ${first}! ${line}` : `Hi ${first}, it's Waves. ${line}`;
 }
 
 const ANALYZE_PHOTOS_MAX = 5;
@@ -2810,31 +2825,80 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [threads, activeThread?.contactPhone, statusFilter, smsHasMore]);
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
-  // opens that customer's SMS conversation. The sms_reply notification carries
-  // the customer id as its thread id (see notification-triggers.js); threads are
-  // keyed by phone but each carries its customerId, so we match on that and snap
-  // into the conversation view once the message log has loaded. Runs once.
+  // (a known sender; the sms_reply bell carries the customer id as its thread
+  // id, see notification-triggers.js) and/or ?message=<Twilio MessageSid> (the
+  // message the alert is about; alone, an unknown sender, named by the message
+  // because a link must not carry their number). The conversation opens even
+  // when it is not in the loaded page of the log, and so does the alerted
+  // message when it is older than that page: the log is asked for the customer
+  // and/or the sid (the server always includes the anchor row) and the result
+  // is merged into, never over, what is loaded. Runs once, after the first load.
   const threadDeepLinkDone = useRef(false);
+  const [deepLinkThreadKey, setDeepLinkThreadKey] = useState(null);
   useEffect(() => {
-    if (!active) return;
-    if (threadDeepLinkDone.current) return;
-    const threadCustomerId = new URLSearchParams(window.location.search).get("thread");
-    if (!threadCustomerId) {
-      threadDeepLinkDone.current = true;
+    if (!active || customer || loading || threadDeepLinkDone.current) return;
+    threadDeepLinkDone.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const threadCustomerId = params.get("thread");
+    const messageSid = params.get("message");
+    if (!threadCustomerId && !messageSid) return;
+    const ofCustomer = (t) => !threadCustomerId || (t.customerId && String(t.customerId) === String(threadCustomerId));
+    const hasAnchor = (t) => t.messages.some((m) => m.twilioSid === messageSid);
+    // The thread that holds the alerted message wins over the customer's
+    // newest thread (a customer can text from more than one number).
+    const loaded = (messageSid && threads.find((t) => ofCustomer(t) && hasAnchor(t)))
+      || (threadCustomerId && threads.find(ofCustomer));
+    if (loaded && (!messageSid || hasAnchor(loaded))) {
+      setDeepLinkThreadKey(smsThreadKey(loaded.contactPhone));
       return;
     }
-    if (!threads.length) return; // wait for the log to load
-    threadDeepLinkDone.current = true;
-    const match = threads.find(
-      (t) => t.customerId && String(t.customerId) === String(threadCustomerId),
-    );
-    if (!match) return; // no thread yet for this customer — stay on the list
+    const scope = [
+      threadCustomerId && `customerId=${encodeURIComponent(threadCustomerId)}`,
+      messageSid && `twilioSid=${encodeURIComponent(messageSid)}`,
+    ].filter(Boolean).join("&");
+    adminFetch(`/admin/communications/log?limit=${SMS_LOG_PAGE_SIZE}&${scope}`)
+      .then((data) => {
+        if (!Array.isArray(data?.messages) || data.error || !data.messages.length) {
+          if (loaded) setDeepLinkThreadKey(smsThreadKey(loaded.contactPhone)); // the anchor is gone; the thread still opens
+          return; // else stay on the list
+        }
+        setMessages((prev) => mergeSmsMessages(prev, data.messages));
+        const anchor = messageSid && data.messages.find((m) => m.twilioSid === messageSid);
+        setDeepLinkThreadKey(anchor ? smsMessageThreadKey(anchor)
+          : loaded ? smsThreadKey(loaded.contactPhone) : smsMessageThreadKey(data.messages[0]));
+      })
+      .catch(() => { if (loaded) setDeepLinkThreadKey(smsThreadKey(loaded.contactPhone)); }); // the list is still there
+  }, [active, customer, loading, threads]);
+  // Open the thread once it is among the loaded ones, and bring the message
+  // the alert was about (?message=<sid>) into view and briefly mark it; with
+  // no sid, or one not in the thread, the newest message.
+  const scrollTargetRef = useRef(null);
+  const [highlightMessageId, setHighlightMessageId] = useState(null);
+  useEffect(() => {
+    if (!deepLinkThreadKey) return;
+    const match = threads.find((t) => smsThreadKey(t.contactPhone) === deepLinkThreadKey);
+    if (!match) return;
+    setDeepLinkThreadKey(null);
     const openedThread = { ...match };
+    const sid = new URLSearchParams(window.location.search).get("message");
+    const alerted = sid ? openedThread.messages.find((m) => m.twilioSid === sid) : null;
+    scrollTargetRef.current = (alerted || openedThread.messages[0])?.id || null;
+    if (alerted) setHighlightMessageId(alerted.id);
     setActiveThread(openedThread);
     setSmsView("conversation");
     selectSmsRecipient(match.contactPhone, match.ourNumber, match.customerId);
     markMessagesRead(openedThread);
-  }, [active, threads, markMessagesRead]);
+  }, [deepLinkThreadKey, threads, markMessagesRead]);
+  useEffect(() => {
+    if (!scrollTargetRef.current || smsView !== "conversation" || !activeThread) return;
+    document.getElementById(`sms-message-${scrollTargetRef.current}`)?.scrollIntoView?.({ block: "center" });
+    scrollTargetRef.current = null;
+  }, [smsView, activeThread]);
+  useEffect(() => {
+    if (!highlightMessageId) return undefined;
+    const timer = setTimeout(() => setHighlightMessageId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [highlightMessageId]);
 
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
@@ -3698,6 +3762,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <ConversationViewV2
             thread={activeThread}
             messages={activeThread.messages.slice().reverse()}
+            highlightMessageId={highlightMessageId}
             onReply={handleThreadReply}
             onBack={() => {
               setSmsView("threads");
@@ -3964,7 +4029,7 @@ export default function CommunicationsPageV2() {
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
   const smsParams = new URLSearchParams(location.search);
-  const smsTarget = ["thread", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
+  const smsTarget = ["thread", "message", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
   const smsTargetKey = smsTarget.some(Boolean) ? JSON.stringify(smsTarget) : "";
   const [openedSmsTarget, setOpenedSmsTarget] = useState(smsTargetKey);
   // Preserve the composer on channel switches, but initialize a new explicit

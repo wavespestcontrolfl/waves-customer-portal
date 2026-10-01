@@ -113,8 +113,9 @@
       "https://ask.ifas.ufl.edu/lh010"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c45f968a3271dc41a6e70a0c74fc30d3e578a758cd844a682bad95a3744d4fa6"
     },
     "role": "lawn_grass",
     "risk": "low",
@@ -252,8 +253,9 @@
       "https://ask.ifas.ufl.edu/publication/ag342"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "6e35940a0ee4b1be5888458a65cadcdad54847d1ca96738f9ca5c995d8502dfd"
     },
     "role": "lawn_grass",
     "risk": "low",
@@ -385,8 +387,9 @@
       "https://ask.ifas.ufl.edu/lh011"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "7409545e58404f40cac3992ba8c3316eb399d511bfefdd2c4140c8415af4ce5f"
     },
     "role": "lawn_grass",
     "risk": "low",
@@ -451,7 +454,7 @@
       {
         "slug": "torpedograss",
         "difference": "Bermudagrass has fine, soft blades throughout; torpedograss has stiffer, coarser blades and sharply pointed rhizome tips that can pierce bare skin.",
-        "next_photo": "A close-up of a dug-up rhizome tip \u2014 a hard, sharp point (torpedograss) versus a blunt, thin rhizome (bermuda).",
+        "next_photo": "Wearing sturdy gloves, a close-up of a dug-up rhizome tip \u2014 a hard, sharp point that can pierce skin (torpedograss) versus a blunt, thin rhizome (bermuda).",
         "photo_can_confirm": true
       },
       {
@@ -528,8 +531,9 @@
       "https://ask.ifas.ufl.edu/lh007"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c3bff8fd46c6622d0ce7a3fad6c4b32e6d5a01d81adade9e9aac6707106db6e4"
     },
     "role": "lawn_grass",
     "risk": "low",
@@ -662,8 +666,9 @@
       "https://ask.ifas.ufl.edu/lh009"
     ],
     "review": {
-      "status": "draft",
-      "notes": "SWFL prevalence: confirmed via the cited UF/IFAS source (ask.ifas.ufl.edu/lh009), which states centipedegrass is \"well adapted to the climate and soils of Central and Northern Florida\" and is \"the most common home lawn grass in the Florida Panhandle,\" and warns \"if soil pH is high, centipedegrass may not be an appropriate choice\" \u2014 consistent with SWFL's higher-pH coastal soils. Range kept \"occasional\" rather than \"common.\""
+      "status": "owner_approved",
+      "notes": "SWFL prevalence: confirmed via the cited UF/IFAS source (ask.ifas.ufl.edu/lh009), which states centipedegrass is \"well adapted to the climate and soils of Central and Northern Florida\" and is \"the most common home lawn grass in the Florida Panhandle,\" and warns \"if soil pH is high, centipedegrass may not be an appropriate choice\" \u2014 consistent with SWFL's higher-pH coastal soils. Range kept \"occasional\" rather than \"common.\"",
+      "approval_hash": "dfe4c48bab93b99a3edb7df0551bc637b90113f83ada881a8f2eb7ef2292cff7"
     },
     "role": "lawn_grass",
     "risk": "low",
@@ -795,8 +800,9 @@
       "https://ufdcimages.uflib.ufl.edu/IR/00/00/17/53/00001/EP15300.pdf"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "235ac96e08a45078cf924e758643fb2c27b252d9714584c96fa78d8302660833"
     },
     "role": "lawn_grass",
     "risk": "low",

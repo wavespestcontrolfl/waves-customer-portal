@@ -36,7 +36,7 @@
       {
         "slug": "bougainvillea",
         "difference": "Hibiscus has one large true flower with no thorns; bougainvillea's color is papery bracts around a tiny flower, on thorny stems.",
-        "next_photo": "A close-up of the stem for thorns and of the colorful part to see if it's one flower or several papery bracts.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the colorful part: one flower or several papery bracts.",
         "photo_can_confirm": true
       }
     ],
@@ -99,8 +99,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/hibiscus/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Chilli thrips is well documented as a hibiscus pest in UF/IFAS entomology literature, though the specific host-plant line wasn't confirmed on the fetched gardening-solutions hibiscus page (which named only aphids, whiteflies and mealybugs)."
+      "status": "owner_approved",
+      "notes": "Chilli thrips is well documented as a hibiscus pest in UF/IFAS entomology literature, though the specific host-plant line wasn't confirmed on the fetched gardening-solutions hibiscus page (which named only aphids, whiteflies and mealybugs).",
+      "approval_hash": "c667c3019f47edb38c6670a350faa2a3a6f971c7fd3bfa28b67691c44027a8af"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -227,8 +228,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/ixora/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f47dd5a62726c50635b28b8012ef7a81987b1d9967b213770f00fa5ad594357a"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -284,7 +286,7 @@
       {
         "slug": "copperleaf",
         "difference": "Croton leaves are thick and leathery in very variable shapes with milky sap when cut; copperleaf has softer, wavy-edged heart-shaped leaves without milky sap.",
-        "next_photo": "A close-up of a broken leaf or stem to check for milky sap, plus a wide shot of overall leaf shape.",
+        "next_photo": "Wearing gloves, a close-up of a broken leaf or stem to check for milky sap, plus a wide shot of overall leaf shape; keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -347,8 +349,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/crotons/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "UF/IFAS gardening-solutions text calls croton leaves 'irritating and poisonous' and warns to keep children and pets from nibbling them, which supports the toxic_to_pets flag; a dedicated ASPCA page for croton could not be loaded to confirm the exact toxic principle and clinical signs."
+      "status": "owner_approved",
+      "notes": "UF/IFAS gardening-solutions text calls croton leaves 'irritating and poisonous' and warns to keep children and pets from nibbling them, which supports the toxic_to_pets flag; a dedicated ASPCA page for croton could not be loaded to confirm the exact toxic principle and clinical signs.",
+      "approval_hash": "6f1796331375e7a110e5f6c376a414ce9c836bd37d0154e19c98ef83c0d6b0fe"
     },
     "role": "landscape_plant",
     "risk": "irritant",
@@ -401,7 +404,7 @@
       {
         "slug": "hibiscus",
         "difference": "Bougainvillea's color is papery bracts around a tiny true flower, on thorny climbing stems; hibiscus has one large true flower on a thornless shrub.",
-        "next_photo": "A close-up of the stem for thorns and of the colorful part to see if it's one flower or several bracts.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the colorful part: one flower or several bracts.",
         "photo_can_confirm": true
       }
     ],
@@ -464,8 +467,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/bougainvillea/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Bougainvillea looper caterpillar is a well-known defoliator in Florida but has no matching catalog slug, so it isn't listed in common_problems."
+      "status": "owner_approved",
+      "notes": "Bougainvillea looper caterpillar is a well-known defoliator in Florida but has no matching catalog slug, so it isn't listed in common_problems.",
+      "approval_hash": "5c088b096ec3dfe51f4b8c2d839e7fed3f42c10fec20848dd3c232c3b68c5e79"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -584,8 +588,9 @@
       "https://blogs.ifas.ufl.edu/charlotteco/2024/05/02/one-sweet-shrub-the-sweet-viburnum/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Botryosphaeria dieback ('Bot rot') is a confirmed, common cause of sweet viburnum dieback per a UF/IFAS Extension blog post but has no matching catalog slug."
+      "status": "owner_approved",
+      "notes": "Botryosphaeria dieback ('Bot rot') is a confirmed, common cause of sweet viburnum dieback per a UF/IFAS Extension blog post but has no matching catalog slug.",
+      "approval_hash": "60acae7006c8d2a98d4d9757cdb4e8f8d9636b30660451af0810e735088145b7"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -645,7 +650,7 @@
       {
         "slug": "clusia",
         "difference": "Ficus hedge has smaller glossy leaves and milky sap from any cut; clusia has thick, leathery paddle-shaped leaves and no milky sap.",
-        "next_photo": "A close-up of a broken leaf or stem to check for milky white sap.",
+        "next_photo": "Wearing gloves, a close-up of a broken leaf or stem to check for milky white sap; keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -709,8 +714,9 @@
       "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/weeping-fig"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Cuban laurel thrips is a well-documented ficus pest but has no matching catalog slug."
+      "status": "owner_approved",
+      "notes": "Cuban laurel thrips is a well-documented ficus pest but has no matching catalog slug.",
+      "approval_hash": "7bff1939a2587705a2ee8f2151b115ec3cad6fa581ca69eae6526da6543f540a"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -831,8 +837,9 @@
       "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/buddhist-pine"
     ],
     "review": {
-      "status": "draft",
-      "notes": "The fetched UF/IFAS plant-ID page did not name specific pests or diseases; mealybug, aphid, sooty mold and fungal leaf spot are listed as common general problems for broadleaf hedge shrubs in this climate, not a podocarpus-specific citation."
+      "status": "owner_approved",
+      "notes": "The fetched UF/IFAS plant-ID page did not name specific pests or diseases; mealybug, aphid, sooty mold and fungal leaf spot are listed as common general problems for broadleaf hedge shrubs in this climate, not a podocarpus-specific citation.",
+      "approval_hash": "109f84a2c90154211a8847f194189540a294d43674571d01646d6e44761cd571"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -955,8 +962,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/trees/seagrape/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Sea grape gall midge / nipple gall and sea grape borer moth are confirmed by UF/IFAS as real, mostly cosmetic problems but neither has a matching catalog slug.; Hedged in customer copy, not asserted as settled: Regulatory/permit status of dune sea grape plantings near the immediate shoreline — Gardening Solutions describes coastal dune protection generally; the exact permit requirement and which shoreline zones it applies to were not confirmed against a specific state or county regulatory source, so the copy is worded as a caution rather than a settled legal claim."
+      "status": "owner_approved",
+      "notes": "Sea grape gall midge / nipple gall and sea grape borer moth are confirmed by UF/IFAS as real, mostly cosmetic problems but neither has a matching catalog slug.; Hedged in customer copy, not asserted as settled: Regulatory/permit status of dune sea grape plantings near the immediate shoreline — Gardening Solutions describes coastal dune protection generally; the exact permit requirement and which shoreline zones it applies to were not confirmed against a specific state or county regulatory source, so the copy is worded as a caution rather than a settled legal claim.",
+      "approval_hash": "4d59aec213ee6974cbaacba9fd1ef01606da4a7f77f09bc93514027fb977c84c"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1071,8 +1079,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/shrubs/cocoplum/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Algal leaf spot (Cephaleuros virescens) and Botryosphaeria canker are named by UF/IFAS as occasional cocoplum problems but neither has a matching catalog slug."
+      "status": "owner_approved",
+      "notes": "Algal leaf spot (Cephaleuros virescens) and Botryosphaeria canker are named by UF/IFAS as occasional cocoplum problems but neither has a matching catalog slug.",
+      "approval_hash": "4fe259f3a9bba731abb06a8e9e0c9552b645835d2bc962f1956e5729b5678dab"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1195,8 +1204,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/trees/crapemyrtle/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Crape myrtle bark scale is confirmed established in Florida by a UF/IFAS pest alert but has no matching catalog slug."
+      "status": "owner_approved",
+      "notes": "Crape myrtle bark scale is confirmed established in Florida by a UF/IFAS pest alert but has no matching catalog slug.",
+      "approval_hash": "2846c02be8599b9cd0062881221d405864d81873b8c8248e135405a353689814"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1315,8 +1325,9 @@
       "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/gardenia"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Iron/manganese chlorosis and root-knot nematode are real UF/IFAS-named gardenia problems but have no matching catalog slug (sting-nematode is a different, lawn-specific species); tea scale is a well-known gardenia pest, but the fetched UF/IFAS page named only 'scales' generically, so it's left out of common_problems."
+      "status": "owner_approved",
+      "notes": "Iron/manganese chlorosis and root-knot nematode are real UF/IFAS-named gardenia problems but have no matching catalog slug (sting-nematode is a different, lawn-specific species); tea scale is a well-known gardenia pest, but the fetched UF/IFAS page named only 'scales' generically, so it's left out of common_problems.",
+      "approval_hash": "ffccf449bea4d49a4ab8463f282ebde1c8ac84b6b7f85131f95058a8222054f5"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1433,8 +1444,9 @@
       "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/oleander"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "5e070285ee59dae8182639796b564c51ffb556afb983736512a2e937ee372043"
     },
     "role": "landscape_plant",
     "risk": "medical",
@@ -1495,7 +1507,7 @@
       {
         "slug": "bougainvillea",
         "difference": "Plumbago has soft oval leaves and no thorns, with small tubular blue or white flower clusters; bougainvillea has thorny stems and large papery colorful bracts.",
-        "next_photo": "A close-up of the stem for thorns and of the flower structure.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the flower structure.",
         "photo_can_confirm": true
       }
     ],
@@ -1558,8 +1570,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/plumbago/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Cotton cushion scale is named by UF/IFAS as an occasional plumbago pest but has no matching catalog slug.; Unverified (not asserted in customer copy): Plumbago sap causing skin irritation or contact dermatitis (plumbagin) — Reported by non-UF/IFAS, non-ASPCA sources (e.g. a state poison information center); could not be confirmed against this catalog's approved source list, so no irritant flag is set here."
+      "status": "owner_approved",
+      "notes": "Cotton cushion scale is named by UF/IFAS as an occasional plumbago pest but has no matching catalog slug.; Unverified (not asserted in customer copy): Plumbago sap causing skin irritation or contact dermatitis (plumbagin) — Reported by non-UF/IFAS, non-ASPCA sources (e.g. a state poison information center); could not be confirmed against this catalog's approved source list, so no irritant flag is set here.",
+      "approval_hash": "ae5124187d0b3ec40f513e3c6300cf67607a14fa8164f42f8e4a1cf6b619ab91"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1680,8 +1693,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/star-jasmine/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "84ef1ce5bd407d704703f3ea95185ec79b92ee9533effac1ef1a4b0247774946"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1736,7 +1750,7 @@
       {
         "slug": "ficus-hedge",
         "difference": "Arboricola has glossy palmate leaves, 5-9 leaflets like fingers; ficus hedge has simple oval leaves, milky sap (umbrella tree looks similar, larger leaflets).",
-        "next_photo": "A close-up of a single leaf to count leaflets and check for a milky sap when broken.",
+        "next_photo": "A close-up of a single leaf to count leaflets and, wearing gloves, check for a milky sap when broken; keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -1800,8 +1814,9 @@
       "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/schefflera"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Scale, mealybug, aphid and spider mite susceptibility is common knowledge for this plant family, but the UF/IFAS fact sheets fetched for arboricola either redirected or were no longer available, so the pest list is general knowledge rather than a page-specific citation.; Hedged in customer copy, not asserted as settled: ASPCA toxicity listing applies specifically to Schefflera arboricola vs. S. actinophylla — The ASPCA page is titled generically 'Schefflera' and does not distinguish between the two commonly planted species; both share the same calcium-oxalate mechanism, but the exact page covers the genus rather than naming arboricola specifically."
+      "status": "owner_approved",
+      "notes": "Scale, mealybug, aphid and spider mite susceptibility is common knowledge for this plant family, but the UF/IFAS fact sheets fetched for arboricola either redirected or were no longer available, so the pest list is general knowledge rather than a page-specific citation.; Hedged in customer copy, not asserted as settled: ASPCA toxicity listing applies specifically to Schefflera arboricola vs. S. actinophylla — The ASPCA page is titled generically 'Schefflera' and does not distinguish between the two commonly planted species; both share the same calcium-oxalate mechanism, but the exact page covers the genus rather than naming arboricola specifically.",
+      "approval_hash": "cf0764d41986f7ba8fb362f6ed67139e5275f37a63eb4ac87a77e60ff59b9b04"
     },
     "role": "landscape_plant",
     "risk": "irritant",
@@ -1858,7 +1873,7 @@
       {
         "slug": "croton",
         "difference": "Copperleaf has soft, wavy-edged heart-shaped leaves with no milky sap; croton has thick leathery leaves in very variable shapes with milky sap when cut.",
-        "next_photo": "A close-up of a broken leaf or stem to check for milky sap, plus a wide shot of overall leaf shape.",
+        "next_photo": "Wearing gloves, a close-up of a broken leaf or stem to check for milky sap, plus a wide shot of overall leaf shape; keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -1921,8 +1936,9 @@
       "https://edis.ifas.ufl.edu/fp006"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Whether copperleaf sap is irritating like some Euphorbiaceae relatives (e.g. croton) is not confirmed by the fetched EDIS FP006 fact sheet, which lists only aphids, mites and scale as problems; no irritant claim is made in this entry."
+      "status": "owner_approved",
+      "notes": "Whether copperleaf sap is irritating like some Euphorbiaceae relatives (e.g. croton) is not confirmed by the fetched EDIS FP006 fact sheet, which lists only aphids, mites and scale as problems; no irritant claim is made in this entry.",
+      "approval_hash": "0c0f2ce45c0d6ade700bbbf7364db01450ba075a76a915d9ead5e6906b26967a"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -2048,8 +2064,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/firebush/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "7e192ccac4db420e7d97daab9ff0966d1ca0740bdaeb47dd68817dfe9ed7ace9"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -2172,8 +2189,9 @@
       "https://ask.ifas.ufl.edu/publication/ST172"
     ],
     "review": {
-      "status": "draft",
-      "notes": "The fetched UF/IFAS fact sheet (ST172) covers Clusia rosea (pitch apple); a dedicated fact sheet for the smaller-leaved hedge species (Clusia guttifera) commonly planted here could not be located, so this entry generalizes from the related species."
+      "status": "owner_approved",
+      "notes": "The fetched UF/IFAS fact sheet (ST172) covers Clusia rosea (pitch apple); a dedicated fact sheet for the smaller-leaved hedge species (Clusia guttifera) commonly planted here could not be located, so this entry generalizes from the related species.",
+      "approval_hash": "d7f376b0e6ec516aa527f20c85df9ef10ed1731100772a016f1af7df742d1a03"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -2296,8 +2314,9 @@
       "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/privet"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Soil nematodes and Verticillium wilt are named generically by UF/IFAS as ligustrum problems but have no matching catalog slug (sting-nematode is a different, lawn-specific species).; Unverified (not asserted in customer copy): Mealybug and sooty mold as common ligustrum problems — General knowledge for broadleaf hedge shrubs in this climate; the fetched UF/IFAS fact sheet named only thrips and mites specifically."
+      "status": "owner_approved",
+      "notes": "Soil nematodes and Verticillium wilt are named generically by UF/IFAS as ligustrum problems but have no matching catalog slug (sting-nematode is a different, lawn-specific species).; Unverified (not asserted in customer copy): Mealybug and sooty mold as common ligustrum problems — General knowledge for broadleaf hedge shrubs in this climate; the fetched UF/IFAS fact sheet named only thrips and mites specifically.",
+      "approval_hash": "b577dfc7a5bb6294516e1f019c587ef3051cbb4b1dbbf3a53ad51a943a1dd048"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -2415,8 +2434,9 @@
       "https://ask.ifas.ufl.edu/publication/ST564"
     ],
     "review": {
-      "status": "draft",
-      "notes": "A live-oak-specific citation for foliar disease or galls (moss, lichen, oak leaf blister) could not be fetched (two UF/IFAS pages returned no usable content); common_problems reflects general, well-documented cultural issues for young landscape trees instead."
+      "status": "owner_approved",
+      "notes": "A live-oak-specific citation for foliar disease or galls (moss, lichen, oak leaf blister) could not be fetched (two UF/IFAS pages returned no usable content); common_problems reflects general, well-documented cultural issues for young landscape trees instead.",
+      "approval_hash": "860f8b5a19c0685ffcaaf2c1e8c5d59628f1a310502d7ec0bf57897d55c57fa5"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -2478,7 +2498,7 @@
       {
         "slug": "mango",
         "difference": "Citrus has smaller glossy oval leaves, often on a winged stalk, and round citrus fruit; mango has long narrow leaves and large single-seeded oval fruit.",
-        "next_photo": "A close-up of a single leaf shape and, if present, any fruit for size and shape.",
+        "next_photo": "A close-up of a single leaf and any fruit (size and shape), taken without handling the plant: mango can irritate skin and citrus can have thorns.",
         "photo_can_confirm": true
       }
     ],
@@ -2550,8 +2570,9 @@
       "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/orange"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2b71e38f3d71317ea20b003bd058119785afe87000813cd117c5c2dbf8a6a1e1"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -2605,7 +2626,7 @@
       {
         "slug": "citrus",
         "difference": "Mango has long narrow leaves and large single-seeded fruit on a much bigger tree; citrus has smaller glossy oval leaves and round citrus fruit.",
-        "next_photo": "A close-up of a single leaf shape and, if present, any fruit for size and shape.",
+        "next_photo": "A close-up of a single leaf and any fruit (size and shape), taken without handling the plant: mango can irritate skin and citrus can have thorns.",
         "photo_can_confirm": true
       }
     ],
@@ -2674,8 +2695,9 @@
       "https://ask.ifas.ufl.edu/publication/EP220"
     ],
     "review": {
-      "status": "draft",
-      "notes": "UF/IFAS EP220 confirms that mango is a poison-ivy relative that may cause allergic reactions. Set safety.allergen and safety.irritant true, changed risk to irritant, and added a contact precaution; the source does not specifically attribute the reaction to sap or peel, so those unsupported details were removed."
+      "status": "owner_approved",
+      "notes": "UF/IFAS EP220 confirms that mango is a poison-ivy relative that may cause allergic reactions. Set safety.allergen and safety.irritant true, changed risk to irritant, and added a contact precaution; the source does not specifically attribute the reaction to sap or peel, so those unsupported details were removed.",
+      "approval_hash": "a32d597f171fbe2cee4d6379ddada8090e7d7ff636a2f9b173dafc9dd6cf522c"
     },
     "role": "landscape_plant",
     "risk": "irritant",
@@ -2733,7 +2755,7 @@
       {
         "slug": "pygmy-date-palm",
         "difference": "Sago palm has stiff, glossy leaflets on a shaggy trunk; pygmy date palm has drooping, spiny fronds on a slender trunk (cardboard palm looks similar, no trunk).",
-        "next_photo": "A close-up of the leaflet texture and a wide shot of the base showing a trunk (sago) or none (cardboard palm).",
+        "next_photo": "From a safe distance (zoom in, don't reach toward spines), a photo of the leaflets: stiff and glossy with rolled-under edges (sago) or soft and drooping (pygmy date palm).",
         "photo_can_confirm": true
       }
     ],
@@ -2796,8 +2818,9 @@
       "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/sago-palm"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "0140a1b685744603510e82a3c54019840af856aed34e59250b0a59dc3d802b21"
     },
     "role": "landscape_plant",
     "risk": "medical",
@@ -2917,8 +2940,9 @@
       "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/bird-paradise-flower"
     ],
     "review": {
-      "status": "draft",
-      "notes": "No UF/IFAS pest page specific to Strelitzia reginae was fetched, so the spider-mite/leaf-spot list is general knowledge rather than a page-specific citation; typical bloom season/peak months were also not confirmed by a fetched source, so peak_months is left empty."
+      "status": "owner_approved",
+      "notes": "No UF/IFAS pest page specific to Strelitzia reginae was fetched, so the spider-mite/leaf-spot list is general knowledge rather than a page-specific citation; typical bloom season/peak months were also not confirmed by a fetched source, so peak_months is left empty.",
+      "approval_hash": "727d9483975d3cdf9ba5300addd7da4683a7b196931a796fa2a41091a8b84a0c"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -3037,8 +3061,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/trees/southern-magnolia/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Magnolia scale (Neolecanium cornuparvum) is well documented nationally as the characteristic scale species on southern magnolia but has no matching catalog slug; florida-wax-scale is not used here to avoid a false species-specific claim."
+      "status": "owner_approved",
+      "notes": "Magnolia scale (Neolecanium cornuparvum) is well documented nationally as the characteristic scale species on southern magnolia but has no matching catalog slug; florida-wax-scale is not used here to avoid a false species-specific claim.",
+      "approval_hash": "46e65e5b02eda221ddd73e3f087219f5ccc4acfbcf9b234ed9a17d99d9db1ac4"
     },
     "role": "landscape_plant",
     "risk": "low",

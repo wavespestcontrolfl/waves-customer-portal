@@ -243,6 +243,26 @@ export class ApiClient {
     return requestPromise;
   }
 
+  /**
+   * POST a customer activity beacon (page view / push open). Unlike request(),
+   * this leaves the GET cache alone (a tab change must not drop cached feed
+   * reads) and never throws on a non-OK answer — callers treat it as
+   * fire-and-forget. Resolves the parsed body, or null on any non-OK answer.
+   * Network/session errors still reject; the caller swallows them. Sent with
+   * keepalive so a request issued just before a full-page navigation (a push
+   * tap opening another URL) is not cancelled by the unload.
+   */
+  async sendActivityBeacon(path, body) {
+    const response = await this.fetchRaw(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      keepalive: true,
+    });
+    if (!response.ok) return null;
+    return response.json().catch(() => null);
+  }
+
   attemptRefresh() {
     // Single-flight: a tab mount fires 10-15 authed calls, and after in-
     // session token expiry every one of them 401s and used to fire its own
@@ -470,6 +490,38 @@ export class ApiClient {
 
   confirmAppointment(id) {
     return this.request(`/schedule/${id}/confirm`, { method: 'POST' });
+  }
+
+  // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): posts the SAME
+  // multipart FormData VisitPrepPhotoForm builds for the public appointment
+  // page, to the customer-authenticated twin of that route. Goes through
+  // fetchRaw directly rather than request() — request() always forces
+  // `Content-Type: application/json`, which would stop the browser from
+  // setting FormData's own multipart boundary. Mirrors request()'s error
+  // shape (an Error with .status/.code/.message) so VisitPrepPhotoForm's
+  // onSubmit contract (status 404 -> "gone", 409 -> "full", etc.) works
+  // unchanged for this caller too.
+  async sendVisitPrepPhotos(scheduledServiceId, formData) {
+    const response = await this.fetchRaw(`${API_BASE}/schedule/${scheduledServiceId}/prep-photos`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const contentType = response.headers.get('content-type') || '';
+      let message = '';
+      let errorBody = null;
+      if (contentType.includes('application/json')) {
+        errorBody = await response.json().catch(() => null);
+        message = errorBody?.error || errorBody?.message || '';
+      } else {
+        message = (await response.text().catch(() => '')).trim();
+      }
+      const requestErr = new Error(message || `Request failed (${response.status})`);
+      requestErr.status = response.status;
+      if (errorBody?.code) requestErr.code = errorBody.code;
+      throw requestErr;
+    }
+    return response.json();
   }
 
   rescheduleAppointment(id, data) {
@@ -720,8 +772,8 @@ export class ApiClient {
 
 
   // ---- Feed / Weather ----
-  getBlogPosts() {
-    return this.request('/feed/blog');
+  getBlogPosts(limit = 6) {
+    return this.request(`/feed/blog?limit=${limit}`);
   }
 
   getNewsletterPosts() {
@@ -752,16 +804,9 @@ export class ApiClient {
     return this.request('/feed/monthly-tip');
   }
 
-  // ---- Satisfaction ----
-  getPendingSatisfaction() {
-    return this.request('/satisfaction/pending');
-  }
-
-  submitSatisfaction(data) {
-    return this.request('/satisfaction', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+  // ---- Google review card (the 1-10 satisfaction rating is retired) ----
+  getGoogleReviewCard() {
+    return this.request('/satisfaction/review-card');
   }
 
   // ---- Property Preferences ----

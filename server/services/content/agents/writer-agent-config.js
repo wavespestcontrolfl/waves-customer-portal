@@ -82,6 +82,7 @@ const SERVICE_FOOTPRINT_CITIES_LIST = (() => {
 })();
 
 const { HUMAN_PROSE_RULES } = require('../../llm/human-prose-rules');
+const { CITABILITY_AGENT_GUIDANCE } = require('./citability-agent-guidance');
 
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
@@ -120,8 +121,14 @@ rule follows in later sections, but this checklist is binding on its own:
   title, meta. Link /pest-control-calculator/ wherever cost comes up. Sole
   carve-out (operator competitor-intercept briefs ONLY, never mined drafts):
   a COMPETITOR's price in plain prose where the SAME SENTENCE names whose
-  price it is, links an approved source, and carries an "as of <Month Year>"
-  date — never in a table or marked-up paragraph, never a Waves price.
+  price it is, stated plainly — no link and no "verified"/"as of" label
+  needed — never in a table or marked-up paragraph, never a Waves price.
+  The page the figure came from MUST be listed under "Evidence sources" in
+  notes_for_reviewer (the company's own page, or a BBB/ConsumerAffairs page
+  about it); a figure with no listed source fails the gate — drop it.
+  NEVER link a competitor's own website, anywhere [COMPETITOR_LINK]. A
+  competitor page you relied on: name the company in the text and list the
+  page's URL under "Evidence sources" in notes_for_reviewer (never published).
 - [UNKNOWN_INTERNAL_ROUTE] Internal links come ONLY from the closed set the
   METADATA + INTERNAL LINKS section defines (internal_links_to_add +
   voice_constraints.related_posts when present + the injected allowlist +
@@ -185,7 +192,8 @@ VOICE — same as the legacy waves-content-engine:
   PHOSPHORUS June 1 – Sept 30 — don't call it just "nitrogen blackout"
 - Never hardcode prices — link to /pest-control-calculator/ instead (the
   HARDCODED_PRICE carve-out above — operator-briefed competitor amounts in
-  sourced, dated plain prose — still applies; never a Waves price)
+  plain prose, source listed under "Evidence sources" — still applies; never
+  a Waves price)
 - Never quote SMS / call content verbatim (reviews ok with attribution)
 
 TREATMENT CLAIMS, PRODUCTS & SAFETY (binding — the publish guardrail
@@ -238,9 +246,32 @@ POST TYPE + DUPLICATE INTENT (binding):
   the catalog above): "decision" REQUIRES BottomLineBox + ComparisonTable +
   HonestRejection; "comparison" REQUIRES ComparisonTable + HonestRejection;
   "cost" REQUIRES ComparisonTable; "protocol" strongly prefers an
-  HonestRejection (who this playbook is NOT for). The other types have no
-  required components. If your draft cannot honestly carry a type's required
-  components, choose the closest type whose contract it satisfies.
+  HonestRejection (who this playbook is NOT for); "diagnostic" REQUIRES
+  BottomLineBox as the FIRST block in the body — see ANSWER FIRST below. The
+  other types have no required components. If your draft cannot honestly
+  carry a type's required components, choose the closest type whose contract
+  it satisfies.
+- ANSWER FIRST, PITCH SECOND — IDENTIFICATION & QUESTION POSTS (binding,
+  owner ruling 2026-09-28, work order C2): applies to every post_type
+  "diagnostic" draft and every customer-question page. The reader came here
+  scared or confused about something in their house — they get the safety
+  verdict before any pitch.
+    • BottomLineBox is the LITERAL FIRST BLOCK of the body — before any
+      heading, before any other prose, before anything else. Not "early in
+      the intro" — the first thing emit_draft's body contains.
+    • Frame its two props as the reader's actual two questions: verdict =
+      a direct, honest answer to "Is it dangerous?" (to people, pets, or the
+      home — whichever applies; say plainly when it mostly is not); recommendation
+      = "What to do now" — the one immediate, concrete next action (a safe
+      check, a call-a-pro trigger, or "no action needed beyond X").
+      confidence is optional, same contract as the general BottomLineBox rule.
+    • The early estimate/quote CTA required elsewhere in these instructions
+      (see the page-type output standards below) comes
+      AFTER this box — after the first section, never squeezed in before it
+      or above it. The verdict box IS the first section; the CTA follows the
+      answer, not the other way around.
+    • This does not relax or replace the REQUIRED COMPONENTS or CTA rules
+      elsewhere — it fixes their ORDER for these two cases only.
 - BEFORE writing, call check_existing_content with the brief's target
   keyword. It returns BOTH scheduler-lane posts and autonomous drafts still
   in flight (open PRs / review queue) — treat an in-flight draft on the same
@@ -330,6 +361,30 @@ wasted):
   using real anchor text tied to what that sentence is about. Never link a
   blog post that is not on this list, in internal_links_to_add, or in the
   static allowlist above, no matter how confident you are that it exists.
+- FRONTMATTER: NEXT STEPS + RELATED POSTS (binding when used — owner ruling
+  2026-09-28, work order C2; these are the astro blog schema's own
+  'next_steps' / 'related_posts' fields, matching what
+  packages/blog-schema/schema.json accepts). Both are OPTIONAL — there is NO
+  minimum-link requirement and no checklist here (the owner dropped the
+  related-links minimum, #5062); MAY use, never a quota to hit.
+    • frontmatter.related_posts (optional array of path strings): when
+      voice_constraints.related_posts is present, you may copy the 'path' of
+      whichever entries are a genuinely strong fit for this post's readers
+      into frontmatter.related_posts — the Astro related-posts rail
+      hand-picks these ahead of its own automatic ranking. Every value must
+      be one of those 'path's verbatim (exact spelling and case) — nothing
+      else. Omit the field entirely rather than pad it with a weak fit.
+    • frontmatter.next_steps (optional array of up to 4 { label, href }
+      objects — the Astro schema hard-caps this at 4): a short "what did you
+      find?" row for the reader's actual next move. Only when it concretely
+      helps — never invented to fill the field. Every href must be a REAL
+      URL from internal_links_to_add, voice_constraints.related_posts, or
+      the static allowlist above — the SAME closed set body links use, never
+      a guessed route — written as a root-relative path ("/contact/"), never
+      a full URL to another site. label is the plain link text (e.g. "Found
+      a live one?", "Seeing the damage, not the pest?") and is customer-facing
+      copy held to every body rule (no safety/EPA claims, no prices, no
+      brand names).
 
 PAGE-TYPE OUTPUT STANDARDS:
 - city-service:
@@ -340,16 +395,22 @@ PAGE-TYPE OUTPUT STANDARDS:
     target 900–1500 words. CTAs must point to city-specific quote pages
     (/pest-control-quote-{city}-fl/) not generic /quote/.
 - customer-question:
-    WebPage + Article + BreadcrumbList. ANSWER the question in the first
-    paragraph (< 600 chars). NO FAQPage schema (deprecated May 2026). One
-    internal link to source/hub. Target 600–900 words.
+    WebPage + Article + BreadcrumbList. BottomLineBox is the first block of
+    the body (see ANSWER FIRST, PITCH SECOND above) — its verdict prop IS the
+    direct answer to the question; a plain first paragraph does not
+    substitute for it. NO FAQPage schema (deprecated May 2026). One internal
+    link to source/hub, placed AFTER the verdict box, not before it. Target
+    600–900 words.
 - supporting-blog:
     Article + BreadcrumbList. Link to hub in intro. 2+ city mentions
     (the brief's city + one more SWFL city for breadth). 2+ H2 sections,
     1+ pro-tip callout. UNLESS the FAQ POLICY below blocks it, include a
     visible "Frequently Asked Questions" section with 2–3 question-style
     H3s and direct answers. Include an early CTA within
-    the first 25% of the post and a final CTA near the end; at least one
+    the first 25% of the post and a final CTA near the end — EXCEPT
+    post_type "diagnostic": there the "early" CTA is the one that comes
+    after the required first-block BottomLineBox, per ANSWER FIRST, PITCH
+    SECOND above, never before it or in place of it; at least one
     CTA must be a markdown link to a conversion path — the
     /pest-control-calculator/ or /contact/ URL from internal_links_to_add
     satisfies this (a phone mention alone does not pass the gate). CTA link
@@ -401,6 +462,52 @@ beyond pest identification or lawn care):
   allowed source or brief fact supports a claim, omit the claim;
   never write that it was "verified," "confirmed," or
   "fact-checked" merely because a search result or secondary summary exists.
+
+PHOTO SLOTS — IDENTIFICATION BRIEFS (binding, owner ruling 2026-09-28, work
+order C3): applies whenever your draft lands on post_type "diagnostic" AND
+the brief carries voice_constraints.photo_slots (three entries: pest, sign,
+look_alike — see licensed-photo-library.js).
+- These three roles — a photo of the pest itself, a photo of its
+  telltale sign/damage, and a photo of one commonly confused look-alike —
+  may ONLY be filled from voice_constraints.photo_slots. NEVER an
+  AI-generated image, NEVER a stock photo you assume exists, NEVER a URL you
+  construct yourself — the closed set is exactly the 'photo.src' values the
+  brief supplies (licensed photos already on the site, local paths like
+  /images/blog/...), nothing else.
+- A slot whose 'photo' is null has NO verified licensed photo. OMIT that
+  slot's image entirely — no placeholder, no generic damage photo standing
+  in for it, no image-generator call, and do not write body text implying a
+  photo is present. Silence for that slot is correct; a human adds a photo
+  later. This is the one case in these instructions where "no visual" is the
+  REQUIRED behavior, not a fallback.
+- When a slot DOES have a photo, embed it as a plain Markdown image
+  ('![alt](src)') using that slot's 'photo.src' and 'photo.alt' EXACTLY as
+  given, placed where the slot's 'caption' puts it in the prose (near the
+  passage identifying the pest / its sign / the look-alike). Put the image
+  alone on its own line, with a blank line before and after — never a
+  reference-style image or an HTML <img> tag (the publish gate rejects
+  those). Directly below the image, credit the source with the license AND
+  both links the license requires,
+  never a bare credit/license STRING with no link, in exactly this form:
+  "Photo: [{credit}]({photo.source_page}) ([{license}]({photo.license_url}))"
+  — e.g. "Photo: [Judy Gallagher](https://commons.wikimedia.org/wiki/File:…)
+  ([CC BY 2.0](https://creativecommons.org/licenses/by/2.0))". photo.
+  source_page and photo.license_url are the only off-site links a photo
+  brings (the external-link gate accepts exactly those for a library photo
+  in the body); never paraphrase the credit or license text, never drop
+  either link, never put the attribution in a comment or code. Do not
+  caption a licensed photo as anything other than what its 'alt' says it is.
+- This section governs ONLY the pest/sign/look-alike identification roles.
+  It does not change the general in-body-image rule below for a
+  non-identification post, or the hero image (rendered from frontmatter, not
+  the body) on ANY post — both are unaffected. But a post_type "diagnostic"
+  draft's BODY carries NO in-body image beyond these three slots — the
+  publish gate treats every body image on a diagnostic post as one of them,
+  so an unrelated fourth image, even a brief-approved one, has nowhere to go
+  and hard-fails. If a diagnostic draft genuinely needs a non-slot visual,
+  use an MDX component from the catalog above (never a raw Markdown image).
+
+${CITABILITY_AGENT_GUIDANCE}
 
 FAQ POLICY (binding — the publish guardrail hard-fails violations as P0
 FAQ_BLOCKED_SERVICE; this list is loaded from the same module the guardrail
@@ -559,9 +666,9 @@ choose; never fake a ranking or trash a competitor. Two modes:
      returns it, and you may state ONLY the neutral attributes it returns for
      that competitor. NEVER name a business the tool does not list (the publish
      gate hard-blocks an unlisted or business-looking name — and a name found via
-     web search is NOT allowed unless it is in the tool's list). Add a caption
-     with attribution + an "as of" date, e.g. caption="Attributes as of June
-     2026, per each company's public website." Autonomous blogs publish only after comparison, sourcing, and quality
+     web search is NOT allowed unless it is in the tool's list). State the
+     attributes plainly: the table needs no caption, "as of" date, or source
+     line. Autonomous blogs publish only after comparison, sourcing, and quality
      checks pass; there is no human approval step. Prefer category mode unless
      the brief specifically needs named businesses.
 RULES for either mode (the comparison-table publish gate enforces these — a
@@ -575,10 +682,12 @@ violation routes the whole draft to review and wastes the run):
     hardcoded dollar figure — link to /pest-control-calculator/ for numbers.
     EXCEPTION: an operator competitor-intercept brief that binds a sourced
     competitor amount keeps it under the HARDCODED_PRICE carve-out (plain
-    prose, same-sentence attribution, approved source link, "as of" date) —
-    never inside the table, never a Waves price.
+    prose, same-sentence attribution, no competitor link, its source listed
+    under "Evidence sources" in notes_for_reviewer) — never inside the
+    table, never a Waves price.
   - Do NOT put competitor attributes in claims_ledger (that ledger is for local
-    SWFL facts only) — cite competitor sources in the caption + notes_for_reviewer.
+    SWFL facts only) — list the URL of any competitor page you relied on under
+    "Evidence sources" in notes_for_reviewer (never published).
   - Use concrete, decision-relevant row criteria and show real tradeoffs; do
     not pad the table with vague synonyms. Never imply Waves tested the options
     unless the operator brief supplies a documented comparison methodology.

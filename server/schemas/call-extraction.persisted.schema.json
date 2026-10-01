@@ -55,9 +55,12 @@
             "1.14.0",
             "1.15.0",
             "1.16.0",
-            "1.17.0"
+            "1.17.0",
+            "1.18.0",
+            "1.19.0",
+            "1.20.0"
           ],
-          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs); 1.15.0 is additive (caller.relationship_to_property gains home_buyer — owner ruling 2026-09-26: a buyer under contract ordering their own WDO inspection); 1.16.0 is additive (scheduling.caller_accepted_slot, scheduling.moved_appointment_date — the call's reschedule agreement and the appointment it moves); 1.17.0 is additive (scheduling.agreed_slot_words, scheduling.moved_appointment_words — owner decision 2026-09-27: the agreed slot and moved-appointment date are recorded as verbatim words so the reschedule applier checks quotes instead of parsing speech) — older payloads remain valid."
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs); 1.15.0 is additive (caller.relationship_to_property gains home_buyer — owner ruling 2026-09-26: a buyer under contract ordering their own WDO inspection); 1.16.0 is additive (scheduling.caller_accepted_slot, scheduling.moved_appointment_date — the call's reschedule agreement and the appointment it moves); 1.17.0 is additive (scheduling.agreed_slot_words, scheduling.moved_appointment_words — owner decision 2026-09-27: the agreed slot and moved-appointment date are recorded as verbatim words so the reschedule applier checks quotes instead of parsing speech); 1.18.0 is additive (caller.relationship_to_property gains family_member — owner ruling 2026-09-28: a relative of the homeowner/resident arranging service at that relative's home, e.g. \"my grandfather's house\", is authorized when staff confirmed a time on the call; live miss, call f5a54dbd); 1.19.0 is additive (consent.sms_declined — codex P1 on #5292: sms_consent_given=false conflated \"never asked\" with an explicit refusal, so the booking-link text lane started texting callers who said no; sms_declined is the dedicated explicit-refusal field, optional/nullable in both schemas per AGENTS.md's additive-only rule, so a pre-1.19 persisted row — which never has it — still validates; the booking-link staging check fails closed on that shape instead); 1.20.0 is additive (scheduling.definite_commitment, scheduling.relative_date_used, scheduling.moved_appointment_relative_date_used — the extraction judges whether the agent definitely committed and whether a relative date was used; the reschedule applier only verifies them) — older payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
@@ -197,6 +200,7 @@
             "real_estate_agent",
             "lender",
             "home_buyer",
+            "family_member",
             "other",
             "unknown"
           ]
@@ -412,6 +416,13 @@
         },
         "do_not_contact_request": {
           "type": "boolean"
+        },
+        "sms_declined": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.19.0, additive/optional in both schemas (AGENTS.md: extraction schema changes never add to `required`) — a pre-1.19 persisted row (which never has it) still validates. true ONLY on an explicit decline of text messages; false otherwise, including when texting never came up; null when not judged."
         }
       }
     },
@@ -1241,7 +1252,7 @@
               "minLength": 1
             }
           },
-          "description": "Set ONLY when confirmed_start_at is set: the agreed START time's words, copied VERBATIM (exact characters as they appear in the transcript) from the /scheduling/confirmed_start_at evidence quote, which must contain every non-null value here. hour: the word(s) naming the agreed START hour exactly as spoken (\"two\", \"2\", \"10\", \"noon\", \"midnight\") — only the hour, no minutes, no AM/PM; for an arrival window, the window's start (\"between two and four\" -> \"two\"). period: the words stating AM/PM for THAT hour (\"pm\", \"p.m.\", \"in the afternoon\", \"this evening\", \"tonight\") — null when nobody said AM/PM or a part of day for that time (never inferred from business hours, and never a part of day describing the OLD appointment, e.g. \"your morning appointment\"); null for noon/midnight. day: the words naming the agreed day (\"Thursday\", \"tomorrow\", \"tonight\", \"November 9th\", \"the 9th\") — null when the day was not said because only the time of the same-day appointment changes. Set the whole object null (and do not confirm) when the agreed time is not ONE exact on-the-hour start: approximate (\"two-ish\", \"around noonish\"), a bound (\"before noon\", \"by two\", \"two or later\"), alternatives (\"two or four\"), or has minutes (\"two thirty\"). When a speaker corrected the time, use the FINAL corrected words only (\"at two, actually three\" -> hour \"three\")."
+          "description": "Set ONLY when confirmed_start_at is set: the agreed START time's words, copied VERBATIM (exact characters as they appear in the transcript) from the /scheduling/confirmed_start_at evidence quote, which must contain every non-null value here. hour: the word(s) naming the agreed START hour exactly as spoken (\"two\", \"2\", \"10\", \"noon\", \"midnight\") — only the hour, no minutes, no AM/PM; for an arrival window, the window's start (\"between two and four\" -> \"two\"). period: the words stating AM/PM for THAT hour (\"pm\", \"p.m.\", \"in the afternoon\", \"this evening\", \"tonight\") — null when nobody said AM/PM or a part of day for that time (never write a period nobody said: an hour said without AM/PM is read as business hours by the prompt rule — 7-11 morning, 12 and 1-6 afternoon — for a new booking or a reschedule, with period null; and never a part of day describing the OLD appointment, e.g. \"your morning appointment\"); null for noon/midnight. day: the words naming the agreed day (\"Thursday\", \"tomorrow\", \"tonight\", \"November 9th\", \"the 9th\") — null when the day was not said because only the time of the same-day appointment changes (or, for a new booking, because the turn holding the agreed hour does not repeat the day). Set the whole object null (and do not confirm) when the agreed time is not ONE exact on-the-hour start: approximate (\"two-ish\", \"around noonish\"), a bound (\"before noon\", \"by two\", \"two or later\"), alternatives (\"two or four\"), or has minutes (\"two thirty\"). When a speaker corrected the time, use the FINAL corrected words only (\"at two, actually three\" -> hour \"three\")."
         },
         "moved_appointment_words": {
           "type": [
@@ -1250,6 +1261,27 @@
           ],
           "minLength": 1,
           "description": "For status \"reschedule_requested\" ONLY: the verbatim words from the /scheduling/moved_appointment_date evidence quote that name that date (\"the 24th\", \"September 24th\", \"Thursday\") — that quote must contain them exactly. null whenever moved_appointment_date is null."
+        },
+        "definite_commitment": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.20.0, additive/optional (never `required`): the extraction's judgement of the agent's promise for the agreed slot. true when the agent's own words firmly commit to that day and time. false ONLY when a hedge or condition applies to WHETHER or WHEN the appointment happens: could/might/can-try/probably/possibly/tentatively/hopefully/perhaps, a condition on the slot (\"if ...\", \"once ...\", \"upon ...\", \"pending ...\", \"after the rain\", \"weather permitting\"), or a plan still to be checked. A courtesy or contingency line about a LATER follow-up (\"if anything comes up I'll let you know\", \"we'll text you a confirmation\", \"that should be fine\" said after a firm slot) does not make it false. Prefer false when genuinely unsure. The agent's commitment quote (/scheduling/agent_committed_booking) must be the WHOLE clause holding the day, date and time INCLUDING every qualifier around them. null when no slot was agreed."
+        },
+        "relative_date_used": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.20.0, additive/optional (never `required`): true when the agreed slot's day was expressed relative to the call or to another date rather than as a plain weekday, calendar date, today, tomorrow or \"this <weekday>\": next week, the following Thursday, the Thursday after this one, a week from Thursday, eight days from now / away / out, in two weeks. Resolve it against the call date so confirmed_start_at carries the true absolute date, record only the bare weekday in agreed_slot_words.day when a weekday was said (otherwise the exact relative phrase, verbatim; the verifier computes only tomorrow, the day after tomorrow, in N days/weeks and N days/weeks from now/today, N = digits, \"a\"/\"one\", or two to eight, and sends any other weekday-less relative date to the office), and pin the whole clause holding the relative expression to /scheduling/relative_date_used. Prefer true when unsure. false when the day was a plain weekday/date/today/tomorrow. null when no slot was agreed."
+        },
+        "moved_appointment_relative_date_used": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.20.0, additive/optional (never `required`): true when the EXISTING appointment's day (moved_appointment_date) was expressed relative to the call or to another date rather than as a plain weekday, calendar date, today, tomorrow or \"this <weekday>\": next week, the following Thursday, the Thursday after this one, a week from Thursday, eight days from now / away / out, in two weeks. Resolve it against the call date so moved_appointment_date carries the true absolute date, record only the bare weekday in moved_appointment_words when a weekday was said (otherwise the exact relative phrase, same closed forms), and pin the whole clause holding the relative expression to /scheduling/moved_appointment_relative_date_used. Prefer true when unsure. false when the day was a plain weekday/date/today/tomorrow. null when no slot was agreed."
         },
         "requested_date_range_start": {
           "type": [

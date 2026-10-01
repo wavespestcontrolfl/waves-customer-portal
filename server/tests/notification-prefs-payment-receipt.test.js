@@ -5,6 +5,7 @@ jest.mock('../middleware/auth', () => ({
   authenticate: jest.fn((req, res, next) => { req.customerId = 'cust-1'; next(); }),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn(async () => {}) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -33,6 +34,20 @@ beforeEach(() => {
     chain.update = jest.fn(async (data) => { updates.push(data); return 1; });
     return chain;
   });
+  // The PUT handler now runs its read+write inside db.transaction(trx => ...)
+  // — trx behaves exactly like db for every table/mock purpose here.
+  db.transaction = jest.fn(async (cb) => cb(db));
+});
+
+test('GET always reports receipts on, even for a legacy opt-out row', async () => {
+  db.mockImplementation(() => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.first = jest.fn(async () => ({ customer_id: 'cust-1', payment_receipt: false }));
+    return chain;
+  });
+  const body = await (await fetch(base)).json();
+  expect(JSON.stringify(body)).toContain('"paymentReceipt":true');
 });
 
 const put = (body) => fetch(base, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });

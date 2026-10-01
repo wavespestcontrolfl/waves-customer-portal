@@ -1,3 +1,9 @@
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => {
   const database = jest.fn();
   database.raw = jest.fn((sql) => sql);
@@ -146,6 +152,19 @@ describe('invoice SMS provider handoff', () => {
     expect(queueQueries.some((q) => q.update.mock.calls.some(
       ([change]) => change.status === 'scheduled',
     ))).toBe(false);
+  });
+
+  test('threads the rendered template key (invoice_sent, no prepay/upfront variant) through to sendCustomerMessage metadata', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM123',
+    });
+
+    await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+      original_message_type: 'invoice',
+      templateKey: 'invoice_sent',
+    });
   });
 
   test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {
@@ -897,6 +916,8 @@ describe('invoice SMS provider handoff', () => {
         // partial_fanout_attempt: a replay just re-fans-out everything.
         partial_fanout_retry: true,
         original_block_code: 'BILLING_CHANNEL_FAILED',
+        // The frozen body's template row, forwarded by the scheduler replay.
+        template_key: 'invoice_sent',
         replay_purpose: 'payment_link',
         refresh_customer_phone: true,
         resolve_from_by_customer: true,

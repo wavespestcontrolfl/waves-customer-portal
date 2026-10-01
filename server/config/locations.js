@@ -180,6 +180,11 @@ const CITY_TO_LOCATION = {
   'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'laurel': 'venice',
   'port charlotte': 'venice', 'punta gorda': 'venice', 'placida': 'venice', 'boca grande': 'venice',
   'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'terra ceia': 'parrish',
+  // Communities that appear as the typed city on real customer records
+  // (2026-09-30 audit of served customers: Duette 7, North Venice 2, Lake
+  // Sarasota 1, Rotonda West 2). Without these a lead whose Places city is one
+  // of them routes to the Bradenton default even though its ZIP is mapped.
+  'duette': 'parrish', 'north venice': 'venice', 'lake sarasota': 'sarasota', 'rotonda west': 'venice',
   // Northern reach into south Hillsborough served by the Parrish office
   // (mirrors the ZIP routing in routes/satisfaction.js).
   ...Object.fromEntries(SOUTH_HILLSBOROUGH_CITIES.map((c) => [c, 'parrish'])),
@@ -205,6 +210,8 @@ function resolveLocation(city) {
 //
 //   1. NEIGHBORHOODS that lead routing never needed a key for — they resolve to
 //      the same office their parent city does.
+//      (Duette, Rotonda West and Lake Sarasota moved into CITY_TO_LOCATION
+//      on 2026-09-30 because they show up as typed customer cities.)
 //   2. One genuine OVERRIDE, `longboat key`: lead routing sends LBK to Sarasota,
 //      but the Bradenton office is ~14mi from the key versus ~18mi for Sarasota,
 //      and the Bradenton profile is the one LBK customers have always been asked
@@ -223,15 +230,12 @@ const REVIEW_CITY_EXTRAS = {
   'kensington park': 'sarasota',
   'indian beach': 'sarasota',
   'bird key': 'sarasota',
-  'lake sarasota': 'sarasota',
   'casey key': 'venice',
   'south venice': 'venice',
   'warm mineral springs': 'venice',
-  'rotonda west': 'venice',
   'manasota key': 'venice',
   'rubonia': 'parrish',
   'gillette': 'parrish',
-  'duette': 'parrish',
 };
 
 const REVIEW_CITY_TO_LOCATION = { ...CITY_TO_LOCATION, ...REVIEW_CITY_EXTRAS };

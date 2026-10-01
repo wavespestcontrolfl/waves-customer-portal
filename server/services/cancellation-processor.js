@@ -24,7 +24,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 // waive_race_lost (codex C3 r2 P1): an office-initiated waive that lost the
 // row to a concurrent fee worker is NOT a clean waive — a charge may still
 // land while the cancellation reports the fee waived.
-const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'charge_review_write_failed', 'waive_race_lost']);
+const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'collection_hold', 'charge_review', 'charge_review_write_failed', 'waive_race_lost']);
 
 /**
  * Process an accepted customer cancellation request, in an order chosen so the
@@ -1325,97 +1325,107 @@ async function processCancellationRequest({
     // 'paid'/'processing' (cash captured or in flight for a visit that now
     // won't happen → refund/credit decision) and a transient 'sending' claim,
     // not just the voidable statuses the sweep skipped.
+    let invoiceMoneyOpen = false;
     try {
       const InvoiceService = require('./invoice');
       await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
-      const unresolved = await db('invoices')
-        .where({ scheduled_service_id: svc.id })
-        .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
-        .select('id');
+      const unresolved = await InvoiceService.unresolvedInvoicesForCancelledService(db, svc.id).select('id');
       for (const inv of unresolved) {
+        invoiceMoneyOpen = true;
         errors.push(`invoice_review:${inv.id}`);
         logger.error(`[cancellation-processor] invoice ${inv.id} for visit ${svc.id} still needs money handling — manual review`);
       }
     } catch (err) {
+      invoiceMoneyOpen = true;
       errors.push(`void_invoices:${svc.id}`);
       logger.error(`[cancellation-processor] invoice void sweep failed for ${svc.id}: ${err.message}`);
     }
 
-    // One-time card-on-file hold: an in-window cancellation charges the flat
-    // late-cancel fee, otherwise the hold is released. No-op when no hold
-    // exists; dark until ONE_TIME_CARD_HOLD. Failure comes back as a reason
-    // code, not a throw — surface the money-unresolved outcomes (declined fee,
-    // ambiguous Stripe result, post-charge write failure).
-    try {
-      const CardHolds = require('./estimate-card-holds');
-      // waiveLateFee (C3, office-initiated waive): the hold rail RELEASES
-      // instead of judging the fee window — 'offboard' intent on scoped
-      // cancels too: the visit's family is ending either way, and with the
-      // park-on-cancel gate a plain waived cancel would PARK the hold
-      // ({parked:true}, no released field) while the records claim the fee
-      // was waived — a parked hold is deferred collection, not a waiver.
-      const holdResult = await CardHolds.handleCardHoldCancellation({
-        scheduledServiceId: svc.id,
-        ...(feeEvaluationAt ? { now: feeEvaluationAt } : {}),
-        ...(lateFeeWaived ? { waiveFee: true, intent: 'offboard' } : {}),
-      });
-      // released === false is unresolved money even with NO reason (a lost
-      // release race returns exactly that shape) — same rule as the
-      // appointment-card rail below. A WAIVER is confirmed only by an
-      // explicit released:true on an existing hold — parked or any other
-      // shape is not a waived fee.
-      if (holdResult && (CARD_HOLD_REVIEW_REASONS.has(holdResult.reason) || holdResult.released === false
-        || (lateFeeWaived && holdResult.reason !== 'no_hold' && holdResult.released !== true))) {
-        errors.push(`card_hold:${svc.id}`);
-        if (lateFeeWaived) feeWaiverConfirmed = false;
-        logger.error(`[cancellation-processor] card hold for ${svc.id} needs review: ${holdResult.reason || 'released:false with no reason'}`);
-      }
-      // A waiver on a retry must not paper over a fee the FIRST attempt
-      // already charged: a charged hold is terminal (status charged_no_show)
-      // and invisible to heldCardForScheduledService, so the waive path
-      // reads clean while the customer's money is gone. Detect it and park
-      // for office review (refund is a human decision, never automatic).
-      // Unverifiable = not a confirmed waiver (fail closed).
-      if (holdResult?.reason === 'no_hold' && lateFeeWaived) {
-        try {
-          const charged = await db('estimate_card_holds')
-            .where({ scheduled_service_id: svc.id, status: 'charged_no_show' })
-            .first('id');
-          if (charged) {
-            feeWaiverConfirmed = false;
-            errors.push(`card_hold_already_charged:${svc.id}`);
-            logger.error(`[cancellation-processor] waiver requested for ${svc.id} but a late-cancel fee was already charged (hold ${charged.id}) — office review, not a waiver`);
-          }
-        } catch (probeErr) {
-          feeWaiverConfirmed = false;
-          errors.push(`card_hold:${svc.id}`);
-          logger.error(`[cancellation-processor] charged-fee probe failed for ${svc.id}: ${probeErr.message}`);
-        }
-      }
-      // Appointment-card fee rail fallback for visits with no hold row
-      // (mutually exclusive lanes — the rail re-checks). Customer-initiated
-      // cancel: no waive; office-initiated waive closes the fee 'waived'.
-      // Same review-reason surfacing.
-      if (holdResult?.reason === 'no_hold') {
-        const ApptCardRequests = require('./appointment-card-request');
-        const apptResult = await ApptCardRequests.handleAppointmentCardCancellation({
+    // An invoice still holding money after the void (or a void that could
+    // not run) sends the late-cancel fee to office review: neither card rail
+    // runs, so no fee is charged and no hold is released or parked beside
+    // that invoice — the same rule runVisitCancellationFollowThrough applies.
+    if (invoiceMoneyOpen) {
+      errors.push(`card_fee_held:${svc.id}`);
+      if (lateFeeWaived) feeWaiverConfirmed = false;
+      logger.error(`[cancellation-processor] fee rails skipped for ${svc.id} — an invoice still needs money handling; office review`);
+    } else {
+      // One-time card-on-file hold: an in-window cancellation charges the flat
+      // late-cancel fee, otherwise the hold is released. No-op when no hold
+      // exists; dark until ONE_TIME_CARD_HOLD. Failure comes back as a reason
+      // code, not a throw — surface the money-unresolved outcomes (declined fee,
+      // ambiguous Stripe result, post-charge write failure).
+      try {
+        const CardHolds = require('./estimate-card-holds');
+        // waiveLateFee (C3, office-initiated waive): the hold rail RELEASES
+        // instead of judging the fee window — 'offboard' intent on scoped
+        // cancels too: the visit's family is ending either way, and with the
+        // park-on-cancel gate a plain waived cancel would PARK the hold
+        // ({parked:true}, no released field) while the records claim the fee
+        // was waived — a parked hold is deferred collection, not a waiver.
+        const holdResult = await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: svc.id,
           ...(feeEvaluationAt ? { now: feeEvaluationAt } : {}),
-          ...(lateFeeWaived ? { waiveFee: true } : {}),
+          ...(lateFeeWaived ? { waiveFee: true, intent: 'offboard' } : {}),
         });
-        // Any non-released outcome from the appt-fee rail is unresolved
-        // money (the rail reserves released:false for exactly that), so the
-        // reason-set check is belt-and-braces on top of it.
-        if (apptResult && (CARD_HOLD_REVIEW_REASONS.has(apptResult.reason) || apptResult.released === false)) {
-          errors.push(`appt_card_fee:${svc.id}`);
+        // released === false is unresolved money even with NO reason (a lost
+        // release race returns exactly that shape) — same rule as the
+        // appointment-card rail below. A WAIVER is confirmed only by an
+        // explicit released:true on an existing hold — parked or any other
+        // shape is not a waived fee.
+        if (holdResult && (CARD_HOLD_REVIEW_REASONS.has(holdResult.reason) || holdResult.released === false
+          || (lateFeeWaived && holdResult.reason !== 'no_hold' && holdResult.released !== true))) {
+          errors.push(`card_hold:${svc.id}`);
           if (lateFeeWaived) feeWaiverConfirmed = false;
-          logger.error(`[cancellation-processor] appointment-card fee for ${svc.id} needs review: ${apptResult.reason}`);
+          logger.error(`[cancellation-processor] card hold for ${svc.id} needs review: ${holdResult.reason || 'released:false with no reason'}`);
         }
+        // A waiver on a retry must not paper over a fee the FIRST attempt
+        // already charged: a charged hold is terminal (status charged_no_show)
+        // and invisible to heldCardForScheduledService, so the waive path
+        // reads clean while the customer's money is gone. Detect it and park
+        // for office review (refund is a human decision, never automatic).
+        // Unverifiable = not a confirmed waiver (fail closed).
+        if (holdResult?.reason === 'no_hold' && lateFeeWaived) {
+          try {
+            const charged = await db('estimate_card_holds')
+              .where({ scheduled_service_id: svc.id, status: 'charged_no_show' })
+              .first('id');
+            if (charged) {
+              feeWaiverConfirmed = false;
+              errors.push(`card_hold_already_charged:${svc.id}`);
+              logger.error(`[cancellation-processor] waiver requested for ${svc.id} but a late-cancel fee was already charged (hold ${charged.id}) — office review, not a waiver`);
+            }
+          } catch (probeErr) {
+            feeWaiverConfirmed = false;
+            errors.push(`card_hold:${svc.id}`);
+            logger.error(`[cancellation-processor] charged-fee probe failed for ${svc.id}: ${probeErr.message}`);
+          }
+        }
+        // Appointment-card fee rail fallback for visits with no hold row
+        // (mutually exclusive lanes — the rail re-checks). Customer-initiated
+        // cancel: no waive; office-initiated waive closes the fee 'waived'.
+        // Same review-reason surfacing.
+        if (holdResult?.reason === 'no_hold') {
+          const ApptCardRequests = require('./appointment-card-request');
+          const apptResult = await ApptCardRequests.handleAppointmentCardCancellation({
+            scheduledServiceId: svc.id,
+            ...(feeEvaluationAt ? { now: feeEvaluationAt } : {}),
+            ...(lateFeeWaived ? { waiveFee: true } : {}),
+          });
+          // Any non-released outcome from the appt-fee rail is unresolved
+          // money (the rail reserves released:false for exactly that), so the
+          // reason-set check is belt-and-braces on top of it.
+          if (apptResult && (CARD_HOLD_REVIEW_REASONS.has(apptResult.reason) || apptResult.released === false)) {
+            errors.push(`appt_card_fee:${svc.id}`);
+            if (lateFeeWaived) feeWaiverConfirmed = false;
+            logger.error(`[cancellation-processor] appointment-card fee for ${svc.id} needs review: ${apptResult.reason}`);
+          }
+        }
+      } catch (err) {
+        errors.push(`card_hold:${svc.id}`);
+        if (lateFeeWaived) feeWaiverConfirmed = false;
+        logger.error(`[cancellation-processor] card-hold handling failed for ${svc.id}: ${err.message}`);
       }
-    } catch (err) {
-      errors.push(`card_hold:${svc.id}`);
-      if (lateFeeWaived) feeWaiverConfirmed = false;
-      logger.error(`[cancellation-processor] card-hold handling failed for ${svc.id}: ${err.message}`);
     }
 
     // Legacy rows predate the track layer (track_state NULL): normalize to

@@ -43,7 +43,7 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
       CREATE TEMP TABLE customers AS
         SELECT * FROM public.customers WITH NO DATA;
       CREATE TEMP TABLE notifications AS
-        SELECT recipient_type, category, title, body, metadata, read_at
+        SELECT recipient_type, category, title, body, detail, metadata, read_at
         FROM public.notifications WITH NO DATA;
     `);
     await trx('customers').insert([
@@ -154,15 +154,22 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     // an existing recurring customer — see docs/sms-stop-line-policy.md). So
     // the seeded copy is asserted as "what this migration seeds, as the STOP
     // sweep leaves it", not as the raw seed. The 2026-09-26 customer copy
-    // audit then rewrites exactly that swept body (exact-body CAS).
+    // audit then rewrites exactly that swept body (exact-body CAS), and the
+    // 2026-09-28 "say Waves once" pass (owner report) rewrites that body
+    // again (also exact-body CAS) — same chained-before/after check one link
+    // further.
     const stopSweep = require('../models/migrations/20260911000010_stop_line_off_remaining_transactional');
     const copyAudit = require('../models/migrations/20260926120000_customer_copy_audit_sms');
+    const brandFix = require('../models/migrations/20260928210000_sms_brand_just_waves');
     const swept = stopSweep._dropStop(migration.TEMPLATE.body);
     const [, auditBefore, auditAfter] = copyAudit._SWAPS
       .find(([key]) => key === migration.TEMPLATE.template_key);
     expect(auditBefore).toBe(swept);
+    const [, brandBefore, brandAfter] = brandFix._SWAPS
+      .find(([key]) => key === migration.TEMPLATE.template_key);
+    expect(brandBefore).toBe(auditAfter);
     const row = await trx('sms_templates').where({ template_key: migration.TEMPLATE.template_key }).first();
-    expect(row.body).toBe(auditAfter);
+    expect(row.body).toBe(brandAfter);
     expect(swept).not.toBe(migration.TEMPLATE.body);
     expect(row.variables).toEqual(['first_name', 'start_date', 'window_text']);
     await trx('sms_templates').where({ id: row.id }).update({ body: 'Administrator test edit' });

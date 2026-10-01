@@ -412,14 +412,18 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
     });
   });
 
-  test('email spam-rescue-review row matches the old raw insert gate-off', async () => {
+  // This body is 149 chars — over the admin brevity guard's 110-char cap — so
+  // the row stores the cut sentence with the whole text in `detail`; every
+  // other column matches the pre-guard raw insert exactly.
+  test('email spam-rescue-review row matches the old raw insert gate-off, body cut with the full text in detail', async () => {
     const notifications = chainMock([{ id: 'd4' }]);
     mockTables({ notifications });
 
+    const fullBody = 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.';
     await NotificationService.notifyAdmin(
       'email_rescue_review',
       'Spam-foldered mail claims a known sender (unverified)',
-      'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
+      fullBody,
       { icon: '⚠️', link: '/admin/email', metadata: { gmail_message_id: 'g1' } },
     );
 
@@ -428,7 +432,8 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       recipient_id: null,
       category: 'email_rescue_review',
       title: 'Spam-foldered mail claims a known sender (unverified)',
-      body: 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
+      body: 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in…',
+      detail: fullBody,
       icon: '⚠️',
       link: '/admin/email',
       metadata: JSON.stringify({ gmail_message_id: 'g1' }),

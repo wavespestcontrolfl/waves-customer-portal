@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
@@ -21,7 +22,7 @@ const {
   canonicalSmsLegacyLinkSql,
   canonicalSmsAddressProjectionSql,
 } = require('../services/sms-response-policy');
-const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
+const { loadPendingSmsConversations, NEEDS_REPLY_SINCE } = require('../services/sms-pending-conversations');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -34,7 +35,6 @@ const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../serv
 const { isEnabled } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
-  HUMAN_REPLY_TYPES,
   markSuggestionScheduled,
   parkThreadSuggestions,
   createReplyHoldingReservation,
@@ -48,6 +48,7 @@ const {
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
 const { gratitudeClaimsPossible } = require('../services/sms-gratitude-context');
+const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
 const {
   excludeUnresolvedSendReservations,
   releaseById: releaseReservationById,
@@ -125,6 +126,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         'ad.suggested_message',
         'ad.input_snapshot',
         'ad.prompt_version',
+        'ad.created_at',
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
@@ -173,70 +175,22 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       }
     }
 
-    // OPEN TIMES send-time recheck (Codex P2): a draft built with an OPEN
-    // TIMES section stores the exact windows it quoted plus the lookup
-    // inputs (input_snapshot.open_times_snapshot, written by
-    // sms-shadow-drafter / estimate-conversion-agent at draft time). This is
-    // the shared choke point for BOTH /sms (immediate send) and
-    // /schedule-sms (queue-time verification) — a card can sit in review up
-    // to 48h, or be scheduled for later, and the calendar never re-checks
-    // itself. Only windows still present in the OUTGOING body are rechecked
-    // (a reviewer's correction that drops every quoted window needs no
-    // recheck; an edit that reformats or re-dates one refuses — see
-    // planOpenTimesRecheck); a gone slot, a fetch error, or a timeout all fail closed,
-    // reusing the same supersede-and-refuse mechanism as the staleness check
-    // above rather than inventing a new one.
-    let openTimesSnapshot = null;
-    if (decision.input_snapshot) {
-      try {
-        const parsedSnapshot = typeof decision.input_snapshot === 'string'
-          ? JSON.parse(decision.input_snapshot)
-          : decision.input_snapshot;
-        openTimesSnapshot = parsedSnapshot?.open_times_snapshot || null;
-      } catch (_e) { openTimesSnapshot = null; }
-    }
-    if (openTimesSnapshot?.quotedWindows?.length) {
-      // Codex r2 P2: an EDITED body (reformatted time, changed day) cannot be
-      // matched to its snapshot by exact text — planOpenTimesRecheck fails
-      // closed on any edit that is not a clean keep-or-drop of each pair.
-      const { openTimesStillOffered, planOpenTimesRecheck } = require('../services/sms-shadow-drafter');
-      const plan = planOpenTimesRecheck({ snapshot: openTimesSnapshot, outgoingBody, originalBody: decision.suggested_message });
-      if (plan.action === 'refuse') {
-        logger.info(`[agent-review] decision ${decision.id} open-times unverifiable after edit (${plan.reason}) — refusing send`);
+    // Every send-time revalidation of the decision's CONTENT lives in one
+    // service (PR #5119 follow-up #6): the OPEN TIMES recheck (a
+    // reviewer-edited body is matched to the persisted pairs, surviving
+    // pairs are rechecked against live availability), the follow-up promise
+    // (stale or edited timing), and the billing amounts (re-read now). This
+    // route keeps ownership + thread staleness and orchestrates. Any block
+    // refuses and retires the decision the same way a stale anchor does.
+    const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+    const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
+    if (blockReason) {
+      logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
+      // A recheck that could not READ the live state (round-42 P2) refuses this attempt but
+      // does NOT retire the card: nothing is known to be stale, so the reviewer can retry.
+      if (!require('../services/agent-decision-send-checks').blockReasonIsEtaInfrastructure(blockReason)) {
         await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
-        return null;
       }
-      if (plan.action === 'recheck') {
-        const recheck = await openTimesStillOffered({
-          city: openTimesSnapshot.lookup?.city || null,
-          customerId: openTimesSnapshot.lookup?.customerId || null,
-          estimateId: openTimesSnapshot.lookup?.estimateId || null,
-          ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
-          quotedWindows: plan.quotedWindows,
-        });
-        if (!recheck.ok) {
-          logger.info(`[agent-review] decision ${decision.id} open-times stale (${recheck.reason}) — refusing send`);
-          await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
-          return null;
-        }
-      }
-    }
-
-    // Follow-up SLA phrase recheck (Codex r3 P2): a draft's relative SLA
-    // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
-    // morning") is frozen at generation, but an Agent Review card can sit
-    // up to 48h before this immediate-send verification runs — the same
-    // choke point as the open-times recheck above, covering both /sms
-    // (immediate send) and /schedule-sms (queue-time verification). Refuse
-    // rather than rewrite: the reviewer approved specific wording, and a
-    // phrase that no longer matches the current 8am/8pm ET window needs a
-    // fresh look, not a silent substitution.
-    // Scoped to drafts that recorded an escalation (Codex r5): the phrases
-    // are ordinary English, so wording alone never refuses a send.
-    const { followupPromiseIsStale } = require('../services/sms-followup-sla');
-    if (followupPromiseIsStale({ inputSnapshot: decision.input_snapshot, promptVersion: decision.prompt_version, body: outgoingBody })) {
-      logger.info(`[agent-review] decision ${decision.id} SLA phrase stale for the current window — refusing send`);
-      await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       return null;
     }
     return decision;
@@ -398,6 +352,12 @@ router.post('/sms', async (req, res, next) => {
   // (delivered state stamped, windowed from the send) before the provider
   // call — handed back on every no-send exit, recorded after a real send.
   let contractActivations = null;
+  // codex #5196 P1: the shared consultation_link_send_attempts row's id
+  // (see its own doc comment in call-booking-link-text.js) — declared here,
+  // not inside the try below, so the catch block's own definite-failure
+  // cleanup can see it too, the same way every other catch-visible send
+  // state above does.
+  let consultationAttemptId = null;
   const restoreContractLinks = async () => {
     if (!contractActivations) return;
     const activations = contractActivations;
@@ -910,7 +870,7 @@ router.post('/sms', async (req, res, next) => {
         const ReviewService = require('../services/review-request');
         const rr = await db('review_requests')
           .where({ id: String(reviewRequestId) })
-          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token', 'service_record_id', 'created_at');
         if (!rr || rr.triggered_by !== 'auto_inline') {
           return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }
@@ -969,8 +929,11 @@ router.post('/sms', async (req, res, next) => {
           async () => {
             const consent = await ReviewService.reviewSmsAllowedNow(rr.customer_id);
             if (!consent.allowed) return { consent };
-            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
+            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id, { staffComposer: true });
             if (!gate.allowed) return { gate };
+            // No click guard here by owner ruling: the Quick Links link is the
+            // staff "send anytime" link, so a prior tap does not suppress it. A
+            // tap on THIS link is still recorded and stops the cadence (/go).
             // Both stamps the owed email leg on the claim itself, so the
             // Quick Links retry path has persisted evidence this ask asked
             // for an email (GH Codex #3856 r8 P1).
@@ -1106,6 +1069,18 @@ router.post('/sms', async (req, res, next) => {
     const providerMessageType = autopayLinkTokens ? 'autopay_setup_link'
       : cardClaim ? require('../services/appointment-card-request').TEMPLATE_KEY
         : (messageType || 'manual');
+    // codex #5196 P1: durable pre-provider evidence for THIS send, written
+    // only when it carries a validated consultation link (outreachLeadId —
+    // same condition that runs the race guard below). consultationAttemptId
+    // itself is declared with the function's other catch-visible state,
+    // above the try block, so onDispatchAbort, the post-send definite-
+    // failure cleanup below, AND the catch block's own cleanup can all
+    // delete exactly this attempt. require()'d here rather than hoisted to
+    // module scope — this file's other call-booking-link-text.js reach-ins
+    // (linkSentRecently below) are lazy for the same reason: tests replace
+    // these exports with jest.spyOn, which a module-scope destructure
+    // would capture before the spy ever lands.
+    const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
     const sendMessage = (reservationId = null) => sendCustomerMessage({
       to,
       body: cleanBody,
@@ -1116,6 +1091,14 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       ...(cardClaim ? { operatorInitiated: true } : {}),
+      // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the decision's ETA
+      // check ran in verifyAgentDraftDecision, before this route's many link / claim /
+      // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
+      // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      ...(verifiedAgentDecision?.id ? {
+        providerPreSendCheck: require('../services/agent-decision-send-checks')
+          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+      } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —
@@ -1130,8 +1113,44 @@ router.post('/sms', async (req, res, next) => {
       // unconditionally unchanged either way, and narrowing it to just the
       // consultation-carrying sends would add conditional complexity for
       // no behavioral difference.
+      //
+      // codex #5018 r15 P2 follow-up: now that the lock is held, ALSO
+      // re-run that lane's own linkSentRecently read on this same
+      // connection — but only when this send itself carries a validated
+      // consultation link (outreachLeadId, set above by bearerCheck's own
+      // checkConsultationLinkSend — the SAME short/long-form resolution
+      // linkSentRecently uses). An ordinary composer text with no
+      // consultation link has nothing for that lane's worker to race.
+      // Scoped to MANUAL_SEND_RACE_GUARD_WINDOW_MS (minutes), never the
+      // 14-day dedupe window — staff may deliberately resend an older link.
+      //
+      // codex #5196 P1: onDispatchStart/onDispatchAbort write and clear the
+      // shared consultation_link_send_attempts row at twilio.js's own REAL
+      // attempt boundary — see admin-leads.js's identical hooks for what
+      // gap this closes. Only when this send carries a validated
+      // consultation link, same as the race guard just below.
+      onDispatchStart: outreachLeadId ? (async () => {
+        consultationAttemptId = await insertConsultationLinkAttempt({
+          leadId: outreachLeadId, toPhone: to, source: 'admin_communications_manual_sms',
+        });
+      }) : undefined,
+      onDispatchAbort: outreachLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
+      // codex #5196 r4 P2: fires instead of onDispatchAbort when Twilio
+      // rejects the send outright, while lockSmsPhone below is still held —
+      // same cleanup, same condition.
+      onDispatchRejected: outreachLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, to);
+        if (outreachLeadId) {
+          const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
+          // codex #5196 P2: matchPhone scopes this manual-window check to
+          // THIS send's own destination (`to`) — see admin-leads.js's
+          // identical guard for why a lead-wide check over-refuses after a
+          // phone correction.
+          if (await linkSentRecently(trx, outreachLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS, matchPhone: to })) {
+            return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
+          }
+        }
         return dispatch(trx);
       }),
       // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
@@ -1280,8 +1299,13 @@ router.post('/sms', async (req, res, next) => {
         return result;
       };
       return reviewLooking
+        // skipSpacing only for a Quick Links tracked link (a claimed request):
+        // that path ran the full seam (consent/review prefs, the staff-composer
+        // unscheduled gate incl. the cap, the click guard) and records the ask
+        // on review_requests. A pasted or typed link has none of that, so it
+        // keeps the 72-hour spacing exactly as on main.
         ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
-          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId })
+          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, skipSpacing: Boolean(claimedReviewRequestId) })
         : sendAndSettle();
     };
     const result = prepLinkSends
@@ -1293,6 +1317,11 @@ router.post('/sms', async (req, res, next) => {
       : await dispatch();
     const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(result);
     const realProviderSend = autoSendExecutor.isRealProviderSend(result);
+    // codex #5196: a DEFINITE failure (never real, never ambiguous) clears
+    // the attempt row onDispatchStart wrote above.
+    if (consultationAttemptId != null && !realProviderSend && !ambiguousProviderOutcome) {
+      await deleteConsultationLinkAttempt(consultationAttemptId);
+    }
     // A definitive result settles the marker. Uncertainty keeps its linked
     // decisions held until a sent row or an operator verdict reconciles them.
     if (ambiguousProviderOutcome) await holdManualReservation();
@@ -1326,7 +1355,14 @@ router.post('/sms', async (req, res, next) => {
           reason: 'Send was blocked or failed — suggestion reopened.',
         });
       }
-      return res.status(result.httpStatus || 422).json({
+      // LINK_SENT_RECENTLY_RACE (the manual-send race guard, above) rides
+      // through the ordinary withSmsHandoff → sendCustomerMessage → result
+      // pipeline, which carries no httpStatus of its own (unlike the
+      // early short-circuit blocks above that set one directly) — mapped
+      // to 409 here, same status the pre-push review-claim-lost block uses
+      // for "conflicts with something that just happened".
+      const statusCode = result.code === 'LINK_SENT_RECENTLY_RACE' ? 409 : (result.httpStatus || 422);
+      return res.status(statusCode).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });
@@ -1526,6 +1562,12 @@ router.post('/sms', async (req, res, next) => {
     const catchProviderOutcome = err?.providerOutcome;
     const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(catchProviderOutcome);
     const realProviderSend = autoSendExecutor.isRealProviderSend(catchProviderOutcome);
+    // codex #5196: same definite-failure cleanup as the resolved-result
+    // path above, for a throw that reached (or passed through) onDispatchStart.
+    if (consultationAttemptId != null && !realProviderSend && !ambiguousProviderOutcome) {
+      const { deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+      await deleteConsultationLinkAttempt(consultationAttemptId);
+    }
     if (ambiguousProviderOutcome) await holdManualReservation();
     else if (realProviderSend && manualReservationId) {
       await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: catchProviderOutcome });
@@ -1945,7 +1987,7 @@ router.get('/log', async (req, res, next) => {
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at',
+        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at', 'messages.twilio_sid',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
@@ -1979,8 +2021,30 @@ router.get('/log', async (req, res, next) => {
 
     // Exact contact match for a lead that has no customer record yet. Never
     // use broad body/name search to choose the conversation or mark it read.
-    if (req.query.phone !== undefined) {
-      const phones = phoneMatchDigits(req.query.phone);
+    // `twilioSid` anchors the read on one message (an alert's deep link, which
+    // must not carry a phone number), under the same visibility scoping as every
+    // other read here. Alone it resolves to that message's contact; with
+    // `customerId` it leaves the customer scope as it is and only guarantees the
+    // anchor row is in the response — a sid that is not that customer's is not
+    // found, so it never pulls in a foreign row. Either way the row is added to
+    // page 1 below when the newest-first cap would leave it out.
+    let contactFilter = req.query.phone;
+    let anchorSid = null;
+    if (req.query.twilioSid !== undefined) {
+      const sid = typeof req.query.twilioSid === 'string' ? req.query.twilioSid.trim() : '';
+      const anchor = sid && await query.clone().clearSelect().clearOrder()
+        .where('messages.twilio_sid', sid)
+        .modify((q) => { if (customerId) q.where('conversations.customer_id', customerId); })
+        .first(db.raw(`${addressProjection.contactPhoneSql} as contact`));
+      if (anchor?.contact) {
+        anchorSid = sid;
+        if (!customerId) contactFilter = anchor.contact;
+      } else if (!customerId) {
+        return res.json({ messages: [], page: 1, limit: DEFAULT_SMS_LOG_LIMIT, hasMore: false, nextPage: null });
+      }
+    }
+    if (contactFilter !== undefined) {
+      const phones = phoneMatchDigits(contactFilter);
       if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
       query = query.whereRaw(`regexp_replace(${addressProjection.contactPhoneSql}, '[^0-9]', '', 'g') = ANY (?::text[])`, [phones]);
     }
@@ -1991,6 +2055,7 @@ router.get('/log', async (req, res, next) => {
       const pending = await loadPendingSmsConversations({
         excludePhones: ADMIN_PHONES,
         customerId,
+        since: NEEDS_REPLY_SINCE,
       });
       pendingIds = pending.filter((row) => row.source === 'canonical').map((row) => row.id);
       pendingPeers = [...new Set(pending.map((row) => row.peer).filter(Boolean))];
@@ -2024,6 +2089,8 @@ router.get('/log', async (req, res, next) => {
       }
     }
 
+    // Every filter applied, before paging: the anchor row is read through it.
+    const filtered = anchorSid ? query.clone() : null;
     query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
 
     const requestedPage = parsePositiveInt(page) || 1;
@@ -2033,7 +2100,15 @@ router.get('/log', async (req, res, next) => {
       .limit(effectiveLimit + 1)
       .offset((requestedPage - 1) * effectiveLimit);
     const hasMore = rowsPlusOne.length > effectiveLimit;
-    const rows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    const pageRows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    // The anchored message is older than a full newest-first page: add it (same
+    // projection and scoping) rather than page around it. hasMore / nextPage
+    // still describe the ordinary pages; a later page repeats the row harmlessly
+    // (clients merge by id).
+    const anchorRow = anchorSid && requestedPage === 1 && !pageRows.some((r) => r.twilio_sid === anchorSid)
+      ? await filtered.where('messages.twilio_sid', anchorSid).first()
+      : null;
+    const rows = anchorRow ? [...pageRows, anchorRow] : pageRows;
     const priorOutboundBodies = await loadPriorOutboundBodies(db, rows, { customerScoped: !!customerId });
     for (const row of rows) {
       if (priorOutboundBodies.has(String(row.id))) {
@@ -2075,7 +2150,7 @@ router.get('/log', async (req, res, next) => {
         replyToMessageId: m.response_reply_to_message_id,
       });
       return {
-        id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
+        id: m.id, conversationId: m.conversation_id, twilioSid: m.twilio_sid || null, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
         responseMessageType,
         responseStatus,
@@ -2215,7 +2290,9 @@ router.get('/unread-count', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid customer id' });
     }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES, customerId, role: req.techRole }));
+    res.json(await countUnreadInboundSms({
+      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
+    }));
   } catch (err) { next(err); }
 });
 
@@ -2614,7 +2691,18 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
-    const { url, line } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+    const { url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+    // A dead-link-guard refusal (C3/C6) is not the same problem as a
+    // missing link: the visit is eligible, just too close to its own start
+    // to move online right now — a distinct 409 so the composer doesn't
+    // tell the operator this appointment has no reschedule link at all
+    // (independent-reviewer finding on PR #5308).
+    if (tooSoonToMove) {
+      return res.status(409).json({
+        error: 'This visit is too close to move online — ask them to reply or call.',
+        code: 'too_close_to_move_online',
+      });
+    }
     // Null url = legacy pre-backfill row without a token (or shortener +
     // portal-url both unavailable) — nothing usable to insert.
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
@@ -2652,7 +2740,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 //     owned by the public page — plan state can change after the text.
 router.post('/reservice-link', requireAdmin, async (req, res) => {
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
+    const { reserviceSelfServeEnabled, loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
     if (!reserviceSelfServeEnabled()) {
       return res.status(404).json({ error: 'Self-serve re-service links are not enabled' });
     }
@@ -2705,38 +2793,45 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     // property the operator actually picked (codex P2 #3194). Remaining
     // siblings follow in a sorted (deterministic) order —
     // customerIdsForAccount has no ORDER BY of its own. First eligible row
-    // wins; none → nothing to insert.
+    // wins; none → nothing to insert. Eligibility itself is the ONE shared
+    // predicate (reservice-scheduler.loadEligibleReserviceLanes, Codex
+    // round-4 P1) — the SAME check the SMS FREE RE-SERVICE fact and the
+    // send-time promise recheck resolve through, so this route's behavior
+    // can never drift from what those report.
     const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
     const orderedIds = selectedId
       ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
       : [...customerIds].sort();
-    let eligible = null;
+    let eligibleId = null;
     let lanes = [];
     for (const id of orderedIds) {
-      const row = await db('customers')
-        .where({ id })
-        .whereNull('deleted_at')
-        .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-      if (!row || row.active === false || !row.reservice_token) continue;
-      const rowLanes = await reserviceLanesForCustomer(row);
+      // Codex round-21 P2: a lookup FAILURE aborts the whole scan (500) — never "no lanes, try the next
+      // sibling", which could text a link for a different property than the operator picked.
+      let rowLanes;
+      try {
+        rowLanes = await loadEligibleReserviceLanesStrict(id);
+      } catch (lookupErr) {
+        logger.error(`reservice-link eligibility lookup failed for ${id}: ${lookupErr.message}`);
+        return res.status(500).json({ error: 'Could not verify re-service eligibility — try again in a moment' });
+      }
       if (rowLanes.length) {
-        eligible = row;
+        eligibleId = id;
         lanes = rowLanes;
         break;
       }
     }
-    if (!eligible) {
+    if (!eligibleId) {
       return res.status(404).json({ error: 'No active recurring plan on this account — a free re-service needs an active plan' });
     }
 
     const { buildReserviceLink } = require('../services/reservice-link');
-    const { url, line } = await buildReserviceLink(eligible.id);
+    const { url, line } = await buildReserviceLink(eligibleId);
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
       url: stripSmsUrlScheme(url),
       line: stripSmsUrlScheme(line),
-      customerId: eligible.id,
+      customerId: eligibleId,
       lanes,
       firstName: recipientFirstName,
     });
@@ -2776,6 +2871,7 @@ const EMAIL_LEG_REASONS = {
   // Post-dispatch throw: the provider MAY hold it — never "try again".
   email_uncertain: "The review email may or may not have gone out — check the customer's email log before sending it again",
   already_reviewed: 'This customer is already marked as having left a review',
+  review_link_clicked: ClickGuard.REVIEW_LINK_CLICKED_REASON,
   no_customer: 'That customer could not be found',
   // The email WENT but the row could not be stamped (twice): the ask is
   // invisible to the cooldown, so the operator must not click again.
@@ -2809,7 +2905,7 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
     logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${requestId}): ${firstErr.message}`);
     await ReviewService.markInlineDelivered(requestId, claimToken);
   }
-  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId) : null;
+  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true }) : null;
 }
 
 // The inline review ask once the composer's send has THROWN: a throw after
@@ -2837,7 +2933,7 @@ async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailR
   }
   await ReviewService.markInlineDelivered(requestId, claimToken);
   if (!emailRequested) return;
-  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId);
+  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true });
   err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
     ? 'the review email was sent too.'
     : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
@@ -2859,7 +2955,15 @@ async function emailReviewAskNow(primaryId) {
     return { status: 409, body: { error: "Could not check this customer's pending review email — try again", outcome: 'error', reason: 'owed_lookup_failed' } };
   }
   if (awaiting?.id) {
-    const copy = await ReviewService.sendInlineEmailCopy(awaiting.id);
+    // Under the same review-send lock as the ordinary Both delivery, so a tap
+    // on the delivered text cannot land between the click check inside
+    // sendInlineEmailCopy and the email provider call.
+    const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id, { skipClickGuard: true }),
+      { recordHealth: false, waitForSlot: false });
+    if (wasLockSkipped(copy)) {
+      return { status: 409, body: { error: 'A review request to this customer is already being sent. Try again in a moment.', outcome: 'blocked', code: 'REVIEW_SEND_BUSY' } };
+    }
     if (copy?.sent) {
       const firstName = await emailContactFirstName(primaryId);
       return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: awaiting.id, firstName, retriedInline: true } };
@@ -3859,19 +3963,6 @@ router.get('/scheduled', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// A queued recruiting text cancelled here never reaches the replay rail's
-// onTerminal, so its comms_history entry would stay 'deferred' and the
-// recruiting queue would keep promising an automatic send (Codex #4623 r17).
-// Same never-downgrade posture as onTerminal: a never-attempted row is
-// proven undelivered → 'blocked'.
-async function reconcileCancelledRecruitingText(meta, trx) {
-  if (!meta || meta.entry_point !== 'recruiting_comms_deferred' || !meta.job_application_id || !meta.ledger_entry_id) return;
-  const { reconcileCommsHistoryEntryByOutcome } = require('../services/recruiting-comms');
-  await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
-    deferred: { outcome: 'blocked', code: 'cancelled_by_admin', finalized_at: new Date().toISOString() },
-  }, trx);
-}
-
 // The recruiting row a composer send answers (replyToMessageId), verified
 // server-side: the row must exist, carry a recruiting type, and belong to
 // the phone being texted — a stale context from an earlier reply target is
@@ -3890,140 +3981,35 @@ async function recruitingReplyContext(messageId, to) {
 }
 
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
+//
+// The actual cancel (thread lock, review-ask-reservation-in-place special
+// case, recruiting comms_history reconciliation, agent_decision re-park/
+// reopen) is extracted into scheduled-sms-cancel.js's cancelScheduledSmsRow
+// — the single writer this route AND the Intelligence Bar's
+// cancel_queued_message tool both call, so neither can reintroduce a bare
+// status flip that strands one of those obligations (Codex round 1 on
+// #5224, P1). This handler only translates that shared result back to the
+// exact responses it always gave.
+//
+// `refuseWorkflowOwned: true` (found during a #5224 pre-push audit): a row an
+// automated workflow owns (any metadata.entry_point other than recruiting,
+// replay_purpose, or a bundled review request) is refused with 409 rather
+// than silently deleted — deleting it here never runs that workflow's own
+// cleanup and would strand its state, exactly like the Intelligence Bar's
+// cancel_queued_message already refuses to. Recruiting texts and
+// Agent-Review-linked rows are unaffected (the writer reconciles both).
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
-    // Peek (no delete yet) just to learn the thread key for the lock.
-    const peek = await db('sms_log')
-      .where({ id: req.params.id, status: 'scheduled' })
-      .first('id', 'to_phone');
-    if (!peek) return res.json({ success: true });
-    if (req.techRole !== 'admin') {
-      // Queued recruiting texts are owner-only (utils/recruiting-thread-scope.js).
-      const typed = await excludeUnresolvedSendReservations(db('sms_log')).where({ id: peek.id }).first('message_type');
-      if (typed && isRecruitingMessageType(typed.message_type)) {
-        return res.status(403).json({ error: 'Admin access required' });
-      }
-    }
-    const threadLast10 = normalizePhoneLast10(peek.to_phone);
-
-    // Lock the thread BEFORE deleting, and resolve the decisions before the
-    // lock releases: in the gap between an unlocked delete and the decision
-    // handling, a concurrent publish sees neither the queued row nor the
-    // still-parked old decisions, inserts a fresh card, and a later reopen
-    // would resurrect stale cards beside it. (The ignore/reopen helpers run
-    // on their own connections but complete before this commit releases the
-    // lock, so the next locked path reads final state.)
-    await db.transaction(async (trx) => {
-      if (threadLast10) await lockSuggestThread(trx, threadLast10);
-
-      // A queued review-ask retry (scheduled-sms-delivery.js's uncertain-send
-      // hold) carries the review_ask_reservation marker as the ONLY evidence
-      // that attempt ever happened. Deleting it would let the next ask bypass
-      // the 72-hour spacing hold, so cancel it in place — a canceled row with
-      // that marker is still an unresolved reservation to review-ask-history's
-      // lastManualAskAt, which reads it regardless of status. Every other
-      // scheduled row cancels the existing way: physically deleted.
-      //
-      // Neither branch below reads the marker first and acts on that
-      // snapshot (codex P1, pre-push local audit on #4334): a plain SELECT
-      // here, followed by a separate DELETE/UPDATE, left a window where the
-      // dispatch cron's claim — itself a single conditional UPDATE,
-      // scheduler.js's claimDueScheduledSms, WHERE status = 'scheduled', on
-      // its own connection — could flip the row to 'sending', attempt
-      // delivery, and requeue it back to 'scheduled' with the marker now
-      // set, after this route had already decided to delete. Matching the
-      // cron's own shape instead closes it: the DELETE only fires when the
-      // marker is NOT present in the SAME statement that checks status, and
-      // the fallback UPDATE only matches a row the DELETE's own WHERE just
-      // excluded (still status = 'scheduled', so the marker must be why) —
-      // no instant where either statement acts on a snapshot the other could
-      // have invalidated.
-      let row = (await trx('sms_log')
-        .where({ id: req.params.id, status: 'scheduled' })
-        .whereRaw("COALESCE(metadata->>'review_ask_reservation', '') <> 'true'")
-        .del(['id', 'metadata', 'created_at']))?.[0];
-      if (!row) {
-        // Either no matching row at all (claimed by the cron, or already
-        // resolved by another request), or one that matched status =
-        // 'scheduled' but carries the marker right now — the DELETE's own
-        // WHERE excluded it for that reason. Cancel it in place instead of
-        // deleting: a canceled row with the marker is still an unresolved
-        // reservation to review-ask-history's lastManualAskAt, which reads
-        // it regardless of status, so the 72-hour spacing hold survives.
-        row = (await trx('sms_log')
-          .where({ id: req.params.id, status: 'scheduled' })
-          .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at']))?.[0];
-      }
-      if (!row) return;
-
-      const meta = parseJson(row.metadata, {});
-      await reconcileCancelledRecruitingText(meta, trx);
-      const decisionIds = [
-        meta.agent_decision_id,
-        ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : []),
-      ].filter(Boolean);
-      if (!decisionIds.length) return;
-
-      if (threadLast10) {
-        // Another queued staff reply on this thread will still answer the
-        // customer — reopening now would put an actionable card on top of
-        // it. Re-park the decisions behind the surviving row: its fire
-        // ignores them, its cancel/failure reopens them. Prefer a
-        // still-'scheduled' sibling: a 'sending' one has been claimed by
-        // the cron, which re-reads metadata after every terminal update —
-        // so a transfer onto it still resolves, but an unclaimed row
-        // avoids even that window. HUMAN_REPLY_TYPES includes 'manual',
-        // which a manual send OR review-ask reservation also carries while
-        // 'sending' — exclude reservations so a synthetic in-flight
-        // placeholder is never mistaken for the surviving reply and made
-        // to inherit these decisions' parked_decision_ids (codex #4333 P2
-        // widened-guard sweep, GitHub round).
-        const sibling = await excludeUnresolvedSendReservations(
-          trx('sms_log')
-            .whereIn('status', ['scheduled', 'sending'])
-            .whereIn('message_type', HUMAN_REPLY_TYPES)
-            .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]),
-        )
-          .orderByRaw("CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END")
-          .orderBy('scheduled_for', 'asc')
-          .first('id');
-        if (sibling) {
-          await trx('sms_log')
-            .where({ id: sibling.id })
-            .update({
-              metadata: trx.raw(
-                `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{parked_decision_ids}', COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) || ?::jsonb)`,
-                [JSON.stringify(decisionIds)]
-              ),
-            });
-          return;
-        }
-
-        // No live sibling — but one may have JUST flipped sending→sent
-        // while this cancel ran. The thread was answered since these
-        // decisions were parked, so they resolve as ignored (drafts back
-        // to the judge), not reopened onto an answered thread.
-        const sentSibling = await trx('sms_log')
-          .where({ direction: 'outbound' })
-          .whereIn('status', ['queued', 'sent', 'delivered'])
-          .whereIn('message_type', HUMAN_REPLY_TYPES)
-          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
-          .where('created_at', '>', row.created_at)
-          .first('id');
-        if (sentSibling) {
-          await ignoreParkedSuggestions({ decisionIds, reviewedBy: req.technicianId || 'Admin' });
-          return;
-        }
-      }
-
-      // No surviving or just-sent reply — the customer was never answered,
-      // the cards return to the composer.
-      await reopenScheduledSuggestions({
-        decisionIds,
-        reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
-      });
+    const result = await cancelScheduledSmsRow({
+      id: req.params.id, techRole: req.techRole, technicianId: req.technicianId, refuseWorkflowOwned: true,
     });
-
+    if (result.outcome === 'forbidden') return res.status(403).json({ error: 'Admin access required' });
+    if (result.outcome === 'workflow_owned') {
+      const label = String(result.workflow || '').replace(/_/g, ' ').trim();
+      return res.status(409).json({
+        error: `This text is queued by an automated workflow${label ? ` (${label})` : ''} and can't be deleted from the inbox. It will send or resolve on its own as that workflow finishes.`,
+      });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -4232,17 +4218,19 @@ router.get('/template-performance', async (req, res, next) => {
   try {
     const days = Math.min(Math.max(parsePositiveInt(req.query.days) || 30, 1), 365);
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    // The exact rendered row (metadata.templateKey) when the sender recorded
+    // it; otherwise the message-type alias the older rows carry.
     const rows = await db('messaging_audit_log')
       .where({ channel: 'sms' })
       .where('created_at', '>=', since)
-      .select(db.raw("COALESCE(metadata->>'original_message_type', purpose, 'unknown') as template_key"))
+      .select(db.raw("COALESCE(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown') as template_key"))
       .select(db.raw("COALESCE(metadata->>'sms_variant_key', '') as variant_key"))
       .count('* as attempts')
       .sum({ segments: 'segment_count' })
       .select(db.raw("SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) as sent"))
       .select(db.raw("SUM(CASE WHEN blocked_code IS NOT NULL THEN 1 ELSE 0 END) as blocked"))
       .select(db.raw("SUM(CASE WHEN provider_error IS NOT NULL THEN 1 ELSE 0 END) as provider_failures"))
-      .groupByRaw("COALESCE(metadata->>'original_message_type', purpose, 'unknown'), COALESCE(metadata->>'sms_variant_key', '')")
+      .groupByRaw("COALESCE(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown'), COALESCE(metadata->>'sms_variant_key', '')")
       .orderBy('attempts', 'desc');
 
     res.json({

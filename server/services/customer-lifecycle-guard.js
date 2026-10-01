@@ -266,6 +266,7 @@ function churnGuardApplies(row) {
 }
 
 module.exports = {
+  TERMINAL_TRACK_STATES,
   whereVisitRowLive,
   findLiveFutureVisit,
   describeLiveVisit,

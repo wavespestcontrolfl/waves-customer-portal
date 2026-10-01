@@ -21,6 +21,7 @@ jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
   addHumanCommitment: jest.fn(),
   listOpenCommitments: jest.fn(),
+  listAutoClosedCommitments: jest.fn(),
   refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
   COMMITMENT_KINDS: ['callback', 'send_estimate', 'send_report'],
   OVERDUE_IMPLICIT_DAYS: 3,
@@ -102,6 +103,8 @@ describe('callback actions use the commitment PATCH endpoint', () => {
   test.each([
     { action: 'snooze', snooze: 'two_hours' },
     { action: 'edit', description: 'Call after lunch', due_at: null, note: 'Customer asked' },
+    // The Owed tab's Reopen on an automatically closed callback.
+    { action: 'reopen' },
   ])('forwards the complete $action payload and displayed version', async (payload) => {
     const cards = require('../services/callback-cards');
     cards.enabled.mockReturnValue(true);
@@ -331,7 +334,7 @@ describe('commitment writes are staff-wide but fail closed when the gate is off'
   });
 
   test('a technician receives the intelligence without billing outcomes (invoices, revenue) — admin-only everywhere else (codex gh-r11 P1)', async () => {
-    mockRole = 'technician';
+    mockRole = 'tech';
     require('../services/call-intelligence').loadCallIntelligence.mockImplementation(async () => ({ call_id: CALL_ID, outcomes: { lead: null, estimates: [], appointments: [], invoices: [{ id: 'inv-1', total: 250, status: 'paid', paid_at: 'T' }], revenue_cents: 25000, basis_note: '' } }));
     mockDb([]);
     await withServer(async (base) => {
@@ -402,6 +405,53 @@ describe('customer relink and recording adoption stay admin-only', () => {
   });
 });
 
+describe('GET /commitments/auto-closed — what the portal closed on its own', () => {
+  const get = (base, query = '') => fetch(`${base}/admin/call-recordings/commitments/auto-closed${query}`);
+
+  test('staff read the list over a 7-day default window, clamped to 1..30 days; the rows come back as the service listed them', async () => {
+    const closed = [{ id: 'k1', kind: 'send_estimate', status: 'fulfilled', fulfillment: { strength: 'association', kind: 'estimate_sent' }, updated_at: '2026-09-04T15:00:00.123Z' }];
+    commitments.listAutoClosedCommitments.mockResolvedValue({ commitments: closed, next: null });
+    await withServer(async (base) => {
+      const res = await get(base);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ commitments: closed, days: 7, has_more: false, next: null });
+      expect((await (await get(base, '?days=3')).json()).days).toBe(3);
+      expect((await (await get(base, '?days=400')).json()).days).toBe(30);
+      expect((await (await get(base, '?days=0')).json()).days).toBe(7);
+      expect((await (await get(base, '?days=abc')).json()).days).toBe(7);
+    });
+    expect(commitments.listAutoClosedCommitments.mock.calls.map(([, o]) => o.days)).toEqual([7, 3, 30, 7, 7]);
+    expect(commitments.listAutoClosedCommitments.mock.calls.every(([, o]) => o.before === null)).toBe(true);
+  });
+
+  test('more than a page: has_more with the cursor for the next page, which is passed back to the service as given; a malformed cursor is a 400', async () => {
+    const cursorId = '8a3f5c1e-2b4d-4e6f-9a1b-3c5d7e9f1a2b';
+    commitments.listAutoClosedCommitments.mockResolvedValue({ commitments: [{ id: 'k1' }], next: { at: '2026-09-04T15:00:00.123Z', id: cursorId } });
+    await withServer(async (base) => {
+      expect(await (await get(base)).json()).toMatchObject({ has_more: true, next: { before_at: '2026-09-04T15:00:00.123Z', before_id: cursorId } });
+      expect((await get(base, `?before_at=2026-09-04T15:00:00.123Z&before_id=${cursorId}`)).status).toBe(200);
+      for (const bad of ['?before_at=2026-09-04T15:00:00.123Z', `?before_id=${cursorId}`, `?before_at=yesterday&before_id=${cursorId}`, '?before_at=2026-09-04T15:00:00.123Z&before_id=1;drop']) {
+        expect((await get(base, bad)).status).toBe(400);
+      }
+    });
+    expect(commitments.listAutoClosedCommitments.mock.calls.map(([, o]) => o.before)).toEqual([null, { at: '2026-09-04T15:00:00.123Z', id: cursorId }]);
+  });
+
+  test('a technician reads it too (same staff-wide auth as the open feed), and a failed read is a 500, never an empty list', async () => {
+    mockRole = 'tech';
+    commitments.listAutoClosedCommitments.mockResolvedValueOnce({ commitments: [], next: null });
+    try {
+      await withServer(async (base) => {
+        expect((await get(base)).status).toBe(200);
+        commitments.listAutoClosedCommitments.mockRejectedValueOnce(new Error('db down'));
+        expect((await get(base)).status).toBe(500);
+      });
+    } finally {
+      mockRole = 'admin';
+    }
+  });
+});
+
 describe('PATCH /commitments/:id', () => {
   test('passes the verdict and the reviewer through; service 4xx errors keep their status', async () => {
     mockDb([{ call_log_id: CALL_ID }, { call_log_id: CALL_ID }]);
@@ -415,6 +465,26 @@ describe('PATCH /commitments/:id', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'explode' }) });
       expect(res.status).toBe(400);
+    });
+  });
+
+  test('a Reopen carries the version the office was shown; a newer verdict answers 409 (other actions are unchanged)', async () => {
+    mockDb([{ call_log_id: CALL_ID }, { call_log_id: CALL_ID }, { call_log_id: CALL_ID }]);
+    const shown = '2026-09-28T18:00:00.123Z';
+    commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, status: 'open' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reopen', expected_at: shown }) });
+      expect(res.status).toBe(200);
+      expect(commitments.applyHumanUpdate).toHaveBeenLastCalledWith(db, COMMIT_ID, expect.objectContaining({ action: 'reopen', expectedAt: shown }));
+    });
+    await withServer(async (base) => {
+      await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'dismiss', expected_at: shown }) });
+      expect(commitments.applyHumanUpdate.mock.calls.at(-1)[2]).not.toHaveProperty('expectedAt');
+    });
+    commitments.applyHumanUpdate.mockRejectedValue(Object.assign(new Error('This promise changed since you opened it — refresh and try again'), { status: 409 }));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reopen', expected_at: shown }) });
+      expect(res.status).toBe(409);
     });
   });
 });

@@ -80,6 +80,15 @@ describe('commitmentsHandoffClause', () => {
 });
 
 describe('composePromisedEstimateDigest', () => {
+  test('itemKeys only when the page is the whole backlog — past the row cap an older promise moving onto the page is not new', () => {
+    expect(composePromisedEstimateDigest([row(6), row(2)]).itemKeys).toEqual(['call-6', 'call-2']);
+    const overflow = composePromisedEstimateDigest([row(6, { total_count: 30 }), row(2, { total_count: 30 })]);
+    expect(overflow.count).toBe(30);
+    expect(overflow.itemKeys).toBeNull(); // clears a stored list (ops-digest.js)
+    const full = composePromisedEstimateDigest([row(6, { total_count: 30, all_ids: ['call-6', 'call-2', 'call-99'] })]);
+    expect(full.itemKeys).toEqual(['call-6', 'call-2', 'call-99']); // past the cap, all_ids still tracks every promise
+  });
+
   test('no rows composes nothing (quiet day)', () => {
     expect(composePromisedEstimateDigest([])).toBeNull();
     expect(composePromisedEstimateDigest(null)).toBeNull();
@@ -90,6 +99,20 @@ describe('composePromisedEstimateDigest', () => {
     expect(composed.subject).toBe('ACT: 2 promised quotes never went out — oldest 6d');
     expect(composed.count).toBe(2);
     expect(composed.oldestDays).toBe(6);
+  });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`.
+  test('headline/summary give the owner-facing short form', () => {
+    const composed = composePromisedEstimateDigest([row(80)]);
+    expect(composed.headline).toBe('Estimates — 1 promised quote not sent');
+    expect(composed.summary).toBe('Oldest is 80 days.');
+  });
+
+  test('headline pluralizes the count and summary pluralizes the day count', () => {
+    const composed = composePromisedEstimateDigest([row(1), row(1)]);
+    expect(composed.headline).toBe('Estimates — 2 promised quotes not sent');
+    expect(composed.summary).toBe('Oldest is 1 day.');
   });
 
   test('masks phone when no customer name and includes summary', () => {

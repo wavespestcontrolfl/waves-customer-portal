@@ -460,12 +460,12 @@ async function getPathologySummary({ dbi = db } = {}) {
     dbi('sms_patch_proposals')
       .where({ status: 'pending' })
       .orderBy('created_at', 'desc')
-      .select('id', 'surface', 'failure_mode', 'evidence_count', 'proposal', 'status', 'reviewed_by', 'reviewed_at', 'created_at'),
+      .select('id', 'surface', 'failure_mode', 'evidence_count', 'proposal', 'status', 'reviewed_by', 'reviewed_at', 'created_at', 'prompt_version'),
     dbi('sms_patch_proposals')
       .where({ status: 'accepted' })
       .orderBy('created_at', 'desc')
       .limit(10)
-      .select('id', 'surface', 'failure_mode', 'evidence_count', 'proposal', 'status', 'reviewed_by', 'reviewed_at', 'created_at'),
+      .select('id', 'surface', 'failure_mode', 'evidence_count', 'proposal', 'status', 'reviewed_by', 'reviewed_at', 'created_at', 'prompt_version'),
   ]);
   return {
     currentVersion,
@@ -490,9 +490,19 @@ async function reviewPatchProposal({ id, action, reviewedBy, adminUserId, dbi = 
     return { ok: false, status: 400, error: 'action must be accept or dismiss' };
   }
   return dbi.transaction(async (trx) => {
-    const row = await trx('sms_patch_proposals').where({ id }).forUpdate().first('id', 'status', 'surface', 'failure_mode');
+    const row = await trx('sms_patch_proposals').where({ id }).forUpdate().first('id', 'status', 'surface', 'failure_mode', 'prompt_version');
     if (!row) return { ok: false, status: 404, error: 'proposal not found' };
     if (row.status !== 'pending') return { ok: false, status: 409, error: `proposal is ${row.status}, not pending` };
+    // Follow-up #3 (PR #5119): a proposal is a fix FOR the prompt version
+    // whose evidence produced it. Accepting one written for a version that
+    // is no longer live would ship a patch against evidence live drafts no
+    // longer generate — refuse; dismissing stays allowed so the card clears.
+    if (action === 'accept' && row.prompt_version) {
+      const live = require('./sms-shadow-drafter').currentPromptVersion();
+      if (row.prompt_version !== live) {
+        return { ok: false, status: 409, error: `proposal was written for ${row.prompt_version}; the live prompt is ${live} — dismiss it, or wait for a replacement built from ${live} evidence` };
+      }
+    }
     const finalStatus = action === 'accept' ? 'accepted' : 'dismissed';
     await trx('sms_patch_proposals').where({ id }).update({
       status: finalStatus,

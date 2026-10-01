@@ -42,6 +42,7 @@ jest.mock('../services/outbound-call-reason', () => ({
 
 const db = require('../models/db');
 const markerDb = require('../models/marker-db');
+const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -75,7 +76,11 @@ const {
   HANDOFF_MARKER_TABLE,
   HANDOFF_MARKER_RETENTION_MS,
   DISPATCH_BATCH,
+  CONSULTATION_ATTEMPT_TABLE,
+  linkSentRecently,
+  _private,
 } = require('../services/call-booking-link-text');
+const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
 describe('computeSendAt', () => {
@@ -335,13 +340,29 @@ describe('stagingIneligibleReason', () => {
     property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
     service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
     scheduling: { status: 'requested' },
-    consent: { do_not_contact_request: false, sms_consent_given: true },
+    consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
     sentiment_and_lead: { lead_quality: 'warm' },
   });
   const leadId = 'lead-1';
 
   test('eligible call returns null', () => {
     expect(stagingIneligibleReason(baseCall, baseExtraction(), leadId)).toBeNull();
+  });
+
+  // consent.sms_declined (schema 1.19.0, codex P1 on #5292) survives the
+  // REAL normalizeExtractionV2 (not just a hand-built fixture) before the
+  // staging check reads it — pre-push review's exact concern: if the
+  // model-output-to-persisted normalizer ever started copying consent
+  // fields by name instead of passing the object through, sms_declined
+  // would silently stop reaching this check.
+  test('sms_declined survives real normalizeExtractionV2 before the staging check reads it', () => {
+    const declined = normalizeExtractionV2({ ...baseExtraction(), consent: { ...baseExtraction().consent, sms_declined: true } });
+    expect(declined.consent.sms_declined).toBe(true);
+    expect(stagingIneligibleReason(baseCall, declined, leadId)).toBe('sms_declined');
+
+    const notDeclined = normalizeExtractionV2(baseExtraction());
+    expect(notDeclined.consent.sms_declined).toBe(false);
+    expect(stagingIneligibleReason(baseCall, notDeclined, leadId)).toBeNull();
   });
 
   test('no lead linkage', () => {
@@ -406,7 +427,15 @@ describe('stagingIneligibleReason', () => {
     ['disposition already booked', { recommended_disposition: 'booked' }, 'disposition_booked'],
     ['disposition no action needed', { recommended_disposition: 'no_action_needed' }, 'disposition_no_action_needed'],
     ['explicit do-not-contact', { consent: { do_not_contact_request: true } }, 'do_not_contact'],
-    ['explicit SMS consent refusal', { consent: { sms_consent_given: false } }, 'sms_consent_refused'],
+    // schema 1.19.0, codex P1 on #5292: sms_consent_given=false also covered
+    // an explicit "no" to "may I text you?", so the dry-run removal above
+    // stopped catching that refusal along with the "never asked" majority
+    // it was meant to unblock. sms_declined is the dedicated field.
+    ['the caller explicitly declined texting', { consent: { sms_declined: true } }, 'sms_declined'],
+    // A pre-1.19 extraction never has sms_declined at all (not null —
+    // simply absent, since the persisted schema doesn't require it) and
+    // must fail CLOSED rather than assume no refusal was made.
+    ['a pre-1.19 extraction with no sms_declined field at all', { consent: { sms_declined: undefined } }, 'sms_refusal_unrecorded'],
     ['caller prefers a phone call', { caller: { preferred_contact_method: 'phone' } }, 'prefers_phone_contact'],
     ['wrong-number lead quality', { sentiment_and_lead: { lead_quality: 'wrong_number' } }, 'lead_quality_wrong_number'],
     ['spam/solicitation lead quality', { sentiment_and_lead: { lead_quality: 'spam_or_solicitation' } }, 'lead_quality_spam_or_solicitation'],
@@ -441,11 +470,18 @@ describe('stagingIneligibleReason', () => {
   // caller who never explicitly opted in to SMS, as long as it rides the
   // consented destination (consentedDestination's ANI/dialed-number path) —
   // no_sms_consent_captured removed from EXCLUDED_TRIAGE_FLAGS. Every OTHER
-  // block still holds: do_not_contact_requested (test below) and an
-  // EXPLICIT sms_consent_given: false ('explicit SMS consent refusal',
-  // covered in the table above) are unaffected by this removal.
+  // block still holds: do_not_contact_requested (test below) and the
+  // explicit do-not-contact request (table above).
   test('no_sms_consent_captured alone no longer blocks (owner ruling 2026-09-28)', () => {
     const extraction = { ...baseExtraction(), triage_flags: ['no_sms_consent_captured'] };
+    expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
+  });
+
+  // Dry run 2026-09-28: sms_consent_given is a required boolean that the
+  // prompt sets true only on an explicit yes, so false = "never asked". It
+  // blocked 151 of 159 real new-lead calls; it must not block staging.
+  test('sms_consent_given: false (never asked) does not block', () => {
+    const extraction = { ...baseExtraction(), consent: { ...baseExtraction().consent, sms_consent_given: false }, triage_flags: ['no_sms_consent_captured'] };
     expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
   });
 
@@ -511,12 +547,36 @@ describe('stagingIneligibleReason', () => {
   });
 });
 
-// ── Gate off is a true no-op ──────────────────────────────────────────────
-test('gate off: sweep never touches the database', async () => {
+// ── Gate off: staging/dispatch are a true no-op, but manual-attempt
+// housekeeping still runs (codex round-3 P2) ──────────────────────────────
+test('gate off: sweep stages and dispatches nothing, but still prunes stale consultation-link attempt rows', async () => {
   isEnabled.mockReturnValue(false);
-  const result = await sweep(db, { now: new Date() });
+  const calledTables = [];
+  const conn = jest.fn((table) => {
+    calledTables.push(table);
+    const chain = {};
+    ['where', 'limit', 'whereIn'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.select = jest.fn(async () => []);
+    chain.del = jest.fn(async () => 0);
+    return chain;
+  });
+  const result = await sweep(conn, { now: new Date() });
   expect(result).toEqual({ staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 });
-  expect(db).not.toHaveBeenCalled();
+  // The only table this touches is CONSULTATION_ATTEMPT_TABLE (the select-
+  // then-delete pair pruneConsultationLinkAttempts issues) — never call_log,
+  // leads, or the handoff marker table: nothing may stage, claim or send
+  // while the gate is off.
+  expect(calledTables).toEqual([CONSULTATION_ATTEMPT_TABLE, CONSULTATION_ATTEMPT_TABLE]);
+  isEnabled.mockReturnValue(true);
+});
+
+// A pruning failure while the gate is off must not throw — logged and
+// swallowed, same as the gate-on housekeeping calls.
+test('gate off: a pruning failure is caught and logged, never thrown', async () => {
+  isEnabled.mockReturnValue(false);
+  const conn = jest.fn(() => { throw new Error('connection reset'); });
+  await expect(sweep(conn, { now: new Date() })).resolves.toEqual({ staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 });
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('consultation-link attempt housekeeping failed while gate is off'));
   isEnabled.mockReturnValue(true);
 });
 
@@ -700,7 +760,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -736,7 +796,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -772,7 +832,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -825,7 +885,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -869,7 +929,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -899,7 +959,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -923,7 +983,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -952,7 +1012,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -979,7 +1039,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -1077,12 +1137,22 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
     expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
   });
 
-  test('a live-customer lookup failure fails closed (no customerId), never throws', async () => {
+  // codex #5018 r15/r16 P1 follow-up: this used to catch the linked
+  // customer's own created_at lookup and read a transient failure as "no
+  // customerId" — silently proceeding to hasPriorContact and, on that
+  // narrowed evidence, potentially stamping the PERMANENT
+  // outbound_without_prior_contact skip on nothing but a DB hiccup. Now
+  // propagates, exactly like every other prior-contact probe in this
+  // describe block (see 'a probe failure PROPAGATES...' below) — never
+  // resolves, and hasPriorContact (and so the outbound_without_prior_contact
+  // stamp) is never reached at all.
+  test('a live-customer lookup failure propagates — never resolved, never stamped outbound_without_prior_contact', async () => {
     hasPriorContact.mockResolvedValue(false);
     const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-broken', metadata: {} };
     const conn = jest.fn(() => ({ where: () => ({ whereNull: () => ({ first: async () => { throw new Error('db down'); } }) }) }));
-    await expect(outboundPriorContactMissing(conn, call)).resolves.toBe(true);
-    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
+    await expect(outboundPriorContactMissing(conn, call)).rejects.toThrow('db down');
+    expect(hasPriorContact).not.toHaveBeenCalled();
+    await expect(outboundStagingReason(conn, call)).rejects.toThrow('db down');
   });
 
   // codex pre-push P1 regression, preserved from the original first_contact_at
@@ -1239,6 +1309,170 @@ describe('consentedDestination', () => {
   });
 });
 
+// ── linkSentRecently: consultation_link_send_attempts scoping (codex #5196) ──
+// Query-construction proof on a mocked conn — the real cross-sender,
+// rollback-surviving behavior is proven against a real Postgres connection
+// in call-booking-link-text-postgres.test.js (the P1/P2 scenarios).
+describe('linkSentRecently: consultation_link_send_attempts scoping (codex #5196)', () => {
+  const LEAD_ID = 'lead-attempt-1';
+  const NOW = new Date('2026-09-28T18:00:00Z');
+
+  function attemptConn({ attemptRow = undefined } = {}) {
+    const calls = { whereRaw: [], where: [] };
+    const conn = jest.fn((table) => {
+      const chain = {};
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
+        .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.whereRaw = jest.fn((...args) => { if (table === CONSULTATION_ATTEMPT_TABLE) calls.whereRaw.push(args); return chain; });
+      chain.where = jest.fn((...args) => { if (table === CONSULTATION_ATTEMPT_TABLE) calls.where.push(args); return chain; });
+      chain.first = jest.fn(async () => (table === CONSULTATION_ATTEMPT_TABLE ? attemptRow : undefined));
+      return chain;
+    });
+    conn.calls = calls;
+    return conn;
+  }
+
+  // The lane's own 14-day dedupe call (dispatchIneligibleReason, no
+  // matchPhone) stays lead-wide — "has ANY current number for this lead
+  // already gotten this link."
+  test('lead-wide (no matchPhone): scoped by lead_id + started_at only, never phone-scoped', async () => {
+    const conn = attemptConn();
+    await linkSentRecently(conn, LEAD_ID, NOW);
+    expect(conn.calls.where).toEqual(expect.arrayContaining([['lead_id', LEAD_ID]]));
+    expect(conn.calls.whereRaw).toEqual([]); // no phone scope applied to the attempts table
+  });
+
+  // codex #5196 P2: the manual guards pass matchPhone — an attempt to
+  // phone A must never block a send to a DIFFERENT phone B for the same
+  // lead (the exact false refusal the old lead-wide handoff join produced).
+  test('matchPhone with a full NANP number scopes the attempts query to that destination', async () => {
+    const conn = attemptConn();
+    await linkSentRecently(conn, LEAD_ID, NOW, { matchPhone: '+19415550111' });
+    expect(conn.calls.whereRaw).toHaveLength(1);
+    expect(conn.calls.whereRaw[0][1]).toEqual(['9415550111']);
+  });
+
+  // An international/partial number never NANP-matches 10 digits — the
+  // same fallback applyPhoneScope already uses for sms_log.to_phone.
+  test('a non-10-digit matchPhone key is never applied as a phone scope', async () => {
+    const conn = attemptConn();
+    await linkSentRecently(conn, LEAD_ID, NOW, { matchPhone: '+442071234567' });
+    expect(conn.calls.whereRaw).toEqual([]);
+  });
+
+  test('a recent attempt row (within the window) short-circuits the whole check to true', async () => {
+    const conn = attemptConn({ attemptRow: { id: 1 } });
+    await expect(linkSentRecently(conn, LEAD_ID, NOW)).resolves.toBe(true);
+  });
+
+  test('no attempt row falls through to the sms_log/short-code checks (still false when those are empty too)', async () => {
+    const conn = attemptConn({ attemptRow: undefined });
+    await expect(linkSentRecently(conn, LEAD_ID, NOW)).resolves.toBe(false);
+  });
+
+  // windowMs bounds `started_at >= since` — rows outside the passed window
+  // are never even matched by the WHERE clause a real Postgres connection
+  // would send (the mocked chain can't prove the boundary itself; that
+  // proof is the Postgres suite's own "rows outside window ignored" case).
+  test('the started_at filter uses `since` derived from windowMs, not the default 14-day window', async () => {
+    const conn = attemptConn();
+    const windowMs = 10 * 60 * 1000;
+    await linkSentRecently(conn, LEAD_ID, NOW, { windowMs });
+    const sinceCall = conn.calls.where.find(([col]) => col === 'started_at');
+    expect(sinceCall[2].getTime()).toBe(NOW.getTime() - windowMs);
+  });
+});
+
+// ── smsDeclinedOnEarlierCall — codex P1 on #5292 ──────────────────────────
+// The dedicated consent.sms_declined check (STAGING_CHECKS) judges only the
+// CURRENT call's own extraction — a caller who declined on an EARLIER call
+// then makes a later, eligible call where texting is never discussed would
+// otherwise read as clear. Query-construction proof on a mocked conn, same
+// idiom as the linkSentRecently/neverSendRecheck suites above — the real
+// cross-call SQL behavior against a live Postgres connection is proven in
+// call-booking-link-text-postgres.test.js.
+describe('smsDeclinedOnEarlierCall', () => {
+  const { smsDeclinedOnEarlierCall } = _private;
+  const PHONE = '+19415550100';
+  const ORIGIN_CALL_ID = 'call-current';
+  const AS_OF = new Date('2026-09-28T18:00:00Z');
+
+  // Builds a mocked call_log query chain that answers `.first(...)` with
+  // `row` regardless of which where/whereRaw/orderBy calls preceded it —
+  // the real filtering (phone match, v2_extraction_status, created_at,
+  // the decisive-consent OR, ORDER BY) is SQL the Postgres suite proves;
+  // this suite proves the function's OWN interpretation of whatever the
+  // query hands back, plus the bindings it sends for the phone scope.
+  function declineConn(row) {
+    const raws = [];
+    const chain = {};
+    ['where', 'orWhere', 'whereNot'].forEach((m) => {
+      chain[m] = jest.fn((...args) => {
+        if (typeof args[0] === 'function') args[0](chain);
+        return chain;
+      });
+    });
+    ['whereRaw', 'orWhereRaw'].forEach((m) => {
+      chain[m] = jest.fn((...args) => { raws.push(args); return chain; });
+    });
+    chain.orderBy = jest.fn(() => chain);
+    chain.modify = jest.fn((fn) => { fn(chain); return chain; });
+    chain.first = jest.fn(async () => row);
+    const conn = jest.fn(() => chain);
+    conn.raws = raws;
+    return conn;
+  }
+
+  test('an earlier decisive call that declined blocks', async () => {
+    const conn = declineConn({ ai_extraction_enriched: { consent: { sms_declined: true, sms_consent_given: false } } });
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(true);
+  });
+
+  // OWNER RULING 2026-09-29: a later opt-in never clears an earlier decline.
+  // The query asks only for declines, never for opt-ins, so there is no
+  // "most recent decisive row" for an opt-in to win.
+  test('the query asks only for declines — a later opt-in cannot clear one', async () => {
+    const conn = declineConn({ ai_extraction_enriched: { consent: { sms_declined: true, sms_consent_given: true } } });
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(true);
+    const sql = conn.raws.map((args) => String(args[0])).join(' ');
+    expect(sql).toContain("->>'sms_declined' = 'true'");
+    expect(sql).not.toContain('sms_consent_given');
+  });
+
+  test('no earlier decisive call at all does not block', async () => {
+    const conn = declineConn(undefined);
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+  });
+
+  // A decline recorded against a DIFFERENT phone is never this phone's
+  // concern — the query itself scopes to `phone` via nanpStoredPhoneClause,
+  // so a mocked "no row for this phone" answer (the SAME shape as "no
+  // earlier decisive call") is the correct behavior here; the bindings
+  // assertion below proves this phone's own key is what actually reaches
+  // the matcher, not some other number's.
+  test('a decline on another phone does not block — the query is scoped to this phone', async () => {
+    const conn = declineConn(undefined); // simulates the real query finding nothing for THIS phone
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+    const { phoneIdentityKey } = require('../utils/phone');
+    const expectedKey = phoneIdentityKey(PHONE);
+    expect(conn.raws.some(([, bindings]) => Array.isArray(bindings) && bindings[0] === expectedKey)).toBe(true);
+  });
+
+  test('an unusable phone (too short / missing) never queries at all', async () => {
+    const conn = declineConn(undefined);
+    await expect(smsDeclinedOnEarlierCall(conn, null, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+    await expect(smsDeclinedOnEarlierCall(conn, '555', { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('the origin call id joins the phone match via orWhere, when given', async () => {
+    const conn = declineConn(undefined);
+    await smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF });
+    const orWhereCall = conn.mock.results[0].value.orWhere.mock.calls.find(([col]) => col === 'id');
+    expect(orWhereCall).toEqual(['id', ORIGIN_CALL_ID]);
+  });
+});
+
 // ── neverSendRecheck — the providerPreSendCheck hook ──────────────────────
 // codex r2 P2: re-runs the MUTABLE never-send predicates on the connection
 // send-customer-message.js hands this callback, right before Twilio's own
@@ -1263,12 +1497,22 @@ describe('neverSendRecheck', () => {
       caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
       property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
       service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
       sentiment_and_lead: { lead_quality: 'warm' },
     },
   };
 
-  function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG } = {}) {
+  // earlierDeclineCall (codex P1 on #5292): the row smsDeclinedOnEarlierCall's
+  // OWN plain (un-locked) call_log query answers with, distinct from the
+  // call_log FOR UPDATE reload above (freshCall) — both query the same
+  // table, on the same mocked conn, so the chain distinguishes them by
+  // whether THIS chain instance's own .forUpdate() was ever called (a new
+  // chain object is built per conn(table) invocation, so the two queries
+  // never share one). Defaults to freshCall, so every existing test that
+  // never overrides it keeps seeing the SAME row either way, as before.
+  function dbi({
+    lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG, earlierDeclineCall = freshCall,
+  } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
       // codex #5018 P2: 'select' chains here like every other builder call —
@@ -1277,13 +1521,15 @@ describe('neverSendRecheck', () => {
       // undefined, so `!longFormCandidates.length` is true and it returns
       // `false` (no long-form candidates) without ever needing an array —
       // the SAME safe default every no-match path here already assumes.
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'join', 'select']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      let callLogLocked = false;
+      chain.forUpdate = jest.fn(() => { callLogLocked = true; return chain; });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
         if (table === 'scheduled_services') return bookedSince;
         if (table === 'sms_log') return smsWithLink;
-        if (table === 'call_log') return freshCall;
+        if (table === 'call_log') return callLogLocked ? freshCall : earlierDeclineCall;
         return undefined;
       });
       chain.pluck = jest.fn(async () => []);
@@ -1396,8 +1642,8 @@ describe('neverSendRecheck', () => {
   // codex #5018 r14 P1: consentedDestination's EARLIER check (this hook's
   // own opening lines) judges the STALE `call` — a reprocess can correct
   // the spoken alternate number or withdraw its explicit sms_consent_given
-  // (to undefined, never necessarily an explicit `false` — stagingIneligibleReason's
-  // own sms_consent_refused entry only catches THAT, not this) between that
+  // (to undefined or false — stagingIneligibleReason never judges the
+  // destination number itself) between that
   // check and this hook's own call_log reload. Sending on stale consent
   // evidence would violate the TCPA-consent-before-SMS invariant, so the
   // SAME check must re-run against the FRESH row too.
@@ -1502,6 +1748,16 @@ describe('neverSendRecheck', () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const conn = dbi({ lead: { ...OPEN, customer_id: null }, bookedSince: { id: 'visit-unlinked' } });
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
+  });
+
+  // codex P1 on #5292: wiring proof — the send-time recheck must also catch
+  // a decline spoken on an EARLIER call for this phone, not only the
+  // CURRENT call's own extraction (FRESH_CALL_LOG, unchanged here, carries
+  // sms_declined: false — this block comes from the OTHER call entirely).
+  test('a decline on an earlier call for this phone blocks the send at recheck time', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi({ earlierDeclineCall: { ai_extraction_enriched: { consent: { sms_declined: true } } } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'sms_declined_earlier_call' });
   });
 
   test('a link delivered in the last 14 days blocks the send', async () => {
@@ -1634,7 +1890,7 @@ describe('dispatchClaimedCall', () => {
       caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
       property: { property_type: 'single_family' },
       service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
       sentiment_and_lead: { lead_quality: 'warm' },
     },
     ai_address_validation: { status: 'validated_accept', inServiceArea: true } };
@@ -1652,14 +1908,35 @@ describe('dispatchClaimedCall', () => {
   // CALL itself is already a fully eligible default row, so reloading it
   // unchanged keeps every test below resolving exactly as before unless it
   // explicitly overrides `freshCall`.
+  // earlierDeclineCall (codex P1 on #5292): the row DISPATCH_CHECKS' OWN
+  // plain (un-locked) call_log query for smsDeclinedOnEarlierCall answers
+  // with — distinct from the call_log FOR UPDATE reload neverSendRecheck
+  // would do later (never reached here since sendCustomerMessage is
+  // mocked), distinguished the same way dbi() above does, for consistency.
+  // Defaults to freshCall, so every existing test keeps seeing the SAME row.
   function makeDb({ lead = OPEN_LEAD, bookedSince = null, visitCreatedAt = null, consultationCodes = [], smsWithLink = null,
     callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {}, freshCall = CALL,
+    earlierDeclineCall = freshCall,
     markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })),
-    markerDel = jest.fn(async () => 1) } = {}) {
+    markerDel = jest.fn(async () => 1),
+    // codex #5196: the shared consultation_link_send_attempts row — the
+    // automated lane's own onDispatchStart INSERTs it in the SAME markerDb()
+    // transaction as the handoff marker (insertConsultationLinkAttempt's
+    // own `.insert(...).returning('id')` shape, unlike the marker's plain
+    // ON CONFLICT DO NOTHING insert).
+    consultationAttemptInsert = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'attempt-mock-1' }]) })),
+    // codex #5018 r15/r16 P1 follow-up: withSmsHandoff's phone-match
+    // customer lookup, called TWICE per handoff (once before locks, once as
+    // the post-lock re-check) — a plain array default keeps every existing
+    // test's two calls identical (never widened); a test proving the
+    // widened-set defer supplies a stateful function instead.
+    customersPluck = jest.fn(async () => []) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'join', 'select']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      let callLogLocked = false;
+      chain.forUpdate = jest.fn(() => { callLogLocked = true; return chain; });
       chain.where = jest.fn((...args) => {
         if (table === 'scheduled_services' && args[0] === 'created_at') capture.bookedSinceBound = args[2];
         return chain;
@@ -1671,18 +1948,28 @@ describe('dispatchClaimedCall', () => {
           return bookedSince;
         }
         if (table === 'sms_log') return smsWithLink;
-        if (table === 'call_log') return freshCall;
+        if (table === 'call_log') return callLogLocked ? freshCall : earlierDeclineCall;
         return undefined;
       });
-      chain.pluck = jest.fn(async () => (table === 'short_codes' ? consultationCodes : []));
+      chain.pluck = jest.fn(async () => {
+        if (table === 'short_codes') return consultationCodes;
+        if (table === 'customers') return customersPluck();
+        return [];
+      });
       chain.update = table === 'call_log' ? callLogUpdate : jest.fn(async () => 1);
       // The handoff marker (codex #5018 r13 P1) INSERTs into its own table,
       // never call_log — activity_log keeps its own dedicated insert stub.
+      // consultation_link_send_attempts (codex #5196) gets its own too —
+      // its insert chain ends in `.returning('id')`, never ON CONFLICT.
       chain.insert = table === 'activity_log' ? activityInsert
-        : (table === HANDOFF_MARKER_TABLE ? markerInsert : jest.fn(async () => {}));
+        : table === HANDOFF_MARKER_TABLE ? markerInsert
+          : table === CONSULTATION_ATTEMPT_TABLE ? consultationAttemptInsert
+            : jest.fn(async () => {});
       // codex #5018 pre-push P1 (round 3): recordSendOutcome's own stale-
       // marker cleanup DELETEs from this same table on a definitely
-      // retryable outcome.
+      // retryable outcome. consultation_link_send_attempts (codex #5196)
+      // is cleared alongside it — no dedicated tracking needed by default,
+      // the generic no-op below is enough unless a test opts in.
       chain.del = table === HANDOFF_MARKER_TABLE ? markerDel : jest.fn(async () => 0);
       return chain;
     });
@@ -1869,6 +2156,16 @@ describe('dispatchClaimedCall', () => {
     const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, visitCreatedAt });
     const result = await dispatchClaimedCall(conn, recovered, NOW);
     expect(result.skipped).toBe('booked_since_call');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex P1 on #5292: wiring proof — DISPATCH_CHECKS must also catch a
+  // decline spoken on an EARLIER call for this lead's phone, even though
+  // CALL's own extraction (unchanged here) carries sms_declined: false.
+  test('a decline on an earlier call for this phone blocks the dispatch', async () => {
+    const conn = makeDb({ earlierDeclineCall: { ai_extraction_enriched: { consent: { sms_declined: true } } } });
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('sms_declined_earlier_call');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
@@ -2066,6 +2363,53 @@ describe('dispatchClaimedCall', () => {
     expect(verdict).toEqual({ ok: true, trx: conn });
   });
 
+  // codex #5018 r15/r16 P1 follow-up: the phone-match candidate customer
+  // ids withSmsHandoff locks with lockCustomerComms are read BEFORE those
+  // locks — a customer quick-added for this exact destination phone in the
+  // gap is never locked, so a booking committed for it between
+  // bookedSinceCall's own read and the actual provider request is never
+  // fenced. The handoff now re-resolves the SAME phone-match query after
+  // every lock is held and bails out retryable, never calling the
+  // caller-supplied handoff, when that re-check finds an id the first pass
+  // missed — proven here with a real Postgres advisory lock in
+  // call-booking-link-text-postgres.test.js (a mocked knex cannot prove a
+  // concurrent insert actually happened in the gap).
+  test('a customer newly matching the destination phone after the initial lock snapshot defers to the next sweep instead of sending unfenced', async () => {
+    let calls = 0;
+    const customersPluck = jest.fn(async () => (calls++ === 0 ? [] : ['new-cust-1']));
+    const conn = makeDb({ customersPluck });
+    await dispatchClaimedCall(conn, CALL, NOW);
+    const sendInput = sendCustomerMessage.mock.calls[0][0];
+    const handoff = jest.fn(async (trx) => ({ ok: true, trx }));
+    const verdict = await sendInput.withSmsHandoff(handoff);
+
+    expect(customersPluck).toHaveBeenCalledTimes(2);
+    expect(handoff).not.toHaveBeenCalled();
+    expect(verdict).toEqual({
+      ok: false,
+      code: 'candidate_customer_set_changed',
+      reason: expect.any(String),
+      retryable: true,
+    });
+  });
+
+  // The mirror case: a re-check that finds exactly the SAME ids (however
+  // many) already locked is not a widened set — the handoff proceeds
+  // normally. Guards against a false positive from set-membership order or
+  // an id appearing in both passes.
+  test('a re-check that resolves the SAME candidate ids as the first pass proceeds normally', async () => {
+    const customersPluck = jest.fn(async () => ['same-cust-1']);
+    const conn = makeDb({ customersPluck });
+    await dispatchClaimedCall(conn, CALL, NOW);
+    const sendInput = sendCustomerMessage.mock.calls[0][0];
+    const handoff = jest.fn(async (trx) => ({ ok: true, trx }));
+    const verdict = await sendInput.withSmsHandoff(handoff);
+
+    expect(customersPluck).toHaveBeenCalledTimes(2);
+    expect(handoff).toHaveBeenCalledWith(conn);
+    expect(verdict).toEqual({ ok: true, trx: conn });
+  });
+
   test('a policy-blocked send (e.g. opted out since the call) is recorded as skipped, not sent', async () => {
     sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' });
     const conn = makeDb();
@@ -2253,6 +2597,40 @@ describe('dispatchClaimedCall', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // only round 1 ever reached the sender
   });
 
+  // codex round-3 P2: recordRetryableDecision's OWN pastRetryDeadline exit
+  // must clear both marker tables too, not only the ordinary requeue path
+  // below it — dispatchClaimedCall's own earlier pre-send deadline check
+  // (proven above) already keeps this branch unreachable through the public
+  // entry point, so recordRetryableDecision is exercised directly via the
+  // module's _private reach-in, the same way its own doc comment upgrade
+  // describes the risk: a marker written by onDispatchStart during THIS
+  // retryable send must not survive a deadline give-up.
+  test("recordRetryableDecision's past-deadline exit still clears both dispatch marker tables", async () => {
+    const now = new Date('2026-09-27T13:00:00Z');
+    const originalSendAt = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+    const entry = { status: 'claimed', lead_id: 'lead-1', send_at: originalSendAt, original_send_at: originalSendAt };
+    const call = { id: 'call-past-deadline', metadata: { call_booking_link_text: entry } };
+
+    const del = jest.fn(async () => 1);
+    const deletedTables = [];
+    const markerConn = jest.fn((table) => {
+      deletedTables.push(table);
+      return { where: jest.fn(() => ({ del })) };
+    });
+    markerConn.transaction = jest.fn(async (fn) => fn(markerConn));
+    markerDb.mockReturnValue(markerConn);
+
+    const skip = jest.fn(async (reason) => ({ sent: false, skipped: reason }));
+    const result = { retryable: true, code: 'PROVIDER_FAILURE' };
+
+    const outcome = await _private.recordRetryableDecision(db, call, entry, 'lead-1', now, result, skip);
+
+    expect(skip).toHaveBeenCalledWith('PROVIDER_FAILURE', { failed: true }); // a delivery that never happened (codex #5358 r1 P1)
+    expect(del).toHaveBeenCalledTimes(2);
+    expect(deletedTables).toEqual([HANDOFF_MARKER_TABLE, CONSULTATION_ATTEMPT_TABLE]);
+    expect(outcome).toEqual({ sent: false, skipped: 'PROVIDER_FAILURE' });
+  });
+
   // ── handoff_started_at — the fact that decides safe-to-retry vs
   // leave-for-review after a failure (codex r3 P2) ────────────────────────
   describe('handoff_started_at is stamped right before the provider call', () => {
@@ -2399,6 +2777,87 @@ describe('dispatchClaimedCall', () => {
       });
       const outcome = await recoverAbandonedClaim(conn, CALL, NOW);
       expect(outcome.ambiguous).toBe(false);
+    });
+
+    // codex #5196 pre-push P1 (Claude fallback audit, round 2): an outright
+    // non-retryable block (e.g. Twilio's own terminal 21211/21610/21614
+    // rejection — classifyProviderFailure's retryable:false, never merely
+    // a pre-dispatch policy refusal) can ALSO arrive AFTER onDispatchStart
+    // already wrote both marker tables — this reaches recordSendOutcome's
+    // generic `skip()` branch, not recordRetryableDecision, and previously
+    // left both markers stale: a manual resend would 409 for
+    // MANUAL_SEND_RACE_GUARD_WINDOW_MS and this lane's own next call to
+    // the same lead would refuse link_sent_recently for the full 14-day
+    // window, even though nothing was ever delivered.
+    test('a definite NON-retryable block AFTER onDispatchStart also clears the stale marker', async () => {
+      const markerDel = jest.fn(async () => 1);
+      const conn = makeDb({ markerDel });
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        await opts.onDispatchStart(); // the marker is written here
+        // Twilio's own terminal rejection (e.g. 21211 invalid To number) —
+        // retryable: false, never ambiguous, never merely a pre-dispatch
+        // policy block.
+        return { sent: false, blocked: true, code: 'TWILIO_INVALID_NUMBER', reason: 'invalid To number' };
+      });
+      const result = await dispatchClaimedCall(conn, CALL, NOW);
+      expect(result).toEqual({ sent: false, skipped: 'TWILIO_INVALID_NUMBER' });
+      expect(markerDel).toHaveBeenCalledTimes(1);
+
+      // recoverAbandonedClaim reads the marker table fresh — with the
+      // stale row cleared it correctly finds none, matching the retryable
+      // case's own proof above.
+      conn.mockImplementation((table) => {
+        const chain = {};
+        ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'where', 'join']
+          .forEach((m) => { chain[m] = jest.fn(() => chain); });
+        chain.first = jest.fn(async () => undefined);
+        chain.update = jest.fn(async () => 1);
+        chain.insert = jest.fn(async () => {});
+        return chain;
+      });
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW);
+      expect(outcome.ambiguous).toBe(false);
+    });
+
+    // codex #5196 r4 P2: onDispatchRejected fires from INSIDE twilio.js's
+    // own dispatch() when messages.create() throws a definitive rejection —
+    // still holding lockSmsPhone, before sendCustomerMessage ever returns.
+    // The lane passes it clearDispatchMarkers(call) directly, the SAME
+    // both-tables clear onDispatchAbort already uses.
+    test('onDispatchRejected clears both dispatch marker tables, the same as onDispatchAbort', async () => {
+      // makeDb() below points markerDb() at its OWN conn by default (whose
+      // consultation-attempt del is an untracked no-op) — override it,
+      // AFTER makeDb() runs, to a dedicated double that tracks every
+      // table a delete lands on, the same way onDispatchAbort's own
+      // clearDispatchMarkers call needs to be observed.
+      const del = jest.fn(async () => 1);
+      const deletedTables = [];
+      const markerConn = jest.fn((table) => {
+        deletedTables.push(table);
+        return { where: jest.fn(() => ({ del })) };
+      });
+      markerConn.transaction = jest.fn(async (fn) => fn(markerConn));
+
+      const conn = makeDb();
+      markerDb.mockReturnValue(markerConn);
+      let deletedAfterHook;
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        expect(typeof opts.onDispatchRejected).toBe('function');
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        // twilio.js's own messages.create() throw, reclassified as a
+        // definitive rejection — fires onDispatchRejected INSTEAD of
+        // onDispatchStart/onDispatchAbort, still inside the handoff.
+        await opts.onDispatchRejected();
+        deletedAfterHook = del.mock.calls.length;
+        return { sent: false, blocked: true, code: 'TWILIO_INVALID_NUMBER', reason: 'invalid To number' };
+      });
+      await dispatchClaimedCall(conn, CALL, NOW);
+
+      expect(deletedAfterHook).toBe(2); // both tables, cleared by the hook itself
+      expect(deletedTables.slice(0, 2)).toEqual([HANDOFF_MARKER_TABLE, CONSULTATION_ATTEMPT_TABLE]);
     });
 
     // The actual r8 P2 fix: a failure in sendCustomerMessage's OWN
@@ -2668,5 +3127,56 @@ describe('recoverStaleClaims', () => {
       return chain;
     });
     await expect(recoverStaleClaims(conn, NOW)).resolves.toBe(0);
+  });
+});
+
+// codex #5358 r3 P1: only a known refusal is a healthy skip. A blocked
+// result from the pipeline itself, or a provider rejection, is a failure
+// the weekly check must surface.
+describe('isExpectedRefusal', () => {
+  const { isExpectedRefusal } = _private;
+  test('opt-outs, suppression and missing consent are expected refusals', () => {
+    for (const code of ['SMS_OPTED_OUT', 'SUPPRESSED_MANUAL_DNC', 'NO_CONSENT_RECORD', 'NON_MOBILE_SMS_RECIPIENT']) {
+      expect(isExpectedRefusal({ sent: false, blocked: true, code })).toBe(true);
+    }
+  });
+  test('pipeline and provider failures are not', () => {
+    for (const code of ['CONTRACT_VIOLATION', 'UNKNOWN_POLICY', 'CONSENT_LOOKUP_FAILED', 'SOME_NEW_CODE']) {
+      expect(isExpectedRefusal({ sent: false, blocked: true, code })).toBe(false);
+    }
+    expect(isExpectedRefusal({ sent: false, code: 'SMS_OPTED_OUT' })).toBe(false);
+  });
+  // codex #5358 r5 P2: Twilio's recipient-side rejections are about the
+  // number, not the lane.
+  test('Twilio recipient rejections are expected; other provider codes are not', () => {
+    for (const code of ['21610', '21614', 21211]) {
+      expect(isExpectedRefusal({ sent: false, retryable: false, providerErrorCode: code })).toBe(true);
+    }
+    expect(isExpectedRefusal({ sent: false, retryable: false, providerErrorCode: '20003' })).toBe(false);
+  });
+});
+
+// codex #5358 r6 P2: every rewrite of the entry keeps staged_at, so the week
+// a call was checked in never moves after staging.
+describe('recordDecision keeps staged_at', () => {
+  const { recordDecision } = _private;
+  function capture() {
+    const written = [];
+    const conn = jest.fn(() => ({
+      where: () => ({ update: async (patch) => { written.push(JSON.parse(patch.metadata.bindings[0])); } }),
+      insert: () => ({ catch: async () => {} }),
+    }));
+    conn.raw = (sql, bindings) => ({ sql, bindings });
+    return { conn, written };
+  }
+  const call = { id: 'c-1', metadata: { call_booking_link_text: { status: 'claimed', staged_at: '2026-10-05T12:20:00.000Z' } } };
+  test('a send and a pending retry carry staged_at forward', async () => {
+    const { conn, written } = capture();
+    await recordDecision(conn, call, { status: 'sent', lead_id: 'l-1', sent_at: '2026-10-05T14:00:00.000Z' }, { logActivity: false });
+    await recordDecision(conn, call, { status: 'pending', lead_id: 'l-1', send_at: '2026-10-05T15:00:00.000Z' }, { logActivity: false });
+    expect(written[0].call_booking_link_text.staged_at).toBe('2026-10-05T12:20:00.000Z');
+    expect(written[0].call_booking_link_text.decided_at).toEqual(expect.any(String));
+    expect(written[1].call_booking_link_text.staged_at).toBe('2026-10-05T12:20:00.000Z');
+    expect(written[1].call_booking_link_text.decided_at).toBeUndefined();
   });
 });

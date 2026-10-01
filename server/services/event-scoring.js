@@ -26,6 +26,12 @@
  * Cross-candidate penalties (third-from-same-venue/domain,
  * previously-featured-similar) are NOT here — they depend on the whole
  * candidate set and belong to the portfolio selector.
+ *
+ * Data-derived penalties (2026-09-27): only `short_notice` remains.
+ * `missing_price` and `unclear_age` were removed — feeds rarely carry
+ * price/age at all, so both penalties fired on most well-formed events and
+ * were the largest reason auto-curation approved almost nothing (see
+ * DERIVED_PENALTY_VALUES below for the measured impact).
  */
 
 const FACTOR_MAXES = Object.freeze({
@@ -47,10 +53,21 @@ const PENALTY_VALUES = Object.freeze({
 });
 
 // Data-derived penalties computed from the row, never model-asserted.
+//
+// missing_price (was 8) and unclear_age (was 5) were removed 2026-09-27
+// (owner ruling): feeds rarely carry price/age at all — missing_price hit
+// 201/270 scored events and unclear_age hit 137/270, so together they were
+// the largest reason auto-curation approved almost nothing (a Boz Scaggs
+// concert scored 77 on factors alone, 64 after both penalties; a pro soccer
+// match went 78 → 70). Neither flag is evidence the event is LOW QUALITY —
+// only that the feed omitted a field — so penalizing it punished well-formed
+// events for a data gap outside their control. Rows scored before this
+// change keep their stored missing_price/unclear_age flags in
+// score_breakdown.derived_penalty_flags for audit history; only NEW scoring
+// (and the rescore path) stops applying them. `short_notice` is unaffected —
+// short notice is a real property of the event, not a feed gap.
 const DERIVED_PENALTY_VALUES = Object.freeze({
   short_notice: 10, // starts <12h after the scoring reference
-  missing_price: 8, // no is_free flag and no price_text
-  unclear_age: 5, // family suitability unknown
 });
 
 const SHORT_NOTICE_HOURS = 12;
@@ -166,8 +183,6 @@ function derivedPenalties(event = {}, reference = new Date()) {
       flags.push('short_notice');
     }
   }
-  if (event.is_free !== true && !event.price_text) flags.push('missing_price');
-  if (event.family_friendly !== true && event.family_friendly !== false) flags.push('unclear_age');
   return flags;
 }
 

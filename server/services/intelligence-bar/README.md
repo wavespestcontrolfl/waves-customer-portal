@@ -32,6 +32,110 @@ See `docs/intelligence-bar-platform-implementation.md` for rollout, verification
 and remaining work. The wiring below describes the retained non-platform path;
 new platform-only tools do not need another branch in that legacy dispatcher.
 
+## Gap reports
+
+What the bar could not do, recorded for the owner's review (each new gap rings the admin bell). The model
+has no tool that writes here: a model-facing write goes through the
+confirmation card (#1568), so collection is server-owned. The route feeds
+`createGapCollector()` (`server/services/agent-gap-reports.js`) what the
+server itself observed in the tool loop:
+
+- its own `discover_capabilities` results, noting whether a tool a search
+  surfaced later ran successfully;
+- `capability_unimplemented`: a tool name the registry does not have, or a
+  registered tool that does not support this case. The latter keeps the
+  tool's own description of the case.
+
+At the end of the request, `flush()` records those signals only when the reply
+told the operator the bar could not do something. The server cannot tell
+which part of a partly declined request failed (listing refunds is not
+issuing one), so a declined request records every search it made, each
+noting whether a related tool ran. Broken tools are not gap reports: every
+tool call's outcome is already in `tool_health_events` (Tool Health). The platform
+prompt asks the model to search with a short, general description before
+declining, so that search becomes the gap's summary. It is stored as written
+(owner 2026-09-28: no name or contact scrubbing), trimmed to 300 characters.
+
+Rows dedupe by a
+fingerprint of source, kind and the summary's word set. A recurrence bumps
+the lifetime `occurrences`, reopens a `fixed` gap as `new`, and fills in a
+domain or tool the first sighting lacked. It also writes one
+`agent_gap_report_sightings` row in the same transaction; windowed counts
+read those rows.
+
+Four sources write today, each server-owned (no model-facing write tool
+anywhere in this list):
+
+- `intelligence-bar` — the admin platform collector above (full
+  `discover_capabilities` signal collection).
+- `tech-bar` — the tech portal's own collector, created independent of
+  `platformEnabled` (the tech context never runs platform mode). It has no
+  discovery loop to sample, so `flush()` takes an extra `ask` (the
+  operator's own request text): a decline with no signals collected records
+  `ask` itself, trimmed, with `attempted: 'The bar declined; no capability
+  search ran'` — only for a refusal that names the bar itself
+  (`BAR_DECLINE_RE`; "not supported by the label" is an answer), and not
+  when a tool genuinely failed on that request (an outage,
+  already in Tool Health). A decline that did collect signals is unaffected — `ask` is
+  ignored whenever there is anything to record already.
+- `texting-ai` — `recordGap()` called from `escalate()` in
+  `services/ai-assistant/assistant.js` (the live texting and portal-chat
+  assistant), only when the escalate tool sets its optional
+  `not_supported: true`. The keyword classifier plays no part.
+  (`managed-assistant.js` is not loaded at runtime and records nothing.)
+- `phone-agent` — `recordGap()` called from Sandy's human handoff
+  (`voice-agent/relay-transfer.js`, right after a confirmed
+  `transfer_to_office`) that Sandy marks `not_supported: true` (an optional
+  tool field; most transfers are staff workflows by design), except on the
+  sandbox and when anything broke on
+  the call (the provider-failure recovery transfer, `RECOVERY_INTENT`, or
+  any failed tool in the handoff packet). Tool timeouts and model-provider failures are not
+  recorded: slow or broken tools are Tool Health's job, not a missing
+  feature. The call fires and forgets (`recordGap(...).catch(() => {})`) so
+  a write, slow or failed, never touches the live call.
+
+`recordGap({ source, summary, attempted, closestTool })` is the one-shot
+path for a source with no per-request collector to sample (texting AI and
+the phone agent each observe exactly one signal per event) — same table,
+same dedupe, same never-throws contract as `writeGapRows()`, which it
+wraps.
+
+`list_gap_reports` (`gap-report-tools.js`) is the read side, for "show gap
+reports" and "what should we build next". It groups by domain and ranks by
+sightings in the window, showing `times_seen_in_window` beside
+`times_seen_total`, and each gap carries its `source`. It returns up to 50
+rows with the real `total_matching` and `has_more`, read through
+`listRecentGaps()`. The owner's triage (`building`,
+`fixed`, `by_design`, `dismissed`) is set by a session through
+`ops/agents/gap-status.js`, which dry-runs by default.
+
+`server/services/agent-gap-reports.js` rings the admin bell the moment a gap is
+recorded (owner 2026-09-29: "when a gap happens"; the old Monday digest is
+gone). A ring event is the first sighting of a gap, a `fixed` gap coming back,
+or an open (new / building) gap whose `belled_at` is NULL (recorded before the
+bell existed, or an earlier bell that was not written); any other repeat is
+quiet, and by_design / dismissed never ring. `upsertGapRow()` reads the
+existing row's status and `belled_at` `FOR UPDATE` inside the write's
+transaction and uses Postgres' `xmax = 0` on the returned row to tell an
+insert from a merge; a reopen clears `belled_at`. The bell is transactional:
+`ringGapBell()` writes the notification row and stamps `belled_at` in a
+savepoint of that same transaction, and `upsertGapRow()` awaits it, so the
+bell commits with the sighting or not at all. The recording path therefore
+waits on one extra notification insert (a local DB write, no external call).
+A bell that is not written rolls back only the savepoint: the sighting still
+commits, `belled_at` stays NULL, `rang` is false, and the gap's next sighting
+rings; the error is logged, never thrown. It is a two-line `agents` bell (`bell: true`, link `/admin/agents`), title
+`Gap #N: <source> (<area>)` or `Gap #N is back: ...`, no free-text summary. Body
+for `intelligence-bar` / `tech-bar` gaps: `A Claude window on the Mac starts
+building it within 10 min.`; for `texting-ai` / `phone-agent` gaps: `Say "build
+gap #N" in any Claude session to start a PR.` The source label map
+(`SOURCE_LABELS`) is `intelligence-bar` -> "bar", `tech-bar` -> "tech bar",
+`texting-ai` -> "texting assistant", `phone-agent` -> "phone agent". Each ring
+event has its own dedupe key (`agent-gap:<id>:<sighting time>`). Kill switch:
+`AGENT_GAP_REPORTS=off`, read at call time. It drops the prompt line, stops
+every write and every bell; `list_gap_reports` keeps reading what was already
+recorded.
+
 ## Retained context modules
 
 How to add a new context-specific tool module. One file per context, six lines of wiring in the route, optional UI hookup.

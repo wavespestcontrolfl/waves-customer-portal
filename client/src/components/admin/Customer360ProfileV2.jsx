@@ -78,10 +78,13 @@ import {
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
+import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
 import { formatETDateOnly } from "../../lib/timezone";
+import { useCollectionHold } from "../../hooks/useCollectionHold";
+import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
 import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
@@ -136,7 +139,7 @@ const INVOICE_STATUS_TEXT = {
 };
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
-import CustomerGeocodeReviewPanel from "./CustomerGeocodeReviewPanel";
+import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
@@ -3272,6 +3275,7 @@ function AdminAutopayPanelV2({
   monthlyRate,
   customerName,
   canCharge = false,
+  collectionHold = null,
 }) {
   const [state, setState] = useState(null);
   const [charging, setCharging] = useState(false);
@@ -3303,7 +3307,25 @@ function AdminAutopayPanelV2({
       setErr("Customer has no monthly_rate set");
       return;
     }
-    if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
+    // Charge now goes PAST a collections dispute hold (operatorOverride), so
+    // the confirm says so, and an unknown hold state needs its own explicit
+    // yes rather than reading as "no hold".
+    const holdStatus = collectionHold?.status;
+    if (collectionHold && holdStatus !== "ready" && holdStatus !== "idle") {
+      if (
+        !window.confirm(
+          `${HOLD_UNKNOWN_MESSAGE}.\n\nThis customer may have a billing hold from a disputed bill, and Charge now goes past it. Charge ${customerName} $${amt.toFixed(2)} anyway?`,
+        )
+      )
+        return;
+    } else if (collectionHold?.dispute) {
+      if (
+        !window.confirm(
+          `This customer has a billing hold (they disputed a bill on a collections call). Charge now goes past the hold.\n\nCharge ${customerName} $${amt.toFixed(2)} anyway?`,
+        )
+      )
+        return;
+    } else if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
       return;
     setCharging(true);
     setErr("");
@@ -3385,6 +3407,9 @@ function AdminAutopayPanelV2({
             </Button>
           )}
         </div>
+        {canCharge && (
+          <CollectionHoldStatus hold={collectionHold} variant="charge" className="mt-2.5" />
+        )}
         {msg && (
           <div ref={outcomeRef} role="status" className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-14">
             {msg}
@@ -6257,6 +6282,7 @@ function CustomerProfileBilling({
   data,
   billingSummary,
   isAdmin,
+  collectionHold,
   setAnnualPrepayOpen,
   setAnnualPrepayInvoiceOpen,
   invoices,
@@ -6316,7 +6342,8 @@ function CustomerProfileBilling({
           </div>
           {(c.servicePausedAt ||
             displayedAnnualPrepayTerm ||
-            data.prepaidPlans?.length > 0) &&
+            data.prepaidPlans?.length > 0 ||
+            collectionHold.dispute) &&
             billingSummary}
           <Customer360Estimates estimates={data.estimates || []} />
         </>
@@ -6333,6 +6360,7 @@ function CustomerProfileBilling({
         monthlyRate={c.monthlyRate}
         customerName={`${c.firstName} ${c.lastName}`}
         canCharge={isAdmin}
+        collectionHold={collectionHold}
       />{" "}
       <AccountCreditPanelV2
         customerId={c.id}
@@ -8283,6 +8311,7 @@ function CustomerBillingSummary({
   embedded,
   c,
   isAdmin,
+  collectionHold,
   resumeBilling,
   resumingBilling,
   resumeBillingErr,
@@ -8301,6 +8330,7 @@ function CustomerBillingSummary({
       <SectionTitle>
         {embedded ? "Billing status & prepay" : "Billing Summary"}
       </SectionTitle>{" "}
+      <CollectionHoldStatus hold={collectionHold} variant="banner" />
       <CustomerBillingPause
         c={c}
         isAdmin={isAdmin}
@@ -9154,6 +9184,7 @@ function CustomerWorkspacePresentation({
             <>
               {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
               <OwedCommitmentsSummary customerId={customerId} source="sms" />
+              {sections.engagement}
               {isAdmin && sections.activity}
               {sections.services}
             </>
@@ -9209,6 +9240,7 @@ function CustomerOverlayPresentation({
           {activeTab === "overview" && sections.overview}
           {activeTab === "billing" && sections.billing}
           {activeTab === "comms" && sections.conversation}
+          {activeTab === "comms" && sections.engagement}
           {activeTab === "services" && sections.services}
           {activeTab === "property" && sections.property}
           {activeTab === "compliance" && sections.compliance}
@@ -9898,10 +9930,12 @@ function useCustomerProfileNavigation({
   isAdmin,
   editOpen,
   onClose,
+  onSelectCustomer,
   loading,
   data,
   reloadCustomer,
   customerId,
+  onDraftActiveChange,
 }) {
   const [requestedTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
@@ -9926,6 +9960,36 @@ function useCustomerProfileNavigation({
     embedded && !isAdmin && requestedTab === "billing"
       ? "overview"
       : requestedTab;
+  // Single "draft active" choke point for every control that can unmount
+  // the address-review panel (it lives only in the overview tab): tab
+  // switches, the header/menu quick actions that jump tabs, Escape, and
+  // (via the onDraftActiveChange callback below) an owning Workspace's own
+  // "All customers" button and this profile's customer-switch links.
+  // A ref, not state — read synchronously from event handlers with no
+  // re-render dependency, same pattern as the panel's own activeIdRef.
+  const draftActiveRef = useRef(false);
+  const handleDraftActiveChange = useCallback((active) => {
+    draftActiveRef.current = active;
+    onDraftActiveChange?.(active);
+  }, [onDraftActiveChange]);
+  const guardNavigateAway = useCallback(
+    () => !draftActiveRef.current || confirmDiscardDraft(),
+    [],
+  );
+  // The two controls that unmount this profile from OUTSIDE its own tab
+  // navigation: closing it, and switching to a different customer via the
+  // account-properties / "others at this address" links. Built here, next
+  // to guardNavigateAway, rather than in the (already complexity-capped)
+  // outer component body.
+  const guardedClose = () => { if (guardNavigateAway()) onClose?.(); };
+  const guardedSelectCustomer = onSelectCustomer
+    ? (id) => { if (guardNavigateAway()) onSelectCustomer(id); }
+    : undefined;
+  const requestTabChange = (next) => {
+    if (next !== activeTab && !guardNavigateAway()) return false;
+    setActiveTab(next);
+    return true;
+  };
   useEffect(() => {
     if (!loading)
       activeTabButtonRef.current?.scrollIntoView?.({
@@ -9948,11 +10012,12 @@ function useCustomerProfileNavigation({
     if (embedded) return undefined;
     const handler = (e) => {
       if (e.key !== "Escape" || subModalOpen) return;
+      if (!guardNavigateAway()) return;
       onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose, embedded, subModalOpen]);
+  }, [onClose, embedded, subModalOpen, guardNavigateAway]);
   useEffect(() => {
     if (!menuOpen) return;
     const handler = (e) => {
@@ -9967,7 +10032,7 @@ function useCustomerProfileNavigation({
     };
   }, [menuOpen]);
   const changeWorkspaceTab = (next) => {
-    setActiveTab(next);
+    if (!requestTabChange(next)) return;
     requestAnimationFrame(() => {
       if (panelRef.current && tabsAnchorRef.current) {
         panelRef.current.scrollTo({
@@ -9990,7 +10055,7 @@ function useCustomerProfileNavigation({
     return () => observer.disconnect();
   }, [embedded, loading, data?.customer?.id]);
   const viewServiceRecords = () => {
-    setActiveTab("comms");
+    if (!requestTabChange("comms")) return;
     requestAnimationFrame(() => {
       const records = panelRef.current?.querySelector(".c360-service-records");
       if (records) {
@@ -10003,7 +10068,7 @@ function useCustomerProfileNavigation({
     await reloadCustomer();
     setAnnualPrepayOpen(false);
     setAnnualPrepayInvoiceOpen(false);
-    setActiveTab("billing");
+    requestTabChange("billing");
   };
   useEffect(() => {
     setMenuOpen(false);
@@ -10032,7 +10097,10 @@ function useCustomerProfileNavigation({
     menuOpen,
     setMenuOpen,
     menuRef,
-    setActiveTab,
+    // Every external consumer of this (the overlay tab bar, the mobile
+    // action menu's tab jumps) gets the same draft guard as changeWorkspaceTab
+    // for free — this is no longer the raw useState setter.
+    setActiveTab: requestTabChange,
     tabsAnchorRef,
     profileContentId,
     menuButtonRef,
@@ -10042,6 +10110,9 @@ function useCustomerProfileNavigation({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    handleDraftActiveChange,
+    guardedClose,
+    guardedSelectCustomer,
   };
 }
 
@@ -10278,10 +10349,17 @@ export default function Customer360ProfileV2({
   initialTab = "overview",
   initialScheduledServiceId = null,
   embedded = false,
+  // Lets an owning Workspace guard its own controls (e.g. "All customers")
+  // against unmounting this profile while its address-review draft is open —
+  // see the draftActiveRef/guardNavigateAway note in useCustomerProfileNavigation.
+  onDraftActiveChange,
 }) {
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
+  // B10: read the dispute hold ONCE per customer; the billing summary shows
+  // it (with Release) and every manual charge control shows it beside itself.
+  const collectionHold = useCollectionHold(customerId, isAdmin);
   const { open: openIntelligenceBar, lastMutation } = useIntelligenceBarActions();
   usePublishIntelligenceBarPageData({ customer_id: customerId, overlay: true });
   const {
@@ -10297,6 +10375,13 @@ export default function Customer360ProfileV2({
     profileVersion,
     profileActionErr,
   } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMutation });
+  const resolveAddressReview = async () => {
+    try {
+      await reloadCustomer();
+    } finally {
+      onCustomerMutation?.({ customerId, action: "update" });
+    }
+  };
   const {
     resumeBilling,
     resumingBilling,
@@ -10371,6 +10456,9 @@ export default function Customer360ProfileV2({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    handleDraftActiveChange,
+    guardedClose,
+    guardedSelectCustomer,
   } = useCustomerProfileNavigation({
     profileReloadKey,
     initialTab,
@@ -10378,10 +10466,12 @@ export default function Customer360ProfileV2({
     isAdmin,
     editOpen,
     onClose,
+    onSelectCustomer,
     loading,
     data,
     reloadCustomer,
     customerId,
+    onDraftActiveChange,
   });
   const [historySearch, setHistorySearch] = useState("");
   useEffect(() => {
@@ -10511,6 +10601,7 @@ export default function Customer360ProfileV2({
       embedded={embedded}
       c={c}
       isAdmin={isAdmin}
+      collectionHold={collectionHold}
       resumeBilling={resumeBilling}
       resumingBilling={resumingBilling}
       resumeBillingErr={resumeBillingErr}
@@ -10599,7 +10690,7 @@ export default function Customer360ProfileV2({
         referral={referral}
         customerId={customerId}
         accountProperties={accountProperties}
-        onSelectCustomer={onSelectCustomer}
+        onSelectCustomer={guardedSelectCustomer}
         addressNeighbors={addressNeighbors}
         setData={setData}
         setProfileActionErr={setProfileActionErr}
@@ -10609,6 +10700,8 @@ export default function Customer360ProfileV2({
             key={customerId}
             customerId={customerId}
             refreshToken={profileVersion}
+            onResolved={resolveAddressReview}
+            onDraftActiveChange={handleDraftActiveChange}
           />
         ) : null}
       />
@@ -10623,6 +10716,7 @@ export default function Customer360ProfileV2({
         data={data}
         billingSummary={billingSummary}
         isAdmin={isAdmin}
+        collectionHold={collectionHold}
         setAnnualPrepayOpen={setAnnualPrepayOpen}
         setAnnualPrepayInvoiceOpen={setAnnualPrepayInvoiceOpen}
         invoices={invoices}
@@ -10689,6 +10783,9 @@ export default function Customer360ProfileV2({
         onLoadOlder={history.loadOlder}
       />
     ),
+    // Read-only sent/engagement feed; the server answers { enabled: false }
+    // while GATE_CUSTOMER_ACTIVITY_TIMELINE is dark and it renders nothing.
+    engagement: <CustomerEngagementTimeline customerId={customerId} adminOnly={isAdmin} />,
     timeline: (
       <CustomerProfileTimeline
         isAdmin={isAdmin}
@@ -10725,7 +10822,7 @@ export default function Customer360ProfileV2({
         setMenuOpen,
         menuRef,
         score,
-        onClose,
+        onClose: guardedClose,
         customerId,
         setAnnualPrepayInvoiceOpen,
         setActiveTab,
@@ -10744,7 +10841,7 @@ export default function Customer360ProfileV2({
       profileActionErr={profileActionErr}
       actions={
         <CustomerProfileMobileActions
-          onClose={onClose}
+          onClose={guardedClose}
           c={c}
           isAdmin={isAdmin}
           openIntelligenceBar={openIntelligenceBar}

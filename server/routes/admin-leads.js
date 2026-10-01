@@ -1383,6 +1383,10 @@ router.post('/:id/consultation-link', async (req, res, next) => {
 const { isUsPhone } = require('../services/lead-consultation-link');
 
 router.post('/:id/send-sms', async (req, res, next) => {
+  // codex #5196 round-3 P2: declared above the try block (not inside it) so
+  // the catch below can see it too — a throw that reached onDispatchStart
+  // must get the same definite-failure cleanup as the resolved-result path.
+  let consultationAttemptId = null;
   try {
     const { message, mediaUrls, mediaAttachments, fromNumber } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
@@ -1450,6 +1454,14 @@ router.post('/:id/send-sms', async (req, res, next) => {
     const ownerCustomerId = linkedOwnerId || bearerCheck.customerId || null;
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+    // codex #5196 P1: durable pre-provider evidence for THIS send, written
+    // only when it carries a validated consultation link (same condition
+    // that runs the race guard below) — see insertConsultationLinkAttempt's
+    // own doc comment. consultationAttemptId is declared above the try
+    // block (round-3 P2) so onDispatchAbort, the post-send definite-failure
+    // cleanup below, AND the catch cleanup all delete exactly this attempt,
+    // never a sibling one.
     const sendResult = await sendCustomerMessage({
       to: lead.phone,
       body: message,
@@ -1464,18 +1476,59 @@ router.post('/:id/send-sms', async (req, res, next) => {
       // so it's allowlisted in validators/send-window.js like the other
       // admin compose surfaces.
       entryPoint: 'admin_leads_send_sms',
-      // codex #5018 r15 P2: without this, a staff-typed message (a manual
-      // consultation link included) can race call-booking-link-text.js's
-      // own worker — its final linkSentRecently check and this send could
-      // interleave, both landing as if the other never happened. The SAME
-      // phone-locked handoff that lane's own automated send already uses
-      // (lockSmsPhone, matching applyInboundOptout's own key) serializes
-      // the two: manual semantics are otherwise UNCHANGED — staff can
-      // always send here, with no 14-day delivered-link block on this
-      // path; only the ORDERING of a concurrent automated attempt against
-      // this one is affected.
+      // codex #5018 r15 P2, closed by its own r16/r17 follow-up (pre-push
+      // Codex r1 P1: narrowed to consultation-carrying sends only — this
+      // route is the general Leads-page send-sms path, not a consultation-
+      // link-only one, and an unconditional race guard blocked every
+      // ordinary reply for the whole race window after any link had gone
+      // out): a staff-typed message that carries a validated consultation
+      // link (bearerCheck.consultationLeadId — the SAME check just above
+      // already resolved it, bound to this exact lead) can race
+      // call-booking-link-text.js's own worker — its final linkSentRecently
+      // check and this send could interleave, both landing as if the other
+      // never happened. The SAME phone-locked handoff that lane's own
+      // automated send already uses (lockSmsPhone, matching
+      // applyInboundOptout's own key) serializes the two, and — now that
+      // the lock is held — this route re-runs THAT lane's own
+      // linkSentRecently read on the SAME held connection, scoped to
+      // MANUAL_SEND_RACE_GUARD_WINDOW_MS (minutes, not the lane's own
+      // 14-day dedupe window): manual semantics are otherwise UNCHANGED —
+      // staff can always resend an OLDER link, and a plain-text reply with
+      // no link is never touched by this check at all — only a link
+      // delivery landing in this same tiny race window is refused (409,
+      // below).
+      //
+      // codex #5196 P1: onDispatchStart/onDispatchAbort write and clear the
+      // shared consultation_link_send_attempts row at twilio.js's own REAL
+      // attempt boundary — the durable evidence that closes the gap where
+      // Twilio accepts this send but the transaction below then fails to
+      // commit, releasing lockSmsPhone before a queued worker or composer
+      // send can see either the rolled-back sms_log row or this marker.
+      // Only when this send carries a validated consultation link — the
+      // SAME condition that runs the race guard just below.
+      onDispatchStart: bearerCheck.consultationLeadId ? (async () => {
+        consultationAttemptId = await insertConsultationLinkAttempt({
+          leadId: bearerCheck.consultationLeadId, toPhone: lead.phone, source: 'admin_leads_send_sms',
+        });
+      }) : undefined,
+      onDispatchAbort: bearerCheck.consultationLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
+      // codex #5196 r4 P2: fires instead of onDispatchAbort when Twilio
+      // rejects the send outright, while lockSmsPhone below is still held —
+      // same cleanup, same condition.
+      onDispatchRejected: bearerCheck.consultationLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, lead.phone);
+        if (bearerCheck.consultationLeadId) {
+          const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
+          // codex #5196 P2: matchPhone scopes this manual-window check to
+          // THIS send's own destination (lead.phone) — the lead-wide check
+          // used to refuse a send to a NEW number just because the OLD
+          // number got this link inside the same window (e.g. the lead's
+          // phone was corrected right after a send).
+          if (await linkSentRecently(trx, bearerCheck.consultationLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS, matchPhone: lead.phone })) {
+            return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
+          }
+        }
         return dispatch(trx);
       }),
       // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
@@ -1495,7 +1548,22 @@ router.post('/:id/send-sms', async (req, res, next) => {
         media,
       },
     });
-    const { isRealProviderSend } = require('../services/sms-auto-send');
+    const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
+    // codex #5196: a DEFINITE failure (never a real provider send, never
+    // ambiguous — the pending/still-settling provider outcomes keep their
+    // row) clears the attempt row written above. The race-guard refusal
+    // below never reaches here with a row to clean — onDispatchStart is
+    // never invoked when withSmsHandoff returns before calling dispatch().
+    if (consultationAttemptId != null && !isRealProviderSend(sendResult) && !isAmbiguousProviderOutcome(sendResult)) {
+      await deleteConsultationLinkAttempt(consultationAttemptId);
+    }
+    // The manual-send race guard above (LINK_SENT_RECENTLY_RACE) is its own
+    // refusal, not the generic blocked-send 422: 409 matches the "conflict
+    // with something that just happened" the composer route below returns
+    // for the same race.
+    if (sendResult.code === 'LINK_SENT_RECENTLY_RACE') {
+      return res.status(409).json({ error: sendResult.reason });
+    }
     if (sendResult.blocked || !isRealProviderSend(sendResult)) {
       return res.status(422).json(sendResult);
     }
@@ -1511,7 +1579,20 @@ router.post('/:id/send-sms', async (req, res, next) => {
       performedBy: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
     });
     res.json({ lead: updated, sent: true, providerMessageId: sendResult.providerMessageId });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // codex #5196 round-3 P2: same definite-failure cleanup as the
+    // resolved-result path above, for a throw that reached (or passed
+    // through) onDispatchStart — matches admin-communications.js's own
+    // catch cleanup so the two routes can't drift.
+    if (consultationAttemptId != null) {
+      const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
+      if (!isRealProviderSend(err?.providerOutcome) && !isAmbiguousProviderOutcome(err?.providerOutcome)) {
+        const { deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+        await deleteConsultationLinkAttempt(consultationAttemptId);
+      }
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/leads/:id/schedule-callback — schedule a callback for a lead
@@ -1795,6 +1876,25 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         }
       }
       if (needsCustomer) {
+        // codex #5196 P1-A: deliberately NOT passing lockPhone here. By this
+        // point the transaction already holds the date-wide occupancy lock
+        // and this exact `leads` row FOR UPDATE (both taken above) — the
+        // handoff's own order is phone-lock BEFORE its leads-row FOR UPDATE
+        // (neverSendRecheck, same transaction), so taking the phone lock
+        // here, after the row lock, would invert that order: this
+        // transaction would hold leads-row(this lead) and wait on
+        // phone-lock, while a handoff for the SAME lead holds phone-lock
+        // and waits on leads-row(this lead) — a genuine two-resource cycle.
+        // This path is still largely covered without it: when the customer
+        // being created is for THIS lead (the common case — converting the
+        // lead the call-booking-link-text send is about), the `leads` row
+        // FOR UPDATE both sides already take serializes them on that row
+        // alone, no phone lock needed. The residual gap is a phone shared
+        // across a DIFFERENT lead row than the one the handoff is texting —
+        // that case is not fenced here and relies on bookedSinceCall's own
+        // fresh, phone-matched re-read inside the handoff's still-open
+        // transaction (see call-booking-link-text.js) to catch a booking
+        // that lands after this converts.
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,
           lastName: lockedLead.last_name || '',

@@ -116,9 +116,9 @@ async function sendViaTwilio(input, hooks = {}) {
 }
 
 async function sendViaTwilioOnce(input, {
-  preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, withSmsHandoff, providerHandoffReservation,
+  preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, onDispatchRejected, withSmsHandoff, providerHandoffReservation,
   // codex #5018 structural fix (post-r7): threaded straight through, same
-  // as onDispatchStart/onDispatchAbort above.
+  // as onDispatchStart/onDispatchAbort/onDispatchRejected above.
   logInHandoff,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
@@ -192,6 +192,15 @@ async function sendViaTwilioOnce(input, {
       agentDecisionId: input.metadata && input.metadata.agentDecisionId,
       parkedDecisionIds: input.metadata && input.metadata.parkedDecisionIds,
       scheduledSmsLogId: input.metadata && input.metadata.scheduled_sms_log_id,
+      // Which sms_templates row rendered this body — set by callers that
+      // render through router.getTemplate / renderSmsTemplate /
+      // renderRequiredSmsTemplate and thread the exact key they requested
+      // into metadata.templateKey (never inferred here). Persisted on the
+      // accepted sms_log row as template_key/template_variant_id
+      // (services/twilio.js) and flows into messaging_audit_log.metadata
+      // as-is via input.metadata below.
+      templateKey: input.metadata && input.metadata.templateKey,
+      templateVariantId: input.metadata && input.metadata.templateVariantId,
       // Durable linkage back to the review ask this text IS. The
       // stranded-send reconciliation proves a send from it, so an ask
       // whose template carries no review link (the private check-ins)
@@ -218,6 +227,10 @@ async function sendViaTwilioOnce(input, {
       // codex #5018 r15 pre-push P1: lets the caller undo its own marker
       // when twilio.js's post-onDispatchStart window recheck refuses.
       onDispatchAbort,
+      // codex #5196 r4 P2: fired instead of onDispatchAbort when
+      // messages.create() throws a definitive rejection, still inside the
+      // handoff lock.
+      onDispatchRejected,
       withSmsHandoff,
       // codex #5018 structural fix (post-r7): gates twilio.js's in-
       // transaction sms_log insert (dispatch()'s own comment there).
@@ -388,6 +401,7 @@ function mapPurposeToMessageType(purpose) {
     case 'tech_en_route':       return 'tech_en_route';
     case 'tech_arrived':        return 'tech_arrived';
     case 'service_completion':  return 'service_complete';
+    case 'lawn_watering_instruction': return 'lawn_watering_instruction';
     case 'billing':             return 'billing_reminder';
     case 'payment_receipt':     return 'receipt';
     case 'payment_failure':     return 'payment_failure';
@@ -413,6 +427,9 @@ module.exports = {
   // may still have reached Twilio.
   classifyProviderFailure,
   SENDER_SIDE_TERMINAL_TWILIO_CODES,
+  // Shared with the booking-link lane, which treats a recipient-side
+  // rejection as an expected refusal rather than a lane failure.
+  RECIPIENT_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

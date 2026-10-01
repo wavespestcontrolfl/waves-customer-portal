@@ -4555,7 +4555,7 @@ function AccountsReceivableTab() {
           method: "POST",
           body: JSON.stringify({
             to: inv.phone,
-            message: `Hi ${inv.customerName}, this is Waves Pest Control. You have an outstanding balance of ${fmtM(inv.amount)} (Invoice #${inv.invoiceNumber}). Please call or reply to arrange payment. Thank you!`,
+            message: `Hi ${inv.customerName}, it's Waves. You have an outstanding balance of ${fmtM(inv.amount)} (Invoice #${inv.invoiceNumber}). Please call or reply to arrange payment. Thank you!`,
           }),
         });
         alert("Reminder sent!");

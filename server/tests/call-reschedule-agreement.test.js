@@ -17,6 +17,8 @@ function v2({ scheduling = {}, evidence } = {}) {
   return {
     scheduling: {
       status: 'reschedule_requested', confirmed_start_at: THURSDAY_2PM, agent_committed_booking: true, caller_accepted_slot: true,
+      // The extraction's own language judgements (schema 1.20.0).
+      definite_commitment: true, relative_date_used: false, moved_appointment_relative_date_used: false,
       agreed_slot_words: WORDS,
       ...scheduling,
     },
@@ -395,6 +397,142 @@ describe('groundRescheduleAgreement', () => {
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
   });
 
+  // Follow-ups after #5163 (owner go-ahead 2026-09-28): three wrong-move
+  // closures and three loosenings measured on the 20-call replay.
+  test('follow-ups: relative weeks, alternatives before the hour, and inexact commitments fail', () => {
+    const plainDay = (text, words, slot = THURSDAY_2PM) => agreedAt(slot, text, words);
+    const thu = { day: 'Thursday', hour: 'two', period: null };
+    expect(plainDay('We will move you to Thursday a week from now at two.', thu).ok).toBe(false);
+    expect(plainDay('We will move you to the following Thursday at two.', thu).ok).toBe(false);
+    expect(plainDay('We will see you at three or Thursday at two.', thu).ok).toBe(false);
+    expect(plainDay('We will see you either Thursday at two.', thu).ok).toBe(false);
+    // The agent's own commitment must say the unstated hour exactly.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: thu },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We should arrive around Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two, please'),
+        quote('/scheduling/caller_accepted_slot', 'caller', 'Thursday at two, please'),
+      ],
+    }), 'Caller: Thursday at two, please.\nAgent: We should arrive around Thursday at two.')).toMatchObject({ ok: false });
+  });
+
+  test('follow-ups: real phrasings that now ground', () => {
+    // A courtesy word right after the hour, and a date whose number equals the hour.
+    expect(agreedAt(THURSDAY_2PM, 'Thursday at two is perfect.', { day: 'Thursday', hour: 'two', period: null }).ok).toBe(true);
+    expect(agreedAt('2026-10-10T10:00:00-04:00', 'We will move it to October 10 at 10.', { day: 'October 10', hour: '10', period: null }).ok).toBe(true);
+    // The agent need not repeat the day the caller named; "9 o'clock" needs no lead word.
+    const nine = { day: 'tomorrow', hour: '9', period: null };
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "Yep, we'll see them at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow. I'll let them know."),
+      ],
+    }), "Caller: Can we make it earlier?\nAgent: Yep, we'll see them at 9.\nCaller: Okay, 9 o'clock tomorrow. I'll let them know.").ok).toBe(true);
+    // A relative day in the commitment is a day, and must be the recorded one.
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "We'll see them in two days at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+      ],
+    }), "Caller: Okay, 9 o'clock tomorrow.\nAgent: We'll see them in two days at 9.")).toMatchObject({ ok: false });
+    for (const commit of ["We'll see them May 3 at 9.", "We'll see them 9/25 at 9."]) {
+      expect([commit, ground(v2({
+        scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', commit),
+          quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+          quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+        ],
+      }), `Caller: Okay, 9 o'clock tomorrow.\nAgent: ${commit}`).ok]).toEqual([commit, false]);
+    }
+    // A bound before "o'clock" is still a bound.
+    for (const said of ["We will be there tomorrow before 9 o'clock.", "We will be there tomorrow by 9 o'clock."]) {
+      expect([said, agreedAt('2026-09-24T09:00:00-04:00', said, { day: 'tomorrow', hour: '9', period: null }).ok]).toEqual([said, false]);
+    }
+    // A day the agent does name must be the recorded one.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Friday at two'),
+        quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two, please'),
+        quote('/scheduling/caller_accepted_slot', 'caller', 'Thursday at two, please'),
+      ],
+    }), 'Caller: Thursday at two, please.\nAgent: We will see you Friday at two.')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    // An agent's leading "No," answering the caller is not a refusal.
+    expect(agreedAt('2026-09-24T12:00:00-04:00', 'No, we will just pop in Thursday at noon.', { day: 'Thursday', hour: 'noon', period: null }).ok).toBe(true);
+    expect(agreedAt('2026-09-24T12:00:00-04:00', 'No, we will not come Thursday at noon.', { day: 'Thursday', hour: 'noon', period: null }).ok).toBe(false);
+  });
+
+  test('follow-ups: an availability phrase names the visit to move; "do not move" still fails', () => {
+    const SAME = 'We will see you at two in the afternoon then.';
+    const moved = (callerLine, movedQuote) => ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-24', moved_appointment_words: 'tomorrow', agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', SAME),
+        quote('/scheduling/confirmed_start_at', 'agent', SAME),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+      ],
+    }), `Caller: ${callerLine}\nAgent: ${SAME}\nCaller: ${ACCEPT}`);
+    expect(moved("We're not going to be home tomorrow morning.", "We're not going to be home tomorrow").ok).toBe(true);
+    expect(moved("I can't make it tomorrow.", "I can't make it tomorrow").ok).toBe(true);
+    expect(moved('Do not move my visit tomorrow.', 'Do not move my visit tomorrow')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+  });
+
+  // Codex #5207 r1: each loosening kept to its own case.
+  test('follow-ups r1: loosenings do not reach past their case', () => {
+    const thu = { day: 'Thursday', hour: 'two', period: null };
+    // A leading "No," only before "we'll"/"I'll".
+    expect(agreedAt(THURSDAY_2PM, 'No, Thursday at two PM.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(false);
+    // "9 o'clock" without a lead only at a clause start or after a plain yes.
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "Avoid 9 o'clock Thursday.", { day: 'Thursday', hour: '9', period: null }).ok).toBe(false);
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "Okay, 9 o'clock Thursday.", { day: 'Thursday', hour: '9', period: null }).ok).toBe(true);
+    // The agent's "let me know" / "I will let you know" is not a booking.
+    expect(agreedAt(THURSDAY_2PM, 'Thursday at two, let me know.', thu).ok).toBe(false);
+    // A same-day commitment may end "have a nice day".
+    const SAME = 'We will see you at two PM, have a nice day.';
+    expect(ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-24', moved_appointment_words: 'September 24th', agreed_slot_words: { day: null, hour: 'two', period: 'PM' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', SAME),
+        quote('/scheduling/confirmed_start_at', 'agent', SAME),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', 'my September 24th visit'),
+      ],
+    }), `Caller: Can you move my September 24th visit?\nAgent: ${SAME}\nCaller: ${ACCEPT}`).ok).toBe(true);
+    // "now" is not a plain commitment word.
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: { day: 'tomorrow', hour: '9', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "We'll see you now at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+      ],
+    }), "Caller: Okay, 9 o'clock tomorrow.\nAgent: We'll see you now at 9.")).toMatchObject({ ok: false });
+    // An availability phrase must govern the moved visit, with no "but".
+    const movedFri = (callerLine, movedQuote) => ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-25', moved_appointment_words: 'Friday', agreed_slot_words: thu },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+      ],
+    }), `Caller: ${callerLine}\nAgent: We will see you Thursday at two.\nCaller: ${ACCEPT}`);
+    expect(movedFri("I'm not going to be home tomorrow, but my appointment is Friday.", 'my appointment is Friday')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(movedFri("I'm not going to be home Friday.", "I'm not going to be home Friday").ok).toBe(true);
+    // Codex #5207 r2.
+    expect(movedFri("I'm not home tomorrow, but Friday works.", 'but Friday works')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(agreedAt(THURSDAY_2PM, 'No, we will see you Thursday at two PM or Friday at three PM.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(false);
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "We'll see you tomorrow at 9, right.", { day: 'tomorrow', hour: '9', period: null }).ok).toBe(false);
+    expect(agreedAt('2026-10-10T09:00:00-04:00', "We'll see you at 9 for your 10th appointment.", { day: '10th', hour: '9', period: null }).ok).toBe(false);
+  });
+
   // The fixtures above inject the fields; this pins them to the stored V2
   // contract (schema 1.17.0), where a rename on either side would silently
   // skip every automatic move.
@@ -418,5 +556,418 @@ describe('groundRescheduleAgreement', () => {
     expect(ground(v2(), `Agent: ${COMMIT}`)).toMatchObject({ ok: false, reason: 'unparseable_transcript' });
     expect(ground(v2({ scheduling: { confirmed_start_at: 'not-a-time' } }))).toMatchObject({ ok: false, reason: 'unparseable_slot' });
     expect(groundRescheduleAgreement({ v2: v2(), transcript: TRANSCRIPT, callStartedAt: 'nope' })).toMatchObject({ ok: false, reason: 'unparseable_slot' });
+  });
+  // Owner direction 2026-09-30 (schema 1.20.0, prompt v19): word lists judging
+  // free conversation never converged over five Codex rounds on #5201, so the
+  // extraction judges the promise's language (definite_commitment,
+  // relative_date_used, moved_appointment_relative_date_used) and resolves
+  // relative dates; the code verifies flags, quotes and the resolved date.
+  // Fixtures are mocked extraction outputs. Call: Wed Sep 23, 2026 (Thursday
+  // Sep 24 is the nearest Thursday, Oct 1 the one after).
+  describe('extraction-judged language (schema 1.20.0)', () => {
+    const NEXT_THURSDAY_2PM = '2026-10-01T14:00:00-04:00';
+    const PM = { day: 'Thursday', hour: 'two', period: 'PM' };
+    // The agent says `said`; the extraction reports `flags` and `slot`.
+    const judged = ({ said, callerSays = ACCEPT, slot = THURSDAY_2PM, words = PM, flags = {}, relativeQuote = said, extraEvidence = [] }) => ground(v2({
+      scheduling: { confirmed_start_at: slot, agreed_slot_words: words, ...flags },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', said),
+        quote('/scheduling/confirmed_start_at', 'agent', said),
+        quote('/scheduling/caller_accepted_slot', 'caller', callerSays),
+        ...(relativeQuote ? [quote('/scheduling/relative_date_used', 'agent', relativeQuote)] : []),
+        ...extraEvidence,
+      ],
+    }), `Caller: Can we move my visit?\nAgent: ${said}\nCaller: ${callerSays}`);
+    const relativeTrue = { relative_date_used: true };
+
+    test('a relative date the extraction resolved and flagged grounds by its own date, never the nearest weekday', () => {
+      for (const said of [
+        'We will see you Thursday eight days away at two PM.',
+        'We will see you the Thursday following this one at two PM.',
+        'We will see you Thursday eight days from now at two PM.',
+        'We will see you Thursday after this one at two PM.',
+        'We will see you Thursday next week at two PM.',
+      ]) {
+        expect([said, judged({ said, slot: NEXT_THURSDAY_2PM, flags: relativeTrue }).ok]).toEqual([said, true]);
+      }
+    });
+
+    test('a flagged relative date the code cannot verify fails closed', () => {
+      const said = 'We will see you Thursday eight days away at two PM.';
+      // No pinned quote for the relative expression.
+      expect(judged({ said, slot: NEXT_THURSDAY_2PM, flags: relativeTrue, relativeQuote: null }))
+        .toMatchObject({ ok: false, reason: 'relative_date_ungrounded' });
+      // Flagged relative but resolved to the nearest Thursday: ambiguous ("next Thursday").
+      expect(judged({ said, slot: THURSDAY_2PM, flags: relativeTrue })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+      // Resolved date is not a Thursday, is in the past, or is beyond the horizon.
+      expect(judged({ said, slot: '2026-10-02T14:00:00-04:00', flags: relativeTrue })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+      expect(judged({ said, slot: '2026-09-17T14:00:00-04:00', flags: relativeTrue })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+      expect(judged({ said, slot: '2026-12-03T14:00:00-05:00', flags: relativeTrue })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+      // Relative dates need a weekday to check against.
+      expect(judged({ said, slot: NEXT_THURSDAY_2PM, flags: relativeTrue, words: { day: 'October 1st', hour: 'two', period: 'PM' } }))
+        .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    });
+
+    // Weekday-less relative dates: only a closed arithmetic set, computed by
+    // the code from the pinned quote and the call's day (Wed Sep 23), and it
+    // must EQUAL the extraction's resolved date.
+    test('weekday-less relative dates ground only for the closed arithmetic forms, when the computed date equals the extraction\'s', () => {
+      const at = (date) => `${date}T14:00:00-04:00`;
+      const FORMS = [
+        ['We will see you tomorrow at two PM.', 'tomorrow', '2026-09-24'],
+        ['We will see you the day after tomorrow at two PM.', 'the day after tomorrow', '2026-09-25'],
+        ['We will see you in three days at two PM.', 'in three days', '2026-09-26'],
+        ['We will see you in 5 days at two PM.', 'in 5 days', '2026-09-28'],
+        ['We will see you eight days from now at two PM.', 'eight days from now', '2026-10-01'],
+        ['We will see you 2 days from today at two PM.', '2 days from today', '2026-09-25'],
+        ['We will see you two weeks from now at two PM.', 'two weeks from now', '2026-10-07'],
+        ['We will see you in 3 weeks at two PM.', 'in 3 weeks', '2026-10-14'],
+        ['We will see you one week from today at two PM.', 'one week from today', '2026-09-30'],
+        ['We will see you in a week at two PM.', 'in a week', '2026-09-30'],
+        ['We will see you a week from now at two PM.', 'a week from now', '2026-09-30'],
+        ['We will see you a week from today at two PM.', 'a week from today', '2026-09-30'],
+        ['We will see you in a day at two PM.', 'in a day', '2026-09-24'],
+        ['We will see you in one day at two PM.', 'in one day', '2026-09-24'],
+      ];
+      for (const [said, day, date] of FORMS) {
+        const words = { day, hour: 'two', period: 'PM' };
+        expect([said, judged({ said, slot: at(date), words, flags: relativeTrue }).ok]).toEqual([said, true]);
+        // The extraction's date must equal the computed one: a day either way fails.
+        const off = new Date(`${date}T12:00:00Z`); off.setUTCDate(off.getUTCDate() + 1);
+        expect([said, judged({ said, slot: at(off.toISOString().slice(0, 10)), words, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+      // The quote, not the recorded words, is what is computed; a missing pin fails.
+      expect(judged({ said: FORMS[4][0], slot: at('2026-10-01'), words: { day: 'eight days from now', hour: 'two', period: 'PM' }, flags: relativeTrue, relativeQuote: null }))
+        .toMatchObject({ ok: false, reason: 'relative_date_ungrounded' });
+      // Past today, and beyond the 60-day horizon, fail even when they equal the computed date.
+      expect(judged({ said: 'We will see you in 8 weeks at two PM.', slot: at('2026-11-18'), words: { day: 'in 8 weeks', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said: 'We will see you in 9 weeks at two PM.', slot: at('2026-11-25'), words: { day: 'in 9 weeks', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok).toBe(false);
+      // The recorded phrase must sit verbatim in the quote, and the quote must state
+      // no other offset form.
+      expect(judged({ said: 'We will see you at least two days from now at two PM.', slot: at('2026-09-25'), words: { day: 'two days from now', hour: 'two', period: 'PM' },
+        flags: relativeTrue, relativeQuote: 'We will see you in two days at two PM.' }).ok).toBe(false);
+      expect(judged({ said: 'We will see you in two days at two PM, not tomorrow.', slot: at('2026-09-25'), words: { day: 'in two days', hour: 'two', period: 'PM' },
+        flags: relativeTrue }).ok).toBe(false);
+      // A quantity bound around the recorded phrase makes it a range, not a date.
+      for (const before of ['at least', 'at most', 'more than', 'less than', 'fewer than', 'over', 'under', 'within', 'by', 'up to',
+        'about', 'around', 'roughly', 'approximately', 'no later than', 'no sooner than', 'before', 'after']) {
+        const said = `We will see you ${before} two days from now at two PM.`;
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day: 'two days from now', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+      for (const after of ['or so', 'or more', 'or two']) {
+        const said = `We will see you two days from now ${after} at two PM.`;
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day: 'two days from now', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+      for (const said of ['We will see you by the day after tomorrow at two PM.', 'We will see you before tomorrow at two PM.']) {
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day: said.includes('after') ? 'the day after tomorrow' : 'tomorrow', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+      // Everything else weekday-less stays manual.
+      for (const [said, day] of [
+        ['We will see you sometime next month at two PM.', 'sometime next month'],
+        ['We will see you in a few days at two PM.', 'in a few days'],
+        ['We will see you in a couple of weeks at two PM.', 'in a couple of weeks'],
+        ['We will see you at least two days from now at two PM.', 'at least two days from now'],
+        ['We will see you half of a day from now at two PM.', 'half of a day from now'],
+        ['We will see you more than a week from now at two PM.', 'more than a week from now'],
+        ['We will see you within two days at two PM.', 'within two days'],
+        ['We will see you by the day after tomorrow at two PM.', 'by the day after tomorrow'],
+        ['We will see you about eight days from now at two PM.', 'about eight days from now'],
+        ['We will see you up to two weeks from now at two PM.', 'up to two weeks from now'],
+        ['We will see you half a day from now at two PM.', 'half a day from now'],
+        ['We will see you in a week or two at two PM.', 'in a week or two'],
+        ['We will see you in nine days at two PM.', 'in nine days'],
+        ['We will see you eight days away at two PM.', 'eight days away'],
+        ['We will see you in two days or three days at two PM.', 'in two days'],
+      ]) {
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day, hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+    });
+
+    // The offset's number is part of the date, never a second clock hour.
+    // A weekday with an exact offset is that weekday's first occurrence on or
+    // after the offset date; an extraction date in any other week contradicts it.
+    // One span detector drives both the hour scan and the parser: "N days/weeks
+    // away|out" compute like "from now", and any offset-shaped span the parser
+    // cannot compute in the pinned clause rejects.
+    test('away/out compute exactly, and any uncomputed offset span in the clause fails closed', () => {
+      const oct = (d) => `2026-10-${d}T14:00:00-04:00`;
+      const weekday = (said, slot) => judged({ said, slot, flags: relativeTrue }).ok;
+      expect(weekday('We will see you Thursday eight days away at two PM.', oct('01'))).toBe(true);
+      expect(weekday('We will see you Thursday eight days away at two PM.', oct('08'))).toBe(false);
+      expect(weekday('We will see you Thursday eight days out at two PM.', oct('08'))).toBe(false);
+      expect(weekday('We will see you Thursday two weeks out at two PM.', oct('08'))).toBe(true);
+      expect(weekday('We will see you Thursday two weeks away at two PM.', oct('15'))).toBe(false);
+      const bare = (said, day, slot) => judged({ said, slot, words: { day, hour: 'two', period: 'PM' }, flags: relativeTrue }).ok;
+      expect(bare('We will see you eight days away at two PM.', 'eight days away', oct('01'))).toBe(true);
+      expect(bare('We will see you two weeks out at two PM.', 'two weeks out', oct('07'))).toBe(true);
+      expect(bare('We will see you eight days away at two PM.', 'eight days away', oct('08'))).toBe(false);
+      // Spans the parser does not compute reject even with a weekday to fall back on.
+      for (const said of [
+        'We will see you Thursday two weeks later at two PM.',
+        'We will see you Thursday two weeks hence at two PM.',
+        'We will see you Thursday nine days from now at two PM.',
+        'We will see you Thursday for two days at two PM.',
+        'We will see you Thursday half a day from now at two PM.',
+        'We will see you Thursday half of a day from now at two PM.',
+        'We will see you a week from Thursday at two PM.',
+        'We will see you Thursday in a week or two at two PM.',
+      ]) expect([said, weekday(said, oct('08'))]).toEqual([said, false]);
+    });
+
+    test('a range or alternative around an offset fails, after or before it', () => {
+      const bare = (said, day) => judged({ said, slot: '2026-09-25T14:00:00-04:00', words: { day, hour: 'two', period: 'PM' }, flags: relativeTrue }).ok;
+      expect(bare('We will see you in two days at two PM.', 'in two days')).toBe(true);
+      for (const [said, day] of [
+        ['We will see you two days from now or three at two PM.', 'two days from now'],
+        ['We will see you two days from now or 3 at two PM.', 'two days from now'],
+        ['We will see you two days from now to three days at two PM.', 'two days from now'],
+        ['We will see you in two to three days at two PM.', 'in two'],
+        ['We will see you two or three days from now at two PM.', 'three days from now'],
+        ['We will see you 2 or 3 days from now at two PM.', '3 days from now'],
+        ['We will see you two days from now through four at two PM.', 'two days from now'],
+        ['We will see you two three days from now at two PM.', 'three days from now'],
+        ['We will see you tomorrow or the day after at two PM.', 'tomorrow'],
+      ]) expect([said, bare(said, day)]).toEqual([said, false]);
+    });
+
+    test('a weekday with an exact offset must agree with the offset', () => {
+      const said = 'We will see you Thursday eight days from now at two PM.';
+      expect(judged({ said, slot: '2026-10-01T14:00:00-04:00', flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said, slot: '2026-10-08T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      expect(judged({ said, slot: '2026-09-24T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      const weeks = 'We will see you Thursday two weeks from now at two PM.';
+      expect(judged({ said: weeks, slot: '2026-10-08T14:00:00-04:00', flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said: weeks, slot: '2026-10-15T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      expect(judged({ said: 'We will see you Thursday a week from now at two PM.', slot: '2026-10-01T14:00:00-04:00', flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said: 'We will see you Thursday a week from now at two PM.', slot: '2026-10-08T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      // Two different offsets in one clause are ambiguous.
+      expect(judged({ said: 'We will see you Thursday in two days or in eight days at two PM.', slot: '2026-10-01T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+    });
+
+    test('a relative offset\'s number is not read as a clock hour', () => {
+      const bare = { day: 'Thursday', hour: 'two', period: null };
+      for (const said of [
+        'We will see you Thursday eight days from now at two.',
+        'We will see you Thursday two weeks from now at two.',
+        'We will see you Thursday in 8 days at two.',
+        'We will see you Thursday eight days away at two.',
+      ]) {
+        const days = /two weeks/.test(said) ? '2026-10-08' : '2026-10-01';
+        expect([said, judged({ said, slot: `${days}T14:00:00-04:00`, words: bare, flags: relativeTrue }).ok]).toEqual([said, true]);
+      }
+      // Unflagged, the same number still counts as a second hour.
+      expect(judged({ said: 'We will see you Thursday eight days from now at two.', relativeQuote: null, words: bare }).ok).toBe(false);
+      // A relative phrase with no hour of its own still needs the hour.
+      expect(judged({ said: 'We will see you Thursday two weeks from now.', slot: '2026-10-08T14:00:00-04:00', words: bare, flags: relativeTrue }).ok).toBe(false);
+    });
+
+    // Call on Monday Sep 28: the nearest Thursday is Oct 1, and "three days from
+    // now" is also Oct 1. An exact closed-set offset that computes to the
+    // resolved date grounds even when that is the nearest weekday; only the
+    // inherently ambiguous forms ("next/this/following Thursday") need a
+    // non-nearest date.
+    test('an exact offset that computes to the resolved date grounds even on the nearest weekday', () => {
+      const MONDAY = '2026-09-28T19:00:00Z';
+      const OCT1 = '2026-10-01T14:00:00-04:00';
+      const run = ({ said, relativeQuote = said, slot = OCT1, moved = null }) => groundRescheduleAgreement({
+        callStartedAt: MONDAY,
+        transcript: `Caller: Can we move my visit?\nAgent: ${said}\nCaller: ${ACCEPT}`,
+        v2: v2({
+          scheduling: { confirmed_start_at: slot, agreed_slot_words: PM, relative_date_used: true, ...(moved ? moved.scheduling : {}) },
+          evidence: [
+            quote('/scheduling/agent_committed_booking', 'agent', said),
+            quote('/scheduling/confirmed_start_at', 'agent', said),
+            quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+            ...(relativeQuote ? [quote('/scheduling/relative_date_used', 'agent', relativeQuote)] : []),
+            ...(moved ? moved.evidence : []),
+          ],
+        }),
+      }).ok;
+      for (const said of [
+        'We will see you Thursday three days from now at two PM.',
+        'We will see you Thursday in 3 days at two PM.',
+        'We will see you Thursday three days from today at two PM.',
+      ]) expect([said, run({ said })]).toEqual([said, true]);
+      // A bound on the offset still rejects; a wrong count computes another date.
+      expect(run({ said: 'We will see you Thursday at least three days from now at two PM.' })).toBe(false);
+      expect(run({ said: 'We will see you Thursday within three days at two PM.' })).toBe(false);
+      expect(run({ said: 'We will see you Thursday about three days from now at two PM.' })).toBe(false);
+      // Ambiguous forms with no offset still need a non-nearest date.
+      for (const said of ['We will see you next Thursday at two PM.', 'We will see you this Thursday at two PM.', 'We will see you the following Thursday at two PM.']) {
+        expect([said, run({ said })]).toEqual([said, false]);
+      }
+      expect(run({ said: 'We will see you the following Thursday at two PM.', slot: '2026-10-08T14:00:00-04:00' })).toBe(true);
+      // The moved appointment: the same rule, with its own flag and pin.
+      const SAME = 'We will see you at two in the afternoon.';
+      const movedRun = (movedQuote) => groundRescheduleAgreement({
+        callStartedAt: MONDAY,
+        transcript: `Caller: Can you move ${movedQuote}?\nAgent: ${SAME}\nCaller: ${ACCEPT}`,
+        v2: v2({
+          scheduling: {
+            confirmed_start_at: OCT1, moved_appointment_date: '2026-10-01', moved_appointment_words: 'Thursday',
+            moved_appointment_relative_date_used: true, agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' },
+          },
+          evidence: [
+            quote('/scheduling/agent_committed_booking', 'agent', SAME),
+            quote('/scheduling/confirmed_start_at', 'agent', SAME),
+            quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+            quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+            quote('/scheduling/moved_appointment_relative_date_used', 'caller', movedQuote),
+          ],
+        }),
+      }).ok;
+      expect(movedRun('my Thursday three days from now appointment')).toBe(true);
+      expect(movedRun('my Thursday at least three days from now appointment')).toBe(false);
+      expect(movedRun('my next Thursday appointment')).toBe(false);
+    });
+
+    test('a relative moved-appointment flag with no resolved date is not grounded', () => {
+      const SAME = 'We will see you at two in the afternoon.';
+      const movedQuote = 'my Thursday a week from now appointment';
+      const run = (scheduling) => ground(v2({
+        scheduling: { agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' }, ...scheduling },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', SAME),
+          quote('/scheduling/confirmed_start_at', 'agent', SAME),
+          quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+          quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+          quote('/scheduling/moved_appointment_relative_date_used', 'caller', movedQuote),
+        ],
+      }), `Caller: Can you move ${movedQuote}?\nAgent: ${SAME}\nCaller: ${ACCEPT}`);
+      // Flag true but no resolved date (the planner would fall back to a lone
+      // same-service candidate): its own reason. Null flag or words still fail.
+      expect(run({ moved_appointment_relative_date_used: true, moved_appointment_date: null, moved_appointment_words: 'Thursday' }))
+        .toMatchObject({ ok: false, reason: 'moved_relative_without_date' });
+      expect(run({ moved_appointment_relative_date_used: true, moved_appointment_date: null, moved_appointment_words: null }))
+        .toMatchObject({ ok: false, reason: 'moved_relative_without_date' });
+      expect(run({ moved_appointment_relative_date_used: true, moved_appointment_date: '2026-10-01', moved_appointment_words: null }))
+        .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    });
+
+    test('a weekday-less relative moved appointment follows the same closed forms', () => {
+      const SAME = 'We will see you at two in the afternoon.';
+      const movedQuote = 'my appointment the day after tomorrow';
+      const movedCase = (date) => ground(v2({
+        scheduling: {
+          confirmed_start_at: `${date}T14:00:00-04:00`, moved_appointment_date: date, moved_appointment_words: 'the day after tomorrow',
+          moved_appointment_relative_date_used: true, agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' },
+        },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', SAME),
+          quote('/scheduling/confirmed_start_at', 'agent', SAME),
+          quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+          quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+          quote('/scheduling/moved_appointment_relative_date_used', 'caller', movedQuote),
+        ],
+      }), `Caller: Can you move ${movedQuote}?\nAgent: ${SAME}\nCaller: ${ACCEPT}`);
+      expect(movedCase('2026-09-25').ok).toBe(true);
+      expect(movedCase('2026-09-26').ok).toBe(false);
+    });
+
+    test('an extraction that dropped the qualifier disagrees with the code and fails closed', () => {
+      // Bare Thursday, not flagged relative, but the extraction resolved Oct 1:
+      // the nearest-Thursday rule disagrees -> manual (never a silent pick).
+      expect(judged({ said: 'We will see you Thursday eight days away at two PM.', slot: NEXT_THURSDAY_2PM, relativeQuote: null }))
+        .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+      // An unflagged relative phrase in the quote never grounds on main's own screen.
+      expect(judged({ said: 'We will see you Thursday next week at two PM.', relativeQuote: null }))
+        .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+      expect(judged({ said: 'We will see you the Thursday following this one at two PM.', relativeQuote: null }).ok).toBe(false);
+    });
+
+    test('the extraction must judge the promise definite, and judge the relative date either way', () => {
+      const said = 'We will see you Thursday at two PM.';
+      expect(judged({ said, relativeQuote: null }).ok).toBe(true);
+      // Codex r1-r3 promise shapes, correctly judged by the extraction.
+      for (const soft of [
+        'We can tentatively see you Thursday at two PM.',
+        'We will probably see you Thursday at two PM.',
+        'The payment is pending, and we could see you Thursday at two PM.',
+        'The payment is pending, and we will see you Thursday at two PM upon clearance.',
+        'We will see you Thursday at two PM once cleared.',
+        'We will see you Thursday at two PM after the rain.',
+        'We will see you Thursday at two PM, weather permitting.',
+      ]) {
+        expect([soft, judged({ said: soft, relativeQuote: null, flags: { definite_commitment: false } })])
+          .toEqual([soft, expect.objectContaining({ ok: false, reason: 'agent_commitment_not_definite' })]);
+      }
+      // Unjudged (older extraction, or the model left it out) is manual.
+      expect(judged({ said, relativeQuote: null, flags: { definite_commitment: null } })).toMatchObject({ ok: false, reason: 'agent_commitment_not_definite' });
+      expect(judged({ said, relativeQuote: null, flags: { definite_commitment: undefined } })).toMatchObject({ ok: false, reason: 'agent_commitment_not_definite' });
+      expect(judged({ said, relativeQuote: null, flags: { relative_date_used: null } })).toMatchObject({ ok: false, reason: 'relative_date_unjudged' });
+      expect(judged({ said, relativeQuote: null, flags: { relative_date_used: undefined } })).toMatchObject({ ok: false, reason: 'relative_date_unjudged' });
+      // Main's own condition screen still backs up a mistaken definite flag
+      // for "if"; "could" and "might" rest on the extraction alone.
+      expect(judged({ said: 'If the tech is free we will see you Thursday at two PM.', relativeQuote: null }).ok).toBe(false);
+    });
+
+    test('courtesy and ordinary acceptance ground on main\'s own rules', () => {
+      for (const said of [
+        'We will see you Thursday at two PM, thank you for your time.',
+        'We will see you Thursday at two PM. Enjoy the rest of your day.',
+        'I have you scheduled for Thursday at two PM.',
+        'We will see you Thursday at two PM, and a tech will call you.',
+      ]) expect([said, judged({ said, relativeQuote: null }).ok]).toEqual([said, true]);
+      for (const callerSays of ['Thursday at two PM works perfectly.', 'That fits my schedule.', 'Thursday at two PM is perfect, thank you.', 'Yes, that works for me.']) {
+        expect([callerSays, judged({ said: 'We will see you Thursday at two PM.', callerSays, relativeQuote: null }).ok]).toEqual([callerSays, true]);
+      }
+      // Main's coarse screen (a "week"/"next"/"following" word next to an
+      // UNflagged slot) is kept as a safety net, so unrelated timing in the
+      // slot's sentence still goes to the office: the known trade-off.
+      expect(judged({ said: 'Your plan renews a week from now, and we will see you Thursday at two PM.', relativeQuote: null }).ok).toBe(false);
+    });
+
+    test('the caller confirming a relative slot ("... and next week sounds perfect") follows the flags', () => {
+      const said = 'We will see you Thursday at two PM.';
+      const callerSays = 'Thursday at two PM and next week sounds perfect.';
+      // Unflagged: main's screen refuses the slot quote's "next week".
+      expect(ground(v2({
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', said),
+          quote('/scheduling/confirmed_start_at', 'caller', callerSays),
+          quote('/scheduling/caller_accepted_slot', 'caller', callerSays),
+        ],
+        scheduling: { agreed_slot_words: PM },
+      }), `Caller: ${callerSays}\nAgent: ${said}`).ok).toBe(false);
+      // Flagged and resolved to Oct 1: grounds through the extraction's date.
+      expect(ground(v2({
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', said),
+          quote('/scheduling/confirmed_start_at', 'caller', callerSays),
+          quote('/scheduling/caller_accepted_slot', 'caller', callerSays),
+          quote('/scheduling/relative_date_used', 'caller', callerSays),
+        ],
+        scheduling: { agreed_slot_words: PM, confirmed_start_at: NEXT_THURSDAY_2PM, relative_date_used: true },
+      }), `Caller: ${callerSays}\nAgent: ${said}`).ok).toBe(true);
+    });
+
+    test('a relative moved appointment follows its own flag and resolved date', () => {
+      const SAME = 'We will see you at two in the afternoon.';
+      const movedQuote = 'my Thursday a week from now appointment';
+      const movedCase = ({ date, words = 'Thursday', flag, pin = true }) => ground(v2({
+        scheduling: {
+          confirmed_start_at: '2026-10-01T14:00:00-04:00',
+          moved_appointment_date: date, moved_appointment_words: words, moved_appointment_relative_date_used: flag,
+          agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' },
+        },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', SAME),
+          quote('/scheduling/confirmed_start_at', 'agent', SAME),
+          quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+          quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+          ...(pin ? [quote('/scheduling/moved_appointment_relative_date_used', 'caller', movedQuote)] : []),
+        ],
+      }), `Caller: Can you move ${movedQuote}?\nAgent: ${SAME}\nCaller: ${ACCEPT}`);
+      expect(movedCase({ date: '2026-10-01', flag: true })).toEqual({ ok: true, reason: 'agreement_grounded', movedDate: '2026-10-01' });
+      // Dropped qualifier: resolved Oct 1 but unflagged, or flagged with the nearest date.
+      expect(movedCase({ date: '2026-10-01', flag: false })).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+      expect(movedCase({ date: '2026-09-24', flag: true })).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+      expect(movedCase({ date: '2026-10-01', flag: true, pin: false })).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+      expect(movedCase({ date: '2026-10-01', flag: null })).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    });
+
+    test('the period of an abbreviated month stays part of the date (Oct. 10 at 10)', () => {
+      expect(agreedAt('2026-10-10T10:00:00-04:00', 'We will move it to Oct. 10 at 10.', { day: 'Oct. 10', hour: '10', period: null }).ok).toBe(true);
+    });
   });
 });

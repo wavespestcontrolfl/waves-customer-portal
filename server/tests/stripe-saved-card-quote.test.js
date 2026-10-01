@@ -756,9 +756,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     const StripeService = require('../services/stripe');
     const chargeSpy = jest.spyOn(StripeService, 'charge').mockResolvedValue({ id: 'pay-1' });
     await StripeService.chargeOneTime('cust-1', 25, 'Flea add-on', 'key-1', { initiated_by: 'machine' });
-    expect(chargeSpy).toHaveBeenCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time', initiated_by: 'machine' }, 'key-1');
+    expect(chargeSpy).toHaveBeenCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time', initiated_by: 'machine' }, 'key-1', { operatorOverride: false });
     await StripeService.chargeOneTime('cust-1', 25, 'Flea add-on');
-    expect(chargeSpy).toHaveBeenLastCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time' }, null);
+    expect(chargeSpy).toHaveBeenLastCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time' }, null, { operatorOverride: false });
     chargeSpy.mockRestore();
   });
 });

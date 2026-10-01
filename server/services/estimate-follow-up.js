@@ -26,6 +26,7 @@ const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
+const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
@@ -132,20 +133,10 @@ async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {})
 }
 
 // estimate_data.noEngagementAutomation — the durable per-estimate opt-out
-// stamped by publish-without-delivery mints. Deliberately the SAME key the
-// engagement engine honors (estimateOptedOutOfEngagement there); duplicated
-// rather than imported because that module requires this one, and a require
-// cycle would hand one of them a partially initialized export.
-function estimateOptedOutOfFollowups(est) {
-  try {
-    const data = typeof est.estimate_data === 'string'
-      ? JSON.parse(est.estimate_data)
-      : est.estimate_data;
-    return data?.noEngagementAutomation === true;
-  } catch {
-    return false;
-  }
-}
+// stamped by publish-without-delivery mints. The ONE shared rule
+// (estimate-comms-eligibility.js) — a dependency-free leaf, so importing it
+// creates no cycle with the engagement engine (which requires this module).
+const { estimateOptedOutOfEngagement: estimateOptedOutOfFollowups } = require('./estimate-comms-eligibility');
 
 // Unified gate. Returns { skip: true, reason } if the send should be
 // blocked, else { skip: false }. Keeps the per-stage loops readable.
@@ -404,6 +395,25 @@ async function mintStageLinks(est, purpose, { query = null, emailOnly = false } 
 // `idempotencyKey` is stable per (stage, estimate) — duplicate cron ticks
 // hit the email_messages unique index instead of resending. The atomic
 // claimStage() flag is still primary; idempotency is belt-and-suspenders.
+// Property row on the estimate follow-up emails (GATE_BILLING_EMAIL_DETAILS,
+// owner-approved 2026-09-29). The payload already carried `property_address`;
+// the audit found 203 follow-ups where no template block showed it. The
+// templates now render the NEW `property_full_address` variable, filled only
+// here and only under the gate, so gate off the emails are byte-identical. The
+// estimate's own address text wins (it is the property the quote is FOR, which
+// can differ from the customer's primary); a value that does not read as a
+// street address ("Primary", "Rental 2", "Property #2") is a nickname, so it
+// falls through to the structured property / customer address.
+async function withFollowupPropertyRow(est, payload) {
+  if (!billingEmailDetailsLive()) return payload;
+  const own = String(est.address || "").trim();
+  let address = isStreetShapedAddress(own) ? own : "";
+  if (!address) {
+    address = await customerPropertyAddress(est.customer_id, est.property_id);
+  }
+  return address ? { ...payload, property_full_address: address } : payload;
+}
+
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   let smsHold = null;
@@ -524,7 +534,7 @@ async function sendDualChannel(est, { sms, email }) {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
         to: est.customer_email,
-        payload: email.payload || {},
+        payload: await withFollowupPropertyRow(est, email.payload || {}),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,

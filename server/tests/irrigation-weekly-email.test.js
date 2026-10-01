@@ -687,6 +687,10 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       expect(sql).not.toContain('waveguard_tier');
       expect(sql).not.toMatch(/"c"\."lawn_type" is not null/);
       expect(sql).not.toContain('"tp"."id" is not null');
+      // Owner opt-in tag (2026-09-28) is an OR alternative to the lawn
+      // evidence — ANDed, it would drop every lawn customer without the tag.
+      expect(sql).toMatch(/or exists \(select 1 from "customer_tags" as "ct" where ct\.customer_id = c\.id and LOWER\(ct\.tag\) = \?\)\)/);
+      expect(bindings).toContain('irrigation_email');
     } finally {
       db.raw = originalRaw;
     }

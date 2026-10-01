@@ -66,6 +66,90 @@ async function syncAppBadge(count, at) {
   } catch { /* badge sync must never surface to the bell */ }
 }
 
+// ops_digest legacy prefix (pre admin-alerts-brevity scope, 2026-09-28): a
+// row written before that scope still carries ACT:/FIX:/FIRST:/FYI:/OK:/
+// [Review] on its title. A new row never does — the same grammar rides in
+// metadata.kind instead (digestKindChip below), so this is display-only
+// cleanup for old rows, never something a new row needs stripped.
+const LEGACY_DIGEST_PREFIX = /^(ACT:|FIX:|FIRST:|FYI:|OK:|\[Review\])\s*/i;
+function displayTitle(n) {
+  return n && n.category === 'ops_digest' && n.title ? n.title.replace(LEGACY_DIGEST_PREFIX, '') : (n && n.title) || '';
+}
+
+function parsedMetadata(n) {
+  if (!n) return null;
+  if (n.metadata && typeof n.metadata === 'object') return n.metadata;
+  if (typeof n.metadata === 'string') {
+    try { return JSON.parse(n.metadata); } catch { return null; }
+  }
+  return null;
+}
+
+// Small chip for an ops_digest row's action grammar — 'Needs you' for
+// ACT/REVIEW, 'Broken' for FIX. No chip for FYI or a non-digest row (the
+// title carried the same grammar as a prefix before this scope; the chip
+// replaces that, so a legacy row with no metadata.kind gets no chip either
+// — it still reads fine once the prefix strip above runs).
+function digestKindChip(n) {
+  if (!n || n.category !== 'ops_digest') return null;
+  const kind = parsedMetadata(n)?.kind;
+  if (kind === 'ACT' || kind === 'REVIEW') return { label: 'Needs you' };
+  if (kind === 'FIX') return { label: 'Broken' };
+  return null;
+}
+
+// An ops_digest row whose link is the shared Activity feed gets `&focus=<id>`
+// appended on click, so AgentActivityTab can expand and scroll straight to
+// this row's item instead of landing on the top of a long feed.
+const ACTIVITY_FEED_LINK_RE = /^\/admin\/agents\?tab=activity\b/;
+function linkFor(n) {
+  const link = n && n.link;
+  if (!link) return link;
+  if (n.category === 'ops_digest' && ACTIVITY_FEED_LINK_RE.test(link)) {
+    return `${link}${link.includes('?') ? '&' : '?'}focus=${encodeURIComponent(n.id)}`;
+  }
+  return link;
+}
+
+// An ops_digest row's full report lives only in the Agents → Activity feed
+// (`detail`). When the row's own tap goes somewhere else — a mapped work page
+// like /admin/communications, or nowhere — a secondary "Full report" link
+// keeps it one tap away; `focus=` loads that row whatever its age or read
+// state (codex r3 P0 on #5236). Null when the row's tap already opens it.
+function reportLinkFor(n) {
+  if (!n || n.category !== 'ops_digest' || !n.id) return null;
+  if (n.link && ACTIVITY_FEED_LINK_RE.test(n.link)) return null;
+  return `/admin/agents?tab=activity&focus=${encodeURIComponent(n.id)}`;
+}
+
+// An admin row's body is cut to one sentence (notification-service's brevity
+// guard) and the full original text is stored in `detail`. Every admin row
+// but an ops_digest one (its full report is the Activity feed's "Full report"
+// link above) reads that text back inline from the bell.
+function fullTextFor(n, type) {
+  if (type !== 'admin' || !n || n.category === 'ops_digest') return null;
+  return typeof n.detail === 'string' && n.detail.trim() ? n.detail : null;
+}
+
+// "Show full text" / "Hide full text": its own click and key handling, never
+// the row's — the row still navigates to its link and marks itself read only
+// on its own tap. `pre-wrap` keeps a list body's line breaks.
+function FullText({ text, color, marginTop }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <button type="button" aria-expanded={shown} onClick={() => setShown((v) => !v)}
+        style={{
+          marginTop, padding: 0, border: 0, background: 'none', cursor: 'pointer',
+          fontSize: 14, fontWeight: 600, textDecoration: 'underline', color,
+        }}>{shown ? 'Hide full text' : 'Show full text'}</button>
+      {shown && (
+        <div style={{ marginTop: 4, fontSize: 14, lineHeight: 1.4, color, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</div>
+      )}
+    </div>
+  );
+}
+
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
@@ -349,6 +433,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     dialogFocusRef.current = node;
   };
 
+  // The row's "Full report" link: its own click, never the row's (the row
+  // would navigate to its mapped work page instead).
+  const openReport = async (e, n, report) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!n.read_at) await markRead(n.id);
+    setOpen(false);
+    window.location.href = report;
+  };
+
   const markRead = async (id) => {
     // Only reflect the read state the server actually accepted — a rejected
     // write (expired token the refresh couldn't save) must not clear badges.
@@ -575,24 +669,29 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Nothing new right now</div>
                 </div>
               )}
-              {!loading && !loadFailed && tab === 'account' && notifications.map(n => (
+              {!loading && !loadFailed && tab === 'account' && notifications.map(n => {
+                const href = linkFor(n);
+                const chip = digestKindChip(n);
+                const report = reportLinkFor(n);
+                const fullText = fullTextFor(n, type);
+                return (
                 <div key={n.id}
-                  role={n.link ? 'link' : undefined}
-                  tabIndex={n.link ? 0 : undefined}
-                  className={n.link ? 'waves-focus-ring' : undefined}
+                  role={href ? 'link' : undefined}
+                  tabIndex={href ? 0 : undefined}
+                  className={href ? 'waves-focus-ring' : undefined}
                   onClick={async () => {
                     if (!n.read_at) await markRead(n.id);
-                    if (n.link) { setOpen(false); window.location.href = n.link; }
+                    if (href) { setOpen(false); window.location.href = href; }
                   }}
-                  onKeyDown={n.link ? async (e) => {
+                  onKeyDown={href ? async (e) => {
                     if (e.key !== 'Enter' && e.key !== ' ') return;
                     e.preventDefault();
                     if (!n.read_at) await markRead(n.id);
                     setOpen(false);
-                    window.location.href = n.link;
+                    window.location.href = href;
                   } : undefined}
                   style={{
-                    padding: '14px 20px', cursor: n.link ? 'pointer' : 'default',
+                    padding: '14px 20px', cursor: href ? 'pointer' : 'default',
                     borderBottom: `1px solid ${isDark ? '#F4F4F5' : 'rgba(27,44,91,0.08)'}`,
                     display: 'flex', gap: 12, alignItems: 'flex-start',
                   }}
@@ -606,25 +705,54 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     )}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 15, fontWeight: 700, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, lineHeight: 1.3,
-                    }}>{n.title}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 15, fontWeight: 700, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, lineHeight: 1.3,
+                        minWidth: 0, flex: '0 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{displayTitle(n)}</div>
+                      {chip && (
+                        <span style={{
+                          fontSize: 14, fontWeight: 600,
+                          padding: '1px 6px', borderRadius: 4, flexShrink: 0,
+                          color: chip.label === 'Broken' ? '#C0392B' : '#0A7EC2',
+                          background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
+                        }}>{chip.label}</span>
+                      )}
+                    </div>
                     {n.body && (
                       <div style={{
                         fontSize: 14, color: isDark ? '#52525B' : CUSTOMER_SURFACE.body, marginTop: 4, lineHeight: 1.4,
+                        // Two lines for ops digests only — their full report is one
+                        // tap away (reportLinkFor); every other row, customer rows
+                        // included, keeps its whole body as before.
+                        ...(n.category === 'ops_digest'
+                          ? { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }
+                          : {}),
                       }}>{n.body}</div>
                     )}
+                    {report && (
+                      <button type="button"
+                        onClick={(e) => openReport(e, n, report)}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        style={{
+                          marginTop: 6, padding: 0, border: 0, background: 'none', cursor: 'pointer',
+                          fontSize: 14, fontWeight: 600, textDecoration: 'underline',
+                          color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
+                        }}>Full report</button>
+                    )}
+                    {fullText && <FullText text={fullText} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
                     <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted, marginTop: 6 }}>
                       {timeAgo(n.created_at)}
                     </div>
                   </div>
-                  {n.link && (
+                  {href && (
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={isDark ? '#18181B' : CUSTOMER_SURFACE.text} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
                       <path d="M7 17L17 7M17 7H8M17 7V16"/>
                     </svg>
                   )}
                 </div>
-              ))}
+                );
+              })}
               {tab === 'account' && moreControl}
               {settingsLink}
             </div>
@@ -707,24 +835,30 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     background: isDark ? '#0f172a' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
                     backdropFilter: isDark ? 'none' : 'blur(8px)', WebkitBackdropFilter: isDark ? 'none' : 'blur(8px)',
                   }}>{group}</div>
-                  {items.map(n => (
+                  {items.map(n => {
+                    const href = linkFor(n);
+                    const chip = digestKindChip(n);
+                    const report = reportLinkFor(n);
+                    const fullText = fullTextFor(n, type);
+                    const title = displayTitle(n);
+                    return (
                     <div key={n.id}
-                      role={n.link ? 'link' : undefined}
-                      tabIndex={n.link ? 0 : undefined}
-                      className={n.link ? 'waves-focus-ring' : undefined}
+                      role={href ? 'link' : undefined}
+                      tabIndex={href ? 0 : undefined}
+                      className={href ? 'waves-focus-ring' : undefined}
                       onClick={async () => {
                         if (!n.read_at) await markRead(n.id);
-                        if (n.link) { setOpen(false); window.location.href = n.link; }
+                        if (href) { setOpen(false); window.location.href = href; }
                       }}
-                      onKeyDown={n.link ? async (e) => {
+                      onKeyDown={href ? async (e) => {
                         if (e.key !== 'Enter' && e.key !== ' ') return;
                         e.preventDefault();
                         if (!n.read_at) await markRead(n.id);
                         setOpen(false);
-                        window.location.href = n.link;
+                        window.location.href = href;
                       } : undefined}
                       style={{
-                        padding: '12px 20px', cursor: n.link ? 'pointer' : 'default',
+                        padding: '12px 20px', cursor: href ? 'pointer' : 'default',
                         borderBottom: `1px solid ${colors.border}`,
                         background: n.read_at ? 'transparent' : colors.unreadBg,
                         display: 'flex', gap: 12, alignItems: 'flex-start',
@@ -733,10 +867,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     >
                       <span style={{ fontSize: 20, flexShrink: 0, marginTop: 2 }}>{n.icon || '\u{1F514}'}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div title={n.title} style={{
-                          fontSize: 15, fontWeight: n.read_at ? 400 : 700, color: colors.text,
-                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        }}>{n.title}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <div title={title} style={{
+                            fontSize: 15, fontWeight: n.read_at ? 400 : 700, color: colors.text,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            minWidth: 0, flex: '0 1 auto',
+                          }}>{title}</div>
+                          {chip && (
+                            <span style={{
+                              fontSize: 14, fontWeight: 600,
+                              padding: '1px 6px', borderRadius: 4, flexShrink: 0,
+                              color: chip.label === 'Broken' ? colors.badge : colors.teal,
+                              background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
+                            }}>{chip.label}</span>
+                          )}
+                        </div>
                         {n.body && (
                           <div title={n.body} style={{
                             fontSize: 14, color: colors.muted, marginTop: 2, lineHeight: 1.4,
@@ -744,6 +889,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
                           }}>{n.body}</div>
                         )}
+                        {report && (
+                          <button type="button"
+                            onClick={(e) => openReport(e, n, report)}
+                            onKeyDown={(e) => e.stopPropagation()}
+                            style={{
+                              marginTop: 4, padding: 0, border: 0, background: 'none', cursor: 'pointer',
+                              fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
+                            }}>Full report</button>
+                        )}
+                        {fullText && <FullText text={fullText} marginTop={4} color={colors.text} />}
                         <div style={{ fontSize: 11, color: colors.muted, marginTop: 4 }}>
                           {timeAgo(n.created_at)}
                         </div>
@@ -755,7 +910,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         }} />
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ))}
               {moreControl}
@@ -813,3 +969,7 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
     </div>
   );
 }
+
+// Pure helpers, exported for focused unit tests (avoids a full component
+// render just to pin the prefix strip / chip / focus-link logic).
+export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor };

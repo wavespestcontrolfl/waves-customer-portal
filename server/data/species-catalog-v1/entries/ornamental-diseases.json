@@ -83,8 +83,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f8f83562ea624a6a86396a0a9ef745cd5a31fe0c6ee1c58e8a17296d299d73ff"
     },
     "condition": {
       "hosts": [
@@ -209,8 +210,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Whether classic-looking spots are truly Plasmopara viburni versus a look-alike fungus is unresolved (UF/IFAS 2026 Florida nursery trials found several look-alike species and some seasons with no true downy mildew at all), which is moot for the customer now that confirmable_by is technician and copy no longer claims a photo settles it."
+      "status": "owner_approved",
+      "notes": "Whether classic-looking spots are truly Plasmopara viburni versus a look-alike fungus is unresolved (UF/IFAS 2026 Florida nursery trials found several look-alike species and some seasons with no true downy mildew at all), which is moot for the customer now that confirmable_by is technician and copy no longer claims a photo settles it.",
+      "approval_hash": "b1c1d6653c59d881322585333dec2b8407c68d468d69f4f87cdd3ea2b043d522"
     },
     "condition": {
       "hosts": [
@@ -328,8 +330,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e9955265a448ba48929496ca4561fdecfa351e06e8446cb0052e8622ee2ca505"
     },
     "condition": {
       "hosts": [
@@ -456,8 +459,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e9bb2a20e4da4b20233f36773b98ae695a642be1ec7fe39eea6934acc52c4264"
     },
     "condition": {
       "hosts": [
@@ -589,8 +593,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "The root-cortex-sloughing diagnostic description is the most detailed UF/IFAS source found but is written for citrus (HS261), a genus-level Phytophthora trait rather than a woody-ornamental-specific fact sheet; PP123 confirms overwatering as a general catalyst for Phytophthora/Fusarium root and crown disease on ornamentals but does not detail the sloughing symptom itself."
+      "status": "owner_approved",
+      "notes": "The root-cortex-sloughing diagnostic description is the most detailed UF/IFAS source found but is written for citrus (HS261), a genus-level Phytophthora trait rather than a woody-ornamental-specific fact sheet; PP123 confirms overwatering as a general catalyst for Phytophthora/Fusarium root and crown disease on ornamentals but does not detail the sloughing symptom itself.",
+      "approval_hash": "e6500ff795ff04ea49fb31f2de7fedb3ea290baea33a09e7c2ace4e13c24b142"
     },
     "condition": {
       "hosts": [
@@ -728,8 +733,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d43d99000cc7f2cbcfae01641d41a5110aeac4780585c1b851ea6950a4301c8b"
     },
     "condition": {
       "hosts": [
@@ -851,8 +857,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Reporting a suspected case through the county extension office is recommended, not a stated legal requirement for homeowners per FDACS's homeowner FAQ, which is why action routes to a specialist referral rather than a reporting mandate."
+      "status": "owner_approved",
+      "notes": "Reporting a suspected case through the county extension office is recommended, not a stated legal requirement for homeowners per FDACS's homeowner FAQ, which is why action routes to a specialist referral rather than a reporting mandate.",
+      "approval_hash": "a5a214748797aade5e63c12f98d7e275354d439239fb83169665469346799169"
     },
     "condition": {
       "hosts": [
@@ -979,8 +986,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Current establishment/severity of oleander leaf scorch specifically in Sarasota-Charlotte-Manatee-Lee-Collier is not separately confirmed; the UF/IFAS source describes the disease generally for Florida oleander, so range is set to occasional as an estimate."
+      "status": "owner_approved",
+      "notes": "Current establishment/severity of oleander leaf scorch specifically in Sarasota-Charlotte-Manatee-Lee-Collier is not separately confirmed; the UF/IFAS source describes the disease generally for Florida oleander, so range is set to occasional as an estimate.",
+      "approval_hash": "c4b9bd2f74c48af3b0bbc4b336cb40b604a76f4f0972b3688c79c3218787475e"
     },
     "condition": {
       "hosts": [
@@ -1012,6 +1020,392 @@
       ],
       "outcome": "no_cure",
       "recovery_note": "There is no recovery once scorch spreads through the canopy; pruning infected limbs well below the symptoms may slow spread on a newly affected plant."
+    }
+  },
+  {
+    "slug": "laurel-wilt",
+    "kind": "disease",
+    "common_name": "Laurel Wilt",
+    "aka": [],
+    "aliases": [
+      "laurel wilt",
+      "laurel wilt disease",
+      "raffaelea lauricola"
+    ],
+    "scientific_name": "Raffaelea lauricola",
+    "rank": "species",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Sudden wilting, with leaves turning brown but hanging on the branches",
+      "Toothpick-like frass or sawdust tubes pushing out of the bark",
+      "Dark streaks in the wood when a strip of bark is peeled back",
+      "Affects avocado, redbay and swampbay, and can kill a tree within weeks to a few months"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "extension_office"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A tree that wilts suddenly, with brown leaves that stay attached, can suggest laurel wilt, a fatal disease of avocado, redbay and swampbay. A photo cannot confirm it. This is a report-and-refer case for the county extension office or state plant regulators.",
+      "fact": "Laurel wilt is carried into trees by the redbay ambrosia beetle, and UF/IFAS lists no approved fungicide that prevents it or stops it in home landscape avocado."
+    },
+    "tech_notes": "Frass tubes on the trunk and dark streaks under the bark are the field clues; do not diagnose. Refer to the county extension office or FDACS Division of Plant Industry for reporting and confirmation, and note that shot-hole borers and ambrosia beetles are a look-alike for the frass.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/hs1358"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Timing corrected to the source: HS1358 says death can come three weeks to three months after infection, not the 4 to 8 weeks in the owner brief. Not modeled as regulated: HS1358 recommends reporting to DPI or extension but the catalog rule for regulated entries needs owner direction."
+    },
+    "verification": [],
+    "condition": {
+      "hosts": [
+        "trees"
+      ],
+      "signs": [
+        "Toothpick-like frass or sawdust tubes pushing out of the bark",
+        "Dark streaks in the wood under peeled bark"
+      ],
+      "symptoms": [
+        "Sudden wilting, with brown leaves that stay attached to the branches",
+        "A tree in the laurel family (avocado, redbay, swampbay) declining fast"
+      ],
+      "required_signature": {
+        "text": "A photo of sudden wilting with brown leaves that hang on can raise concern, but only lab confirmation identifies laurel wilt; report it and refer.",
+        "elements": [
+          "Sudden wilting, with brown leaves that stay attached to the branches"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "shot-hole-borers-ambrosia-beetles",
+          "difference": "Both leave frass on the trunk; laurel wilt adds sudden wilting of the whole tree, while borer damage often shows first as branch dieback.",
+          "next_observation": "A wide photo of the whole canopy and a close-up of the frass on the trunk.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once a tree is infected; infected avocado trees usually die within weeks to a few months."
+    }
+  },
+  {
+    "slug": "greasy-spot",
+    "kind": "disease",
+    "common_name": "Greasy Spot",
+    "aka": [
+      "Citrus Greasy Spot"
+    ],
+    "aliases": [
+      "greasy spot",
+      "citrus greasy spot",
+      "mycosphaerella citri",
+      "zasmidium citri"
+    ],
+    "scientific_name": "Mycosphaerella citri",
+    "rank": "species",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Yellow to dark brown, greasy-looking blotches, first on the underside of mature leaves",
+      "Matching yellow spots on the upper leaf surface",
+      "Heavy leaf drop in late winter to early spring on affected trees"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots",
+      "wilting-dieback"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      11,
+      12,
+      1
+    ],
+    "peak_months": [
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Yellow-brown, greasy-looking blotches and winter leaf drop on citrus can suggest greasy spot, but other citrus leaf problems look alike. A technician checks the pattern and timing; the spores are released in spring and summer, and symptoms follow months later.",
+      "fact": "Greasy spot has a long delay: spores land in spring and summer, but the spotting only shows up in fall and winter."
+    },
+    "tech_notes": "Spores are released April to July; symptoms show November to January, and leaves drop in late winter. Time the visit to the spring release window rather than to when the spots appear.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/hs263"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). active_months combine the spore-release months (April-July) with the symptom months (November-January); peak_months [5, 6, 7] follow the owner brief and sit in the spore-release window."
+    },
+    "verification": [],
+    "condition": {
+      "hosts": [
+        "citrus"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Yellow to dark brown, greasy-looking blotches, first on the underside of mature leaves",
+        "Matching yellow spots on the upper leaf surface",
+        "Leaf drop in late winter to early spring"
+      ],
+      "required_signature": {
+        "text": "A photo of greasy-looking blotches with yellow spots on the upper leaf can raise concern, but a technician distinguishes greasy spot from other citrus leaf problems.",
+        "elements": [
+          "Yellow to dark brown, greasy-looking blotches, first on the underside of mature leaves"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "melanose",
+          "difference": "Greasy spot is a greasy-looking blotch on leaves; melanose is sandpaper-rough brown specks on fruit and leaves.",
+          "next_observation": "A close-up of the leaf and of any fruit, checking for rough, sandpaper-like specks.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "citrus-rust-mite",
+          "difference": "Rust mites bronze the fruit rind; greasy spot marks the leaves with greasy blotches and drops them in winter.",
+          "next_observation": "A close-up of a leaf and of the fruit rind on the same tree.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "warm_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Trees usually keep growing after leaf drop, but timing matters; plan around the spring spore window rather than the winter symptoms."
+    }
+  },
+  {
+    "slug": "melanose",
+    "kind": "disease",
+    "common_name": "Melanose",
+    "aka": [
+      "Citrus Melanose"
+    ],
+    "aliases": [
+      "melanose",
+      "citrus melanose",
+      "diaporthe citri"
+    ],
+    "scientific_name": "Diaporthe citri",
+    "rank": "species",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Sandpaper-rough brown specks on fruit and leaves",
+      "Specks may form streaks or tear-drop patterns on fruit",
+      "Dead twigs and dead wood in the canopy nearby"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "peak_months": [
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Sandpaper-rough brown specks on citrus fruit and leaves can suggest melanose, which mostly affects how the fruit looks. A technician checks the pattern and the canopy, because dead wood is where the spores come from.",
+      "fact": "The melanose fungus grows on dead twigs in the tree, so the specks on fruit and leaves trace back to dead wood in the canopy, not to the fruit itself."
+    },
+    "tech_notes": "Dead twigs (roughly 1/8 to 1/4 inch) that died within recent months are the spore source; prune dead wood and dispose of brush piles promptly. Infection risk depends on fruit size and wet spring weather.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/cg019"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Source is the commercial citrus production guide (spring infection window around fruit set); months [3-7] and peak [4, 5, 6] follow the owner brief and match its April start of protection."
+    },
+    "verification": [
+      {
+        "claim": "Streak or tear-drop pattern on fruit",
+        "note": "Common melanose description not stated in the excerpted CG019 text; confirm at review."
+      }
+    ],
+    "condition": {
+      "hosts": [
+        "citrus"
+      ],
+      "signs": [
+        "Sandpaper-rough brown specks on fruit and leaves"
+      ],
+      "symptoms": [
+        "Dead twigs and dead wood in the canopy nearby"
+      ],
+      "required_signature": {
+        "text": "A photo of sandpaper-rough brown specks can raise concern, but a technician confirms melanose by the pattern and the dead wood in the canopy.",
+        "elements": [
+          "Sandpaper-rough brown specks on fruit and leaves"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "greasy-spot",
+          "difference": "Melanose is sandpaper-rough brown specks on fruit and leaves; greasy spot is a greasy-looking blotch on leaves with winter leaf drop.",
+          "next_observation": "A close-up of the leaf and of any fruit, checking for rough, sandpaper-like specks.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "citrus-rust-mite",
+          "difference": "Rust mite bronzes the fruit rind smoothly or with a sharkskin look; melanose leaves distinct sandpaper-rough brown specks.",
+          "next_observation": "A close-up of the rind, plus a photo of dead twigs in the canopy.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "warm_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "The specks on existing fruit do not fade, but removing dead wood lowers pressure on new growth over the following season."
     }
   }
 ]

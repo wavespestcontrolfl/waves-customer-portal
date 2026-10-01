@@ -1164,6 +1164,9 @@ function NextPhotoCard({ nextPhoto, onRetakePhoto }) {
       </div>
       {nextPhoto.ask && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{nextPhoto.ask}</div>}
       {nextPhoto.why && <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.45 }}>{nextPhoto.why}</div>}
+      {nextPhoto.safety_line && (
+        <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{nextPhoto.safety_line}</div>
+      )}
       {canConfirm && (
         <button type="button" data-glass-accent="" data-glass-size="primary" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
           minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
@@ -1201,6 +1204,9 @@ function CandidatesSection({ candidates, hasEntry }) {
               {c.local === 'common_here_now' && <Chip tone="ally">Common here now</Chip>}
               {c.local === 'uncommon_here' && <Chip>Uncommon here</Chip>}
             </div>
+            {c.safety_line && (
+              <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{c.safety_line}</div>
+            )}
             {c.difference_from_top && (
               <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.4 }}>{c.difference_from_top}</div>
             )}

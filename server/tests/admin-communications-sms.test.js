@@ -121,6 +121,10 @@ jest.mock('../services/sms-auto-send', () => ({
 // The inline review claim boundary: the route must verify + claim BEFORE the
 // provider call and abort on any validation miss (fail closed — the tokenized
 // review page carries customer data).
+jest.mock('../services/review-click-guard', () => ({
+  askSuppressedByClick: jest.fn(async () => false),
+  REVIEW_LINK_CLICKED_REASON: 'This customer already tapped their Google review link, so no further review request is sent.',
+}));
 jest.mock('../services/review-request', () => ({
   claimInlineForSend: jest.fn(async () => new Date('2026-08-31T03:00:00.000Z')),
   inlineClaimStillHeld: jest.fn(async () => true),
@@ -137,6 +141,7 @@ jest.mock('../services/review-ask-history', () => ({
   ...jest.requireActual('../services/review-ask-history'),
   lastDeliveredAskAt: jest.fn(async () => null),
   lastManualAskAt: jest.fn(async () => null),
+  lastUnresolvedAskAt: jest.fn(async () => null),
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_key, fn) => fn()),
@@ -1388,6 +1393,42 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('a tracked review click since the draft was added does NOT block a Quick Links send (owner: send anytime)', async () => {
+    const ClickGuard = require('../services/review-click-guard');
+    ClickGuard.askSuppressedByClick.mockResolvedValue(true);
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline',
+          token: 'tok-abc123', service_record_id: null, scheduled_service_id: null, created_at: new Date('2026-09-28T12:00:00Z'),
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            to: '+15551234567',
+            body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+            messageType: 'manual',
+            reviewRequestId: 'rr-1',
+          }),
+        });
+        expect(res.status).toBe(200);
+        expect(ClickGuard.askSuppressedByClick).not.toHaveBeenCalled();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      });
+    } finally { ClickGuard.askSuppressedByClick.mockReset().mockResolvedValue(false); }
+  });
+
   test('an email-only review preference set after the mint refuses the SMS send', async () => {
     const ReviewService = require('../services/review-request');
     ReviewService.reviewSmsAllowedNow.mockResolvedValueOnce({ allowed: false, reason: 'email_only' });
@@ -1610,7 +1651,7 @@ describe('admin communications SMS route', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toMatchObject({ reviewEmail: { sent: true } });
         expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
-        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1', { skipClickGuard: true });
         // Both stamps the owed email leg on the claim — the Quick Links
         // retry path's persisted evidence this ask asked for an email.
         expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: true });
@@ -1631,7 +1672,7 @@ describe('admin communications SMS route', () => {
         expect(res.status).toBe(500);
         expect((await res.json()).error).toMatch(/text was accepted; the review email was sent too/);
         expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
-        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1', { skipClickGuard: true });
         expect(ReviewService.releaseInlineClaim).not.toHaveBeenCalled();
       });
     });
@@ -2503,6 +2544,7 @@ describe('Communications review ask serialization', () => {
     mockGates.smsGratitudeReplies = false;
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
+    history.lastUnresolvedAskAt.mockReset().mockResolvedValue(null);
     locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
       if (held.has(key)) return { skipped: true, reason: 'lease_held' };
       held.add(key);
@@ -2658,21 +2700,16 @@ describe('Communications review ask serialization', () => {
     expect(reservation.metadata.manual_send_reservation).toBe(true);
   });
 
-  test('a claimed-link ask refused by the spacing check BEFORE provider entry hands its lock-held reservation back (pre-push codex P1 on #4331)', async () => {
-    // The claimed-link seam reserves sms_log evidence under the first lock
-    // hold; dispatchReviewAsk then refuses (another ask is inside the
-    // 72-hour window) without ever running sendAndSettle. Nothing settled
-    // the reservation — it must be released, or the customer is blocked for
-    // 72 hours by a row with no provider attempt behind it.
+  test('a claimed-link ask inside the 72-hour window is not refused: staff composer sends skip spacing and keep their reservation', async () => {
     const reservations = wireReservationLedger();
     history.lastManualAskAt.mockResolvedValue(new Date());
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
     await withServer(async baseUrl => {
-      const refused = await send(baseUrl, inline);
-      expect(refused.status).toBe(409);
-      expect((await refused.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect((await send(baseUrl, inline)).status).toBe(200);
     });
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(history.lastManualAskAt).not.toHaveBeenCalled();
+    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(true);
   });
 
   test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {
@@ -2886,6 +2923,7 @@ describe('Communications review ask serialization', () => {
     });
   });
 
+  // Pasted/typed review links (no reviewRequestId) keep main's behavior.
   test('a preceding cadence delivery blocks the bare staff ask', async () => {
     history.lastDeliveredAskAt.mockResolvedValue(new Date());
     await withServer(async baseUrl => {
@@ -2895,12 +2933,134 @@ describe('Communications review ask serialization', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
-  test('history failure releases the inline claim without sending', async () => {
+  test('a pasted link inside 72h is refused for a recent manual ask too, and never consults the unscheduled gate or unresolved lookup', async () => {
+    history.lastManualAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+    });
+    expect(reviews.checkUnscheduledAskGates).not.toHaveBeenCalled();
+    expect(history.lastUnresolvedAskAt).not.toHaveBeenCalled();
+  });
+  test('history failure on a pasted link holds the send with a 503', async () => {
     history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
     await withServer(async baseUrl => {
-      expect((await send(baseUrl, inline)).status).toBe(503);
+      const response = await send(baseUrl);
+      expect(response.status).toBe(503);
+      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('skipSpacing is passed to dispatchReviewAsk only for a claimed Quick Links link', async () => {
+    const dispatchModule = require('../services/review-ask-dispatch');
+    const spy = jest.spyOn(dispatchModule, 'dispatchReviewAsk');
+    try {
+      await withServer(async baseUrl => {
+        expect((await send(baseUrl)).status).toBe(200);
+        expect((await send(baseUrl, inline)).status).toBe(200);
+      });
+      expect(spy.mock.calls[0][2]).toMatchObject({ skipSpacing: false, excludeRequestId: null });
+      expect(spy.mock.calls[1][2]).toMatchObject({ skipSpacing: true, excludeRequestId: 'rr-1' });
+    } finally { spy.mockRestore(); }
+  });
+
+  // Quick Links (claimed reviewRequestId) links skip spacing.
+  test('a Quick Links link is never held by the 72-hour spacing, and reads no spacing history', async () => {
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
+    history.lastManualAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
+    expect(history.lastManualAskAt).not.toHaveBeenCalled();
+  });
+  test('a Quick Links link is held while an earlier send to the customer is unresolved, and its claim is released', async () => {
+    history.lastUnresolvedAskAt.mockResolvedValue(new Date());
+    const reservations = wireReservationLedger();
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.code).toBe('REVIEW_SEND_UNRESOLVED');
+      expect(body.error).toMatch(/still being confirmed/);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', true);
+    });
+    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
+  });
+  test('the unresolved lookup failing holds a Quick Links send with a 503', async () => {
+    history.lastUnresolvedAskAt.mockRejectedValue(new Error('history unavailable'));
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(503);
+      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('the Quick Links send seam runs the unscheduled-ask gate as the staff composer (cadence and cooldown skipped), once', async () => {
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(200);
+    });
+    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledTimes(1);
+    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledWith('cust-A', { staffComposer: true });
+  });
+  test.each([
+    ['already_queued', /already queued/],
+    ['in_flight', /being sent right now/],
+  ])('a Quick Links link is still refused by the duplicate-send gate (%s)', async (outcome, message) => {
+    reviews.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome });
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toMatch(message);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('a Quick Links link sends for a customer who already tapped a tracked link, without consulting the click guard', async () => {
+    const ClickGuard = require('../services/review-click-guard');
+    ClickGuard.askSuppressedByClick.mockResolvedValue(true);
+    try {
+      await withServer(async baseUrl => {
+        expect((await send(baseUrl, inline)).status).toBe(200);
+      });
+      expect(ClickGuard.askSuppressedByClick).not.toHaveBeenCalled();
+    } finally { ClickGuard.askSuppressedByClick.mockReset().mockResolvedValue(false); }
+  });
+  test.each([
+    ['review_off'], ['sms_off'], ['email_only'], ['already_reviewed'],
+  ])('a Quick Links link is still refused when the customer cannot receive review texts (%s)', async reason => {
+    reviews.reviewSmsAllowedNow.mockResolvedValue({ allowed: false, reason });
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(422);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('a pasted link keeps the 72-hour spacing even for a tapped customer and is never staff-composer gated', async () => {
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+    });
+    expect(reviews.checkUnscheduledAskGates).not.toHaveBeenCalled();
+  });
+  test('a non-review message never consults the unscheduled-ask gate', async () => {
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, { body: 'Your technician is on the way.' })).status).toBe(200);
+    });
+    expect(reviews.checkUnscheduledAskGates).not.toHaveBeenCalled();
+  });
+  test('a Quick Links send still refuses when another review send holds the customer lock', async () => {
+    held.add('review-send:cust-A');
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toMatch(/already being sent/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
   test('inline stamping and the owed email stay inside the lock', async () => {
@@ -3485,6 +3645,22 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
   });
 
+  test('follow-up #1: the promised timing edited into "within 60 minutes" refuses the send and supersedes, even inside the window', async () => {
+    jest.useFakeTimers(FAKE_TIMERS_OPTS);
+    jest.setSystemTime(new Date('2026-09-28T14:00:00.000Z')); // 10:00 ET — inside the window
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {
+        agentDraft: 'Sorry about that — someone will follow up within 60 minutes.',
+        body: 'Sorry about that — someone will follow up within 60 minutes.',
+      });
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).toHaveBeenCalledWith({ decisionId: 'dec-1' });
+  });
+
   test('the SAME stale wording on a draft that recorded NO escalation sends normally — "within the hour" is ordinary English (Codex r5)', async () => {
     jest.useFakeTimers(FAKE_TIMERS_OPTS);
     jest.setSystemTime(new Date('2026-09-28T01:30:00.000Z')); // 21:30 ET, outside the window
@@ -3497,6 +3673,32 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     });
     expect(sendCustomerMessage).toHaveBeenCalled();
     expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
+  });
+
+  // Codex round-41 P2 (PR #5334): the decision's live-ETA check also runs at the TRUE provider
+  // boundary for an Agent Review send — decision-linked sends only.
+  test('a decision-linked send carries the live-ETA providerPreSendCheck; a hand-typed one does not', async () => {
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow({ suggested_message: 'Thanks for reaching out! We appreciate you.', input_snapshot: JSON.stringify({}) }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { agentDraft: 'Thanks for reaching out! We appreciate you.', body: 'Thanks for reaching out! We appreciate you.' });
+      expect(res.status).toBe(200);
+    });
+    const linked = sendCustomerMessage.mock.calls.at(-1)[0];
+    expect(typeof linked.providerPreSendCheck).toBe('function');
+    await expect(linked.providerPreSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+
+    sendCustomerMessage.mockClear();
+    mockDb({ decision: null, claimUpdates: [] });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Hand typed.' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].providerPreSendCheck).toBeUndefined();
   });
 
   test('a body with no SLA phrase is unaffected regardless of the time', async () => {
@@ -3601,4 +3803,212 @@ test('a consultation link to an active applicant phone is refused before the rec
   } finally {
     isRecruitingPhone.mockResolvedValue(false);
   }
+});
+
+// Follow-up to codex #5018 r15 P2: the phone lock above only serialized
+// ORDERING against call-booking-link-text.js's own worker — it never
+// actually stopped a same-moment duplicate. Now that the lock is held, this
+// composer route re-runs that lane's own linkSentRecently read on the SAME
+// held connection — but only when this send itself carries a validated
+// consultation link (outreachLeadId) — scoped to a short race window, never
+// the lane's own 14-day dedupe window.
+describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
+  const LEAD_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
+  let bearerSpy;
+  let linkSentRecentlySpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    db.mockImplementation(() => makeUniversalBuilder());
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-race-guard' });
+    bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: LEAD_ID });
+    linkSentRecentlySpy = jest.spyOn(require('../services/call-booking-link-text'), 'linkSentRecently').mockResolvedValue(false);
+  });
+  afterEach(() => {
+    bearerSpy.mockRestore();
+    linkSentRecentlySpy.mockRestore();
+  });
+
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: portal.wavespestcontrol.com/l/cons1', leadId: LEAD_ID, ...overrides }),
+  });
+
+  test('a consultation-link send re-checks linkSentRecently on the held connection and dispatches when the window is clear (resend of an old link allowed)', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ withSmsHandoff: expect.any(Function) }));
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
+    const result = await withSmsHandoff(dispatch);
+    // codex #5196 P2: matchPhone scopes the manual-window check to this
+    // send's own destination (`to`), not just the lead.
+    expect(linkSentRecentlySpy).toHaveBeenCalledWith(trx, LEAD_ID, expect.any(Date), { windowMs: 10 * 60 * 1000, matchPhone: '+15551234567' });
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(result).toEqual({ sent: true, sawTrx: true });
+  });
+
+  test('an automated send landing just before this one refuses with 409, never dispatching', async () => {
+    linkSentRecentlySpy.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      await send(baseUrl);
+    });
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    const result = await withSmsHandoff(dispatch);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      ok: false,
+      code: 'LINK_SENT_RECENTLY_RACE',
+      reason: expect.stringMatching(/just texted/i),
+      retryable: false,
+    });
+  });
+
+  test('the route maps LINK_SENT_RECENTLY_RACE to a 409 with a clear message', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, code: 'LINK_SENT_RECENTLY_RACE',
+      reason: 'A booking link was just texted to this number a moment ago',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toMatch(/just texted/i);
+    });
+  });
+
+  test('no consultation link in the body: linkSentRecently is never consulted', async () => {
+    bearerSpy.mockResolvedValue({ ok: true }); // no consultationLeadId
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'Running a bit late today.' });
+      expect(res.status).toBe(200);
+    });
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
+    const result = await withSmsHandoff(dispatch);
+    expect(linkSentRecentlySpy).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(result).toEqual({ sent: true, sawTrx: true });
+  });
+});
+
+// codex #5196 P1: the durable consultation_link_send_attempts marker —
+// written at twilio.js's REAL attempt boundary (onDispatchStart) and
+// cleared on an abort or a definite post-send failure — only for a send
+// that carries a validated consultation link (outreachLeadId, the SAME
+// condition that runs the manual-race guard above).
+describe('the consultation-link attempt marker (codex #5196 P1)', () => {
+  const LEAD_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
+  let bearerSpy;
+  let insertAttemptSpy;
+  let deleteAttemptSpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    db.mockImplementation(() => makeUniversalBuilder());
+    bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: LEAD_ID });
+    insertAttemptSpy = jest.spyOn(require('../services/call-booking-link-text'), 'insertConsultationLinkAttempt').mockResolvedValue('attempt-99');
+    deleteAttemptSpy = jest.spyOn(require('../services/call-booking-link-text'), 'deleteConsultationLinkAttempt').mockResolvedValue();
+  });
+  afterEach(() => {
+    bearerSpy.mockRestore();
+    insertAttemptSpy.mockRestore();
+    deleteAttemptSpy.mockRestore();
+  });
+
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: portal.wavespestcontrol.com/l/cons1', leadId: LEAD_ID, ...overrides }),
+  });
+
+  test('a consultation send passes onDispatchStart/onDispatchAbort/onDispatchRejected that write and clear the shared attempt row', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-attempt' });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    const { onDispatchStart, onDispatchAbort, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
+    expect(typeof onDispatchStart).toBe('function');
+    expect(typeof onDispatchAbort).toBe('function');
+    expect(typeof onDispatchRejected).toBe('function');
+    await onDispatchStart();
+    expect(insertAttemptSpy).toHaveBeenCalledWith({ leadId: LEAD_ID, toPhone: '+15551234567', source: 'admin_communications_manual_sms' });
+    await onDispatchAbort();
+    expect(deleteAttemptSpy).toHaveBeenCalledWith('attempt-99');
+  });
+
+  // codex #5196 r4 P2: onDispatchRejected deletes the SAME id — it fires
+  // from inside twilio.js's own dispatch() instead of onDispatchAbort when
+  // messages.create() itself throws a definitive rejection.
+  test('onDispatchRejected deletes the attempt row twilio.js\'s own dispatch() wrote', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-attempt' });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    const { onDispatchStart, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
+    await onDispatchStart();
+    expect(deleteAttemptSpy).not.toHaveBeenCalled();
+    await onDispatchRejected();
+    expect(deleteAttemptSpy).toHaveBeenCalledWith('attempt-99');
+  });
+
+  // Mirrors production ordering: twilio.js invokes onDispatchStart BEFORE
+  // sendCustomerMessage resolves, so the mock does the same here — proving
+  // the ROUTE's own post-send cleanup (not just the hook's own definition)
+  // fires for a definite failure.
+  test('a definite send failure (never real, never ambiguous) deletes the attempt row', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: false, blocked: true, code: 'SOME_DEFINITE_FAILURE' };
+    });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    expect(insertAttemptSpy).toHaveBeenCalled();
+    expect(deleteAttemptSpy).toHaveBeenCalledWith('attempt-99');
+  });
+
+  test('a real provider send keeps the attempt row (no cleanup call)', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+    });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    expect(insertAttemptSpy).toHaveBeenCalled();
+    expect(deleteAttemptSpy).not.toHaveBeenCalled();
+  });
+
+  test('an ambiguous provider outcome keeps the attempt row (no cleanup call)', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: false, retryable: true, deliveryOutcome: 'uncertain' };
+    });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    expect(insertAttemptSpy).toHaveBeenCalled();
+    expect(deleteAttemptSpy).not.toHaveBeenCalled();
+  });
+
+  test('a plain reply with no consultation link never touches the attempt marker', async () => {
+    bearerSpy.mockResolvedValue({ ok: true }); // no consultationLeadId
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-plain' });
+    await withServer(async (baseUrl) => {
+      await send(baseUrl, { body: 'Running a bit late today.' });
+    });
+    const { onDispatchStart, onDispatchAbort, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
+    expect(onDispatchStart).toBeUndefined();
+    expect(onDispatchAbort).toBeUndefined();
+    expect(onDispatchRejected).toBeUndefined();
+    expect(insertAttemptSpy).not.toHaveBeenCalled();
+  });
 });

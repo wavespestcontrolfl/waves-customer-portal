@@ -127,7 +127,7 @@ lawn/plant build's 119 not-yet-built plant/condition slugs between L1 and
 L1b (see "Cross-worker slugs" below); L1b built every one of them, so
 `planned_slugs` is empty again.
 
-## L1b: the lawn/plant content landed (119 draft entries)
+## L1b: the lawn/plant content landed (119 entries, owner-approved 2026-09-28)
 
 `entries/{turfgrasses,broadleaf-weeds,grassy-weeds,sedges,palms,shrubs-trees,
 nematodes,turf-diseases,ornamental-diseases,palm-diseases,nutrient-disorders,
@@ -137,13 +137,14 @@ in `~/photo-id-lawn-plant-build-20260927/` (72 plant-section: 6 turfgrass +
 organism/sting-nematode). Total catalog: 358 (239 pest + 72 plant + 47
 condition), `catalog_version: "2026-09-28.1"`.
 
-**Every one of the 119 is `review.status: "draft"`.** None is nameable by any
-engine: the pest engine's `resolveCandidate` already refuses any node outside
-`section: 'pest'` (PR #5143), and this content has no engine, route, or gate
-of its own yet — those are separate, later PRs (L3 engine, L4 route/go-live,
-both dark by construction). The owner's review pass on this content — via the
-review-page pattern the pest catalog used — comes before any of them can be
-approved.
+**All 119 are owner-approved (owner, 2026-09-28: "approve all 119").** Each
+carries `review.status: "owner_approved"` and an `approval_hash` over its
+current content, set in one approvals PR after a safety pass on every
+customer instruction (gloves for breaking stems with irritant sap, a
+technician rather than a ladder for a palm's spear leaf, zoom rather than
+approach for the spiny date palms). The pest engine still refuses any node
+outside `section: 'pest'` (PR #5143); the plant engine (L3, #5186) names this
+content, but nothing calls it until the L4 route PR, which is the go-live.
 
 ### The `plant` object (required exactly for `turfgrass`/`weed`/`host_plant`)
 
@@ -205,8 +206,8 @@ confirmation, never a photo.
 ### Shared-schema deltas for this content
 
 `service.key` is `null` for every one of the 119 entries — owner decision 4
-(auto-pricing lawn/plant conditions) is still pending, so nothing here
-prices anything automatically. Disorders (abiotic conditions) carry
+(2026-09-27) routes turf conditions to Lawn Care but auto-prices nothing, so
+nothing here prices anything automatically. Disorders (abiotic conditions) carry
 `scientific_name: null` and `rank: "condition"`; every other plant/condition
 kind carries a real taxon like every pest entry. `size` is omitted (plants
 and conditions carry no size; organisms, including sting-nematode, still do).
@@ -256,8 +257,8 @@ copy rule 9).
 - `entries/<group>.json` — one JSON array per **group** (not per subgroup),
   e.g. `entries/ants.json` holds every ant entry regardless of which ant
   subgroup it's in. The catalog ships 358 entries: 239 pest (the original
-  build brief) + 119 lawn/plant draft entries (L1b — 72 plant + 47
-  condition). The loader merges every file in the directory, so **adding a
+  build brief) + 119 lawn/plant entries (L1b — 72 plant + 47
+  condition), all owner-approved. The loader merges every file in the directory, so **adding a
   species never requires touching the loader**.
 
 ## How to add a species
@@ -297,9 +298,9 @@ brief; the jest suite enforces them)
 | `legacy_slugs`, `sources`, `review` | `owner_approved` reviews carry a SHA-256 `approval_hash`; see below |
 
 All 239 pest catalog entries are owner-approved (`house-centipede` was the
-last, on 2026-09-28 after its range fact-check closed). The 119 lawn/plant
-entries L1b added (see "L1b" above) are all still `review.status: "draft"`,
-pending the owner's own review pass on that content. Runtime
+last, on 2026-09-28 after its range fact-check closed), and so are the 119
+lawn/plant entries L1b added (owner, 2026-09-28; see "L1b" above) — 358 of
+358. Runtime
 naming requires all three conditions: `review.status` is `owner_approved`, the
 `verification` list is empty, and `review.approval_hash` matches the stable
 hash of every authored entry field. `review` metadata and the loader-injected

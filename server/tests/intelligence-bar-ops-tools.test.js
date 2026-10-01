@@ -253,3 +253,276 @@ describe('intelligence bar Railway ops tools', () => {
     expect(JSON.stringify(body)).not.toContain('foreign-deploy-999');
   });
 });
+
+// Outside-write tools (IB scope expansion item 1, owner ruling 2026-09-28):
+// full-access gating lives in the ROUTE (getToolsForContext,
+// intelligence-bar-full-access-tool-offering.test.js), not here — these
+// tests cover the module contract: missing-token refusal, a human-readable
+// preview naming the real service and its current status, and the commit
+// path's refusal.
+describe('intelligence bar Railway write tools (preview only)', () => {
+  const ENVIRONMENT_FIXTURE = gqlResponse({
+    environment: {
+      id: 'env-1',
+      name: 'production',
+      serviceInstances: {
+        edges: [{ node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: 'd1', status: 'SUCCESS', createdAt: '2026-07-11T10:00:00Z' } } }],
+      },
+    },
+  });
+
+  test('unconfigured state is benign for both write tools, no network call', async () => {
+    for (const name of ['redeploy_railway_service', 'restart_railway_service']) {
+      const result = await executeOpsTool(name, { service_name: 'portal' });
+      expect(result.error).toBeUndefined();
+      expect(result.configured).toBe(false);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('redeploy_railway_service: unconfirmed names the real service by its pinned id and current deploy status', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    // The pinned canonical identity (id + exact name), not just the name —
+    // latest_deployment_id (codex r3 P1 on #5275) is what actually binds the
+    // fingerprint to WHICH deployment, since deployed_at is volatile.
+    expect(result.service).toEqual({
+      id: 's1', service: 'portal', latest_deployment_id: 'd1',
+      latest_deployment_status: 'SUCCESS', deployed_at: '2026-07-11T10:00:00Z',
+    });
+    expect(result.note).toContain('portal');
+    expect(result.note).toMatch(/Redeploy/);
+  });
+
+  // Codex r3 P1 on #5275: deployed_at is volatile (stripped by the
+  // fingerprint's `_at`-suffix rule), so a NEW deploy landing between preview
+  // and confirm — with the SAME status text (e.g. another SUCCESS) — must
+  // still be caught as drift. Only latest_deployment_id makes that possible.
+  test('redeploy_railway_service: the preview fingerprint changes when the deployment id changes, even with identical status text', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    const env = (depId, createdAt) => gqlResponse({
+      environment: {
+        id: 'env-1',
+        name: 'production',
+        serviceInstances: { edges: [{ node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: depId, status: 'SUCCESS', createdAt } } }] },
+      },
+    });
+    global.fetch.mockResolvedValueOnce(env('d1', '2026-07-11T10:00:00Z'));
+    const before = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    // A brand-new successful deploy — identical status text, only the id
+    // (and the volatile timestamp) differ.
+    global.fetch.mockResolvedValueOnce(env('d2', '2026-07-12T10:00:00Z'));
+    const after = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(previewFingerprint(after)).not.toBe(previewFingerprint(before));
+
+    // A re-fetch of the SAME deployment still fingerprints identically.
+    global.fetch.mockResolvedValueOnce(env('d1', '2026-07-11T10:00:00Z'));
+    const again = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(previewFingerprint(again)).toBe(previewFingerprint(before));
+  });
+
+  test('redeploy_railway_service: a substring is never enough — it never picks a service that merely contains the input', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(gqlResponse({
+      environment: {
+        id: 'env-1',
+        name: 'production',
+        serviceInstances: {
+          edges: [
+            { node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: 'd1', status: 'SUCCESS', createdAt: '2026-07-11T10:00:00Z' } } },
+            { node: { serviceId: 's2', serviceName: 'portal-worker', latestDeployment: { id: 'd2', status: 'SUCCESS', createdAt: '2026-07-11T09:00:00Z' } } },
+          ],
+        },
+      },
+    }));
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    // Exact match on 'portal' exists (the other row only CONTAINS it), so
+    // this still resolves — proves the substring row is never conflated in.
+    expect(result.error).toBeUndefined();
+    expect(result.service.id).toBe('s1');
+  });
+
+  test('redeploy_railway_service: wildcard characters in the input are literal, never widen the match', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'port%' });
+    expect(result.error).toMatch(/No Railway service found exactly named "port%"/);
+  });
+
+  test('redeploy_railway_service: several services exactly named the same thing is a refusal, never an arbitrary pick', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(gqlResponse({
+      environment: {
+        id: 'env-1',
+        name: 'production',
+        serviceInstances: {
+          edges: [
+            { node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: 'd1', status: 'SUCCESS', createdAt: '2026-07-11T10:00:00Z' } } },
+            { node: { serviceId: 's2', serviceName: 'Portal', latestDeployment: { id: 'd2', status: 'SUCCESS', createdAt: '2026-07-11T09:00:00Z' } } },
+          ],
+        },
+      },
+    }));
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(result.error).toMatch(/Multiple Railway services are exactly named/);
+  });
+
+  test('restart_railway_service: unconfirmed names the real service too', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('restart_railway_service', { service_name: 'portal' });
+    expect(result.error).toBeUndefined();
+    expect(result.note).toMatch(/Restart/);
+    expect(result.note).toContain('no new deploy');
+  });
+
+  test('an unknown service name returns an error result, no confirm', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'nonexistent' });
+    expect(result.error).toMatch(/No Railway service found exactly named/);
+  });
+});
+
+describe('intelligence bar Railway write tools (confirmed commit)', () => {
+  const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+
+  const envFixture = (deploymentId = 'd1') => gqlResponse({
+    environment: {
+      id: 'env-1',
+      name: 'production',
+      serviceInstances: {
+        edges: [{ node: { serviceId: 's1', serviceName: 'portal', latestDeployment: deploymentId ? { id: deploymentId, status: 'SUCCESS', createdAt: '2026-07-11T10:00:00Z' } : null } }],
+      },
+    },
+  });
+
+  function railwayEnv() {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+  }
+
+  async function previewPins(name) {
+    railwayEnv();
+    global.fetch.mockResolvedValueOnce(envFixture('d1'));
+    const preview = await executeOpsTool(name, { service_name: 'portal' });
+    global.fetch.mockClear();
+    return outsideWritePins(name, preview);
+  }
+
+  test('redeploy_railway_service: confirm runs serviceInstanceRedeploy for the PINNED service + the env id, after re-asserting the deployment', async () => {
+    const pins = await previewPins('redeploy_railway_service');
+    expect(pins).toEqual({ _verified_railway_service_id: 's1', _verified_railway_deployment_id: 'd1' });
+    global.fetch
+      .mockResolvedValueOnce(envFixture('d1'))
+      .mockResolvedValueOnce(gqlResponse({ serviceInstanceRedeploy: true }));
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'something-else', ...pins, confirmed: true });
+    expect(result).toEqual({ success: true, tool: 'redeploy_railway_service', service_id: 's1', redeployed_from_deployment_id: 'd1' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const mutation = JSON.parse(global.fetch.mock.calls[1][1].body);
+    expect(mutation.query).toContain('serviceInstanceRedeploy');
+    expect(mutation.variables).toEqual({ serviceId: 's1', environmentId: 'env-1' });
+  });
+
+  test('restart_railway_service: confirm runs deploymentRestart on the PINNED deployment id', async () => {
+    const pins = await previewPins('restart_railway_service');
+    global.fetch
+      .mockResolvedValueOnce(envFixture('d1'))
+      .mockResolvedValueOnce(gqlResponse({ deploymentRestart: true }));
+
+    const result = await executeOpsTool('restart_railway_service', { service_name: 'portal', ...pins, confirmed: true });
+    expect(result).toEqual({ success: true, tool: 'restart_railway_service', service_id: 's1', restarted_deployment_id: 'd1' });
+    const mutation = JSON.parse(global.fetch.mock.calls[1][1].body);
+    expect(mutation.query).toContain('deploymentRestart');
+    expect(mutation.variables).toEqual({ id: 'd1' });
+  });
+
+  test.each(['redeploy_railway_service', 'restart_railway_service'])(
+    '%s: a deploy that landed after the card was shown is refused as target-changed, no mutation sent',
+    async (name) => {
+      const pins = await previewPins(name);
+      global.fetch.mockResolvedValueOnce(envFixture('d2-newer'));
+
+      const result = await executeOpsTool(name, { service_name: 'portal', ...pins, confirmed: true });
+      expect(result.code).toBe('target_changed');
+      expect(result.preview_changed).toBe(true);
+      expect(global.fetch).toHaveBeenCalledTimes(1); // the re-read only
+    },
+  );
+
+  test('a pinned service that vanished from the environment is refused as target-changed', async () => {
+    const pins = await previewPins('redeploy_railway_service');
+    global.fetch.mockResolvedValueOnce(gqlResponse({ environment: { id: 'env-1', name: 'production', serviceInstances: { edges: [] } } }));
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal', ...pins, confirmed: true });
+    expect(result.code).toBe('target_changed');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('restart on a service with no deployment refuses instead of guessing', async () => {
+    railwayEnv();
+    global.fetch.mockResolvedValueOnce(envFixture(null));
+    const result = await executeOpsTool('restart_railway_service', {
+      service_name: 'portal', _verified_railway_service_id: 's1', _verified_railway_deployment_id: null, confirmed: true,
+    });
+    expect(result.code).toBe('no_deployment');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['redeploy_railway_service', 'restart_railway_service'])(
+    '%s: confirmed without a verified pin refuses and never calls Railway',
+    async (name) => {
+      railwayEnv();
+      const result = await executeOpsTool(name, { service_name: 'portal', confirmed: true });
+      expect(result.code).toBe('missing_verified_pin');
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ['HTTP 403', { ok: false, status: 403, json: async () => ({}) }],
+    ['HTTP 401', { ok: false, status: 401, json: async () => ({}) }],
+    ['a GraphQL "Not Authorized" error', { ok: true, status: 200, json: async () => ({ errors: [{ message: 'Not Authorized' }] }) }],
+  ])('a read-only token (%s) on the mutation returns a clear write-access result and reports no success', async (_label, denied) => {
+    const pins = await previewPins('redeploy_railway_service');
+    global.fetch.mockResolvedValueOnce(envFixture('d1')).mockResolvedValueOnce(denied);
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal', ...pins, confirmed: true });
+    expect(result.code).toBe('write_access_required');
+    expect(result.error).toMatch(/cannot deploy or restart.*write access/i);
+    expect(result.success).toBeUndefined();
+  });
+
+  test('a non-permission GraphQL failure on the mutation stays a plain error', async () => {
+    const pins = await previewPins('restart_railway_service');
+    global.fetch.mockResolvedValueOnce(envFixture('d1'))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ errors: [{ message: 'Deployment is not restartable' }] }) });
+    const result = await executeOpsTool('restart_railway_service', { service_name: 'portal', ...pins, confirmed: true });
+    expect(result.error).toMatch(/not restartable/);
+    expect(result.code).toBeUndefined();
+  });
+});

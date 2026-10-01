@@ -121,6 +121,18 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
   });
+
+  it('the watering banner renders once, directly under the visit status card', async () => {
+    const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+    const { container } = renderReport({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, banner } });
+    await screen.findByText('Stable — watching thin areas');
+    expect(screen.getAllByTestId('lawn-watering-banner')).toHaveLength(1);
+    const status = container.querySelector('#service-status');
+    const card = screen.getByTestId('lawn-watering-banner').closest('[data-glass="card"]');
+    expect(status.nextElementSibling).toBe(card);
+    // Same 16px rhythm as the report sections, never flush against the status card.
+    expect(card.style.marginTop).toBe('16px');
+  });
 });
 
 describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {
@@ -723,6 +735,54 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(note.textContent).toMatch(/FDACS ID card #JE000001/);
   });
 
+  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28): the server omits
+  // `product.report_copy` entirely when the gate is off or the product has
+  // no approved wording — the client renders purely off that key's presence,
+  // so these two payloads stand in for gate-off and gate-on.
+  it('renders "How it works" / "On the label" / "Pets & kids" when the server includes report_copy', async () => {
+    const withCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    withCopy.applications[0].product.name = 'Taurus SC';
+    withCopy.applications[0].product.report_copy = {
+      how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
+      // Owner ruling 2026-09-29: a rounded count + city sentence, not a
+      // named pest list.
+      also_labeled_for: 'Labeled for 25+ Bradenton pests',
+      pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+    };
+    const { container } = renderReport(withCopy);
+    await screen.findByText('Visit Summary');
+    const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(card).getByText('How it works')).toBeInTheDocument();
+    expect(within(card).getByText(/walk right through the treated band/)).toBeInTheDocument();
+    expect(within(card).getByText('On the label')).toBeInTheDocument();
+    expect(within(card).getByText('Labeled for 25+ Bradenton pests')).toBeInTheDocument();
+    expect(within(card).getByText('Pets & kids')).toBeInTheDocument();
+    expect(within(card).getByText(/Keep people and pets off treated areas/)).toBeInTheDocument();
+  });
+
+  it('never renders "On the label" when report_copy carries no also_labeled_for key (narrow products / the LESCO ruling), and renders nothing when report_copy is absent', async () => {
+    const lescoCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    lescoCopy.applications[0].product.name = 'LESCO 90/10 Nonionic Surfactant';
+    lescoCopy.applications[0].product.report_copy = {
+      how_it_works: 'A spreader added to the spray so it covers evenly and sticks to surfaces.',
+      pets_kids: 'Follows the spray it’s mixed into.',
+    };
+    const { container } = renderReport(lescoCopy);
+    await screen.findByText('Visit Summary');
+    const lescoCard = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'LESCO 90/10 Nonionic Surfactant' }).closest('.applied-product-card');
+    expect(within(lescoCard).getByText('How it works')).toBeInTheDocument();
+    expect(within(lescoCard).queryByText('On the label')).toBeNull();
+    expect(within(lescoCard).getByText('Pets & kids')).toBeInTheDocument();
+
+    // Base fixture (no report_copy on any application) — gate-off shape.
+    const { container: plainContainer } = renderReport(legacyLawnReport);
+    await screen.findByText('Visit Summary');
+    const plainProducts = plainContainer.querySelector('#products-applied');
+    expect(within(plainProducts).queryByText('How it works')).toBeNull();
+    expect(within(plainProducts).queryByText('On the label')).toBeNull();
+    expect(within(plainProducts).queryByText('Pets & kids')).toBeNull();
+  });
+
   it('a bait-station check or an unknown verdict gets Poison Control but names no applicator', async () => {
     const rodentBait = { id: 'rb-2', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
     for (const payload of [
@@ -1256,9 +1316,13 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     payload.planSummary = { year: 2026, visitsThisYear: 4, reservicesThisYear: 1 };
     const { container } = renderReport(payload);
 
-    await screen.findByText('Your plan');
+    // A real <h2>: the glass theme hides every .section-eyebrow outside the
+    // hero, so the title must not ride one (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Your plan', level: 2 });
     const section = container.querySelector('#your-plan');
     expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
     expect(within(section).getByText('This year: 4 visits, including 1 re-service')).toBeInTheDocument();
     expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
   });
@@ -1306,6 +1370,48 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
   });
 });
 
+// "Near you" line (owner ask 2026-09-28, lawn only): a fixed sentence naming
+// the lawn pest found most often around the customer's city, live mode only.
+describe('ReportViewPage — "Near you" line (nearYou)', () => {
+  it('live mode with nearYou renders the fixed sentence', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+    const { container } = renderReport(payload);
+
+    // A real <h2>, never a glass-hidden .section-eyebrow (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Near you', level: 2 });
+    const section = container.querySelector('#near-you');
+    expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
+    expect(within(section).getByText('Around Parrish this past month, chinch bugs were the lawn pest we found most often.')).toBeInTheDocument();
+  });
+
+  it('renders nothing when the payload carries no nearYou', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    delete payload.nearYou;
+    const { container } = renderReport(payload);
+
+    await screen.findByText(payload.customerName, { exact: false });
+    expect(container.querySelector('#near-you')).toBeNull();
+  });
+
+  it('stays hidden in pdf mode even when the payload carries nearYou (the server already strips it)', async () => {
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', '/report/test-legacy-lawn?mode=pdf');
+    try {
+      const payload = structuredClone(legacyLawnReport);
+      payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+      const { container } = renderReport(payload);
+
+      await screen.findByText(payload.customerName, { exact: false });
+      expect(container.querySelector('#near-you')).toBeNull();
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
+  });
+});
+
 // Ask Waves (codex P2 on #5167): a staff browser sends its portal JWT on the
 // /ask request, as on the /data read, so the server can leave staff QA
 // questions out of customer engagement; a customer's browser sends none.
@@ -1333,5 +1439,52 @@ describe('ReportViewPage — Ask Waves request carries the staff JWT only for st
   it('a customer browser sends no Authorization header', async () => {
     const headers = await askAndReadHeaders();
     expect(headers).not.toHaveProperty('Authorization');
+  });
+});
+
+describe('ReportViewPage — expiring signed map links', () => {
+  const withMapUrl = (url) => ({
+    ...legacyLawnReport,
+    treatmentMap: { ...(legacyLawnReport.treatmentMap || {}), satellite: { available: true, live: { url, width: 640, height: 340 } } },
+  });
+
+  it('refetches once when the map image cannot load (expired link), swapping in the fresh link', async () => {
+    const probed = [];
+    class FakeImage {
+      set src(value) {
+        probed.push(value);
+        if (value.includes('EXPIRED')) setTimeout(() => this.onerror && this.onerror(), 0);
+      }
+    }
+    vi.stubGlobal('Image', FakeImage);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.EXPIRED.sig') })
+      .mockResolvedValue({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.FRESH.sig') });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(probed.some((u) => u.includes('FRESH'))).toBe(true));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+    // The fresh link loads, so nothing keeps refetching.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+  });
+
+  it('does not refetch when the map link is still good', async () => {
+    class OkImage { set src(_v) { /* loads fine */ } }
+    vi.stubGlobal('Image', OkImage);
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.GOOD.sig') }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await screen.findAllByText(/./);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(1);
   });
 });

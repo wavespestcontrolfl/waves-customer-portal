@@ -490,20 +490,46 @@ async function recordManualPayment(id, {
     queued = true;
   } else if (sendReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
-    const emailLeg = via === 'email' || via === 'both';
-    if (emailLeg) {
-      emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
+    const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
+    // The payment is already recorded: a claim failure only skips the
+    // receipt (reported back), never fails the payment.
+    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !updatedInvoice.receipt_sent_at })
+      .catch((err) => ({ error: err.message }));
+    if (claim.inFlight && !claim.byOperator) {
+      // A queued job for this invoice is delivering the receipt right now.
+      queued = true;
+    } else if (claim.inFlight) {
+      // Another operator send holds it and delivers only what that operator
+      // chose — no promise this payment's receipt goes out: report it unsent.
+      emailResult = { ok: false, error: 'another receipt send for this invoice is in progress — resend from the Invoices page' };
+    } else if (claim.alreadySent) {
+      emailResult = { ok: false, error: 'receipt already sent' };
+    } else if (claim.error) {
+      emailResult = { ok: false, error: `receipt claim failed: ${claim.error}` };
     }
-    if (via === 'sms' || via === 'both') {
+    const canSend = !claim.inFlight && !claim.alreadySent && !claim.error;
+    const emailLeg = via === 'email' || via === 'both';
+    const smsLeg = via === 'sms' || via === 'both';
+    if (canSend) {
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true });
-        smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
-      } catch (err) {
-        smsResult = { ok: false, error: err.message };
+        if (emailLeg) {
+          emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
+          if (emailResult?.ok) await recordOperatorReceiptDelivered(claim, 'email');
+        }
+        const r = smsLeg
+          ? await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true })
+            .catch((err) => ({ sent: false, reason: err.message }))
+          : null;
+        if (r) smsResult = r.sent ? { ok: true } : { ok: false, error: r.reason || r.code || 'not-sent' };
+        if (smsResult?.ok) await recordOperatorReceiptDelivered(claim, 'sms');
+        if (emailResult?.ok || smsResult?.ok) {
+          await db('invoices').where({ id }).update({ receipt_sent_at: db.fn.now() });
+        }
+      } finally {
+        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult });
       }
     }
     if (emailResult?.ok || smsResult?.ok) {
-      await db('invoices').where({ id }).update({ receipt_sent_at: db.fn.now() });
       await db('activity_log').insert({
         customer_id: updatedInvoice.customer_id,
         action: 'invoice_receipt_sent',

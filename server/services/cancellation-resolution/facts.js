@@ -13,6 +13,7 @@
  */
 
 const db = require('../../models/db');
+const { excludeNeverAttemptedHoldDeferrals } = require('../collections/collection-hold');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../invoice-helpers');
@@ -257,9 +258,9 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
         || (r.due_date ? String(dateOnly(r.due_date)) < today : String(dateOnly(r.created_at)) < thirtyAgo)
       )) || null;
     }, 'error'),
-    leg('failedPayment', () => dbh('payments')
+    leg('failedPayment', () => excludeNeverAttemptedHoldDeferrals(dbh('payments')
       .where({ customer_id: customerId, status: 'failed' })
-      .whereNull('superseded_by_payment_id')
+      .whereNull('superseded_by_payment_id'))
       .first('id'), 'error'),
     // COMPLETED records only, and rows carry structured_notes so the
     // customer-visibility filter below can exclude internal-only typed

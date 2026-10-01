@@ -96,7 +96,7 @@ async function activeAutomationSuppressionFor(template, email, database = db) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) return null;
   const rows = await database('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [normalizedEmail])
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(normalizedEmail))
     .where({ status: 'active' });
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
 }
@@ -159,6 +159,16 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
 // the enrollment, and the step is re-rendered for them on the next tick.
 async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId, dispatch }) {
   const { loadBillingEmailContext, dispatchUnderBillingEmailAuthority, blocked } = require('./billing-channel-email-authority');
+  // Collections DISPUTE hold (owner ruling 2026-09-30): the payment-failed email carries an
+  // update-card / pay CTA. Checked here and again under the authority's locks right before the
+  // provider request (fail closed); a hold leaves the step due (retryable) - it goes out after
+  // the release, never during the dispute.
+  const holdCollections = require('./collections/collection-hold');
+  const holdBlock = (held) => blocked('COLLECTION_HOLD_DEFER', held.reason === 'lookup_failed'
+    ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
+    : 'Customer has an active collections dispute hold; payment-failed email deferred', { retryable: true });
+  const upFront = await holdCollections.messagingHeldByCollectionHold(enrollment.customer_id);
+  if (upFront.held) return settlePaymentFailedRefusal({ enrollment, sendId, block: holdBlock(upFront) });
   const input = {
     customerId: enrollment.customer_id, channel: 'email',
     metadata: { billingDeliveryCategory: 'payment_issue' },
@@ -180,6 +190,16 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
   await dispatchUnderBillingEmailAuthority({
     input,
     recipientEmail: context.recipientEmail,
+    // The hold rides the authority's preSendCheck, which the authority re-runs at the FINAL
+    // provider boundary (after SendGrid's request preparation, right before the fetch) as well
+    // as before dispatch - a hold committed while the request is prepared is caught there, not
+    // only at this one-time pre-dispatch read. Refusals are the retryable COLLECTION_HOLD_DEFER.
+    preSendCheck: async ({ database } = {}) => {
+      const heldNow = await holdCollections.messagingHeldByCollectionHold(enrollment.customer_id, database);
+      if (!heldNow.held) return { ok: true };
+      const refusal = holdBlock(heldNow);
+      return { ok: false, code: refusal.code, reason: refusal.reason, retryable: true };
+    },
     emailSuppression: async (trx, email) => {
       const suppression = await activeAutomationSuppressionFor(template, email, trx);
       return suppression ? blocked('EMAIL_SUPPRESSED', automationSuppressionReason(suppression)) : null;
@@ -193,6 +213,20 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
   return res;
 }
 
+// A collections dispute hold is a WAIT (owner ruling 2026-09-30): the step is not attempted, so
+// it leaves no failed step-send row (a queued row already inserted for it is removed) and the
+// enrollment moves to a bounded recheck time instead of staying overdue - an overdue held
+// enrollment would be re-picked every minute and could fill the runner's 50-row page ahead of
+// unrelated automations. After the release the next tick past that time sends it.
+async function deferPaymentFailedForHold({ enrollment, sendId = null, reason }) {
+  if (sendId) await db('automation_step_sends').where({ id: sendId }).del();
+  await db('automation_enrollments').where({ id: enrollment.id, status: 'active' }).update({
+    next_send_at: new Date(Date.now() + require('./collections/collection-hold').HOLD_DEFER_MS),
+    updated_at: new Date(),
+  });
+  return { sent: false, deferred: true, held: true, reason };
+}
+
 // A refusal that stands until the customer's record changes cancels the
 // enrollment, as before. One the authority marks retryable (a recheck that
 // could not run, a recipient that moved mid-send) leaves the step due for
@@ -200,6 +234,7 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
 // re-reads it as a schedulable hold, but nothing re-reads it for this step.
 async function settlePaymentFailedRefusal({ enrollment, sendId, block }) {
   const reason = String(block.reason || block.code || 'Billing email refused');
+  if (block.code === 'COLLECTION_HOLD_DEFER') return deferPaymentFailedForHold({ enrollment, sendId, reason });
   if (block.retryable === true && block.code !== 'BILLING_PREFERENCES_CHANGED') {
     await db('automation_step_sends').where({ id: sendId }).update({
       status: 'failed', failure_reason: reason.slice(0, 500), updated_at: new Date(),
@@ -663,6 +698,18 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     consultationText: consultationBlock.text,
   });
 
+  const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
+  // Collections DISPUTE hold: read BEFORE the step-send row is inserted, so a held step leaves no
+  // row at all (sendPaymentFailedThroughBillingAuthority re-checks under the authority's locks).
+  if (billingSend) {
+    const upFront = await require('./collections/collection-hold').messagingHeldByCollectionHold(enrollment.customer_id);
+    if (upFront.held) {
+      return deferPaymentFailedForHold({ enrollment, reason: upFront.reason === 'lookup_failed'
+        ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
+        : 'Customer has an active collections dispute hold; payment-failed email deferred' });
+    }
+  }
+
   const sendRow = await db('automation_step_sends').insert({
     enrollment_id: enrollment.id,
     step_id: step.id,
@@ -671,7 +718,6 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
 
-  const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
     sendId: sendRow.id, testRecipient, billingSend });
   if (deliveryBlock) return deliveryBlock;
@@ -777,6 +823,13 @@ async function processDueSteps() {
     .where('e.status', 'active')
     .where('t.enabled', true)
     .where('e.next_send_at', '<=', new Date())
+    // A payment-failed enrollment for a customer under an active collections dispute hold is a
+    // wait: it stays out of the page (never starving unrelated automations) and is picked up on
+    // the first tick after the release. The step itself re-checks the hold (fail closed).
+    .where((q) => q.whereNot('e.template_key', 'payment_failed')
+      .orWhereNotExists(function heldPaymentFailed() {
+        require('./collections/collection-hold').collectionHoldExistsSql(this, 'e.customer_id');
+      }))
     .orderBy('e.next_send_at', 'asc')
     .limit(50)
     .select('e.id');

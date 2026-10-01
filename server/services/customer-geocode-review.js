@@ -8,8 +8,11 @@ const ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', ...ADDRESS_FIELDS, 'latitude', 'longitude'];
 const reviewEnabled = () => gateEnvValue('GATE_GEOCODE_REVIEW');
 const addressSnapshot = customer => ADDRESS_FIELDS.map(field => customer[field] ?? null);
-const sameAddress = (customer, review) => JSON.stringify(addressSnapshot(customer)) === JSON.stringify(review?.address_snapshot);
+const normalizedAddress = values => (values || []).map(value => value || null);
+const sameAddress = (customer, review) => JSON.stringify(normalizedAddress(addressSnapshot(customer)))
+  === JSON.stringify(normalizedAddress(review?.address_snapshot));
 const hasPin = customer => ['latitude', 'longitude'].every(field => customer[field] != null && Number.isFinite(Number(customer[field])) && Number(customer[field]) !== 0);
+const needsCoordinatePairRepair = customer => customer?.latitude == null || customer?.longitude == null;
 const samePin = (customer, review) => hasPin(customer) && ['latitude', 'longitude'].every(field => Number(customer[field]) === Number(review[field]));
 const completeAddress = customer => ['address_line1', 'city', 'state', 'zip'].every(field => String(customer[field] || '').trim())
   && /^\d+[A-Za-z-]*\s+\S/.test(String(customer.address_line1 || '').trim());
@@ -65,7 +68,8 @@ async function getReviewDetail(customerId, conn = db) {
   return detail(customer, review, next?.date, primary);
 }
 
-const ADDRESS_MATCH_SQL = 'r.address_snapshot = jsonb_build_array(c.address_line1, c.address_line2, c.city, c.state, c.zip)';
+const NORMALIZED_REVIEW_ADDRESS_SQL = "jsonb_build_array(COALESCE(NULLIF(r.address_snapshot->>0, ''), ''), COALESCE(NULLIF(r.address_snapshot->>1, ''), ''), COALESCE(NULLIF(r.address_snapshot->>2, ''), ''), COALESCE(NULLIF(r.address_snapshot->>3, ''), ''), COALESCE(NULLIF(r.address_snapshot->>4, ''), ''))";
+const ADDRESS_MATCH_SQL = `${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(c.address_line1, ''), ''), COALESCE(NULLIF(c.address_line2, ''), ''), COALESCE(NULLIF(c.city, ''), ''), COALESCE(NULLIF(c.state, ''), ''), COALESCE(NULLIF(c.zip, ''), ''))`;
 const PRIMARY_ADDRESS_MATCH_SQL = "jsonb_build_array(COALESCE(p.address_line1, ''), COALESCE(p.address_line2, ''), COALESCE(p.city, ''), COALESCE(p.state, ''), COALESCE(p.zip, '')) = jsonb_build_array(COALESCE(c.address_line1, ''), COALESCE(c.address_line2, ''), COALESCE(c.city, ''), COALESCE(c.state, ''), COALESCE(c.zip, ''))";
 const PRIMARY_HAS_PIN_SQL = `((${PRIMARY_ADDRESS_MATCH_SQL}) AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND p.latitude <> 0 AND p.longitude <> 0)`;
 const EFFECTIVE_LAT_SQL = `(CASE WHEN ${PRIMARY_HAS_PIN_SQL} THEN p.latitude ELSE c.latitude END)`;
@@ -112,7 +116,7 @@ function excludeReviewedAddresses(query, alias = 'customers') {
       .where(function () {
         this.where('r.status', 'verified').orWhere(function () {
           this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
-            .whereRaw('r.address_snapshot = jsonb_build_array(??.address_line1, ??.address_line2, ??.city, ??.state, ??.zip)', Array(5).fill(alias));
+            .whereRaw(`${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(??.address_line1, ''), ''), COALESCE(NULLIF(??.address_line2, ''), ''), COALESCE(NULLIF(??.city, ''), ''), COALESCE(NULLIF(??.state, ''), ''), COALESCE(NULLIF(??.zip, ''), ''))`, Array(5).fill(alias));
         });
       });
   });
@@ -131,10 +135,76 @@ function excludeMatchingPrimaryPins(query, customerAlias = 'customers') {
   });
 }
 
+function excludeCustomerAutomaticGeocodeForId(query, customerId) {
+  if (!reviewEnabled()) return query;
+  query.whereNotExists(function () {
+    this.select('r.customer_id').from('customer_geocode_reviews as r')
+      .join('customers as blocked_customer', 'blocked_customer.id', 'r.customer_id')
+      .where({ 'r.customer_id': customerId })
+      .where(function () {
+        this.where('r.status', 'verified').orWhere(function () {
+          this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
+            .whereRaw(`${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(blocked_customer.address_line1, ''), ''), COALESCE(NULLIF(blocked_customer.address_line2, ''), ''), COALESCE(NULLIF(blocked_customer.city, ''), ''), COALESCE(NULLIF(blocked_customer.state, ''), ''), COALESCE(NULLIF(blocked_customer.zip, ''), ''))`);
+        });
+      });
+  });
+  return query.whereNotExists(function () {
+    this.select('p.id').from('customer_properties as p')
+      .join('customers as primary_customer', 'primary_customer.id', 'p.customer_id')
+      .where({ 'p.customer_id': customerId, 'p.active': true, 'p.is_primary': true })
+      .whereNotNull('p.latitude').whereNotNull('p.longitude')
+      .whereRaw('p.latitude <> 0 AND p.longitude <> 0')
+      .whereRaw("jsonb_build_array(COALESCE(p.address_line1, ''), COALESCE(p.address_line2, ''), COALESCE(p.city, ''), COALESCE(p.state, ''), COALESCE(p.zip, '')) = jsonb_build_array(COALESCE(primary_customer.address_line1, ''), COALESCE(primary_customer.address_line2, ''), COALESCE(primary_customer.city, ''), COALESCE(primary_customer.state, ''), COALESCE(primary_customer.zip, ''))");
+  });
+}
+
+async function reviewedCustomerLocation(customer, conn = db) {
+  if (!customer || !reviewEnabled()) return customer;
+  const [review, primary] = await Promise.all([
+    conn('customer_geocode_reviews').where({ customer_id: customer.id }).first(),
+    conn('customer_properties').where({ customer_id: customer.id, active: true, is_primary: true }).first(),
+  ]);
+  const effective = effectiveCustomer(customer, primary);
+  if (!review || !sameAddress(customer, review)) {
+    return review?.status === 'verified'
+      ? { ...customer, latitude: null, longitude: null, geocode_review_blocked: true }
+      : effective;
+  }
+  // verified_by_review distinguishes a pin backed by a matching, staff-
+  // verified review from ordinary stored coordinates `effective` returns
+  // for every other non-blocked case below (Codex P1: a caller that treats
+  // ANY returned pin as review-authoritative would wrongly retain a
+  // customer's plain stored coordinates — never reviewed at all — over a
+  // freshly supplied correction).
+  if (review.status === 'verified' && samePin(effective, review)) return { ...effective, verified_by_review: true };
+  if (['verified', 'needs_details', 'needs_pin', 'outside_area'].includes(review.status)) {
+    return { ...customer, latitude: null, longitude: null, geocode_review_blocked: true };
+  }
+  return effective;
+}
+
+async function withCustomerReviewWriteFence(customerId, conn = db, write, {
+  lockWhenDisabled = false,
+  wait = true,
+} = {}) {
+  if (!reviewEnabled() && !lockWhenDisabled) return write(conn);
+  return conn.transaction(async (trx) => {
+    const customerQuery = trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate();
+    if (!wait) customerQuery.noWait();
+    const customer = await customerQuery.first('id');
+    if (!customer) return null;
+    const primaryQuery = trx('customer_properties')
+      .where({ customer_id: customerId, active: true, is_primary: true }).orderBy('id').forUpdate();
+    if (!wait) primaryQuery.noWait();
+    await primaryQuery.select('id');
+    return write(trx);
+  });
+}
+
 function blockingPropertyReview(builder, propertyAlias) {
   builder.where('r.status', 'verified').orWhere(function () {
     this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
-      .whereRaw('r.address_snapshot = jsonb_build_array(??.address_line1, ??.address_line2, ??.city, ??.state, ??.zip)',
+      .whereRaw(`${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(??.address_line1, ''), ''), COALESCE(NULLIF(??.address_line2, ''), ''), COALESCE(NULLIF(??.city, ''), ''), COALESCE(NULLIF(??.state, ''), ''), COALESCE(NULLIF(??.zip, ''), ''))`,
         Array(5).fill(propertyAlias));
   });
 }
@@ -267,6 +337,8 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
 }
 
 module.exports = { reviewEnabled, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
-  attemptReviewedGeocode, excludeReviewedAddresses, excludeMatchingPrimaryPins, effectiveReview, blocksAutomaticGeocode,
+  attemptReviewedGeocode, excludeReviewedAddresses, excludeMatchingPrimaryPins, excludeCustomerAutomaticGeocodeForId,
+  reviewedCustomerLocation, withCustomerReviewWriteFence, effectiveReview, blocksAutomaticGeocode,
+  needsCoordinatePairRepair,
   filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision, serviceReviewContexts,
   excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId };

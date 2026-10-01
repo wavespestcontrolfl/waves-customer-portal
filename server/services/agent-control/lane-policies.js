@@ -75,8 +75,20 @@ const LANE_RUNTIME = {
   response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
+  // PROMISE_CONTACT_CHECK: a 15-minute tick reads open Waves "other" call promises and, on a grounded model verdict, closes one in the ledger (internal_write; no customer message). Cadence stays 'event': a tick with no candidate makes no call.
+  'call-commitment-contact-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'call-commitment-contact-check', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
+  // Email asks + staff promises (PR 1, 2026-09-29) — same shape as the SMS
+  // lane above, minus workflow_id/LONG_BATCH: it does not (yet) join the
+  // Control-center job-health mapping (LANE_RUNTIME's own workflow_id set is
+  // closed and asserted exhaustively by agent-control-run-index.test.js).
+  'email-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
+  // customer's texts + completion notes and stores it on review_sequences —
+  // no customer-visible output of its own, so internal_write like sms_intent.
+  review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  sms_service_identity: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
   // queue retries later — no cross-provider chain, no deterministic answer.
   contact_correction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M3' },
@@ -155,7 +167,17 @@ const LANE_RUNTIME = {
   // M3 (Codex r20): the public analyzer's fallback path converts analyzePhoto() into report findings it persists and teases without staff review.
   lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_visit_assessment: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
+  // Owner ruling 2026-09-29: the gated Fable name tie-break (GATE_LAWN_ASSESSMENT_REFEREE, dark). One extra ledger row
+  // per call, inside the same technician-reviewed visit as lawn_visit_assessment; a miss leaves Gemini's read standing.
+  lawn_assessment_referee: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
   tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  // Plant photo ID (owner rulings 2026-09-28/29): the plant engine's Gemini -> Sol ladder and its gated
+  // Fable name tie-break, both through the llm adapters (one ledger row per call). No runtime caller until
+  // the L4 route ships; customer-visible once it does. The referee is dark (GATE_PLANT_ID_REFEREE).
+  // Both run in-request with a hard timeout and a deterministic result: Gemini -> Sol, and a referee
+  // that times out or fails leaves the Gemini/Sol answer standing (interactive, never queued).
+  plant_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
@@ -258,8 +280,6 @@ const LANE_RUNTIME = {
   review_ask: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // M3: GATE_REVIEW_AUTO_REPLY=auto publishes without approval and persists the audit evidence — Codex r9.
   review_reply: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M3' },
-  // M3 (Codex r18): review-gate.js returns the generated copy to the customer and persists generated_review_text — no staff step.
-  review_gate_text: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // customer_visible + M3 (Codex r18): the autonomous publisher stamps the alt text into blog frontmatter the PR poller can auto-merge.
   hero_alt: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   // read_only: a gate, not a write — screenGeneratedImage returns a pass/fail
@@ -281,6 +301,7 @@ const LANE_RUNTIME = {
   // SDK call in ledgerCall (all were direct_sdk, Codex r14).
   codex_remediation: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   footprint_claim: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
+  business_name_confirm: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // offline (Codex r16): classifyQueryIntent calls Anthropic only and drops to keyword rules on a miss (seo-diagnosis-tools.js).
   seo_intent: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // M3 (Codex r16): the Monday cron runs generateWeeklyReport unattended, persists seo_advisor_reports and texts the owner — same shape as agent_bi.
@@ -313,9 +334,19 @@ const LANE_RUNTIME = {
   // draft_for_human + M2 (Codex r18): a Veo clip is only made for a draft campaign run and lands in the approval queue.
   video_gen: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, maturity: 'M2', ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },
-  // events_editorial (main 2026-09-03): curation + normalizing copy on the two-provider contentDraft policy; cron batch.
-  // customer_visible: curation can flip events_raw.admin_status to approved, making model-selected events publishable with no human (pre-push P1).
-  events_editorial: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
+  // events_editorial (main 2026-09-03; split 2026-09-27 — see events_curation
+  // below): normalizing (freshness/type classification, venue cleanup) on
+  // the two-provider contentDraft policy; cron batch. Never flips
+  // admin_status, so this stays internal_write (events_curation is the
+  // customer-visible half).
+  events_editorial: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
+  // events_curation (split from events_editorial 2026-09-27, owner ruling:
+  // move scoring to the newsletterWriter policy — Opus 5.5 effort max —
+  // and stop penalizing missing price / unclear age so the weekly issue
+  // stops starving at 0 approved events). customer_visible: curation can
+  // flip events_raw.admin_status to approved, making model-selected events
+  // publishable with no human (pre-push P1, unchanged by the split).
+  events_curation: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
   // M3 (Codex r16): the 8am cron runs generateDailyAdvice unattended, persists ad_advisor_reports and texts the owner.
   ads_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3' },
 

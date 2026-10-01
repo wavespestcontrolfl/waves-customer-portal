@@ -13,6 +13,9 @@ const {
   isVariableOrCustomDiscountPreset,
 } = require("./discount-stack");
 const { discountStackingLive } = require("../config/feature-gates");
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require("./billing-lane").stampedZeroFreeLive();
 const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
@@ -449,7 +452,107 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // conversion, or annual-prepay stamping can commit between the two, and the
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
+// True when this invoice bills an upcoming visit OTHER than its own anchor,
+// read from the invoice's own lines (client_id scheduled_<id>_primary — every
+// service mint writes one) plus the combined first-application stamp
+// (scheduled_services.first_application_invoice_id). Fails closed.
+async function invoiceBillsAnotherUpcomingVisit(conn, invoiceRow) {
+  let items = invoiceRow.line_items;
+  if (typeof items === "string") { try { items = JSON.parse(items); } catch { items = []; } }
+  const lines = Array.isArray(items) ? items : [];
+  const itemized = lines.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ""))?.[1]).filter(Boolean);
+  const lineIds = itemized.filter((id) => id !== String(invoiceRow.scheduled_service_id));
+  // An unitemized base-application invoice on an anchor bills every member
+  // of that anchor's combined group (the re-price side reads it the same
+  // way — Codex r8 P1 on #5301), whichever stamp those members carry.
+  const aggregateOnAnchor = itemized.length === 0 && invoiceRow.scheduled_service_id
+    && lines.some((li) => lineIsBaseApplication(li));
+  if (!invoiceRow.id && !lineIds.length) return false; // nothing to match on
+  try {
+    // The stamp column postdates some schemas (dev/preview/rolling deploys);
+    // without it only the invoice's own member lines can match (Codex r9 P2).
+    const hasStamp = await conn.schema.hasColumn("scheduled_services", "first_application_invoice_id");
+    if (!hasStamp && !lineIds.length) return false;
+    const row = await conn("scheduled_services")
+      .where(function () {
+        if (hasStamp) this.where("first_application_invoice_id", invoiceRow.id);
+        if (lineIds.length) this.orWhereIn("id", lineIds);
+        if (hasStamp && aggregateOnAnchor) {
+          this.orWhereIn("first_application_invoice_id", function () {
+            this.select("id").from("invoices").where("scheduled_service_id", invoiceRow.scheduled_service_id);
+          });
+        }
+      })
+      .whereNot("id", invoiceRow.scheduled_service_id)
+      // Only statuses that prove the billed work won't be charged; a COMPLETED
+      // member can still be re-priced (Codex r9 P1 on #5301).
+      .whereNotIn("status", ["cancelled", "canceled", "no_show", "skipped", "rescheduled"])
+      .first("id");
+    return Boolean(row);
+  } catch (err) {
+    throw new Error(`Could not verify the other visits this invoice bills — refusing to unvoid (${err.message})`);
+  }
+}
+
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) additions — both
+  // independent of the scheduled_service_id early-return below, so they
+  // also cover a combined-visit packet invoice and one linked only by
+  // service_record_id, and both gated so the function stays byte-identical
+  // while off. Fail CLOSED on a read error, same posture as every other
+  // guard in this function. No customer billing_mode lookup needed — the
+  // rule is lane-free.
+  if (stampedZeroFreeLive()) {
+    // A combined-visit packet invoice bills EVERY member stamped with its
+    // id, not only the owner visit resolved below — a member re-priced to
+    // $0 after the void would ride back in on the restored combined
+    // charge.
+    if (invoiceRow.visit_completion_packet_id) {
+      let freeMember = null;
+      try {
+        let q = conn("visit_completion_packet_items as p")
+          .join("scheduled_services as s", "s.id", "p.scheduled_service_id")
+          .where("p.packet_id", invoiceRow.visit_completion_packet_id)
+          .where("p.invoice_id", invoiceRow.id)
+          .where("s.estimated_price", 0);
+        if (lock) q = q.forShare("s");
+        freeMember = await q.first("s.id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the combined invoice's visits — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (freeMember) {
+        throw new Error(
+          "Cannot unvoid — a visit on this combined invoice is now priced at $0; re-price that visit before restoring a charge",
+        );
+      }
+    }
+    // Most post-completion invoices carry only service_record_id — when
+    // there is no scheduled_service_id for the block below to check,
+    // resolve the visit through the service record so the $0 rule still
+    // covers it. Every OTHER linked-visit guard below still only runs when
+    // scheduled_service_id is present — unchanged by this gate.
+    if (!invoiceRow.scheduled_service_id && invoiceRow.service_record_id) {
+      let svcViaRecord = null;
+      try {
+        let q = conn("service_records as sr")
+          .join("scheduled_services as s", "s.id", "sr.scheduled_service_id")
+          .where("sr.id", invoiceRow.service_record_id);
+        if (lock) q = q.forUpdate("s");
+        svcViaRecord = await q.first("s.estimated_price", "s.primary_line_price");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the linked service record's visit — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (svcViaRecord && hasAuthoritativeZeroPrice(svcViaRecord.estimated_price, svcViaRecord.primary_line_price)) {
+        throw new Error(
+          "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
+        );
+      }
+    }
+  }
   if (!invoiceRow.scheduled_service_id) return;
   let svc = null;
   try {
@@ -487,6 +590,15 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
       "Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge",
     );
   }
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): ANY visit now stamped
+  // $0 — not only a callback conversion — refuses the restore the same
+  // way; the check above stays narrow (callback-only) for gate-off
+  // byte-identical behavior.
+  if (stampedZeroFreeLive() && hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)) {
+    throw new Error(
+      "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
+    );
+  }
   // Annual-prepay stamping: prepaid_method + amount + term link mean the
   // base work's money lives on the term's prepay invoice (the dispatch
   // add-ons fallback voids exactly these invoices with NO invoice-level
@@ -503,6 +615,16 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   ) {
     throw new Error(
       "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
+    );
+  }
+  // A combined first-application invoice also bills OTHER visits (owner
+  // ruling 2026-09-29 on #5301): restoring one while it bills another
+  // upcoming visit could revive an old price that visit was re-priced away
+  // from while this invoice was void. Refused outright — staff create a new
+  // invoice instead.
+  if (await invoiceBillsAnotherUpcomingVisit(conn, invoiceRow)) {
+    throw new Error(
+      "Cannot unvoid — this invoice also bills other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
     );
   }
 }
@@ -1798,8 +1920,12 @@ async function buildScheduledServiceInvoiceLines(
   // Delegate to the shared predicate so this can never drift from
   // completionInvoiceAmount / predictCompletionBilling's own reading of
   // the same provenance signal.
-  const authoritativeZero = primaryBaseKnown
-    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // primaryBaseKnown is implied with the gate off (the predicate needs a
+  // positive primary_line_price there); under GATE_STAMPED_ZERO_FREE a bare
+  // stamped $0 with no primary is authoritative too, so stored add-ons
+  // reconcile down to it (Codex r1 P1 on #5256). Checkout extras are
+  // appended after this reconciliation, untouched.
+  const authoritativeZero = hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
   // Whether storedNetAmount below actually came from a stamped price on this
   // row (a real positive estimated_price, or the provenance-backed genuine
   // $0) versus the fee/rate fallback another caller resolved because this
@@ -2242,7 +2368,7 @@ async function linkedScheduledServiceId(invoice, database = db) {
 // same on its transaction before its caller re-reads it and passes it in).
 // `database` is that same locked handle, used only for the linked-visit
 // lookup and the ownership recheck — never a second root-pool connection.
-async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice }) {
+async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null }) {
   // `error` is the field withProviderHandoff's caller (this file) has always
   // read on a blocked outcome (byte-identical to the pre-refactor shape);
   // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
@@ -2278,6 +2404,24 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
     return { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: ownership.code, error: ownership.reason, reason: ownership.reason,
       validator: "check_invoice_ownership_boundary" };
+  }
+  // Collections DISPUTE hold, re-read at the actual provider boundary on the
+  // locked handle (owner ruling 2026-09-30): a hold that committed after the
+  // sender's own up-front check, during claiming, lock waits or message
+  // preparation, still stops the pay link here - retryable and deferred, never
+  // terminal (savepoint read, fail closed). Payer-billed and the explicit
+  // operator/customer exemptions are skipped; no cross-writer locking (the hold
+  // writer never waits - the accepted millisecond window of collection-hold.js).
+  if (!current.payer_id) {
+    const collectionHold = require("./collections/collection-hold");
+    // A trusted operator / customer exemption skips a plain DISPUTE hold only; a wrong-number /
+    // wrong-party fallback hold (an all-channel outreach block) still stops the pay link.
+    const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, database,
+      { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
+    if (held.held) {
+      const defer = collectionHold.holdDeferOutcome(held);
+      return { sent: false, blocked: true, ...defer, error: defer.reason, validator: "check_invoice_collection_hold" };
+    }
   }
   if (invoiceAmountDue(current) <= 0
     || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
@@ -2360,6 +2504,13 @@ async function withDeferredInvoiceProviderHandoff(meta, dispatch) {
   return withCheckedInvoiceProviderHandoff(meta.invoice_id, async (trx) => {
     const refusal = await deferredInvoiceDeliveryRefusal(meta, trx);
     if (!refusal) return { ok: true };
+    // A collections dispute hold: the schedulable hold every delayed pay-link
+    // leg shares (retryable + deferred; the scheduled rail refunds the attempt).
+    if (refusal.holdDefer) {
+      const defer = require("./collections/collection-hold").holdDeferOutcome(refusal.held);
+      return { sent: false, blocked: true, ...defer, error: defer.reason,
+        validator: "check_invoice_replay_eligibility" };
+    }
     return { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: "INVOICE_REPLAY_INELIGIBLE", error: refusal.reason, reason: refusal.reason,
       retryable: refusal.retryable === true, validator: "check_invoice_replay_eligibility" };
@@ -2376,6 +2527,9 @@ async function checkDeferredInvoiceEmailDelivery(meta, { database } = {}) {
   }
   try {
     const refusal = await deferredInvoiceDeliveryRefusal(meta, database);
+    if (refusal?.holdDefer) {
+      return { ok: false, ...require("./collections/collection-hold").holdDeferOutcome(refusal.held) };
+    }
     return refusal
       ? { ok: false, code: "INVOICE_REPLAY_INELIGIBLE", reason: refusal.reason, retryable: refusal.retryable === true }
       : { ok: true };
@@ -2590,7 +2744,8 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // line. Runs under `database` (the caller's own transaction) so the
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, templateKey = null, database = db,
+  holdExempt = null,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2630,6 +2785,9 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      ...persistedHoldExempt(holdExempt),
+      // The frozen body's template row; the scheduler replay forwards it.
+      ...(templateKey ? { template_key: templateKey } : {}),
       // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
       // already owns (and sent) this notice's Email, so the replay must keep
       // Email out of its fan-out exactly like the nested call did; the
@@ -3310,7 +3468,9 @@ async function dequeuePayerOwnedZeroDueInvoice(inv, reasonText) {
 // and claimPacketInvoiceForSend's requireDue branch so a fairness change
 // (the attempt cap, the due predicate) only has to be made once.
 async function claimDueScheduledInvoiceForSend(database, invoiceId) {
-  const claimToken = crypto.randomUUID();
+  // A recognizable queue claim (see newQueueSendClaimToken): the visit summary lets a planned,
+  // email-only queue claim pass, and drops its link for any other claim.
+  const claimToken = require("./invoice-helpers").newQueueSendClaimToken();
   // Full row (pre-push audit P1, #4131 slice 4): claimPacketInvoiceForSend's
   // requireDue branch used to return "*" as claim.invoice before sharing
   // this helper, and downstream consumers of a packet claim read fields
@@ -3325,6 +3485,313 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
     .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
     .returning("*");
   return claimed || null;
+}
+
+// Collections DISPUTE hold at the DIRECT sender (owner ruling 2026-09-30, the
+// chokepoint rule): sendViaSMS / sendViaSMSAndEmail build and send the pay-link
+// invoice message for every caller, so the live hold check is DEFAULT-ON here -
+// the backstop behind processScheduledSends' and the queued legs' own boundary
+// checks. A self-pay invoice whose customer has an active dispute hold (or
+// whose hold cannot be verified: fail closed) is refused with the coded,
+// retryable COLLECTION_HOLD_DEFER - never a terminal failure - BEFORE any claim,
+// credit draw or provider contact, so nothing is left to reverse. Payer-billed
+// invoices go to the payer's AP inbox and are exempt. Only operator-initiated
+// sends (admin send/resend routes, the assistant tools) and customer-initiated
+// ones (estimate accept, "text me the link") pass holdExempt; a pre-claimed send
+// (allowClaimed: the worker, or the wrapper calling its own leg) was already
+// checked by its owner. Every AUTOMATED caller must handle the refusal as a wait.
+const HOLD_EXEMPT_CALLERS = new Set(["operator", "customer"]);
+// A queued invoice notice replays WITHOUT its caller, so the trusted exemption the immediate send
+// carried (an operator's send, the customer's own estimate accept) is persisted on the row
+// (metadata.hold_exempt) and re-applied by replay eligibility and the deferred provider handoff.
+// Only the two trusted values are ever written; it skips a plain dispute hold, never a fallback hold.
+function persistedHoldExempt(holdExempt) {
+  return HOLD_EXEMPT_CALLERS.has(holdExempt) ? { hold_exempt: holdExempt } : {};
+}
+// `row` is the invoice's { customer_id, payer_id } the caller already read.
+async function directSendHoldRefusal(row, holdExempt) {
+  if (!row || row.payer_id) return null;
+  const collectionHold = require("./collections/collection-hold");
+  // The exemption skips the DISPUTE part only (Codex #5424 r13): a fallback hold still waits.
+  const held = await collectionHold.messagingHeldByCollectionHold(row.customer_id, undefined,
+    { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
+  return held.held ? collectionHold.holdDeferOutcome(held) : null;
+}
+
+// The ONE order every unclaimed sender entry uses (Codex #5424 r12 P1): resolve Bill-To FIRST, then
+// judge the homeowner's dispute hold only for an invoice that is STILL self-pay. A renewal or
+// combined-visit invoice whose payer_id is not stamped yet may belong to a payer that resolves live
+// under claimBillToFencedSend's held rows, and the homeowner's unrelated dispute must not defer it.
+// `fenced` is claimBillToFencedSend's result: null (no fence applies - nothing claimed), a payer
+// withdrawal (the caller returns payer_billed), or a claim. The hold guard runs for the null and
+// claim cases; a claim it refuses is handed straight back (restored to its prior status, queued-send
+// rows returned, nothing credited or sent), so the refusal leaves the invoice exactly as it was found
+// - the same state the no-fence refusal leaves. Returns the refusal outcome or null.
+async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExempt) {
+  const holdRefusal = await directSendHoldRefusal(row, holdExempt);
+  if (!holdRefusal) return null;
+  if (fenced?.claim?.claimed) {
+    const { previousStatus, consumedQueuedSendRows = [], invoice } = fenced.claim;
+    const restored = await restoreSendClaim(invoiceId, previousStatus, fenced.claim.claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+    // Codex #5424 r15: a restore that did not land (database error, claim token no longer ours) leaves
+    // the invoice in 'sending' - ten minutes on, stale-claim recovery parks it with NO scheduled send
+    // time, so the ordinary "waits, then sends after the release" defer would be a lie. Never return
+    // it: surface a distinct held + manual-recovery outcome and raise a durable office alert.
+    if (!restored) {
+      // A false restore does not prove the claim is stuck (Codex #5459 r1 P2): a concurrent payment, void,
+      // delivery or other transition can legitimately have moved the row, and those writers do not keep this
+      // send claim. Re-read it; only a row STILL 'sending' under OUR claim token is stranded.
+      const lookupFailed = holdRefusal.lookupFailed === true;
+      let verdict = await classifyClaimAfterFailedRestore(invoiceId, invoice.send_claim_token);
+      if (verdict.kind === "stranded") {
+        // The marker's compare-and-set can lose the same race (Codex #5459 r5 P2): it reports whether the claim was
+        // still ours, and a zero-row result is re-classified before any alert goes out.
+        const marked = await alertHoldClaimStranded(invoiceId, row, invoice.send_claim_token, { lookupFailed });
+        if (marked && marked.kind !== "stranded") verdict = marked;
+      }
+      if (verdict.kind === "stranded") return holdClaimStrandedOutcome(lookupFailed);
+      // The claim is gone and the invoice is not stuck: nothing to recover, no alert.
+      if (verdict.kind === "delivered") return holdInvoiceAlreadyDeliveredOutcome(verdict.status);
+      if (verdict.kind === "settled") return holdInvoiceAlreadySettledOutcome(verdict.status);
+      // Handed back by someone else (draft / scheduled again): the ordinary hold refusal is accurate.
+    }
+  }
+  return holdRefusal;
+}
+
+const HOLD_CLAIM_STRANDED_CODE = "COLLECTION_HOLD_CLAIM_STRANDED";
+// Statuses a concurrent writer can move an invoice to while its send claim is being handed back (Codex #5459 r5 P2):
+// DELIVERED (a concurrent markDeliverySent finalized it - accepted, never "not sent": an automated caller that read
+// it as a failed delivery would resend the pay link after the release) versus paid / void terminal states.
+const DELIVERED_AFTER_HOLD_STATUSES = new Set(["sent", "viewed", "overdue"]);
+const TERMINAL_AFTER_HOLD_STATUSES = new Set(["paid", "prepaid", "void", "voided", "refunded", "canceled", "cancelled"]);
+// Re-reads the invoice after a failed claim restore and says what became of it:
+// stranded (still 'sending' under OUR token, or unreadable: fail toward telling the office) | delivered |
+// settled (paid / void / gone) | handed_back (draft / scheduled again, or another claimant's).
+async function classifyClaimAfterFailedRestore(invoiceId, claimToken) {
+  let current = null;
+  try {
+    current = await db("invoices").where({ id: invoiceId }).first("status", "send_claim_token", "scheduled_send_error");
+  } catch { return { kind: "stranded" }; }
+  if (current && current.status === "sending" && current.send_claim_token === claimToken) {
+    const marker = String(current.scheduled_send_error || "");
+    return { kind: "stranded", marked: marker.includes(HOLD_CLAIM_STRANDED_MARKER), lookupFailed: marker.includes(HOLD_CLAIM_LOOKUP_FAILED_MARKER) };
+  }
+  const status = String(current?.status || "").toLowerCase();
+  if (DELIVERED_AFTER_HOLD_STATUSES.has(status)) return { kind: "delivered", status };
+  if (!current || TERMINAL_AFTER_HOLD_STATUSES.has(status)) return { kind: "settled", status };
+  return { kind: "handed_back", status };
+}
+// The invoice was DELIVERED on its own while the hold refused this send: the delivery is accepted, nothing to resend.
+function holdInvoiceAlreadyDeliveredOutcome(status) {
+  return {
+    code: "INVOICE_ALREADY_DELIVERED",
+    reason: `The invoice was already delivered (${status || "sent"}); nothing more to send`,
+    alreadyDelivered: true,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "accepted",
+  };
+}
+// The invoice settled on its own (paid, voided, ...) while the hold refused the send: not stranded, not a wait.
+function holdInvoiceAlreadySettledOutcome(status) {
+  return {
+    code: "INVOICE_ALREADY_SETTLED",
+    reason: `The invoice is already ${status || "settled"}; nothing was sent`,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "not_sent",
+  };
+}
+// NOT the retryable hold defer: the invoice is stuck in 'sending' and will not be retried by the sender.
+function holdClaimStrandedOutcome(lookupFailed = false) {
+  return {
+    code: HOLD_CLAIM_STRANDED_CODE,
+    // A failed hold lookup is NOT a confirmed hold (Codex #5459 r6 P2): never tell staff to wait for a release.
+    reason: lookupFailed
+      ? "The hold lookup failed and the invoice's send claim could not be handed back; check whether a hold applies and whether the pay link was delivered"
+      : "Customer has an active collections hold, and the invoice's send claim could not be handed back; it needs manual recovery",
+    held: !lookupFailed,
+    ...(lookupFailed ? { lookupFailed: true } : {}),
+    manualRecovery: true,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "not_sent",
+  };
+}
+
+// Marker appended to the 'sending' row's scheduled_send_error when a hold refusal could not hand the claim back
+// (Codex #5459 r2 P2). It is the durable "this stranded claim is owed an office alert" record: the stale-claim
+// sweep reads it before parking the row (the park overwrites the error text) and raises the alert itself.
+const HOLD_CLAIM_STRANDED_MARKER = "HOLD_CLAIM_STRANDED";
+// The marker for a refusal whose hold lookup FAILED (no confirmed hold): same prefix, so every marker test still
+// matches, and the sweep's retry reads the suffix to word its alert neutrally.
+const HOLD_CLAIM_LOOKUP_FAILED_MARKER = `${HOLD_CLAIM_STRANDED_MARKER}:lookup_failed`;
+// The dedupe keys are per CLAIM (invoice + send claim token), not per invoice (Codex pre-push audit on #5459 r4):
+// notifyAdmin and the sweep both treat any standing notification with the key as the live alert, so an old
+// incident's row would otherwise swallow a later stranded claim on the same invoice.
+const holdClaimStrandedAlertKey = (invoiceId, claimToken) => `hold-claim-stranded:${invoiceId}:${claimToken || ""}`;
+const holdClaimMaybeStuckAlertKey = (invoiceId, claimToken) => `hold-claim-maybe-stuck:${invoiceId}:${claimToken || ""}`;
+
+// Raises the stranded / manual-recovery alert. THROWS on failure: callers decide how to retry. Its wording is only
+// true for a CONFIRMED pre-provider refusal (the marker records one), where re-queueing or resending is safe.
+async function raiseHoldClaimStrandedAlert(invoiceId, customerId, claimToken, { lookupFailed = false } = {}) {
+  // notifyAdmin reports a failed write as a null return rather than a throw: that is a failed alert too.
+  const raised = await require("./admin-alert-compose").raiseAdminAlert("alert", {
+    area: "Billing",
+    action: lookupFailed ? "recover an invoice stuck after a failed hold check" : "recover the invoice stuck behind a customer hold",
+    why: lookupFailed
+      ? "The hold check failed, so the send stopped and the invoice could not be handed back."
+      : "A hold stopped the send, and the invoice could not be handed back to the queue.",
+    severity: "needs-you",
+    link: `/admin/invoices?invoice=${invoiceId}`,
+    subject: { type: "invoice", id: String(invoiceId) },
+    doneWhen: "invoice_claim_recovered",
+    who: "person",
+  }, {
+    detail: lookupFailed
+      ? `Invoice ${invoiceId}: the send was stopped because the hold check failed, and its in-progress send claim could not be released. We could not confirm whether a hold applies, so do not assume one is pending: check the customer's hold status and whether the pay link was delivered, then re-queue or resend it if it was not.`
+      : `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
+    dedupeKey: holdClaimStrandedAlertKey(invoiceId, claimToken),
+    metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
+  });
+  if (!raised) throw new Error("the stranded-claim alert was not recorded");
+}
+
+// The NEUTRAL alert (Codex #5459 r4 P2): used where the claim cannot be tied to a confirmed pre-provider hold
+// refusal (the marker could not be written, or a stale claim of a held customer carries no marker). It never says
+// the send did not happen: a claim can also die AFTER the provider accepted the message, and a resend would then
+// duplicate the pay link. THROWS on failure.
+async function raiseHoldClaimMaybeStuckAlert(invoiceId, customerId, claimToken, { lookupFailed = false } = {}) {
+  const raised = await require("./admin-alert-compose").raiseAdminAlert("alert", {
+    area: "Billing",
+    action: "check a held invoice that may be stuck",
+    why: "An invoice send ran into a customer hold and the invoice may be stuck in sending.",
+    severity: "needs-you",
+    link: `/admin/invoices?invoice=${invoiceId}`,
+    subject: { type: "invoice", id: String(invoiceId) },
+    doneWhen: "invoice_delivery_checked",
+    who: "person",
+  }, {
+    detail: lookupFailed
+      ? `Invoice ${invoiceId}: its send claim was left in progress after a failed hold check. We could not confirm whether a hold applies; check the hold and whether the customer actually received the pay link before resending, so it is not sent twice.`
+      : `Invoice ${invoiceId}: its send claim was left in progress and the customer has a collections hold. Check whether the customer actually received the pay link before resending, so it is not sent twice.`,
+    dedupeKey: holdClaimMaybeStuckAlertKey(invoiceId, claimToken),
+    metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
+  });
+  if (!raised) throw new Error("the maybe-stuck alert was not recorded");
+}
+
+// At refusal time (the restore just failed): record the owed alert on the row (a durable marker once the database
+// answers), then raise the stranded alert; the stale-claim sweep (processScheduledSends) retries it until it lands.
+// If the marker cannot be written the stranded alert is NOT trusted to survive (the sweep could not tell this claim
+// from one that crashed after provider contact), so the failure is logged at error and the neutral alert goes out
+// instead, under its own dedupe key. Residual, accepted: if that alert fails too, three database writes (restore,
+// marker, alert) failed in one outage and nothing durable remains except the active-hold sweep below.
+async function alertHoldClaimStranded(invoiceId, row, claimToken = null, { lookupFailed = false } = {}) {
+  const marker = lookupFailed ? HOLD_CLAIM_LOOKUP_FAILED_MARKER : HOLD_CLAIM_STRANDED_MARKER;
+  let markerRecorded = false;
+  if (claimToken) {
+    try {
+      const marked = await db("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken })
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
+        .update({ scheduled_send_error: db.raw("CASE WHEN COALESCE(scheduled_send_error, '') = '' THEN ?::text ELSE scheduled_send_error || ' | ' || ?::text END", [marker, marker]) });
+      if (Number(marked) > 0) {
+        markerRecorded = true;
+      } else {
+        // Zero rows: the claim moved after the caller's re-read (paid / voided / delivered / restored), or it already
+        // carries the marker. Re-read; only a claim that is really still ours and 'sending' gets the alert, and its
+        // marker, if present, is the one an earlier attempt wrote.
+        const verdict = await classifyClaimAfterFailedRestore(invoiceId, claimToken);
+        if (verdict.kind !== "stranded") return verdict;
+        // Still ours: the marker an earlier attempt wrote makes it confirmed; without one (the write was lost) the
+        // claim cannot be tied to a pre-provider refusal, so the neutral alert goes out instead.
+        markerRecorded = verdict.marked === true;
+        lookupFailed = lookupFailed || verdict.lookupFailed === true;
+      }
+    } catch (err) {
+      logger.error(`[invoice] hold-claim-stranded marker NOT recorded for ${invoiceId}; raising the neutral maybe-stuck alert instead: ${err.message}`);
+    }
+  }
+  try {
+    if (markerRecorded) await raiseHoldClaimStrandedAlert(invoiceId, row?.customer_id, claimToken, { lookupFailed });
+    else await raiseHoldClaimMaybeStuckAlert(invoiceId, row?.customer_id, claimToken, { lookupFailed });
+  } catch (err) {
+    logger.error(`[invoice] hold-claim alert failed for ${invoiceId} (${markerRecorded ? "the stale-claim sweep retries it" : "no marker: only the sweep's active-hold check can still surface it"}): ${err.message}`);
+  }
+  return null;
+}
+
+// The stale-claim sweep's half (Codex #5459 r2/r4 P2). A stale 'sending' row is a hold-claim candidate when it
+// carries the marker (a confirmed hold refusal: the stranded alert), or it is a self-pay invoice whose customer has
+// an ACTIVE hold with no marker (the marker write can fail in the same outage; the neutral alert, since nothing
+// ties the claim to a pre-provider refusal). A hold that was merely released is not evidence for any claim. A
+// candidate is parked only once its alert has LANDED (the dedupe key's standing notification), so a failed alert
+// keeps being retried each tick and never duplicates.
+function strandedHoldClaimCandidate(q) {
+  return q.where((c) => c
+    .whereRaw("COALESCE(scheduled_send_error, '') LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
+    .orWhere((held) => held.whereNull("payer_id").whereNull("payer_statement_id").whereExists(function activeHold() {
+      require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
+    })));
+}
+function standingStrandedAlert() {
+  this.select(1).from("notifications as n").where("n.recipient_type", "admin")
+    .whereRaw("n.metadata->>'dedupeKey' = (CASE WHEN COALESCE(invoices.scheduled_send_error, '') LIKE ? THEN 'hold-claim-stranded:' ELSE 'hold-claim-maybe-stuck:' END) || invoices.id::text || ':' || COALESCE(invoices.send_claim_token::text, '')", [`%${HOLD_CLAIM_STRANDED_MARKER}%`]);
+}
+const STALE_SENDING_SQL = "NOW() - INTERVAL '10 minutes'";
+function stalePark() {
+  return {
+    status: "scheduled",
+    scheduled_send_at: null,
+    scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
+    send_claim_token: null,
+    updated_at: new Date(),
+  };
+}
+
+// Runs at the end of every sweep: raises the alert for each stale hold-claim candidate whose alert has not landed,
+// then parks that row. A failed alert leaves the row in 'sending' (the park above skips it), so the next tick
+// retries; an alert that landed is never raised twice.
+async function raiseStrandedHoldClaimAlerts() {
+  try {
+    const rows = await strandedHoldClaimCandidate(db("invoices").where({ status: "sending" })
+      .where("updated_at", "<", db.raw(STALE_SENDING_SQL)))
+      .whereNotExists(standingStrandedAlert)
+      .select("id", "customer_id", "send_claim_token", db.raw("COALESCE(scheduled_send_error, '') LIKE ? AS marked", [`%${HOLD_CLAIM_STRANDED_MARKER}%`]), db.raw("COALESCE(scheduled_send_error, '') LIKE ? AS lookup_failed", [`%${HOLD_CLAIM_LOOKUP_FAILED_MARKER}%`]));
+    for (const row of rows) {
+      try {
+        const opts = { lookupFailed: row.lookup_failed === true };
+        if (row.marked) await raiseHoldClaimStrandedAlert(row.id, row.customer_id, row.send_claim_token, opts);
+        else await raiseHoldClaimMaybeStuckAlert(row.id, row.customer_id, row.send_claim_token, opts);
+        // Park only the claim this sweep read, and only while it is still stale: during the alert await
+        // another sweep may park it and an operator may start a fresh send, whose live claim must survive.
+        await db("invoices").where({ id: row.id, status: "sending" })
+          .where((t) => (row.send_claim_token == null ? t.whereNull("send_claim_token") : t.where("send_claim_token", row.send_claim_token)))
+          .where("updated_at", "<", db.raw(STALE_SENDING_SQL))
+          .update(stalePark());
+      } catch (err) {
+        logger.error(`[invoice] stale hold-claim alert for ${row.id} failed - leaving it in 'sending' for the next sweep: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[invoice] stale hold-claim sweep failed: ${err.message}`);
+  }
+}
+
+// A renewal's own clearance (termite-annual-renewal-charge withRenewalSendClearance) parks a self-pay
+// renewal behind the customer's dispute hold by throwing renewal_send_withheld with
+// collectionHoldDeferral. For an UNCLAIMED, non-exempt sender entry that is the hold refusal, not a
+// failure: it returns the coded retryable outcome. A pre-claimed send and an operator / customer
+// send (exempt from the hold) keep the throw as before.
+function renewalClearanceHoldDeferral(err, allowClaimed) {
+  // The trusted exemption is threaded INTO the clearance (claimBillToFencedSend -> withRenewalSendClearance
+  // ignoreDisputeHold), so a hold deferral that still reaches here is one the exemption does not cover
+  // (a fallback hold) - a wait for every unclaimed caller, exempt or not.
+  return Boolean(err?.collectionHoldDeferral) && !allowClaimed;
+}
+function collectionHoldRefusalFromClearance() {
+  return require("./collections/collection-hold").holdDeferOutcome({ reason: "hold" });
 }
 
 async function claimInvoiceForSend(invoiceId, {
@@ -3431,6 +3898,14 @@ async function claimInvoiceForSend(invoiceId, {
     throw invoiceNotSendableError(latest);
   }
   invoice.send_claim_token = freshClaimToken;
+  // A first send that waited for the visit summary's handoff (which holds this invoice through the
+  // pay-link text) finds the claim free only once the text is out. The invoice is stamped after
+  // that release, so the summary's own record is read: a link text that started or was accepted
+  // means the customer has the link, and this first send is refused, not repeated.
+  if (firstDeliveryOnly && current.visit_completion_packet_id && await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link")) {
+    await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+    throw invoiceAlreadyDeliveredError(invoice);
+  }
   await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
   const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, freshClaimToken, adoptsQueuedInvoiceSend, database);
   return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
@@ -3600,7 +4075,12 @@ function assertRenewalGateAlive() {
 // send never reaches a provider; a worker's queue claim is given back first
 // (releaseRefusedRenewalSend) so the refusal never retries to the homeowner.
 async function claimRenewalInvoiceForSend(invoiceId, renewal, options = {}) {
+  // A trusted operator / customer send (Codex #5424 r13) is exempt from the DISPUTE part of the
+  // clearance's hold check, so the admin Send and a customer-requested link work for a renewal
+  // invoice too; a fallback hold still parks it.
+  const ignoreDisputeHold = HOLD_EXEMPT_CALLERS.has(options.holdExempt);
   return require("./termite-annual-renewal-charge").withRenewalSendClearance(renewal.id, {
+    ignoreDisputeHold,
     claim: () => claimRenewalInvoiceUnderFence(invoiceId, renewal.customer_id, options),
     release: (verdict) => releaseRefusedRenewalSend(invoiceId, verdict, options),
   });
@@ -3634,6 +4114,30 @@ async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaim
     }
     return { payerBilled: true, payerId };
   });
+}
+
+// The scheduled sender's dispute-hold check runs BEFORE sendViaSMSAndEmail's own renewal Bill-To fence,
+// so a HELD homeowner whose termite renewal invoice belongs to a third-party payer (resolved from the
+// customer default, not yet stamped on the invoice) would be parked behind the homeowner's dispute
+// instead of reaching its payer. For a worker-preclaimed renewal invoice, this runs the SAME fence
+// (renewal gate + customer/payer rows FOR SHARE) and the SAME withdrawal claimRenewalInvoiceUnderFence
+// does - a draft stamped payer_billed:<payer>, never retried to the homeowner - and returns
+// { payerBilled: true, payerId }. Null = no renewal link or no payer: the hold defers it as usual.
+// Same order as the unclaimed sender entries (holdRefusalAfterBillToResolution): Bill-To first, the hold
+// only for an invoice still self-pay. The worker already owns a queue claim here, so it consults the hold
+// first and runs this fence only for a held invoice - the same outcome without a fence per due invoice.
+async function withdrawHeldRenewalInvoiceToPayer(claimed) {
+  if (!claimed || claimed.payer_id || claimed.visit_completion_packet_id || !claimed.annual_prepay_term_id) return null;
+  const renewal = await termiteRenewalTermForInvoice(claimed.id, claimed.annual_prepay_term_id);
+  if (!renewal) return null;
+  return withRenewalSendGate(claimed, () => db.transaction(async (trx) => {
+    const payerId = await customerDefaultPayerLocked(renewal.customer_id, trx);
+    if (!payerId) return null;
+    const moved = await trx("invoices").where({ id: claimed.id, status: "sending", send_claim_token: claimed.send_claim_token }).update({
+      status: "draft", send_claim_token: null, scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: new Date(),
+    });
+    return moved ? { payerBilled: true, payerId } : null;
+  }));
 }
 
 async function customerDefaultPayerLocked(customerId, trx) {
@@ -3755,7 +4259,7 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
   }
 }
 
-const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
+const { BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, SUMMARY_TEXT_CARRIED_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require("./invoice-helpers");
 
 async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
@@ -3921,6 +4425,89 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
   await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
 }
 
+// The money a cancel's void moves for one invoice, as the confirmation card
+// shows and pins it: the invoice total, the account credit applied to it
+// (restoreAccountCreditForVoidedInvoice), and the estimate deposit credit
+// its deposit_credit lines carry (restoreDepositCreditForVoidedInvoice sums
+// the same lines the same way). Cents-rounded so a pg numeric string and a
+// pinned JSON number compare equal.
+function cancelVoidInvoiceAmounts(row) {
+  const cents = (v) => Math.round(Number(v || 0) * 100);
+  let items = [];
+  try {
+    const raw = row?.line_items;
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    items = Array.isArray(arr) ? arr : [];
+  } catch { items = []; }
+  const depositCents = items
+    .filter((item) => item?.category === "deposit_credit")
+    .reduce((sum, line) => sum + Math.abs(cents(line.amount ?? line.unit_price ?? 0)), 0);
+  return {
+    total: row?.total != null ? cents(row.total) / 100 : null,
+    credit_applied: cents(row?.credit_applied) / 100,
+    deposit_credit: depositCents / 100,
+  };
+}
+
+function cancelVoidAmountsMatch(a, b) {
+  if (!a || !b) return false;
+  return ["total", "credit_applied", "deposit_credit"].every((k) => (a[k] ?? null) === (b[k] ?? null));
+}
+
+// The customer's link rides the visit summary text, and the invoice Email that backs it up
+// did not go: the office is told (one alert per invoice, the existing admin feed).
+async function alertSummaryCarriedEmailFailed(invoiceId, invoiceNumber, reason) {
+  try {
+    await require("./admin-alert-compose").raiseAdminAlert("alert", {
+      area: "Billing",
+      action: "confirm the customer got the invoice link",
+      why: "The link went out by text only, and the invoice email did not go.",
+      severity: "needs-you",
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: "invoice", id: String(invoiceId) },
+      doneWhen: "invoice_link_confirmed",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceNumber || invoiceId}: its pay link was sent only in the visit summary text, and the invoice email did not go (${reason}). Check that the customer has the link, or resend the invoice.`,
+      dedupeKey: `summary-carried-email:${invoiceId}`,
+      metadata: { invoice_id: invoiceId },
+    });
+  } catch (err) {
+    logger.warn(`[invoice] summary-carried email alert failed for ${invoiceId}: ${err.message}`);
+  }
+}
+
+// The text a parked invoice's error carries when neither the visit summary text nor the invoice
+// email carried its link (the summary's acceptance later finalizes it).
+const SUMMARY_LINK_PARK_TEXT = "the visit summary text did not carry the link";
+
+// Neither the visit summary text nor the invoice email carried the link: parked for the office.
+async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
+  try {
+    await require("./admin-alert-compose").raiseAdminAlert("alert", {
+      area: "Billing",
+      action: "send the customer their invoice link",
+      why: "Neither the visit summary text nor the invoice email carried it.",
+      severity: "needs-you",
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: "invoice", id: String(invoiceId) },
+      doneWhen: "invoice_link_delivered",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceNumber || invoiceId}: the visit summary text did not carry its pay link and the invoice email did not go (${reason}). It is parked for review: send the link to the customer.`,
+      dedupeKey: `summary-link-undelivered:${invoiceId}`,
+      metadata: { invoice_id: invoiceId },
+    });
+    // The summary text may have been accepted between the park and this insert: its acceptance
+    // closes the alert key, which did not exist yet. Read again now that the alert does.
+    if ((await db("invoices").where({ id: invoiceId }).first("sms_sent_at"))?.sms_sent_at) {
+      await require("./admin-alert-episodes").closeAdminAlertKeys(db, [`summary-link-undelivered:${invoiceId}`], "summary_text_accepted");
+    }
+  } catch (err) {
+    logger.warn(`[invoice] summary-link undelivered alert failed for ${invoiceId}: ${err.message}`);
+  }
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -4057,8 +4644,18 @@ const InvoiceService = {
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
-          const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
-          await acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
+          // The SHARED lock chain (mint advisory lock → customer KEY SHARE →
+          // visit row FOR UPDATE + the never-ran status refusal), not a bare
+          // visit FOR UPDATE: this path is every linked create() caller that
+          // does not otherwise route through the chain (manual admin, project/
+          // WDO, prepay-switch undo, estimate converter). A cancellation that
+          // won the mint lock and committed while this waited must not be
+          // billed past (Codex #5244 r7), and the customer key-share must come
+          // BEFORE the visit lock — the invoice insert's customer FK would
+          // otherwise take it after, inverting the order the chain exists to
+          // hold against the extension accept (ABBA deadlock).
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(database, { scheduledServiceId: linkedScheduledServiceId, customerId });
         }
         if (stampedEstimateIdInNotes) {
           await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
@@ -5176,6 +5773,11 @@ const InvoiceService = {
       useScheduledReplay = false,
       dueDate,
       skipDepositCredit = false,
+      // refuseDepositCredit: the caller's approval did not cover consuming
+      // deposit money (the IB closeout repair). Checked on the LOCKED
+      // deposit read below — a 409 instead of any roll-forward, so no
+      // deposit that landed after the caller's own preview is consumed.
+      refuseDepositCredit = false,
       // Caller-supplied lines appended AFTER the service's own lines (secure
       // plan-choice setup fee): the caller owns the claim/idempotency for
       // these — this method just carries them into the same mint so the fee
@@ -5214,6 +5816,11 @@ const InvoiceService = {
       // caller's transaction, and the invoice commits atomically with the
       // caller's own writes.
       database = null,
+      // The caller's check under the visit row lock, run on every linked
+      // mint (see buildParams): same contract as
+      // mintScheduledServiceInvoiceWithDeposit's recheckInTrx. Completion
+      // passes refuseCoveredMemberMintInTrx (Codex r4 P1 on #5237).
+      recheckInTrx = null,
     },
   ) {
     const sr = await db("service_records")
@@ -5270,6 +5877,22 @@ const InvoiceService = {
             throw scheduledPriceMovedError(lockedRow);
           }
         }
+      }
+      // The caller's in-lock check runs on EVERY linked mint, not only the
+      // replay lane (pre-push P1 on 645ccccaee — completion's backfill mint
+      // is explicit-amount). The non-replay lanes hold only the advisory mint
+      // lock here, so they take the same shared chain first (the advisory
+      // re-acquire is a same-transaction no-op): the check then reads under
+      // the visit row lock, the one the stamp writer also takes.
+      if (recheckInTrx && conn && sr.scheduled_service_id) {
+        if (!replayFromScheduled) {
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(conn, {
+            scheduledServiceId: sr.scheduled_service_id,
+            customerId: sr.customer_id,
+          });
+        }
+        await recheckInTrx(conn);
       }
       const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
@@ -5388,6 +6011,14 @@ const InvoiceService = {
         logger.warn(
           `[invoice] source-estimate lookup failed for service ${serviceRecordId}: ${err.message}`,
         );
+        // A caller that must not consume deposit money cannot tell a
+        // deposit-bearing visit from a plain one without this read — fail
+        // closed instead of minting a full-balance draft.
+        if (refuseDepositCredit) {
+          const refusal = new Error("Deposit provenance could not be read — bill it from Billing Recovery.");
+          refusal.status = 409;
+          throw refusal;
+        }
       }
     }
     if (sourceEstimateId) {
@@ -5419,6 +6050,11 @@ const InvoiceService = {
             const createParams = await buildParams(trx);
             await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
             const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
+            if (refuseDepositCredit && depositCredit) {
+              const refusal = new Error("An estimate deposit credit would apply to this invoice — bill it from Billing Recovery.");
+              refusal.status = 409;
+              throw refusal;
+            }
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
@@ -5451,6 +6087,15 @@ const InvoiceService = {
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
           if (err.status) throw err;
+          // A refuseDepositCredit caller (the IB closeout repair, incl. its
+          // rolled-back preview) must not trigger the retry/alert path:
+          // an unreadable deposit ledger is a quiet refusal, never a real
+          // estimate_deposit_reconcile_needed alert from a planning call.
+          if (refuseDepositCredit) {
+            const refusal = new Error("Deposit balance could not be verified — bill it from Billing Recovery.");
+            refusal.status = 409;
+            throw refusal;
+          }
           logger.warn(
             `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
           );
@@ -5587,6 +6232,8 @@ const InvoiceService = {
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
   async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true, hasEmailLeg = false,
+    // Opt-out of the default-on dispute-hold check: 'operator' | 'customer' only.
+    holdExempt = null,
     // Internal-only: sends this same call once more after a not_zero_due
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
@@ -5611,17 +6258,26 @@ const InvoiceService = {
     let pre = null;
     try {
       if (!allowClaimed) {
-        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
-        // A termite renewal invoice takes the same fence (claimBillToFencedSend).
-        const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
+        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id", "annual_prepay_term_id", "customer_id");
+        // A termite renewal invoice takes the same fence (claimBillToFencedSend). Bill-To is
+        // resolved BEFORE the default-on dispute-hold backstop (see
+        // holdRefusalAfterBillToResolution): the hold applies only to a still-self-pay invoice.
+        const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, holdExempt });
         if (packetClaim?.payerBilled) {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
+        const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, pre, packetClaim, holdExempt);
+        if (holdRefusal?.alreadyDelivered) return { sent: true, ...holdRefusal }; // accepted: delivered concurrently (Codex #5459 r5 P2)
+        if (holdRefusal) return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
         claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
       } else {
         claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, firstDeliveryOnly, overridesReviewHold });
       }
     } catch (claimErr) {
+      if (renewalClearanceHoldDeferral(claimErr, allowClaimed)) {
+        const holdRefusal = collectionHoldRefusalFromClearance();
+        return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
+      }
       // Codex round-5 #4131: a claim path detecting zero-due never settles
       // itself (see zeroDueDetectedError) — direct callers of sendViaSMS
       // (collections-conversation.js, the AI-assistant send tool, batch
@@ -5642,7 +6298,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, _zeroDueRetried: true,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -5796,6 +6452,10 @@ const InvoiceService = {
     // variant). If the row is missing/disabled, we skip the SMS rather than
     // falling back to inline copy.
     let body = null;
+    // Tracks whichever of the three rows below actually rendered — never
+    // guessed, so a caught template-lookup error below (body stays null)
+    // leaves this null too.
+    let renderedTemplateKey = null;
     try {
       const templates = require("../routes/admin-sms-templates");
       const tplOpts = {
@@ -5829,6 +6489,7 @@ const InvoiceService = {
           first_visit_clause: firstVisitClause,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
       }
       // Upfront invoices — the setup + first-application invoice auto-sent at
       // estimate acceptance, or any invoice billed before its service date —
@@ -5845,6 +6506,7 @@ const InvoiceService = {
           service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_upfront";
       }
       if (!body) {
         // Either an ordinary invoice, or the prepay template was missing/disabled
@@ -5856,6 +6518,7 @@ const InvoiceService = {
           service_date: formattedDate || "today",
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent";
       }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
@@ -5967,6 +6630,7 @@ const InvoiceService = {
       if (updated && pendingChannelToQueue) {
         const queueOutcome = await queuePendingChannelReplay({
           invoiceId, customerId: customer.id, toPhone: customer.phone || "", body,
+          templateKey: renderedTemplateKey, holdExempt,
           database: trx, ...pendingChannelToQueue,
         });
         pendingChannelQueued = queueOutcome.queued === true;
@@ -6033,6 +6697,10 @@ const InvoiceService = {
           original_message_type: "invoice",
           billingDeliveryCategory: "invoice",
           notificationEventKey: `invoice:${invoiceId}:sent`,
+          // Which of the three invoice_sent* rows actually rendered
+          // (never inferred — the messageType above is the fixed
+          // kill-switch key, not the rendering row).
+          ...(renderedTemplateKey ? { templateKey: renderedTemplateKey } : {}),
         },
         ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
@@ -6057,13 +6725,13 @@ const InvoiceService = {
           }
           const current = await database("invoices").where({ id: invoiceId }).first();
           return checkInvoiceDeliveryPreconditions(database, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
           });
         },
         withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
           invoiceId,
           (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
           }),
           dispatch,
         ),
@@ -6150,6 +6818,7 @@ const InvoiceService = {
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
+        if (renderedTemplateKey) err.smsTemplateKey = renderedTemplateKey;
         err.toPhone = customer.phone;
         throw err;
       }
@@ -6348,6 +7017,11 @@ const InvoiceService = {
       // link was never delivered, so return the credit rather than leave it
       // consumed + the invoice edit-locked.
       if (restored) await reverseSmsCreditOnFailure();
+      // A collections dispute-hold refusal always leaves the invoice SCHEDULED (never
+      // stranded as a draft): the sender holds it during the dispute and sends it after.
+      if (restored && !allowClaimed && err.code === "COLLECTION_HOLD_DEFER") {
+        await require("./collections/collection-hold").requeueHeldInvoice(invoiceId, { customerId: invoice.customer_id });
+      }
       logger.error(
         `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
       );
@@ -6367,9 +7041,19 @@ const InvoiceService = {
       emailRecipientOverride = null,
       payUrlParams = null,
       operatorInitiated = false,
+      // Opt-out of the default-on dispute-hold check: 'operator' | 'customer' only.
+      holdExempt = null,
       // The staff user behind an operator send (attribution for the
       // invoice-issued closeout's audit row); null for automated sends.
       actorTechnicianId = null,
+      // IB closeout repair: its approval never covered consuming account
+      // credit, so this send behaves exactly as with the autoApplyAccountCredit
+      // gate off — no credit is applied (the balance stays on the account).
+      skipAccountCreditAutoApply = false,
+      // IB closeout repair: the total its approval showed. Checked on the
+      // CLAIMED row (a claimed invoice is no longer an editable draft); a
+      // mismatch restores the claim and sends nothing.
+      expectedTotal = null,
       // Internal-only: retries this same call once more after a
       // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
       // caller never sets this, so a race can retry at most once.
@@ -6381,12 +7065,13 @@ const InvoiceService = {
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true, _underRenewalGate,
+      emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
     });
+
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id", "customer_id");
     // Codex #4971 r24 P1: a termite RENEWAL invoice's send holds the renewal
     // gate through its ENTIRE provider handoff — not only while the claim is
     // checked (claimRenewalInvoiceForSend's clearance) — for EVERY caller,
@@ -6402,7 +7087,7 @@ const InvoiceService = {
       if (renewal) {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-          emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+          emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
         }));
       }
     }
@@ -6421,10 +7106,17 @@ const InvoiceService = {
     // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
     try {
-      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt });
     } catch (err) {
       const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
       if (zeroDueResult) return zeroDueResult;
+      // A self-pay renewal the clearance parked behind the customer's dispute hold: the same coded,
+      // retryable refusal every unclaimed sender entry returns (nothing claimed, nothing sent).
+      if (renewalClearanceHoldDeferral(err, allowClaimed)) {
+        const holdRefusal = collectionHoldRefusalFromClearance();
+        return { ok: false, ...holdRefusal, error: holdRefusal.reason,
+          sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
+      }
       // The scheduled-send worker already fenced and claimed this send; a
       // transient failure of the re-judge here left no provider request
       // behind, so the invoice goes back to its queue slot instead of
@@ -6438,6 +7130,23 @@ const InvoiceService = {
     if (packetClaim?.payerBilled) {
       return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
         sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
+    }
+    // Default-on dispute-hold backstop (see directSendHoldRefusal), AFTER Bill-To resolution (see
+    // holdRefusalAfterBillToResolution): only a still-self-pay invoice waits behind the homeowner's
+    // dispute. Before any credit draw or provider contact; a fence claim it refuses is handed back.
+    // A pre-claimed send (allowClaimed) was already judged by its owner, the worker.
+    if (!allowClaimed) {
+      const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, accrualPre, packetClaim, holdExempt);
+      if (holdRefusal) {
+        // A concurrently DELIVERED invoice is an accepted result (Codex #5459 r5 P2): callers that read ok:false as a
+        // failed delivery would retry and resend the pay link after the hold is released.
+        if (holdRefusal.alreadyDelivered) {
+          return { ok: true, ...holdRefusal,
+            sms: { ok: true, code: holdRefusal.code, alreadyDelivered: true }, email: { ok: true, code: holdRefusal.code, alreadyDelivered: true } };
+        }
+        return { ok: false, ...holdRefusal, error: holdRefusal.reason,
+          sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
+      }
     }
     // Claim FIRST, then apply credit. Applying before the claim strands credit when
     // two sends race: the loser draws down the balance, but the winner already owns
@@ -6469,6 +7178,16 @@ const InvoiceService = {
     // without ever reaching a provider handoff's own assertion — so the
     // renewal gate is re-asserted here first. A lost gate restores the send
     // claim and throws; nothing was applied, nothing was sent.
+    if (expectedTotal !== null
+      && Math.round(Number(claim.invoice.total) * 100) !== Math.round(Number(expectedTotal) * 100)) {
+      await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+      return {
+        ok: false,
+        code: "total_changed",
+        error: `Invoice total is $${Number(claim.invoice.total).toFixed(2)}, not the approved $${Number(expectedTotal).toFixed(2)} — not sent`,
+        sms: { ok: false }, email: { ok: false },
+      };
+    }
     if (_underRenewalGate) {
       try {
         assertRenewalGateAlive();
@@ -6478,7 +7197,7 @@ const InvoiceService = {
       }
     }
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
-    const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
+    const sendCreditResult = skipAccountCreditAutoApply ? null : await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
       // Resolve the adopted rows while the token still owns the row — the
       // resolution is token-scoped and would be a silent no-op after the
@@ -6518,9 +7237,16 @@ const InvoiceService = {
     // Third-party Bill-To: a payer-billed invoice must NOT text the homeowner
     // a pay link — AR and the pay link route to the payer (email) instead.
     // The homeowner is the service recipient, not the party being asked to pay.
+    const plannedBySummary = !operatorInitiated
+      && String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR);
     if (claim.invoice?.payer_id) {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
+    } else if (plannedBySummary) {
+      // The Text leg belongs to the visit summary text, which has not been accepted: this
+      // sender never texts the invoice, and the leg does not count as delivered.
+      sms.error = "Text carried by the visit summary";
+      sms.code = "text_carried_by_summary";
     } else if (!operatorInitiated
       && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
       // A prior automated attempt delivered Text/App but could not start its
@@ -6546,6 +7272,7 @@ const InvoiceService = {
           claimToken: claim.invoice.send_claim_token,
           payUrlParams,
           operatorInitiated,
+          holdExempt,
           hasEmailLeg: true,
           // This wrapper's own claim above already adopted (and will
           // restore/resolve) any queued pay-link SMS this send supersedes —
@@ -6675,6 +7402,7 @@ const InvoiceService = {
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.smsTemplateKey) sms.heldTemplateKey = err.smsTemplateKey;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
@@ -6723,7 +7451,10 @@ const InvoiceService = {
               billingDeliveryCategory: "invoice",
               notificationEventKey: `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
+              // The held body's template row; the scheduler replay forwards it.
+              ...(sms.heldTemplateKey ? { template_key: sms.heldTemplateKey } : {}),
               original_block_code: sms.code,
+              ...persistedHoldExempt(holdExempt),
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
               resolve_from_by_customer: true,
@@ -6752,6 +7483,7 @@ const InvoiceService = {
       }
     }
     delete sms.heldBody;
+    delete sms.heldTemplateKey;
     delete sms.heldToPhone;
 
     // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
@@ -6790,6 +7522,7 @@ const InvoiceService = {
           recipientOverride: emailRecipientOverride,
           payUrlParams,
           claimToken: claim.invoice.send_claim_token,
+          holdExempt,
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
         });
         if (r?.ok) email.ok = true;
@@ -6797,7 +7530,12 @@ const InvoiceService = {
         if (r?.sentAt) email.sentAt = r.sentAt;
         if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
+        if (r?.deferred) email.deferred = true;
+        if (r?.nextAllowedAt) email.nextAllowedAt = r.nextAllowedAt;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
+        // A refusal (suppressed address, the choice no longer selecting Email) is not a transient failure.
+        if (r?.blocked) email.blocked = true;
+        if (r?.skipped) email.skipped = true;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
         if (r?.recipient) email.recipient = r.recipient;
         if (r?.messageId) email.messageId = r.messageId;
@@ -6806,7 +7544,34 @@ const InvoiceService = {
       }
     }
 
-    const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    // A Text leg the visit summary text carries leaves the Email as the customer's path to the
+    // link: a transient failure retries (the queue's attempt cap ends it, see processScheduledSends),
+    // not only an unreadable preference. A deterministic refusal (blocked, or the choice no
+    // longer selecting Email) retries nothing: like any accepted-Text row whose Email fails,
+    // the invoice finalizes as sent (so dunning arms) and the office is told.
+    const carriedBySummary = String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR);
+    // A planned Text leg counts as delivered only if the summary's text was accepted since
+    // (its acceptance stamps sms_sent_at); read fresh, after the email leg.
+    let summaryAcceptedNow = false;
+    if (plannedBySummary) {
+      const fresh = await db("invoices").where({ id: invoiceId }).first("sms_sent_at");
+      if (fresh?.sms_sent_at) {
+        summaryAcceptedNow = true;
+        sms.ok = true;
+        sms.deduped = true;
+        sms.eventVisibleAt = fresh.sms_sent_at;
+        delete sms.code;
+        delete sms.error;
+      }
+    }
+    // A planned leg whose summary text was accepted while this send ran is a carried one from
+    // here on (the claim's snapshot still says planned): same retry and refusal handling.
+    const summaryCarried = carriedBySummary || (plannedBySummary && summaryAcceptedNow);
+    const emailMustRetry = !operatorInitiated && (email.code === "billing_prefs_unavailable"
+      || ((carriedBySummary || plannedBySummary) && !email.ok && !email.blocked && !email.skipped));
+    if (summaryCarried && !operatorInitiated && !email.ok && !emailMustRetry) {
+      await alertSummaryCarriedEmailFailed(invoiceId, claim.invoice.invoice_number, email.error || email.code || "refused");
+    }
     const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
     if (emailMustRetry && sms.ok && claimed && !allowClaimed
       && ["draft", "scheduled"].includes(previousStatus)) {
@@ -6950,7 +7715,10 @@ const InvoiceService = {
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
+            // The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
+            || (claim.invoice.sms_sent_at && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+              && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR))) });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -7031,6 +7799,11 @@ const InvoiceService = {
           logger.warn(`[invoice] credit reversal after failed send skipped for ${invoiceId}: ${e.message}`);
         }
       }
+      // A collections dispute-hold refusal always leaves the invoice SCHEDULED, never a
+      // draft nothing sends after the release (the sender holds it, then sends it).
+      if (restored && !allowClaimed && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
+        await require("./collections/collection-hold").requeueHeldInvoice(invoiceId, { customerId: claim.invoice.customer_id });
+      }
     }
     // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark
     // behind GATE_INVOICE_ISSUED_CLOSES_VISIT): a delivered invoice closes
@@ -7054,8 +7827,18 @@ const InvoiceService = {
         invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
       });
     }
+    // Nothing delivered and a leg was refused by the collections dispute hold: the AGGREGATE
+    // result is that same retryable deferral (callers read result.code, not the legs).
+    const holdLegs = [sms, email].filter((leg) => leg?.code === "COLLECTION_HOLD_DEFER");
+    const holdOnly = !ok && holdLegs.length > 0 && !sms.ok && !email.ok
+      && !terminalVisitObserved && !deliveryOutcomeUncertain && !adoptedQueueUnrestored;
     return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
+      ...(holdOnly ? {
+        code: "COLLECTION_HOLD_DEFER", retryable: true, deferred: true, deliveryOutcome: "not_sent",
+        error: holdLegs[0].error || "Customer has an active collections dispute hold; delivery deferred until it is released",
+        ...(holdLegs.find((leg) => leg.nextAllowedAt) ? { nextAllowedAt: holdLegs.find((leg) => leg.nextAllowedAt).nextAllowedAt } : {}),
+      } : {}),
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
       ...(terminalVisitRefused
         ? (terminalVisitVoided
@@ -7101,6 +7884,7 @@ const InvoiceService = {
       smsEventVisibleAt = undefined,
       emailEventVisibleAt = undefined,
       deduped = false,
+      summaryCarried = false,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
@@ -7163,7 +7947,14 @@ const InvoiceService = {
     // this call performed the write; the helper's priorStatus gate (read pre-
     // update) keeps a resend of an already-sent invoice from converting.
     if (updated) {
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status,
+        // The visit summary text's stamp on a carried invoice is its Text leg, not a prior delivery
+        // (the same exception sendViaSMSAndEmail applies when the queue finalizes it). The caller
+        // says so: the failed attempts have already rewritten the row's marker to its plain form.
+        priorDelivered: Boolean(invoice.sent_at
+          || (invoice.sms_sent_at && !summaryCarried
+            && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+            && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR))) });
     }
 
     try {
@@ -7226,13 +8017,12 @@ const InvoiceService = {
     await db("invoices")
       .where({ status: "sending" })
       .where("updated_at", "<", db.raw("NOW() - INTERVAL '10 minutes'"))
-      .update({
-        status: "scheduled",
-        scheduled_send_at: null,
-        scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
-        send_claim_token: null,
-        updated_at: new Date(),
-      });
+      // A stranded hold claim whose office alert has not landed stays in 'sending' until it has (see
+      // raiseStrandedHoldClaimAlerts at the end of this sweep).
+      .where((outer) => outer.whereNot((stranded) => {
+        strandedHoldClaimCandidate(stranded).whereNotExists(standingStrandedAlert);
+      }))
+      .update(stalePark());
 
     const due = await db("invoices")
       .where({ status: "scheduled" })
@@ -7243,6 +8033,61 @@ const InvoiceService = {
           .whereNull("scheduled_send_attempts")
           .orWhere("scheduled_send_attempts", "<", 5),
       )
+      // Invoices held by a customer's active collection HOLD (a dispute, or the wrong-number /
+      // wrong-party fallback a released dispute restores) never take a page
+      // slot (owner ruling 2026-09-30): a pile of held invoices, re-due every
+      // tick and oldest first, must not starve the unheld ones behind them.
+      // A payer-billed invoice goes to the payer's AP inbox and is never held.
+      // A combined-visit (packet) invoice whose Bill-To is not yet resolved
+      // (no payer_id stamped) is admitted to the live Bill-To fence
+      // (claimPacketInvoiceForSend) below, because a payer assigned since
+      // queueing routes it to the payer, held homeowner or not - but only until
+      // the fence has CONFIRMED it is still self-pay (Codex #5424 r14): the
+      // sender then stamps hold_bill_to_checked_at, and a held row with a fresh
+      // stamp is skipped here, so a large held cohort never re-occupies the
+      // delivery page every tick. A payer change is picked up at the next recheck
+      // interval (collection-hold HOLD_BILL_TO_RECHECK_MS, 30 min); a hold RELEASE needs no stamp expiry:
+      // the row is no longer held, so the first tick after it sends.
+      // The delivery-boundary check below stays AFTER that fence: it is the
+      // authoritative answer for a truly self-pay invoice and for a hold that
+      // lands between this read and the send.
+      // A termite renewal successor's prepay invoice (annual_prepay_terms.prepay_invoice_id with a
+      // renewed_from link) is in the same position (round 11): its payer is the customer DEFAULT,
+      // resolved live by the renewal Bill-To fence, so a held homeowner's renewal must reach that
+      // fence (withdrawHeldRenewalInvoiceToPayer, run before the hold deferral below) instead of
+      // being hidden behind the homeowner's dispute.
+      .where((q) =>
+        q.whereNotNull("payer_id")
+          .orWhere((unresolved) => unresolved
+            .where((stale) => stale.whereNull("hold_bill_to_checked_at")
+              .orWhere("hold_bill_to_checked_at", "<", new Date(Date.now() - require("./collections/collection-hold").HOLD_BILL_TO_RECHECK_MS)))
+            .where((fence) => fence.whereNotNull("visit_completion_packet_id")
+              .orWhereExists(function renewalSuccessorInvoice() {
+                this.select(1).from("annual_prepay_terms as apt")
+                  .whereRaw("apt.prepay_invoice_id = invoices.id")
+                  .whereNotNull("apt.renewed_from_term_id").whereNotNull("apt.annual_plan_version");
+              })))
+          .orWhereNotExists(function noActiveCollectionHold() {
+            // ANY active collection_hold (dispute OR a wrong-number / wrong-party fallback, the
+            // all-channel outreach block a released dispute restores): messaging waits on both.
+            require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
+          }),
+      )
+      // Ordinary rows first: an unresolved-Bill-To packet / renewal row with no fresh stamp (the only
+      // rows a held cohort can occupy) sorts AFTER every other due row, then oldest first, so a large
+      // held cohort never takes a slot ahead of an ordinary invoice - not even on the tick that first
+      // fences it (Codex #5424 r14). The cost is bounded: an unheld packet invoice waits behind a
+      // page-full of ordinary rows for a tick or two.
+      .orderBy(db.raw(
+        `CASE WHEN invoices.payer_id IS NULL
+           AND (invoices.hold_bill_to_checked_at IS NULL OR invoices.hold_bill_to_checked_at < ?)
+           AND (invoices.visit_completion_packet_id IS NOT NULL OR EXISTS (
+             SELECT 1 FROM annual_prepay_terms apt
+             WHERE apt.prepay_invoice_id = invoices.id
+               AND apt.renewed_from_term_id IS NOT NULL AND apt.annual_plan_version IS NOT NULL))
+         THEN 1 ELSE 0 END`,
+        [new Date(Date.now() - require("./collections/collection-hold").HOLD_BILL_TO_RECHECK_MS)],
+      ), "asc")
       .orderBy("scheduled_send_at", "asc")
       .limit(limit)
       .select(
@@ -7378,7 +8223,8 @@ const InvoiceService = {
         // lookup error: worst case an email waits for 8:00 AM, never a
         // night text.
         const acceptedChannelPendingEmail = String(inv.scheduled_send_error || "")
-          .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+          .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)
+          || String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR);
         let hasSmsLeg = !inv.payer_id && !acceptedChannelPendingEmail;
         if (hasSmsLeg) {
           try {
@@ -7437,6 +8283,9 @@ const InvoiceService = {
         }
       }
       let claimed = null;
+      // True once claimPacketInvoiceForSend's Bill-To fence has run to completion and found the
+      // packet invoice still self-pay (Codex #5424 r15): the held-row stamp below needs this.
+      let packetFenceConfirmed = false;
       // A combined-visit invoice re-resolves live Bill-To ownership under
       // held rows before its queue claim; a payer means the homeowner send is
       // withdrawn for good, not retried.
@@ -7452,10 +8301,25 @@ const InvoiceService = {
         }
         if (fenced.error) {
           logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} left queued — Bill-To fence failed: ${fenced.error.message}`);
+          // A broken fence on a HELD customer's row must not re-occupy the page every tick (Codex #5424 r15
+          // review): stamp the same recheck interval a confirmed fence gets. Nothing can be sent to a held
+          // self-pay homeowner meanwhile, a hold release makes the row non-held (the stamp is ignored and
+          // the first tick after it sends), and a payer assigned since is picked up at the recheck. A hold
+          // lookup that cannot answer stamps nothing (retried next tick).
+          try {
+            const holdNow = await require("./collections/collection-hold").messagingHeldByCollectionHold(inv.customer_id);
+            if (holdNow.held && holdNow.reason !== "lookup_failed") {
+              await db("invoices").where({ id: inv.id, status: "scheduled" }).whereNull("payer_id")
+                .update({ hold_bill_to_checked_at: new Date(), updated_at: new Date() });
+            }
+          } catch (stampErr) {
+            logger.warn(`[invoice] Could not stamp the Bill-To recheck on ${inv.invoice_number} after its fence failed: ${stampErr.message}`);
+          }
           continue;
         }
         if (!fenced.claim?.claimed) continue;
         claimed = fenced.claim.invoice;
+        packetFenceConfirmed = true;
       } else {
         claimed = await claimDueScheduledInvoiceForSend(db, inv.id);
       }
@@ -7464,6 +8328,57 @@ const InvoiceService = {
       const restoreClaimedInvoice = (payload) => db("invoices")
         .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
         .update({ ...payload, send_claim_token: null });
+
+      // Collections HOLD (owner ruling 2026-09-30; any active collection_hold - a dispute or the
+      // wrong-number / wrong-party fallback, Codex #5424 r13): no pay link reaches
+      // a customer while one stands, and this is the ONE
+      // chokepoint for every queued self-pay invoice - including one queued
+      // BEFORE the hold was placed. Nothing has been sent yet (the claim is
+      // the only write so far). The invoice stays 'scheduled', moves one cron
+      // tick out with NO attempt spent, and the claim is given back. Fail
+      // closed: a lookup that cannot be answered defers the same way, retried
+      // every tick - never a permanent park. When the hold is released by any
+      // path, the first tick after it sends the invoice through the normal
+      // path below and the reminder ladder starts. A payer-billed invoice goes
+      // to the payer's AP inbox, not the disputing homeowner - not held here.
+      if (!claimed.payer_id) {
+        const holdBlock = await require("./collections/collection-hold")
+          .messagingHeldByCollectionHold(claimed.customer_id);
+        if (holdBlock.held) {
+          // A renewal invoice owned by a third-party payer is not the homeowner's pay link: run the
+          // Bill-To fence FIRST so it reaches its payer even while the homeowner's dispute stands.
+          // A fence that cannot be judged falls through to the deferral (fail closed toward waiting).
+          let renewalFence = null;
+          let renewalFenceRan = false;
+          try {
+            renewalFence = await withdrawHeldRenewalInvoiceToPayer(claimed);
+            renewalFenceRan = true;
+          } catch (fenceErr) {
+            logger.warn(`[invoice] Held renewal invoice ${inv.invoice_number}: Bill-To fence failed (${fenceErr.message}) - deferring behind the dispute hold`);
+          }
+          if (renewalFence?.payerBilled) {
+            held += 1;
+            logger.info(`[invoice] Scheduled send for ${inv.invoice_number} withdrawn - the renewal is billed to payer ${renewalFence.payerId} (homeowner dispute hold does not apply)`);
+            continue;
+          }
+          const deferUntil = new Date(Date.now() + require("./collections/collection-hold").HOLD_DEFER_MS);
+          // The Bill-To fence has now CONFIRMED this held row is self-pay (a packet row's fence ran
+          // above, a renewal's just now; a fence that errored leaves no stamp and retries next tick):
+          // stamp it so the due query stops re-admitting it every tick (Codex #5424 r14).
+          const billToConfirmed = renewalFenceRan || packetFenceConfirmed;
+          const deferredRows = await restoreClaimedInvoice({
+            status: "scheduled", scheduled_send_at: deferUntil, updated_at: new Date(),
+            ...(billToConfirmed ? { hold_bill_to_checked_at: new Date() } : {}),
+          });
+          if (deferredRows) {
+            deferred += 1;
+            logger.info(holdBlock.reason === "lookup_failed"
+              ? `[invoice] Scheduled send for ${inv.invoice_number} deferred to ${deferUntil.toISOString()} - the collections dispute-hold lookup failed (${holdBlock.error?.message || "unknown"}); retrying next tick`
+              : `[invoice] Scheduled send for ${inv.invoice_number} deferred to ${deferUntil.toISOString()} - the customer has an active collections dispute hold`);
+          }
+          continue;
+        }
+      }
 
       let result;
       try {
@@ -7557,22 +8472,102 @@ const InvoiceService = {
       // 19:59→20:01 race) is a deferral, not a failure: move the due time
       // to the window open and leave the attempt counter alone — five
       // overnight cron passes must not permanently fail the send.
+      // A collections dispute hold reported by EITHER undelivered leg (the Text/App
+      // boundary or the separate branded Email boundary) is the same deferral: wait,
+      // spend no attempt, so a hold that outlasts the ladder never strands the invoice.
+      const holdLeg = [result.sms, result.email]
+        .find((leg) => leg?.code === "COLLECTION_HOLD_DEFER" && leg?.nextAllowedAt);
       const smsHeld =
         // Holds that are not bounded by the clock spend an attempt instead:
         // APP_PROVIDER_RETRY takes the native backoff below, and a suppression
         // or Email preparation outage must not reschedule for free indefinitely.
-        REPLAY_HOLD_CODES.includes(result.sms?.code)
+        (REPLAY_HOLD_CODES.includes(result.sms?.code)
         && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
-        && result.sms?.nextAllowedAt;
-      const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
-        ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
-        : error;
+        && result.sms?.nextAllowedAt)
+        || holdLeg?.nextAllowedAt;
+      const heldUntil = holdLeg?.nextAllowedAt || result.sms?.nextAllowedAt;
+      // The carried marker stays through every retry: losing it would text the pay link.
+      const summaryCarriedRow = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR);
+      const summaryPlannedRow = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR);
+      // A planned Text leg (the summary text not accepted) with an Email that cannot deliver, refused
+      // or out of attempts, goes to office review rather than "sent": nothing carried the link.
+      // If the summary's text was accepted meanwhile the invoice finalizes like a carried one.
+      if (!smsHeld && summaryPlannedRow
+        && (result.email?.blocked || result.email?.skipped || Number(inv.scheduled_send_attempts || 0) + 1 >= 5)) {
+        failed += 1;
+        const summaryTextAccepted = async () => Boolean((await db("invoices").where({ id: inv.id }).first("sms_sent_at"))?.sms_sent_at);
+        const finalizeAccepted = async () => {
+          await this.markDeliverySent(inv.id, {
+            source: "summary_carried_email_refused", summaryCarried: true, claimToken: claimed.send_claim_token,
+            requestReview: Boolean(claimed.scheduled_request_review), reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+          });
+          await alertSummaryCarriedEmailFailed(inv.id, inv.invoice_number, error);
+        };
+        if (await summaryTextAccepted()) {
+          await finalizeAccepted();
+        } else {
+          // One conditional write under the row lock: the summary's acceptance stamp writes the same
+          // row, so either it lands first (this matches nothing, and the invoice is finalized as
+          // carried) or the park lands first (the acceptance then finalizes the parked invoice).
+          const parked = await db("invoices")
+            .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
+            .whereNull("sms_sent_at")
+            .update({
+              status: "scheduled",
+              scheduled_send_at: null,
+              scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+              scheduled_send_error: `${require("./invoice-helpers").STALE_SEND_PARK_ERROR} — ${SUMMARY_LINK_PARK_TEXT} and the invoice email did not go: ${error}`,
+              send_claim_token: null,
+              updated_at: new Date(),
+            });
+          if (!parked) {
+            if (await summaryTextAccepted()) await finalizeAccepted();
+            else logger.warn(`[invoice] Summary-planned invoice ${inv.invoice_number}: its send claim changed before it could be parked — left to stale-claim recovery`);
+            continue;
+          }
+          // Nothing was delivered: the credit this send auto-applied is returned, exactly as after any
+          // other failed scheduled send (the row is 'scheduled' again, so the reversal is allowed).
+          if (result.creditApplied > 0) {
+            try {
+              await require("./customer-credit").reverseAppliedCredit({ invoiceId: inv.id, amount: result.creditApplied, createdBy: "system:scheduled_send_failed" });
+            } catch (e) {
+              logger.warn(`[invoice] credit reversal after parking ${inv.id} skipped: ${e.message}`);
+            }
+          }
+          await alertSummaryLinkUndelivered(inv.id, inv.invoice_number, error);
+          logger.error(`[invoice] Summary-planned invoice ${inv.invoice_number}: neither the summary text nor the email carried the link — parked for office review: ${error}`);
+        }
+        continue;
+      }
+      // A planned row whose summary text was accepted during this attempt is carried now.
+      const durableSendError = summaryPlannedRow
+        ? `${result.sms?.ok ? SUMMARY_TEXT_CARRIED_ERROR : SUMMARY_TEXT_PLANNED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
+        : summaryCarriedRow
+        ? `${SUMMARY_TEXT_CARRIED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
+        : result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
+          ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
+          : error;
+      // A carried invoice that reaches the attempt cap must not strand: it is finalized as
+      // sent (dunning arms, as for any accepted-Text row whose Email fails) and the office is told.
+      if (!smsHeld && summaryCarriedRow && Number(inv.scheduled_send_attempts || 0) + 1 >= 5) {
+        failed += 1;
+        await this.markDeliverySent(inv.id, {
+          source: "summary_carried_email_exhausted",
+          summaryCarried: true,
+          claimToken: claimed.send_claim_token,
+          requestReview: Boolean(claimed.scheduled_request_review),
+          reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+        });
+        await alertSummaryCarriedEmailFailed(inv.id, inv.invoice_number, error);
+        logger.error(`[invoice] Summary-carried invoice ${inv.invoice_number} email failed ${Number(inv.scheduled_send_attempts || 0) + 1} times — finalized as sent, office alerted: ${error}`);
+        continue;
+      }
       let restored = 0;
       if (smsHeld) {
         deferred += 1;
         restored = await restoreClaimedInvoice({
           status: "scheduled",
-          scheduled_send_at: new Date(result.sms.nextAllowedAt),
+          scheduled_send_at: new Date(heldUntil),
           scheduled_send_error: durableSendError,
           updated_at: new Date(),
         });
@@ -7607,7 +8602,7 @@ const InvoiceService = {
       }
       if (smsHeld) {
         logger.info(
-          `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${result.sms.nextAllowedAt}`,
+          `[invoice] Scheduled send for ${inv.invoice_number} held (send window or collections dispute hold) — deferred to ${heldUntil}`,
         );
       } else {
         logger.error(
@@ -7615,6 +8610,7 @@ const InvoiceService = {
         );
       }
     }
+    await raiseStrandedHoldClaimAlerts();
     return { sent, failed, deferred };
   },
 
@@ -7639,6 +8635,61 @@ const InvoiceService = {
   // carries the receipt. Manual single-channel operator sends (via='sms')
   // must NOT declare it: the operator explicitly chose the text, and there is
   // no email leg on that route to carry the receipt (codex round 5).
+  // The shortened receipt link a text carries. /receipt/, not /pay/: the pay
+  // page forwards paid invoices to the receipt but renders a refunded one as
+  // a "Refunded" payment page. Empty when the invoice has no token.
+  async receiptSmsUrl(invoice) {
+    const longReceiptUrl = invoice.token
+      ? `${publicPortalUrl()}/receipt/${invoice.token}`
+      : "";
+    return longReceiptUrl
+      ? shortenOrPassthrough(longReceiptUrl, {
+          kind: "receipt",
+          entityType: "invoices",
+          entityId: invoice.id,
+          customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        })
+      : "";
+  },
+
+  // The shortened pay link, minted exactly as sendViaSMS mints it, for the one
+  // other text that may carry it: the combined-visit summary
+  // (visit-completion-summary.js).
+  // The visit summary text carrying this invoice's pay link was accepted: the Text leg is
+  // recorded as delivered, and a planned invoice is promoted to the accepted-channel marker
+  // (the sender then counts the leg as delivered, and never texts it).
+  async markSummaryTextAccepted(invoiceId) {
+    const updated = await db("invoices").where({ id: invoiceId }).update({
+      sms_sent_at: db.raw("COALESCE(sms_sent_at, NOW())"),
+      scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN ? ELSE scheduled_send_error END",
+        [`${SUMMARY_TEXT_PLANNED_ERROR}%`, SUMMARY_TEXT_CARRIED_ERROR]),
+      updated_at: new Date(),
+    });
+    // An invoice the office was asked to review because neither the summary text nor the email
+    // carried its link (SUMMARY_LINK_PARK_TEXT) now has the link delivered: finalize it as sent
+    // through the ordinary path (lead conversion, dunning) and resolve the alert.
+    const row = await db("invoices").where({ id: invoiceId }).first("status", "scheduled_send_at", "scheduled_send_error");
+    if (row?.status === "scheduled" && !row.scheduled_send_at
+      && String(row.scheduled_send_error || "").includes(SUMMARY_LINK_PARK_TEXT)) {
+      await this.markDeliverySent(invoiceId, { source: "summary_text_accepted", summaryCarried: true });
+      await require("./admin-alert-episodes").closeAdminAlertKeys(db, [`summary-link-undelivered:${invoiceId}`], "summary_text_accepted")
+        .catch((err) => logger.warn(`[invoice] could not resolve the undelivered-link alert for ${invoiceId}: ${err.message}`));
+    }
+    return updated;
+  },
+
+  async payLinkSmsUrl(invoice) {
+    if (!invoice.token) return "";
+    return shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: "invoice",
+      entityType: "invoices",
+      entityId: invoice.id,
+      customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+  },
+
   /**
    * The customer-facing money facts a payment-receipt text needs: exact
    * amount collected, the " (Visa ending 4242)" card clause, and the
@@ -7653,37 +8704,34 @@ const InvoiceService = {
    * credit). Falls back to amount due when no payment row exists.
    */
   async receiptSmsFacts(invoice) {
-    const domain = publicPortalUrl();
-    // /receipt/, not /pay/: the pay page forwards paid invoices to the
-    // receipt but renders a refunded one as a "Refunded" payment page.
-    const longReceiptUrl = invoice.token
-      ? `${domain}/receipt/${invoice.token}`
-      : "";
-    const receiptUrl = longReceiptUrl
-      ? await shortenOrPassthrough(longReceiptUrl, {
-          kind: "receipt",
-          entityType: "invoices",
-          entityId: invoice.id,
-          customerId: invoice.customer_id,
-          codePrefix: invoiceShortCodePrefix(invoice),
-        })
-      : "";
+    const receiptUrl = await InvoiceService.receiptSmsUrl(invoice);
     const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
-    const receiptPayment = await db("payments")
+    const amount = await InvoiceService.receiptAmountFor(invoice);
+    return { amount, cardLine, receiptUrl };
+  },
+
+  // The amount a receipt states, read-only: net cash kept when a refund is
+  // recorded on the payment row, otherwise the amount due. Shared by the
+  // receipt SMS and the IB closeout repair card (which must not mint the
+  // short link receiptSmsFacts does).
+  // failClosed: an unreadable payments row throws instead of falling back to
+  // the amount due (which would drop a recorded refund) — for callers that
+  // show and pin the amount (the IB card).
+  async receiptAmountFor(invoice, { failClosed = false } = {}) {
+    const paymentQuery = db("payments")
       .where({ customer_id: invoice.customer_id })
       .whereIn("status", ["paid", "refunded"])
       .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
       .orderBy("created_at", "desc")
-      .first()
-      .catch(() => null);
+      .first();
+    const receiptPayment = failClosed ? await paymentQuery : await paymentQuery.catch(() => null);
     const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
     const receiptAmount = receiptRefunded > 0
       ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
       : invoiceAmountDue(invoice);
-    const amount = Number.isFinite(receiptAmount)
+    return Number.isFinite(receiptAmount)
       ? receiptAmount.toFixed(2)
       : "0.00";
-    return { amount, cardLine, receiptUrl };
   },
 
   async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false } = {}) {
@@ -7766,6 +8814,7 @@ const InvoiceService = {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
         notificationEventKey: `invoice:${invoiceId}:receipt`,
+        templateKey: "invoice_receipt",
       },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
@@ -10916,11 +11965,16 @@ const InvoiceService = {
    */
   async voidOpenInvoicesForCancelledService(
     scheduledServiceId,
-    { invoiceId = null, refusedClaimToken = null } = {},
+    { invoiceId = null, refusedClaimToken = null, pinnedInvoices = null, pinnedCreditReversalOfferIds = null } = {},
   ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
     const refusedSendCleanup = Boolean(invoiceId && refusedClaimToken);
+    const pinnedById = Array.isArray(pinnedInvoices)
+      ? new Map(pinnedInvoices.map((inv) => [String(inv.id), inv]))
+      : null;
+    const pinnedMismatch = (row) => pinnedById
+      && !cancelVoidAmountsMatch(cancelVoidInvoiceAmounts(row), pinnedById.get(String(row.id)));
     try {
       const candidateQuery = db("invoices");
       if (refusedSendCleanup) {
@@ -10941,13 +11995,31 @@ const InvoiceService = {
               );
           })
           .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
+        // A cancel confirmed from a card that listed the invoices it voids
+        // (Intelligence Bar cancel_appointment, via the follow-through's
+        // pinned effects) voids ONLY those, and only at the amounts shown
+        // (checked below, before any Stripe call and again under the row
+        // lock); an invoice created or changed after the card is left
+        // open, and the follow-through's post-void gate then sends the fee
+        // to office review.
+        if (pinnedById) candidateQuery.whereIn("id", [...pinnedById.keys()]);
       }
       const candidates = await candidateQuery
-        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
+        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
+          "total", "credit_applied", "line_items");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
         try {
+          // A card-confirmed cancel never pins an invoice carrying a
+          // PaymentIntent (the card refuses that shape), so one attached
+          // since the card is left alone: no Stripe cancel, no void.
+          if (pinnedById && (pinnedMismatch(candidate) || candidate.stripe_payment_intent_id)) {
+            logger.warn(
+              `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — changed since the confirmed card; needs office review`,
+            );
+            continue;
+          }
           // ── Stripe PI triage (pre-lock) ────────────────────────────────
           const triagedPiId = candidate.stripe_payment_intent_id || null;
           // The refused-send cleanup runs after provider preparation. Never
@@ -11059,6 +12131,8 @@ const InvoiceService = {
               }
             } else if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
               return { skipped: `status moved to ${locked.status}`, invoice: locked };
+            } else if (pinnedMismatch(locked)) {
+              return { skipped: "amounts changed since the confirmed card; needs office review", invoice: locked };
             }
             // A different/new PI attached after triage means a customer is
             // actively starting a payment — skip.
@@ -11161,6 +12235,7 @@ const InvoiceService = {
           const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
             scheduledServiceId,
             createdBy: 'system:inspection_credit_cancellation_void_hook',
+            ...(pinnedCreditReversalOfferIds ? { pinnedReversalOfferIds: pinnedCreditReversalOfferIds } : {}),
           });
           // Surfaced for callers that COUNT reversals (the hourly sweep,
           // which now routes through this seam — Codex #3178 r33 P2): a
@@ -11176,6 +12251,144 @@ const InvoiceService = {
       }
     }
     return voided;
+  },
+
+  /**
+   * Read-only preview of voidOpenInvoicesForCancelledService — which
+   * invoices for this scheduled service WOULD be voided right now, with NO
+   * write and NO Stripe mutation (a live PaymentIntent is only RETRIEVED
+   * here, never cancelled). Mirrors that function's candidate/skip rules
+   * exactly (same status set, same applied-payment/finalized-statement/
+   * PaymentIntent-in-flight checks) so the Intelligence Bar cancel_appointment
+   * preview can freeze the exact invoice set the confirmation card shows,
+   * and the commit path can recompute this same preview immediately before
+   * voiding and refuse on drift instead of settling a different set.
+   * Throws when any read fails (the candidate scan, a statement or payment
+   * check, a PaymentIntent retrieve): a read that fails now may succeed at
+   * commit and void an invoice the card never showed, so the caller treats
+   * the whole effect set as undeterminable. A PaymentIntent that Stripe
+   * cannot verify without an error (`!pi`) is skipped, as the sweep does.
+   */
+  async previewInvoiceVoidForCancelledService(scheduledServiceId) {
+    const would = [];
+    if (!scheduledServiceId) return would;
+    const candidates = await db("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            db("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      })
+      .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
+      .orderBy("id")
+      .select("id", "invoice_number", "status", "total", "credit_applied", "line_items",
+        "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+    for (const candidate of candidates) {
+      if (candidate.payer_statement_id) {
+        const stmt = await db("payer_statements").where({ id: candidate.payer_statement_id }).first("status");
+        if (stmt && stmt.status !== "open") continue; // finalized statement — needs a credit on the next statement
+      }
+      const appliedPayment = await db("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [candidate.id])
+        .first("id");
+      if (candidate.payment_recorded_at || appliedPayment) continue; // money already applied — needs manual refund/credit review
+      if (candidate.stripe_payment_intent_id) {
+        const pi = await require("./stripe").retrievePaymentIntent(candidate.stripe_payment_intent_id);
+        if (!pi || PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) continue;
+      }
+      would.push({
+        id: candidate.id,
+        invoice_number: candidate.invoice_number,
+        status: candidate.status,
+        // The void would CANCEL this PaymentIntent (and unbind it from
+        // combined siblings) — a card-confirmed cancel refuses that shape.
+        payment_intent: Boolean(candidate.stripe_payment_intent_id),
+        ...cancelVoidInvoiceAmounts(candidate),
+      });
+    }
+    return would;
+  },
+
+  /**
+   * Read-only preview of the post-void gate that BOTH cancellation money
+   * steps apply once voidOpenInvoicesForCancelledService has run: an
+   * invoice on this scheduled service still outside
+   * CANCELLED_SERVICE_RESOLVED_STATUSES makes runVisitCancellationFollowThrough
+   * skip the fee step (office alerted) and makes
+   * reverseInspectionCreditForBooking defer (office alerted). The real gate
+   * runs AFTER the void, so the invoices the void preview says it would void
+   * (`voidedInvoiceIds`) are treated as resolved here. Same query as both
+   * gates, unresolvedInvoicesForCancelledService. Returns true when an
+   * invoice would still be unresolved. Throws when the read
+   * fails: the caller treats the effect set as undeterminable rather than
+   * guessing.
+   */
+  async previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
+    if (!scheduledServiceId) return false;
+    const query = InvoiceService.unresolvedInvoicesForCancelledService(db, scheduledServiceId);
+    if (voidedInvoiceIds.length) query.whereNotIn("id", voidedInvoiceIds);
+    return Boolean(await query.first("id"));
+  },
+
+  // Query-builder clause: an invoice tied to a visit — directly
+  // (scheduled_service_id) or through its service record (service_record_id,
+  // how most post-completion invoices link). For customer-wide visit-money
+  // checks (the signup-cancel eligibility and pre-refund scans in
+  // customer-offboarding.js); per-visit gates use
+  // unresolvedInvoicesForCancelledService below.
+  whereVisitLinked(qb) {
+    qb.whereNotNull("scheduled_service_id").orWhereNotNull("service_record_id");
+  },
+
+  /**
+   * The invoices of a cancelled scheduled service that still hold money
+   * (outside CANCELLED_SERVICE_RESOLVED_STATUSES), linked directly OR through
+   * a service record — the same two links the void sweep scans, since most
+   * post-completion invoices carry only service_record_id. The ONE query for
+   * every post-void gate: the follow-through's fee gate, the inspection-credit
+   * reversal's invoice guard, the plan-cancel processor's manual-review list,
+   * offboarding's per-visit check, and the Intelligence Bar preview. The
+   * direct link alone let an invoice still holding money go unseen, so a
+   * late-cancel fee could be charged and a credit reversed beside it.
+   * Returns a query builder.
+   */
+  unresolvedInvoicesForCancelledService(conn, scheduledServiceId) {
+    return conn("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            conn("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      })
+      .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+  },
+
+  /**
+   * ALL invoices linked to this scheduled service, in ANY status — the
+   * same direct-or-through-service-record link
+   * unresolvedInvoicesForCancelledService uses above, minus its
+   * resolved-status filter. Owner ruling 2026-09-28 ("bare visits only"):
+   * the Intelligence Bar cancel card refuses a visit with ANY invoice on
+   * record at all — paid, void, refunded, draft, whatever — since a bare
+   * visit is one with nothing on the books to begin with, not just nothing
+   * currently voidable. Accepts `conn` (db or a trx) so the commit-time
+   * recheck (tools.js cancelAppointment) can run this same query under the
+   * row lock it already holds. Returns a query builder; callers decide the
+   * columns/limit (an existence check at proposal time, the identical shape
+   * re-run under the lock at commit).
+   */
+  anyInvoiceLinkedToVisit(conn, scheduledServiceId) {
+    return conn("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            conn("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      });
   },
 
   async getStats() {
@@ -11289,7 +12502,13 @@ module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+// The receipt SMS leg's phone-less App admission — shared with the IB closeout
+// repair card so it describes the same reach sendReceipt has.
+module.exports.explicitBillingAppSelected = explicitBillingAppSelected;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
+module.exports._cancelVoidInvoiceAmounts = cancelVoidInvoiceAmounts;
+module.exports._cancelVoidAmountsMatch = cancelVoidAmountsMatch;
+
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
 // Test-only seam (#4131 slice 4): exercises the atomic attempt-increment
@@ -11312,3 +12531,11 @@ module.exports.claimInvoiceForSend = claimInvoiceForSend;
 // be asserted against real schema without driving the whole send twice.
 module.exports.restoreSendClaim = restoreSendClaim;
 module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
+// Test-only seam (GATE_STAMPED_ZERO_FREE): exercises the unvoid linked-visit
+// guard directly, without driving the whole unvoidInvoice call chain, so the
+// gate's on/off behavior (incl. the combined-packet member check and the
+// service_record_id-only fallback) can be pinned with a minimal conn mock.
+module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;
+// Test-only seam (#5424 r14): the pending-channel replay queue row, to pin the persisted trusted
+// dispute-hold exemption (metadata.hold_exempt) that the replay's eligibility and boundary re-apply.
+module.exports._queuePendingChannelReplay = queuePendingChannelReplay;

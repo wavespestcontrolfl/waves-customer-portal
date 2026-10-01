@@ -110,8 +110,14 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
     ...built,
     title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
     body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
+    ...(built.detail ? { detail: cleanBody(redactSensitiveText(built.detail)) } : {}),
   };
 }
+
+// A call alert opens the call it is about: the Calls tab reads
+// #tab=calls&call=<call_log id> (CallLogTabV2 pins a call outside its loaded
+// window). No id in the payload keeps the bare tab.
+const callLink = (p) => `/admin/communications#tab=calls${p.callLogId ? `&call=${encodeURIComponent(p.callLogId)}` : ''}`;
 
 // priority: 'urgent' (red, double vibrate), 'high' (amber), 'normal' (teal), 'low' (gray)
 const TRIGGER_REGISTRY = {
@@ -293,9 +299,21 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
       body: redactSensitiveText(p.message || '').slice(0, 140),
+      // The whole text, for the bell's "Show full text": the 140-character
+      // body above (also the push text) used to be all the bell ever kept.
+      ...(String(p.message || '').length > 140 ? { detail: redactSensitiveText(p.message).slice(0, 1600) } : {}),
       // threadId is the customer id (see twilio-webhook). CommunicationsPageV2
       // reads ?thread=<customerId> and opens that customer's SMS conversation.
-      link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
+      // The MessageSid (never the phone number, which this feed masks) names
+      // the message the alert is about, so the page scrolls to THAT message
+      // even when newer ones arrive before the tap. A known sender keeps the
+      // thread link and appends &message=<sid> (markInboundSmsReadAdmin and
+      // inbound-sms-read match the part before &message=); an unknown sender
+      // has no customer, so ?message= alone opens the conversation
+      // (inbound-sms-read recognises both unlinked shapes by this prefix).
+      link: p.threadId
+        ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
+        : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
     }),
   },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
@@ -314,7 +332,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Sandy transfer without context',
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
-      link: '/admin/communications#tab=calls',
+      link: callLink(p),
     }),
   },
   // Direct watcher bells must also join the staff visibility allowlist.
@@ -375,9 +393,8 @@ const TRIGGER_REGISTRY = {
         title: `${p.reason === 'sandy_provider_failure' ? 'AI call callback' : 'Voicemail'} — ${who}`,
         body: bodyParts.join(' - '),
         // Voicemail recordings render under the Calls tab (hash-routed);
-        // ?thread= would open the SMS view instead. CallLogTabV2 has no
-        // per-call URL param today, so the tab is the deepest stable link.
-        link: '/admin/communications#tab=calls',
+        // ?thread= would open the SMS view instead.
+        link: callLink(p),
       };
     },
   },
@@ -409,7 +426,7 @@ const TRIGGER_REGISTRY = {
       body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
-      link: '/admin/communications#tab=calls',
+      link: callLink(p),
     }),
   },
   // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.
@@ -422,7 +439,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: `Repeat caller — ${p.name || 'unknown number'}`,
       body: `${p.phone || 'unknown number'} has called ${p.count} times in the last 3 hours (${p.unanswered} unanswered)${p.line ? ` on ${p.line}` : ''}.`,
-      link: '/admin/communications#tab=calls',
+      link: callLink(p),
     }),
   },
   // A lead calls back while a Waves promise from an earlier unbooked call
@@ -443,7 +460,7 @@ const TRIGGER_REGISTRY = {
       return {
         title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
         body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
-        link: '/admin/communications#tab=calls',
+        link: callLink(p),
       };
     },
   },
@@ -817,7 +834,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter proof sent — reply APPROVED to send',
       body: `Proof of "${p.subject || 'Untitled'}" emailed to ${p.recipient || 'the owner inbox'}. Reply APPROVED to that email and it sends to ${p.recipientCount ?? '?'} active subscribers; any other reply (or none) leaves it a draft.`,
-      link: '/admin/newsletter?tab=compose',
+      // Deep-link THE draft the notice is about — the bare compose tab opens
+      // the latest autopilot draft, not this one (codex round 16 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   newsletter_proof_approved: {
@@ -831,6 +850,20 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=history',
     }),
   },
+  newsletter_send_not_dispatched: {
+    label: 'Newsletter send cancelled: the draft changed after Send was clicked',
+    category: 'newsletter',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Newsletter not sent',
+      body: `"${p.subject || 'Untitled'}" changed after Send was clicked — nothing went out. Review the draft and send it again.`,
+      // Deep-link THE affected draft: the bare compose tab opens the latest
+      // autopilot draft, not the campaign whose send was cancelled (codex
+      // round 14 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
+    }),
+  },
   newsletter_proof_blocked: {
     label: 'Newsletter proof/approval blocked by validation',
     category: 'newsletter',
@@ -839,7 +872,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter proof blocked',
       body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Fix the draft in the composer — nothing was sent.`,
-      link: '/admin/newsletter?tab=compose',
+      // Deep-link THE draft the notice is about — the bare compose tab opens
+      // the latest autopilot draft, not this one (codex round 16 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   event_sources_unhealthy: {
@@ -1079,7 +1114,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             trigger.category,
             built.title,
             built.body,
-            { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
+            { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
               ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }

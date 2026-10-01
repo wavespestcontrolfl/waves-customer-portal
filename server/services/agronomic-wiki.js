@@ -25,6 +25,13 @@ function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
 }
 
+// A track page's grass_track id, read from the title updateTrackPage writes
+// ("Track st_augustine Performance"). The slug is slugified
+// ("track/st-augustine") and matches no treatment_outcomes rows.
+function trackIdFromPage(page) {
+  return page.title.replace(/^Track\s+/i, '').replace(/\s+Performance$/i, '');
+}
+
 // Escape LIKE/ILIKE metacharacters so product names containing literal
 // "%" or "_" (e.g. "LESCO High Manganese Combo AM 1% Mg 5.75% S ...")
 // match as text instead of acting as wildcards. Pair with ESCAPE '\'.
@@ -344,10 +351,11 @@ async function callClaude(systemPrompt, userPrompt) {
     const response = await createDeepMessage(client, {
       laneId: 'wiki_compiler',
       model: MODEL,
-      // effort 'medium' (2026-09-28): at high, Opus 5.5's thinking still ran
-      // a September page into the 16000 cap. A page summarizes logged
-      // outcomes; it needs room to write, not deep reasoning.
-      effort: 'medium',
+      // effort 'low' (2026-09-28): at high, Opus 5.5's thinking ran a
+      // September page into the 16000 cap; at medium, the largest product
+      // page (39 records) still did. A page summarizes logged outcomes; it
+      // needs room to write, not deep reasoning.
+      effort: 'low',
       // DEEP: thinking spends from max_tokens ahead of the visible answer.
       // 16000 (was 8192, 2026-09-26): 5 of 6 prod calls were hitting 8192
       // exactly (avg output 7515) with thinking eating the whole cap —
@@ -1626,8 +1634,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
             const productName = page.title.replace(/^Product:\s*/i, '');
             classify(await AgronomicWiki.updateProductPage(productName, REFRESH_OPTS));
           } else if (page.category === 'track') {
-            const trackId = page.slug.replace('track/', '');
-            classify(await AgronomicWiki.updateTrackPage(trackId, REFRESH_OPTS));
+            classify(await AgronomicWiki.updateTrackPage(trackIdFromPage(page), REFRESH_OPTS));
           } else if (page.category === 'seasonal') {
             const monthSlug = page.slug.replace('seasonal/', '');
             const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
@@ -2042,6 +2049,7 @@ module.exports.recomputeEntryReviewGate = recomputeEntryReviewGate;
 // imports it (a __private-only export made that destructuring undefined
 // and the first fallback call aborted the whole detection pass).
 module.exports.escapeLike = escapeLike;
+module.exports.trackIdFromPage = trackIdFromPage;
 
 // Exposed for unit tests only.
 module.exports.__private = {

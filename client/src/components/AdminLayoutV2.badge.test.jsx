@@ -68,13 +68,13 @@ describe("AdminLayoutV2 Messages badge", () => {
     expect(link).not.toHaveTextContent(/unread/);
   });
 
-  it("links the mobile badge to unanswered conversations", async () => {
+  it("links the mobile badge to the full inbox, not the unanswered filter", async () => {
     unread.value = 5;
     mobile.value = true;
     mount();
     const tabbar = await screen.findByRole("navigation", { name: "Primary" });
     const link = within(tabbar).getByRole("link", { name: /Messages.*5 conversations needing a reply/ });
-    expect(link).toHaveAttribute("href", "/admin/communications?needsResponse=true");
+    expect(link).toHaveAttribute("href", "/admin/communications");
     expect(link).toHaveTextContent("5");
   });
 
@@ -82,7 +82,7 @@ describe("AdminLayoutV2 Messages badge", () => {
     unread.value = 240;
     mount();
     const link = await screen.findByRole("link", { name: /Communications.*240 conversations needing a reply/ });
-    expect(link).toHaveAttribute("href", "/admin/communications?needsResponse=true");
+    expect(link).toHaveAttribute("href", "/admin/communications");
     expect(link).toHaveTextContent("99+");
   });
 });

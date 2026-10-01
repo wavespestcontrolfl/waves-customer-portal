@@ -83,8 +83,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b3eb428b63d49908ec727f9203f0605b748788b4c306111af95189afd48763b9"
     },
     "condition": {
       "hosts": [
@@ -136,7 +137,7 @@
           "slug": "mower-scalping",
           "difference": "Drought stress shows blue-gray, folded blades across dry zones; mower scalping is a uniform tan, stubbly cut appearing right after a mow.",
           "next_observation": "Check whether the discoloration followed a recent mow or a dry, sunny spell.",
-          "photo_can_confirm": true
+          "photo_can_confirm": false
         },
         {
           "slug": "chinch-bug",
@@ -246,8 +247,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "481d9fc15494291721c98f1c1a2885639550e0fdbfdd4047b9778418bff611a7"
     },
     "condition": {
       "hosts": [
@@ -393,8 +395,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "6d51e383d5261319e55c7ba23e9db9c1d9e13240accb969b00e1644f09ca5be1"
     },
     "condition": {
       "hosts": [
@@ -525,8 +528,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "9cbff5d06650030e0d5344e36a207e5f1f6c70dd115512d8d181bfb4b9cb2752"
     },
     "condition": {
       "hosts": [
@@ -555,7 +559,7 @@
           "slug": "mower-scalping",
           "difference": "Compaction wear follows a repeated traffic path regardless of mowing; mower scalping is a uniform tan cut appearing right after a single low mow.",
           "next_observation": "Check whether the thin area is a walking path or matches a recent mow.",
-          "photo_can_confirm": true
+          "photo_can_confirm": false
         }
       ],
       "site_factors": [
@@ -651,8 +655,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c916526b2688f42f016837f44871cd22ad6d70a41e9ba574ea84ec1e07c4331f"
     },
     "condition": {
       "hosts": [
@@ -722,8 +727,8 @@
     "stages": [],
     "sign_of": [],
     "traits": [
-      "Leaflets or leaves brown or blacken within days of a cold snap, worst on the most exposed growth",
-      "Leaves often look water-soaked before turning brown or black on exposed parts of the plant",
+      "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+      "Some leaves look water-soaked and others brown or black on the exposed parts of the plant",
       "Damage is worse on plants in open, unprotected spots than those under canopy or near a building"
     ],
     "look_alikes": [],
@@ -783,8 +788,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3864a4b257d7280760ad5c26fe7c08745ea691018e519465d740ee312ec51e4b"
     },
     "condition": {
       "hosts": [
@@ -794,14 +800,14 @@
       ],
       "signs": [],
       "symptoms": [
-        "Leaflets or leaves brown or blacken within days of a cold snap, worst on the most exposed growth",
-        "Leaves often look water-soaked before turning brown or black on exposed parts of the plant"
+        "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+        "Some leaves look water-soaked and others brown or black on the exposed parts of the plant"
       ],
       "required_signature": {
-        "text": "A wide photo showing the water-soaked, then browned or blackened, leaf pattern shortly after a cold snap.",
+        "text": "A wide photo showing water-soaked and browned or blackened leaves, worst on the most exposed growth.",
         "elements": [
-          "Leaflets or leaves brown or blacken within days of a cold snap, worst on the most exposed growth",
-          "Leaves often look water-soaked before turning brown or black on exposed parts of the plant"
+          "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+          "Some leaves look water-soaked and others brown or black on the exposed parts of the plant"
         ],
         "confirmable_by": "photo"
       },
@@ -816,7 +822,7 @@
         {
           "slug": "potassium-deficiency-palm",
           "difference": "Cold damage appears within days of a cold snap and can affect many fronds at once; potassium deficiency develops gradually and stays on the oldest fronds only.",
-          "next_observation": "A wider photo checking how many fronds are affected and whether a recent cold snap occurred.",
+          "next_observation": "A technician checks how many fronds are affected and whether the damage lines up with a recent cold snap.",
           "photo_can_confirm": false
         }
       ],
@@ -844,7 +850,7 @@
     "stages": [],
     "sign_of": [],
     "traits": [
-      "Leaf scorch, wilting or smaller-than-normal new leaves on a recently planted tree or shrub",
+      "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)",
       "Premature fall color or early leaf drop out of season on a new planting",
       "Growth stalls or slows noticeably compared to before the plant was moved"
     ],
@@ -917,8 +923,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3cb385242a6413701a584ce1edd601dd53d02ae7a537746a61c9f23ed316c299"
     },
     "condition": {
       "hosts": [
@@ -927,12 +934,12 @@
       ],
       "signs": [],
       "symptoms": [
-        "Leaf scorch, wilting or smaller-than-normal new leaves on a recently planted tree or shrub"
+        "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)"
       ],
       "required_signature": {
-        "text": "A wide photo of the struggling new planting, noting how recently it was installed and whether the soil is wet or dry.",
+        "text": "A wide photo of the struggling plant showing signs of a new installation (stakes, a fresh mulch ring or the root ball edge) and whether the soil looks wet or dry.",
         "elements": [
-          "Leaf scorch, wilting or smaller-than-normal new leaves on a recently planted tree or shrub"
+          "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)"
         ],
         "confirmable_by": "photo"
       },
@@ -1060,8 +1067,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "73bf182a73b5bf8664629ce727c99e22e827f1e9d94eee41452c3e8515f0de41"
     },
     "condition": {
       "hosts": [

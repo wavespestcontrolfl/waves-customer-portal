@@ -449,14 +449,14 @@ postgres('visit completion packet records on PostgreSQL', () => {
         .whereRaw("metadata->>'scheduledServiceId' = ?", [serviceId]);
       expect(alerts).toHaveLength(1);
       if (lane === 'ordinary') {
-        expect(alerts[0].body).toContain(`setup fee is covered by invoice ${coveringInvoice.invoice_number}`);
-        expect(alerts[0].body).toContain('do NOT re-bill the setup fee');
+        expect(alerts[0].detail || alerts[0].body).toContain(`setup fee is covered by invoice ${coveringInvoice.invoice_number}`);
+        expect(alerts[0].detail || alerts[0].body).toContain('do NOT re-bill the setup fee');
       } else if (feeAmount < 99) {
-        expect(alerts[0].body).toContain('$59.00 remaining');
+        expect(alerts[0].detail || alerts[0].body).toContain('$59.00 remaining');
         expect(alerts[0].metadata.expectedSetupFeeCents).toBe(9900);
       } else {
-        expect(alerts[0].body).not.toContain('ALSO:');
-        expect(alerts[0].body).not.toContain('setup fee');
+        expect(alerts[0].detail || alerts[0].body).not.toContain('ALSO:');
+        expect(alerts[0].detail || alerts[0].body).not.toContain('setup fee');
       }
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -4005,6 +4005,21 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(email).toHaveBeenCalledTimes(2);
       expect(email.mock.calls[1][0].idempotencyKey).toBe(email.mock.calls[0][0].idempotencyKey);
     } finally { dispatch.mockRestore(); }
+  });
+
+  test('an active dispute hold does not change the closeout: the invoice is scheduled as usual and the invoice SENDER (not the closeout) holds it', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    const [flag] = await mockPg('collections_flags').insert({ customer_id: fixture.customerId, flag: 'collection_hold',
+      reason: 'dispute on call: synthetic billing question', created_by: 'test' }).returning('id');
+    try {
+      // Owner ruling 2026-09-30: the sender is the one chokepoint for a held pay link, so the
+      // closeout no longer reads the hold at all - no lookup to fail, nothing to park.
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+      const queued = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(queued).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, scheduled_send_error: null });
+      expect(queued.scheduled_send_at).not.toBeNull();
+    } finally { await mockPg('collections_flags').where({ id: flag.id }).del(); }
   });
 
   test('a caller-owned transaction is rejected before any packet query or upload', async () => {

@@ -77,7 +77,7 @@
       "what_it_means": "A uniform pale yellow-green lawn, worse on older blades, can suggest low nitrogen, but early disease or a root problem can look similar. A photo cannot confirm it; a technician checks the pattern and times any nutrition within the local fertilizer rules.",
       "fact": "Florida's sandy soils hold nitrogen poorly, so it can wash below the root zone with heavy rain well before a lawn shows visible signs of running low."
     },
-    "tech_notes": "Rule out rust and disease first; nitrogen timing is restricted by the local fertilizer blackout (Jun 1 - Sep 30) for nitrogen and phosphorus.",
+    "tech_notes": "Rule out rust and disease first. Nitrogen and phosphorus timing follows the property's local fertilizer ordinance, which varies by county and city.",
     "links": {
       "site_page": null,
       "guides": []
@@ -88,8 +88,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "0dec75b0962b66766bdbaa10654795ea5e524728d626224f6c68f8659e77ad35"
     },
     "condition": {
       "hosts": [
@@ -125,7 +126,7 @@
         {
           "slug": "turf-rust",
           "difference": "Nitrogen deficiency has no pustules; rust shows orange, powdery pustules on the blade that rub off on a finger.",
-          "next_observation": "Rub a blade between your fingers checking for orange residue.",
+          "next_observation": "A close-up of your fingertip after rubbing a blade: orange powder that rubs off points to rust.",
           "photo_can_confirm": true
         }
       ],
@@ -217,8 +218,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b748f8a0ce418c1f22c42035a611e541b1e1235136eecbb527b63214df0b7649"
     },
     "condition": {
       "hosts": [
@@ -254,7 +256,7 @@
         {
           "slug": "herbicide-injury",
           "difference": "Iron deficiency stripes new blades lawn-wide; herbicide injury matches where and when something was applied, whether a small area or the whole lawn.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or a mowing/edging path.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or a mowing/edging path.",
           "photo_can_confirm": false
         }
       ],
@@ -355,8 +357,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "fa17834264065c3f8bbf5d5c9203a11ea30c9b129524aa54bb62bfe7870f0d4a"
     },
     "condition": {
       "hosts": [
@@ -392,7 +395,7 @@
         {
           "slug": "herbicide-injury",
           "difference": "Magnesium deficiency shows blotchy, interveinal yellowing lawn-wide; herbicide injury matches where and when something was applied, spot or lawn-wide.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or spreads evenly.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or spreads evenly.",
           "photo_can_confirm": false
         }
       ],
@@ -493,8 +496,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c6b6b95487f644f007336487dbb0075fdd937534f2ec61dd0bed4009c2e4b6fe"
     },
     "condition": {
       "hosts": [
@@ -530,7 +534,7 @@
         {
           "slug": "cold-damage",
           "difference": "Potassium deficiency develops gradually and stays on the oldest fronds; cold damage appears within days of a cold snap and can affect many fronds at once.",
-          "next_observation": "A wider photo checking how many fronds are affected and whether a recent cold snap occurred.",
+          "next_observation": "A technician checks how many fronds are affected and whether the damage lines up with a recent cold snap.",
           "photo_can_confirm": false
         }
       ],
@@ -631,8 +635,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bc1739f1c426bc7b137a8921bf7837fe43661052b6caaba660cc95381ca82e9f"
     },
     "condition": {
       "hosts": [
@@ -766,8 +771,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2b186680bfe4d28c2926e50d29a07bde57123ca7949ddef7b4ad2cba06b842ca"
     },
     "condition": {
       "hosts": [
@@ -897,8 +903,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "833286f8dc8bc9fc59fc43a7a53c9157ed71b55759561e4ad4ba3fe44c10d9f9"
     },
     "condition": {
       "hosts": [
@@ -927,7 +934,7 @@
         {
           "slug": "palm-bud-rot",
           "difference": "Boron deficiency keeps the spear leaf attached even if it will not open; bud rot leaves discolor, wilt and pull free easily from the crown.",
-          "next_observation": "Gently check whether the spear leaf pulls free, or have a technician check it.",
+          "next_observation": "A technician checks whether the spear leaf pulls free; don't climb a ladder to reach it yourself.",
           "photo_can_confirm": false
         },
         {
@@ -1035,8 +1042,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "58cd6ba4ecd354b42ac3e387bed6f4329e1e8e9c6f277598b5452f81059b7f7a"
     },
     "condition": {
       "hosts": [
@@ -1075,6 +1083,139 @@
       ],
       "outcome": "manageable",
       "recovery_note": "New fronds emerge greener within a few months once drainage or planting depth is corrected."
+    }
+  },
+  {
+    "slug": "micronutrient-chlorosis-shrubs",
+    "kind": "disorder",
+    "common_name": "Micronutrient Chlorosis (shrubs)",
+    "aka": [],
+    "aliases": [
+      "micronutrient chlorosis",
+      "shrub chlorosis",
+      "manganese chlorosis"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Yellow new leaves with the veins staying green",
+      "Older leaves stay green while the newest growth looks pale",
+      "Worse near slabs, walkways and limestone or alkaline soil"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Yellow new leaves with green veins on shrubs such as ixora or gardenia suggest a micronutrient problem, often tied to alkaline soil rather than a pest. A technician checks the soil conditions and the site before timing any nutrition within the local rules.",
+      "fact": "This kind of yellowing is often about soil pH: in alkaline or limestone-influenced soil, the iron and manganese are present but the plant cannot take them up."
+    },
+    "tech_notes": "Not a pest. Check for alkaline soil, limestone fill or slabs near the root zone, and drainage. Interveinal chlorosis on new growth points to iron or manganese; confirm before assuming which.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep362"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). EP362 covers iron and manganese deficiency on South Florida woody ornamentals and the alkaline/limestone link, but does not name ixora or gardenia for these two nutrients (it names ixora for potassium and phosphorus)."
+    },
+    "verification": [
+      {
+        "claim": "Ixora and gardenia as example hosts for iron/manganese chlorosis",
+        "note": "From the owner brief. EP362 does not name these plants for iron or manganese deficiency; copy lists them as examples only."
+      }
+    ],
+    "condition": {
+      "hosts": [
+        "shrubs"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Yellow new leaves with the veins staying green",
+        "Older leaves stay green while the newest growth looks pale"
+      ],
+      "required_signature": {
+        "text": "A close-up of the newest leaves showing yellowing between green veins while older leaves stay green.",
+        "elements": [
+          "Yellow new leaves with the veins staying green"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "spider-mites",
+          "difference": "Spider mites stipple leaves with fine webbing on the underside; micronutrient chlorosis is even yellowing between veins on the newest leaves.",
+          "next_observation": "A close-up of a leaf underside checking for webbing or tiny moving specks.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "tea-scale",
+          "difference": "Tea scale leaves yellow blotches over scales cemented on the leaf underside; chlorosis follows the veins with nothing on the underside.",
+          "next_observation": "A close-up of the leaf underside checking for flat, brown, cemented scales.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph",
+        "poor_drainage"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "New growth usually greens up over a few months once the soil conditions are addressed."
     }
   }
 ]

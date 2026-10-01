@@ -83,7 +83,11 @@ const REFERENCE_DOMAINS = Object.freeze(['wikipedia.org']);
 // Brands the brief named that neither existing competitor list carries yet,
 // plus the owner's 2026-09-27 correction: flapest.com (Florida Pest Control,
 // Gainesville, since 1949) is a COMPANY, never the trade association above.
-const EXTRA_COMPETITOR_DOMAINS = Object.freeze(['flapest.com', 'hometeampestdefense.com']);
+// Also the competitors the SEO tools track (rank-tracker.js
+// TRACKED_COMPETITORS, the admin-seo-v2.js seo_competitors seed), so every
+// competitor list the portal keeps reaches the no-competitor-links matcher
+// (content/competitor-links.js; its test pins the parity).
+const EXTRA_COMPETITOR_DOMAINS = Object.freeze(['flapest.com', 'hometeampestdefense.com', 'hoskinspest.com', 'nozzlenolen.com', 'abchomeandcommercial.com']);
 // The live union of BOTH tracked competitor lists this portal already
 // maintains (competitor-discovery.js's national/regional franchises +
 // competitor-gap-miner.js's local SWFL independents, itself overridable via

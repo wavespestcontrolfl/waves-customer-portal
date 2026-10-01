@@ -24,8 +24,9 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+const { normalizeLawnAftercare, renderedWeekPlan, resolveLawnAftercare } = require('./lawn-aftercare');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v7'; // v7: ground drought rewrites in the report's low/high water states.
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v10_rendered_plan'; // Ground the aftercare state + the weekly plan the card renders; actions and water copy stay deterministic under a product verdict.
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -37,15 +38,31 @@ function stableStringify(value) {
   return JSON.stringify(value ?? null);
 }
 
+// The weekly plan fact is the plan the card RENDERS (reduced by a credited
+// water-in), never the raw plan.
+function waterFacts(water, aftercare) {
+  if (!water) return null;
+  const plan = renderedWeekPlan(aftercare, water.weekPlan);
+  return {
+    status: water.status, droughtSignal: water.droughtSignal ?? null, rain: water.rainInches, irrigation: water.irrigationInches, total: water.totalInches, target: water.targetInches, confidence: water.confidence, rainWindow: 'past 7 days ending on the visit date',
+    weekPlan: plan?.title ? { title: plan.title, detail: plan.detail || null, action: plan.action || null } : null,
+  };
+}
+
 // Only the FACTS that should drive copy — not the deterministic prose itself, so the
 // model writes fresh rather than paraphrasing our fallback sentences.
 function groundingFacts(v2, ctx) {
+  const { verdict, customerTask } = resolveLawnAftercare(v2.aftercare, v2.water?.weekPlan);
   return {
     overallScore: v2.snapshot?.overallScore ?? null,
     overallStatus: v2.snapshot?.status ?? null,
     grassLabel: ctx.grassLabel || 'lawn',
     diagnosis: (v2.diagnosis || []).map((d) => ({ key: d.key, label: d.label, score: d.score, status: d.status })),
-    water: v2.water ? { status: v2.water.status, droughtSignal: v2.water.droughtSignal ?? null, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence, rainWindow: 'past 7 days ending on the visit date' } : null,
+    water: waterFacts(v2.water, v2.aftercare),
+    // The verdict every other watering surface reads (lawn-aftercare.js). It
+    // is part of the cache key, so copy written for one verdict is never
+    // served on a report carrying another.
+    aftercare: { verdict, customerTask },
     mowing: v2.mowing && v2.mowing.measuredHeightInches != null ? { status: v2.mowing.status, measured: v2.mowing.measuredHeightInches, idealMin: v2.mowing.idealMinInches, idealMax: v2.mowing.idealMaxInches } : null,
     treatment: v2.treatment ? { focus: v2.treatment.focus, products: (v2.treatment.products || []).map((p) => ({ name: p.name, activeIngredient: p.activeIngredient, kind: p.kind, whatItDoes: p.whatItDoes, targets: p.targets })) } : null,
     trendDirection: trendDirection(v2.trends?.overall),
@@ -82,6 +99,7 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 3. Photo AI shows PATTERNS, not confirmed diagnoses. Never assert a specific disease or insect as confirmed — say "signals"/"patterns we're watching" unless a fact marks it tech-confirmed.
 4. Never say the lawn is "improving"/"recovering"/"better" unless trendDirection is "up". If "down", be honest but calm; if "none", don't reference a trend.
 5. Water: water.droughtSignal is the authority for localized drought; observations and customer concerns cannot establish it. Follow the supplied water status: "balanced" supports checking the flagged area's coverage, "high" supports easing back, and only "low" supports more water. Never replace a supplied watering plan with a different instruction.
+5a. Aftercare: aftercare.verdict "credit" means today's product requires the recorded watering-in (aftercare.customerTask). Never tell the customer to skip, delay, or cut that watering-in, and never present general drought advice as a substitute for it. water.weekPlan is the plan the report shows after that watering-in. The customer's action sentences and the water explanation are kept as written.
 5b. The rain number is a PAST-7-DAYS total ending on the visit date. Describe the window as "this week" or "the past week" — NEVER "since the last visit", "this cycle", "between visits", or any wording tied to the visit schedule (visits are not weekly), and never present it as a single day's rain.
 6. Mowing: Waves does NOT mow. Frame mowing as how the lawn is being kept and a suggestion to the customer; never say Waves will fix it.
 7. Use active-ingredient names or plain descriptions for products — never hype. Lead with the product's plain-language role and never make a bare chemical name the subject of an instruction to the homeowner ("water in the clothianidin" → "water in today's treatment").
@@ -208,18 +226,25 @@ function safeWaterText(modelValue, fallback) {
 function mergeNarrative(v2, out) {
   if (!out || typeof out !== 'object') return v2;
   const next = JSON.parse(JSON.stringify(v2));
+  // A product-driven aftercare verdict owns the customer's task and the
+  // watering story: the hero, insight cards, water explanation and product
+  // note must state the same one, so the model may not rewrite them.
+  const verdictOwnsWatering = resolveLawnAftercare(v2.aftercare, v2.water?.weekPlan).verdict !== 'none';
+  const rewriteAction = (modelValue, fallback) => (
+    fallback && !verdictOwnsWatering ? safeText(modelValue, fallback) : fallback
+  );
 
   if (next.snapshot) {
     next.snapshot.statusHeadline = safeText(out.statusHeadline, next.snapshot.statusHeadline);
     next.snapshot.mainWatch = next.snapshot.mainWatch ? safeText(out.mainWatch, next.snapshot.mainWatch) : next.snapshot.mainWatch;
-    next.snapshot.customerAction = next.snapshot.customerAction ? safeText(out.customerAction, next.snapshot.customerAction) : next.snapshot.customerAction;
+    next.snapshot.customerAction = rewriteAction(out.customerAction, next.snapshot.customerAction);
   }
   const cats = out.categories || {};
   next.diagnosis = (next.diagnosis || []).map((d) => {
     const v = safeText(cats[d.key], d.explanation || d.customerExplanation);
     return { ...d, explanation: v, customerExplanation: v };
   });
-  if (next.water) next.water.explanation = safeWaterText(out.water, next.water.explanation);
+  if (next.water && !verdictOwnsWatering) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
   if (next.mowing && next.mowing.measuredHeightInches != null) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
@@ -235,7 +260,7 @@ function mergeNarrative(v2, out) {
         whatWeSaw: safeText(m.whatWeSaw, ins.whatWeSaw),
         whyItMatters: safeText(m.whyItMatters, ins.whyItMatters),
         wavesAction: safeText(m.wavesAction, ins.wavesAction),
-        customerAction: ins.customerAction ? safeText(m.customerAction, ins.customerAction) : ins.customerAction,
+        customerAction: rewriteAction(m.customerAction, ins.customerAction),
         nextVisitPlan: ins.nextVisitPlan ? safeText(m.nextVisitPlan, ins.nextVisitPlan) : ins.nextVisitPlan,
       };
     });
@@ -252,25 +277,34 @@ function mergeNarrative(v2, out) {
  * @param {object} deps { callModel?: async ({system,text}) => ({ ok, json }) }
  */
 async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
+  const aftercare = normalizeLawnAftercare(v2?.aftercare);
+  const guardedV2 = aftercare === v2?.aftercare ? v2 : { ...v2, aftercare };
   // Every rewritten field can introduce moisture advice, including an unrelated
   // insight or treatment sentence. Preserve the complete deterministic report
   // before cache/model access unless structured evidence establishes drought.
-  if (!v2 || v2.water?.droughtSignal !== true) return v2;
-  const facts = groundingFacts(v2, ctx);
+  // A non-neutral product note also stays deterministic until its provenance is
+  // affirmative and unopposed. Any narrative field could contradict it.
+  const { verdict } = resolveLawnAftercare(guardedV2?.aftercare, guardedV2?.water?.weekPlan);
+  const overlayAllowed = verdict === 'credit' || (verdict === 'none' && guardedV2?.aftercare?.neutral === true);
+  if (!guardedV2 || guardedV2.water?.droughtSignal !== true || !overlayAllowed) return guardedV2;
+  const facts = groundingFacts(guardedV2, ctx);
   const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}`).digest('hex');
+  // The cache holds the MODEL OUTPUT, never a merged report: every hit
+  // re-merges onto this report, so its deterministic fields (aftercare, plan,
+  // locked customer actions) always come from the visit being rendered.
   const hit = _cache.get(cacheKey);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return mergeNarrative(guardedV2, hit.json);
 
   const callModel = deps.callModel || ((payload) => dispatchWithFallback(
     MODELS.TEXT_POLICIES.customerCopy,
     { laneId: 'lawn_visit_narratives', jsonMode: true, maxTokens: 1300, ...payload },
   ));
 
-  let merged = v2;
+  let json = null;
   try {
     const res = await callModel({ system: SYSTEM_PROMPT, text: buildUserMessage(facts), jsonSchema: narrativeSchema(facts) });
     if (res && res.ok && res.json) {
-      merged = mergeNarrative(v2, res.json);
+      json = res.json;
     } else {
       logger.warn(`[lawn-report-v2] narrative miss (${res && res.reason}); using deterministic copy`);
     }
@@ -278,9 +312,9 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
     logger.warn(`[lawn-report-v2] narrative failed: ${err.message}; using deterministic copy`);
   }
 
-  _cache.set(cacheKey, { at: Date.now(), value: merged });
+  _cache.set(cacheKey, { at: Date.now(), json });
   if (_cache.size > 300) _cache.delete(_cache.keys().next().value);
-  return merged;
+  return mergeNarrative(guardedV2, json);
 }
 
 module.exports = {

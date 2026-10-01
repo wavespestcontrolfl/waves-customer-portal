@@ -4,9 +4,13 @@
 // proof is covered in call-commitments tests.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // The real guard, so an in-place rewrite is judged on the text a fresh post stores.
+  normalizeAdminText: (...args) => jest.requireActual('../services/notification-service').normalizeAdminText(...args),
+}));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false), adminBodyGuardAllLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/callback-cards', () => ({ ...jest.requireActual('../services/callback-cards'), enabled: jest.fn(() => true), prepareCallbackCards: jest.fn() }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutLayers: jest.fn(async () => ({ dates: new Set() })) }));
@@ -92,6 +96,12 @@ describe('selectMissed', () => {
 // { table, calls: [[method, ...args]] } so a test can assert what was asked,
 // and `first`/`select`/`update` answer from the scenario given to mockDb.
 let log = [];
+// A person's call that reached the customer, and a person's delivered text,
+// as staff-contact.js reads them (personCallBack / operatorReply + smsDelivered).
+const STAFF_CONTACT = {
+  call_log: { source: 'admin-click', v2_extraction_status: 'valid', is_voicemail: 'false' },
+  sms_log: { status: 'delivered', message_type: 'manual', operator_sent: true },
+};
 function mockDb({ activity = {}, call = null, standingRow = null, settled = [], lockedStamp = {}, hints = {} } = {}) {
   log = [];
   const updates = [];
@@ -123,12 +133,15 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
       if (['scheduled_services', 'call_log', 'sms_log'].includes(table)) {
         const on = typeof activity[table] === 'function' ? activity[table]() : activity[table];
         if (!on) return [];
-        // One far-future record per contact the query asked about.
+        // One far-future record per contact the query asked about: by default
+        // a person's call that reached the customer, or a person's delivered
+        // text (the fields staff-contact.js reads); an object overrides them.
+        const fields = { ...STAFF_CONTACT[table], ...(typeof on === 'object' ? on : {}) };
         const ins = entry.calls.filter(([m]) => m === 'whereIn');
         const custs = ins.filter(([, col]) => col === 'customer_id').flatMap(([, , v]) => v);
         const phones = entry.calls.filter(([m, sql]) => (m === 'whereRaw' || m === 'orWhereRaw') && /regexp_replace\(COALESCE/.test(sql)).flatMap(([, , v]) => v);
-        return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z' })),
-          ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z' }))];
+        return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z', ...fields })),
+          ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z', ...fields }))];
       }
       if (table === 'call_commitments' && cols.includes('fulfillment')) {
         const ids = entry.calls.filter(([m]) => m === 'whereIn').flatMap(([, , v]) => v);
@@ -179,7 +192,8 @@ test('a new miss posts the rolling list fresh, unread, at the top of the feed', 
   const [, title, body, opts] = rollingCall();
   expect(title).toBe('1 missed follow-up in the last 24 hours');
   expect(body).toContain('callback promised to Test Caller');
-  expect(opts).toMatchObject({ dedupeKey: `${ROLLING_KEY}:${NOW.toISOString()}`, bell: true, metadata: { missed_commitment_ids: ['a'] } });
+  // One miss opens its call; several open the Owed list.
+  expect(opts).toMatchObject({ dedupeKey: `${ROLLING_KEY}:${NOW.toISOString()}`, bell: true, link: '/admin/communications#tab=calls&call=call-a', metadata: { missed_commitment_ids: ['a'] } });
   // Posted inside the same transaction that retires the older posts.
   expect(opts.trx).toBe(db);
 });
@@ -207,8 +221,43 @@ test('a listed promise whose details changed is rewritten in place, read state k
   await runFollowUpSlaWatcher({ now: NOW });
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   expect(updates).toHaveLength(1);
-  expect(updates[0].patch.body).toContain('callback promised to Test Caller');
+  // The brevity guard's form: a one-sentence body, the whole list in `detail`.
+  expect(updates[0].patch.body.length).toBeLessThanOrEqual(110);
+  expect(updates[0].patch.detail).toContain('callback promised to Test Caller');
   expect(updates[0].patch.read_at).toBeUndefined();
+});
+
+test('a standing single-miss post from before the link change is rewritten quietly when only its link differs', async () => {
+  listOpenCommitments.mockResolvedValue([row('a')]);
+  // Learn the title/body the tick writes for this list, so only the link can differ.
+  const learned = (await (async () => {
+    const u = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title: 'x', body: 'x' } });
+    await runFollowUpSlaWatcher({ now: NOW });
+    return u;
+  })())[0].patch;
+  const stored = (link) => ({ ...posted(['a']), read_at: NOW, title: learned.title, body: learned.body, detail: learned.detail, link });
+
+  const updates = mockDb({ standingRow: stored('/admin/communications#tab=owed') });
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(updates).toHaveLength(1);
+  expect(updates[0].patch.link).toBe('/admin/communications#tab=calls&call=call-a');
+  expect(updates[0].patch.read_at).toBeUndefined();
+
+  // Already carrying the right link: nothing to write.
+  const quiet = mockDb({ standingRow: stored(learned.link) });
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(quiet).toHaveLength(0);
+});
+
+test('a standing post already in the guard\'s form is not rewritten every tick', async () => {
+  listOpenCommitments.mockResolvedValue([row('a')]);
+  const first = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title: 'x', body: 'old text' } });
+  await runFollowUpSlaWatcher({ now: NOW });
+  const { title, body, detail, link } = first[0].patch;
+  const second = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title, body, detail, link } });
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(second).toHaveLength(0);
 });
 
 test('a new miss joining the list re-posts it and retires the older post', async () => {
@@ -216,6 +265,7 @@ test('a new miss joining the list re-posts it and retires the older post', async
   listOpenCommitments.mockResolvedValue([row('a'), row('b', { call_log_id: 'call-b' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).alerted).toBe(1);
   expect(rollingCall()[1]).toBe('2 missed follow-ups in the last 24 hours');
+  expect(rollingCall()[3].link).toBe('/admin/communications#tab=owed');
   expect(updates).toEqual([{ table: 'notifications', patch: { read_at: NOW } }]);
 });
 
@@ -226,6 +276,8 @@ test('items only dropping off rewrite the latest post in place, read state kept 
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   expect(updates).toHaveLength(1);
   expect(updates[0].patch.title).toBe('1 missed follow-up in the last 24 hours');
+  // Down to one miss, the standing post now opens that call.
+  expect(updates[0].patch.link).toBe('/admin/communications#tab=calls&call=call-a');
   expect(updates[0].patch.read_at).toBeUndefined();
   expect(JSON.parse(updates[0].patch.metadata).missed_commitment_ids).toEqual(['a']);
 });
@@ -319,19 +371,37 @@ test('a lead who became a customer through the follow-up still matches by number
   expect(argsOf('scheduled_services', 'whereIn')).toContainEqual(['customer_id', ['new-cust']]);
 });
 
-test('only a text that actually went out counts — scheduled, reserved and failed rows are excluded', async () => {
+test('only a text that reached the customer counts: queued, sent-but-undelivered, reserved and failed rows are excluded (the proof\'s smsDelivered)', async () => {
   mockDb({ activity: { sms_log: true } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   await runFollowUpSlaWatcher({ now: NOW });
-  expect(argsOf('sms_log', 'whereIn')).toContainEqual(['status', ['queued', 'sent', 'delivered']]);
+  expect(argsOf('sms_log', 'whereIn')).toContainEqual(['status', ['sent', 'delivered']]);
+  // A text accepted but never delivered keeps the promise on the list.
+  mockDb({ activity: { sms_log: { status: 'sent' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
 });
 
-test('a text counts only when a person wrote it — manual, or an AI draft staff approved/revised — AND a staff sender', async () => {
+test('a text counts only when a person sent it: the composer\'s stamp or the sending admin, or an AI draft staff approved/revised (the proof\'s operatorReply) — never a bare manual type', async () => {
   mockDb({ activity: { sms_log: true } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   await runFollowUpSlaWatcher({ now: NOW });
-  expect(argsOf('sms_log', 'whereIn')).toContainEqual(['message_type', ['manual', 'ai_approved', 'ai_revised']]);
-  expect(argsOf('sms_log', 'whereNotNull')).toEqual([['admin_user_id']]);
+  expect(argsOf('sms_log', 'whereRaw').map(([sql]) => sql).join(' ')).toMatch(/human_authored.*admin_user_id IS NOT NULL/);
+  expect(argsOf('sms_log', 'orWhereIn')).toContainEqual(['message_type', ['ai_approved', 'ai_revised']]);
+  mockDb({ activity: { sms_log: { operator_sent: false } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  mockDb({ activity: { sms_log: { operator_sent: false, message_type: 'ai_approved' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+});
+
+test('only a call a person placed counts: an automated outbound call (collections), or a staff call that reached voicemail, keeps the promise on the list', async () => {
+  mockDb({ activity: { call_log: true } });
+  listOpenCommitments.mockResolvedValue([row('a')]);
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+  expect(argsOf('call_log', 'whereIn')).toContainEqual(['source', ['admin-click', 'admin-callback', 'tech-click']]);
+  mockDb({ activity: { call_log: { source: 'collections_voice' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  mockDb({ activity: { call_log: { is_voicemail: 'true' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
 });
 
 test.each(['send_estimate', 'schedule_visit'])('a connected call counts on a %s promise too — completed 60 s+ customer leg, affirmatively not voicemail', async (kind) => {
@@ -535,6 +605,7 @@ test('an in-place rewrite stores admin text emoji-stripped, like a fresh post', 
   listOpenCommitments.mockResolvedValue([row('a', { customer_first_name: 'Test\u{1F41B}' })]);
   await runFollowUpSlaWatcher({ now: NOW });
   expect(updates[0].patch.body).not.toMatch(/\u{1F41B}/u);
+  expect(updates[0].patch.detail).not.toMatch(/\u{1F41B}/u);
 });
 
 test('a held-over promise whose call cannot be verified still drops off when later activity proves follow-up', async () => {

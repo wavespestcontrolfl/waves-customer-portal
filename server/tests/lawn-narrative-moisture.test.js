@@ -74,4 +74,32 @@ describe('structured moisture governs the optional whole-report narrative', () =
     expect(out.water.droughtSignal).toBe(true);
     expect(out.water.totalInches).toBe(v2.water.totalInches);
   });
+
+  test.each([
+    [{ watering: 'Follow the recorded product note.', waterInRequired: true, neutral: false }, 'legacy unverified note'],
+    [{ watering: 'Do not water for 24 hours.', evidenceSource: 'product_instruction', wateringHold: true, needsReview: false, neutral: false }, 'recorded hold'],
+  ])('%s bypasses the narrative before cache or model access', async (aftercare) => {
+    const v2 = buildLawnReportV2({ lawnAssessment: assessment('minor', undefined) });
+    v2.aftercare = aftercare;
+    const callModel = jest.fn(async () => ({ ok: true, json: { water: 'Invented watering advice.' } }));
+    const out = await applyLawnReportNarrative(v2, { observations: 'Unique guarded aftercare.' }, { callModel });
+    expect(callModel).not.toHaveBeenCalled();
+    expect(out.aftercare.watering).toContain(aftercare.watering);
+    expect(out.aftercare.creditableWaterIn).toBe(false);
+  });
+
+  test('affirmative product-instruction evidence remains eligible for the grounded overlay', async () => {
+    const v2 = buildLawnReportV2({ lawnAssessment: assessment('minor', undefined) });
+    v2.aftercare = {
+      watering: 'Water in with 0.25 inches today.', waterInRequired: true,
+      creditableWaterIn: true, evidenceSource: 'product_instruction', wateringHold: false, needsReview: false,
+    };
+    const wording = 'Based on rain this week, the lawn needs checking the flagged area’s coverage.';
+    const callModel = jest.fn(async () => ({ ok: true, json: { water: wording, statusHeadline: 'Coverage is the thing to watch' } }));
+    const out = await applyLawnReportNarrative(v2, { observations: 'Unique affirmative aftercare.' }, { callModel });
+    expect(callModel).toHaveBeenCalledTimes(1);
+    // The credited verdict owns the watering story; other prose still varies.
+    expect(out.water.explanation).toBe(v2.water.explanation);
+    expect(out.snapshot.statusHeadline).toBe('Coverage is the thing to watch');
+  });
 });

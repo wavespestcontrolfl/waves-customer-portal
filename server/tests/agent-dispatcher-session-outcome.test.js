@@ -195,3 +195,48 @@ describe('agent dispatcher — editorial registration failure', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('agent dispatcher — in-session citability brief (5013 Codex r2 P2)', () => {
+  let registerSessionLint;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = {
+      ...ORIGINAL_ENV,
+      ANTHROPIC_API_KEY: 'k',
+      CONTENT_AGENT_ENVIRONMENT_ID: 'env-1',
+      CONTENT_WRITER_AGENT_ID: 'agent-writer',
+      CONTENT_REFRESHER_AGENT_ID: 'agent-refresh',
+    };
+    registerSessionLint = jest.fn();
+    jest.doMock('../services/content/agents/brief-driven-tools', () => ({
+      executeBriefTool: jest.fn(),
+      getDraft: jest.fn(),
+      getCheckedRoutes: jest.fn(() => []),
+      clearDraft: jest.fn(),
+      registerSessionLint,
+      // Stop right after registration; the lint arming is what is under test.
+      registerSessionEditorial: jest.fn(async () => { throw new Error('stop'); }),
+    }));
+    jest.doMock('../services/llm-dispatch-metrics', () => ({ recordSessionUsage: jest.fn(async () => {}) }));
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ id: 'sess-cit' }), text: async () => '',
+    }));
+  });
+
+  afterAll(() => { process.env = ORIGINAL_ENV; global.fetch = ORIGINAL_FETCH; });
+
+  it('a new supporting blog arms the lint with its brief for citability advisories', async () => {
+    const blogBrief = { opportunity_id: 'opp-blog', action_type: 'new_supporting_blog', page_type: 'supporting-blog' };
+    await load().runWithBrief(blogBrief, { selfLintOptions: { lint: true } });
+    expect(registerSessionLint).toHaveBeenCalledWith('sess-cit', { lint: true }, { citabilityBrief: blogBrief });
+  });
+
+  it('a refresh arms the lint without a citability brief (the run-level retry owns it)', async () => {
+    await load().runWithBrief(
+      { opportunity_id: 'opp-refresh', action_type: 'refresh_existing_page', page_type: 'refresh', target_url: '/blog/door/' },
+      { selfLintOptions: { lint: true } },
+    );
+    expect(registerSessionLint).toHaveBeenCalledWith('sess-cit', { lint: true }, { citabilityBrief: null });
+  });
+});

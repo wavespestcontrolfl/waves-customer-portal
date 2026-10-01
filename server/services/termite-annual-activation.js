@@ -112,6 +112,7 @@ function parkedAtForEstimate(estimate) {
 const REPLAYED_ACCEPT_OPTS = [
   'prepayInvoiceAmount', 'firstApplicationAmount', 'manualDiscountItemization', 'adoptedExistingAppointmentId',
   'annualPrepayTermStart', 'coverageServiceType', 'coverageVisitCount', 'coverageCadence',
+  'createdCustomerId',
 ];
 function replayedAcceptOpts(acceptContext) {
   return Object.fromEntries(REPLAYED_ACCEPT_OPTS
@@ -303,6 +304,24 @@ async function deliverAnnualInvoiceOrBell({
     // (invoiceSmsQueued counts as delivered, never bells) — mirrored here
     // so the queued cohort doesn't ring a false-alarm bell every sweep tick
     // until the queue actually flushes.
+    // A collections dispute hold (the direct sender refuses with the retryable
+    // COLLECTION_HOLD_DEFER): a wait, not a failure. No false-alarm bell; the
+    // invoice is queued on the hold-aware scheduled sender (below) and goes out on
+    // the first tick after the release.
+    if (invoiceDelivery?.code === 'COLLECTION_HOLD_DEFER') {
+      // Queue the invoice on the hold-aware scheduled sender (round-11 P2): the attempt stamp
+      // above makes today's reconciliation scan skip it, so without this a release moments later
+      // would wait for the next day's sweep. The sender defers it while the hold stands and sends
+      // it on the first tick after the release. Best-effort: a queue failure raises the durable
+      // office alert and the reconciliation sweep still covers the invoice the next ET day.
+      let customerId = null;
+      try {
+        customerId = (await conn('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id || null;
+      } catch { /* the alert simply omits the customer */ }
+      const queued = await require('./collections/collection-hold').requeueHeldInvoice(invoiceId, { customerId });
+      logger.info(`[termite-annual-activation] invoice ${invoiceId} delivery deferred for estimate ${estimateId}: collections dispute hold - ${queued ? 'queued on the scheduled sender' : 'queue failed (office alerted)'}; sent after release`);
+      return { ok: false, held: true, invoiceDelivery };
+    }
     const deliveryQueued = invoiceDelivery?.sms?.scheduled === true;
     if (!invoiceDelivery || (invoiceDelivery.ok === false && !deliveryQueued)) {
       const NotificationService = require('./notification-service');
@@ -1589,5 +1608,5 @@ module.exports = {
   installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,
-  _private: { CASTABLE_ISO_INSTANT, SIGNATURE_NUDGE_EVENT, expireAbandonedSignature },
+  _private: { CASTABLE_ISO_INSTANT, SIGNATURE_NUDGE_EVENT, expireAbandonedSignature, deliverAnnualInvoiceOrBell },
 };

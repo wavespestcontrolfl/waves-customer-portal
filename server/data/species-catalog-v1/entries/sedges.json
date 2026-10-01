@@ -102,8 +102,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/sedges/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "57f62df1d4261a5f77ae3daaba6254ee7dd49ace3ccd07042aeaae09a12173c5"
     },
     "role": "weed",
     "risk": "low",
@@ -230,8 +231,9 @@
       "https://blogs.ifas.ufl.edu/entnemdept/2023/06/01/weed-of-the-month-nutsedge/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bf93a18d9ad0c026074c63b8fdaae1457fc4808255b4f8379d2a809ee155990f"
     },
     "role": "weed",
     "risk": "low",
@@ -354,8 +356,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "cd1a5370079d537258cd0e56e9ebc0c4f46a20de730cb0b8dbbcfe6b28f4da29"
     },
     "role": "weed",
     "risk": "low",
@@ -482,8 +485,9 @@
       "https://erec.ifas.ufl.edu/weed-id/green-kyllinga"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "642468ad77adde41c4b0c3e97f06ba4a8f32fc32c57aa7b431f68c03d6670b48"
     },
     "role": "weed",
     "risk": "low",

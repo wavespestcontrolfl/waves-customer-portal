@@ -260,6 +260,55 @@ function classifyDeliveryCertainty(outcome) {
   return 'unknown';
 }
 
+// Purposes whose SMS/App notices are billing follow-up (pay / update-card link or a
+// charge announcement) and so wait out an active collections dispute hold.
+const HOLD_GATED_MESSAGE_PURPOSES = Object.freeze(['payment_failure', 'autopay']);
+
+// The machine-initiated dunning senders (Day 3-90 invoice follow-up ladder, late-payment checker,
+// balance reminder workflow, previsit balance reminder) send under the shared purposes
+// 'payment_link' / 'billing', which the invoice sender, an operator's project payment link and
+// the price-change notice also use - so they are recognised by their entry point
+// (collection-hold HOLD_GATED_DUNNING_ENTRY_POINTS), not by purpose alone.
+// A queued replay (every deferred row replays under entry point scheduled_sms_cron) of a dunning
+// text whose purpose is the shared 'payment_link': the follow-up ladder's quiet-hours requeue. Its
+// registry recheck reads the hold before dispatch; this is the boundary read for a hold that commits
+// after it (Codex #5424 r14). The other gated queued rows replay under a gated purpose already.
+const HOLD_GATED_REPLAY_ORIGINS = Object.freeze(['invoice_followup_deferred']);
+function isHoldGatedBillingMessage(input = {}) {
+  if (input.audience !== 'customer' || !input.customerId) return false;
+  if (HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose)) return true;
+  if (input.entryPoint === 'scheduled_sms_cron'
+    && HOLD_GATED_REPLAY_ORIGINS.includes(String(input.metadata?.original_entry_point || ''))) return true;
+  return require('../collections/collection-hold').HOLD_GATED_DUNNING_ENTRY_POINTS.has(String(input.entryPoint || ''));
+}
+
+// The ONE gated hold predicate (round-11 P1, structural): run at step 1.5 AND again inside
+// providerPreparationCheck, the last pre-provider callback, so a dispute committed during the
+// policy / contact / consent / caller-check awaits (or any pre-work added later) still stops the
+// send. Returns null (send may proceed) or the coded WAIT verdict. Exemptions live here, once: a
+// customer's own action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+// (holdExempt 'operator') skip a plain dispute hold only - a fallback hold still waits; a lookup
+// failure answers held (fail closed).
+// `database` is the provider handoff's held transaction when the final-boundary re-check runs inside
+// one (providerPreparationCheck's `handoffDb`): the read MUST reuse that connection (a savepoint read),
+// never open a root-pool one - at DB_POOL_MAX=2 a second connection waiting on the locks the handoff
+// holds would deadlock the send against its own pool (Codex #5424 r13 P1). Undefined = the root pool.
+// The exemptions skip a plain DISPUTE hold only: a wrong-number / wrong-party fallback hold (an
+// all-channel outreach block) still stops the notice.
+async function billingHoldBlock(input = {}, database = undefined) {
+  const collectionHold = require('../collections/collection-hold');
+  if (!isHoldGatedBillingMessage(input)) return null;
+  const ignoreDisputeHold = input.customerInitiated === true || collectionHold.holdExemptionApplies(input.holdExempt);
+  const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database, { ignoreDisputeHold });
+  if (!held.held) return null;
+  logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+  // ONE hold outcome everywhere (Codex #5424 r14): the retryable, deferred COLLECTION_HOLD_DEFER
+  // shape with nextAllowedAt. A queued replay (scheduler, registry, email retry rails) treats it as
+  // a wait and refunds the attempt; a caller that must not retry (the immediate completion text)
+  // reads it through collectionHold.isHoldSuppression and decides itself.
+  return { ok: false, ...collectionHold.holdDeferOutcome(held) };
+}
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -330,12 +379,42 @@ async function sendCustomerMessage(input) {
 async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
   let providerHandoffReservation = null;
+  // Short codes the SMS link wrap put in THIS attempt's body (stamped to the
+  // sms_log row in the finally below once the send is accepted).
+  let wrappedLinkCodes = [];
   try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
   if (!contractCheck.ok) {
     logger.warn(`[send_customer_message] contract violation: ${contractCheck.reason}`);
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
+  }
+
+  // 1.5 Collections DISPUTE hold (owner ruling 2026-09-30): a payment-failure notice carries
+  // a pay / update-card link and is billing follow-up the customer was told is on hold. The
+  // billing-cron attempts, the Stripe webhook notices and every other live payment_failure
+  // sender reach the provider through here, so the live hold check sits at this one boundary
+  // (the accepted millisecond window of collection-hold.js: no cross-writer locking). Suppress
+  // - never queue: dunning after the release covers it; the retry row stays as it is. Fail
+  // closed on an unverifiable hold. A notice for a payment the customer just made themselves
+  // (customerInitiated) is not follow-up and is exempt.
+  // The machine-initiated 'autopay' purpose is the same follow-up: the card-expiry sweeps
+  // (autopay-notifications, workflows/payment-expiry) text an update-card portal link and the
+  // pre-charge reminder announces a charge the hold has stopped. Every purpose-'autopay'
+  // sender is a cron sweep; a customer-driven autopay notice would carry customerInitiated.
+  // The machine-initiated DUNNING senders (isHoldGatedBillingMessage: the follow-up ladder, the
+  // late-payment and balance reminders, the previsit balance reminder) are the same follow-up:
+  // their preflight consulted the hold minutes earlier, but they await credit application, link
+  // shortening, ledger writes and rendering before reaching here, so a hold placed in between
+  // stops the send at this boundary. The suppression is a WAIT: every caller keeps the touch due
+  // (no failed row, nothing paused) and it goes out after the release. Exempt: a customer's own
+  // action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+  // (holdExempt 'operator', e.g. the office "send now" button); payer-billed invoices never reach
+  // these senders (they pause or skip before sending).
+  const heldBlock = await billingHoldBlock(input);
+  if (heldBlock) {
+    const { ok: _heldOk, ...heldOutcome } = heldBlock;
+    return { sent: false, blocked: true, ...heldOutcome };
   }
 
   // 2. Resolve policy
@@ -356,10 +435,15 @@ async function sendCustomerMessageCore(input) {
     providerPreSendCheck: suppliedProviderPreSendCheck,
     onDispatchStart,
     onDispatchAbort,
+    // codex #5196 r4 P2: same shape as onDispatchAbort, fired instead when
+    // twilio.js's own messages.create() throws a definitive rejection —
+    // the phone lock is still held at that point (onDispatchAbort's own
+    // comment explains why).
+    onDispatchRejected,
     // codex #5018 structural fix (post-r7): opts a caller's sms_log insert
     // INTO the handoff transaction (twilio.js's dispatch() reads this same
-    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort,
-    // through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
+    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort/
+    // onDispatchRejected, through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
     // Omitted (the default for every caller that doesn't name it), twilio.js
     // falls back to origin/main's own post-handoff, out-of-transaction insert.
     logInHandoff,
@@ -459,7 +543,17 @@ async function sendCustomerMessageCore(input) {
     // only and manual semantics are unconditional either way.
     || (['lead', 'customer'].includes(input.audience)
       && ['conversational', 'card_request'].includes(input.purpose)
-      && input.entryPoint === 'admin_communications_manual_sms');
+      && input.entryPoint === 'admin_communications_manual_sms')
+    // The estimate page's "text me the packet" send (estimate-public.js
+    // POST /:token/service-details/send, B01): a bearer-token page whose
+    // recipient can be a stranger's wrong number, so the phone lock (the STOP /
+    // wrong-number writers' own lockSmsPhone) is held through the provider
+    // request, and for a customer-backed estimate the customer-comms lock too
+    // (the sms_enabled writer's lock, taken first). Suppression and consent
+    // reload under them and fail closed. A lead has no customer row: phone only.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
+      && input.entryPoint === 'estimate_service_details_send'
+      && input.metadata?.original_message_type === 'estimate_service_details');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -655,6 +749,32 @@ async function sendCustomerMessageCore(input) {
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
+  // GATE_SMS_LINK_WRAP: every portal link in a customer/lead SMS becomes a
+  // tracked /l/<code> short link (sms-link-wrap.js). Here — after the
+  // withheld-link rewrite, the app/billing routing and every earlier body
+  // transform, immediately before countSegments — so the audit row, segment
+  // count and the text that goes out all describe the SAME wrapped body. Never
+  // blocks: any failure inside keeps the original link.
+  if (sendInput.channel === 'sms') {
+    try {
+      const linkWrap = await require('./sms-link-wrap').wrapPortalLinks({
+        body: sendInput.body,
+        channel: sendInput.channel,
+        audience: sendInput.audience,
+        purpose: sendInput.purpose,
+        hasMedia: sendHasMedia,
+        customerId: sendInput.customerId,
+        leadId: sendInput.leadId,
+      });
+      if (linkWrap.codes.length) {
+        sendInput.body = linkWrap.body;
+        wrappedLinkCodes = linkWrap.codes;
+      }
+    } catch (err) {
+      logger.warn(`[send_customer_message] SMS link wrap failed, body unchanged: ${err?.name || 'error'}`);
+    }
+  }
+
   const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
@@ -971,6 +1091,11 @@ async function sendCustomerMessageCore(input) {
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
     const annualVerdict = await annualOfferGuardVerdict(sendInput, handoffDb);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
+    // Dispute-hold boundary re-check (round-11 P1): the step-1.5 read ran before policy, contact,
+    // suppression, consent and caller checks; a hold committed since must still stop a gated
+    // billing notice here. Same coded WAIT outcome; exemptions live in billingHoldBlock.
+    const holdBlock = await billingHoldBlock(sendInput, handoffDb);
+    if (holdBlock) return rememberBoundaryBlock(holdBlock, 'collection_hold_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
@@ -1078,9 +1203,14 @@ async function sendCustomerMessageCore(input) {
     // window has closed — otherwise a send that never reached
     // messages.create() would be misclassified as ambiguous forever.
     onDispatchAbort,
+    // codex #5196 r4 P2: fired instead of onDispatchAbort when
+    // messages.create() itself throws a definitive rejection — still
+    // inside the handoff, lock held. See twilio.js's dispatch().
+    onDispatchRejected,
     // codex #5018 structural fix (post-r7): threaded straight through, same
-    // as onDispatchStart/onDispatchAbort above — see this file's own
-    // destructure comment and twilio.js's dispatch() for what it gates.
+    // as onDispatchStart/onDispatchAbort/onDispatchRejected above — see
+    // this file's own destructure comment and twilio.js's dispatch() for
+    // what it gates.
     logInHandoff,
     providerHandoffReservation,
   });
@@ -1277,6 +1407,14 @@ async function sendCustomerMessageCore(input) {
         .attachReservationContext(providerHandoffReservation, err.providerOutcome);
     }
     throw err;
+  } finally {
+    // Fire-and-forget: stamping never adds latency to the send path. The
+    // .catch is a backstop (settleWrappedLinks never throws); code only, never
+    // the message — a Knex error embeds the bound target_url.
+    if (wrappedLinkCodes.length) {
+      void require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome)
+        .catch((err) => logger.warn(`[send_customer_message] wrapped-link stamp failed: ${String((err && (err.code || err.name)) || 'error').slice(0, 40)}`));
+    }
   }
 }
 
@@ -1304,14 +1442,19 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
   // window (codex P1, PR #4403 round 15).
   const seriesMoveId = sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
     ? sendInput.metadata?.series_move_id || null : null;
-  const knownSlot = sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
-  if (!knownSlot && !seriesMoveId) return;
+  // A notice that quoted no window (promisedWindowUnknown — a windowless
+  // reschedule) records an UNKNOWN-window promise: its renderedSlotMs only
+  // guarded the send, and skipping it would leave the visit on its older
+  // window.
+  const windowUnknown = sendInput.promisedWindowUnknown === true;
+  const knownSlot = !windowUnknown && sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
+  if (!knownSlot && !seriesMoveId && !windowUnknown) return;
   const providerSid = String(providerOutcome.providerMessageId || '');
   const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
     || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
   if (!deliverable) return;
   await require('../no-show-detector').recordSentWindowFallback({
-    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null,
+    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null, windowUnknown,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
     // ONLY the series confirmation proves the siblings were superseded, and
@@ -1403,6 +1546,7 @@ module.exports = {
   // Exposed for tests
   _internals: {
     validateContract,
+    recordPromiseEvidenceFallback,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

@@ -20,6 +20,11 @@
  */
 
 const db = require('../models/db');
+
+// A row version as a claim bound: `updated_at < stored + 1ms` (millisecond
+// truncation on the way through the driver would otherwise miss an exact
+// match). Used by every dispatch claim that validated a row first.
+const noLaterThan = (value) => new Date(new Date(value).getTime() + 1);
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const crypto = require('crypto');
@@ -31,8 +36,9 @@ const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
-const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
+const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
+const { pestInsiderProofLive } = require('../config/feature-gates');
 const NewsletterSubscribers = require('./newsletter-subscribers');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
@@ -78,8 +84,18 @@ function excludeGloballySuppressed(query) {
     this.select(db.raw('1'))
       .from('email_suppressions as es')
       .where('es.status', 'active')
-      .whereRaw('LOWER(es.email) = LOWER(newsletter_subscribers.email)')
-      .whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES);
+      // Any spelling of the same Gmail inbox counts (owner decision 2026-09-29).
+      .whereRaw(require('../utils/email-equivalence').suppressionCoversColumnSql('es.email', 'newsletter_subscribers.email'))
+      // A global type from any stream, OR any row scoped to no group or the
+      // newsletter's own group (an unsubscribe recorded under another Gmail
+      // spelling than the subscriber row, codex #5323 r8) — the same rule
+      // automationSuppressionMatches applies.
+      .where(function newsletterScoped() {
+        this.whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES)
+          .orWhereNull('es.group_key')
+          .orWhere('es.group_key', '')
+          .orWhere('es.group_key', 'marketing_newsletter');
+      });
   });
 }
 
@@ -107,6 +123,169 @@ function excludeArchivedCustomers(query) {
       .whereRaw('ac.id = newsletter_subscribers.customer_id')
       .whereNotNull('ac.deleted_at');
   });
+}
+
+// Owner ruling 2026-09-29 (#5165, option A): mailbox mailability is judged
+// at SEND TIME by state, not fenced by per-writer locks (the writer-lock
+// approach kept spreading into live paths and produced a genuine deadlock —
+// see the git history on this predicate for the reverted attempt). This one
+// predicate now carries BOTH rules for EVERY audience read:
+//
+//   1. Explicit marketing opt-out — owner ruling 2026-09-28: exclude an
+//      active subscriber when its linked customer, or any live
+//      (non-archived) profile holding the same MAILBOX, has marketing_offers
+//      = false, email_enabled = false, or a marketing_channel that resolves
+//      to 'sms' (email-division/eligibility.js channelFor — only a stored
+//      'sms' resolves there; anything else reads as the 'email' default).
+//      NULL / missing prefs are NOT an opt-out.
+//   2. Non-mailable mailbox sibling — owner ruling 2026-09-29: exclude an
+//      active subscriber when ANY OTHER newsletter_subscribers row for the
+//      SAME MAILBOX has a status other than 'active'. newsletter_subscribers
+//      .status carries no CHECK constraint (schema: a plain string,
+//      defaultTo('active')), so this reads every value the code actually
+//      writes there — 'unsubscribed' (the unsubscribe routes / SendGrid and
+//      Resend complaint webhooks), 'pending' (double opt-in, not yet
+//      confirmed), 'inactive' (newsletter-sunset.js, 90-day win-back
+//      grace), 'waitlist' (inspection-public.js's out-of-area consultation
+//      prompt — never itself a subscription) — plus, fail-closed, any
+//      other/unrecognised value or NULL (IS DISTINCT FROM 'active', not
+//      `<> 'active'`, so a NULL status blocks too, never silently passing).
+//      A hard bounce/spam-complaint alone does NOT write this column —
+//      admin-newsletter.js's own comment: "there's no status='bounced' in
+//      the table"; bounces live on bounce_count/last_bounced_at and the
+//      separate email_suppressions ledger (excludeGloballySuppressed).
+//   3. Duplicate ACTIVE rows for the SAME mailbox — codex #5165 P2: rule 2
+//      above only catches a sibling whose status is NOT 'active', so a
+//      pending Google-alias row that races the import and is later
+//      CONFIRMED — both rows now 'active' — passed rule 2 entirely on both
+//      sides and both got sent, a duplicate delivery to one inbox. At send
+//      time, only ONE active row per mailbox is sendable: the CANONICAL
+//      one, deterministically the earliest `created_at` then `id`
+//      (matches the tie-break every other canonical pick in this codebase
+//      uses — customers' twin picker, the reconcile candidate order —
+//      applied here directly on newsletter_subscribers itself, no join to
+//      customers needed, since two active rows sharing a mailbox are
+//      compared on their OWN rows). Every other active row on that mailbox
+//      is excluded.
+//
+// Same mailbox = exact LOWER(TRIM), or Google's mailbox identity (dots and
+// '+tag' ignored, googlemail.com = gmail.com) — the repo's one rule,
+// customer-comms-lock.js GOOGLE_MAILBOX_SQL.
+//
+// Because the check runs on every audience read (buildSubscriberQuery, the
+// resume refetch, the per-chunk re-check, the resume precheck, and the
+// newsletter-sunset reads), an opt-out or a same-mailbox unsubscribe/pending/
+// inactive row recorded after a subscriber joined stops the next campaign,
+// and a resume ledger row for that recipient is terminalized through
+// skipIneligibleDeliveries.
+// Every call site wraps excludeArchivedCustomers with this helper (pinned
+// by newsletter-sender-marketing-optout.test.js).
+//
+// Both the notification_prefs/customers join AND the mailbox-sibling scan
+// are pre-filtered FIRST, each in its own `WITH ... AS MATERIALIZED` CTE
+// (opted_out_profiles / blocked_mailbox_siblings) — EXPLAIN against the QA
+// database (codex #5165) showed Postgres re-running the join/scan ONCE PER
+// OUTER SUBSCRIBER ROW (a Nested Loop Anti Join re-executed
+// `loops=<subscriber count>` times) whenever the match condition is an OR
+// of several LOWER/TRIM/SPLIT_PART comparisons — that shape defeats
+// Postgres's usual subquery flattening/decorrelation AND defeats a hash
+// join (Postgres can't hash an OR of two different equality keys), so a
+// plain (non-materialized) derived table, or a materialized one still
+// matched by an OR condition, both get replanned right back into the same
+// per-row rescan. opted_out_profiles stays small enough (an opt-out list)
+// that this was already fast (measured: 497ms / ~284k buffer hits ->
+// 153ms / ~560, same rows, on a 4,000-customer / 800-subscriber seed) —
+// but blocked_mailbox_siblings is the WHOLE non-active tail (every
+// unsubscribe/pending/inactive/waitlist row ever recorded), routinely much
+// larger, so it ALSO needs to be a genuine equality: MAILBOX_KEY_SQL
+// collapses "exact match OR Google-alias match" into ONE computed key
+// (a Google address's stripped mailbox identity, or the address itself)
+// so Postgres can plan the match as a real Hash Anti Join — one hash of
+// the small deduped key set, one probe per outer row — instead of a
+// nested loop that rescans the whole CTE per row. Measured on the same
+// seed plus a 3,000-row non-active tail (40 of them Google-alias siblings
+// of active rows): the OR-matched version (materialized, but still an OR)
+// ran 1,927ms with `Rows Removed by Join Filter: 2,173,600` — the CTE
+// rescanned per outer row despite being materialized; the single-key
+// equi-join version ran 166ms as a genuine `Hash Anti Join`, same result
+// rows either way.
+const { GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
+const OPTOUT_SAME_MAILBOX_SQL = (() => {
+  const profile = 'TRIM(oo.email)';
+  const subscriber = 'TRIM(newsletter_subscribers.email)';
+  return `(LOWER(${profile}) = LOWER(${subscriber})
+    OR (${GOOGLE_MAILBOX_SQL.isGoogle(profile)} AND ${GOOGLE_MAILBOX_SQL.isGoogle(subscriber)}
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(profile)} <> ''
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(subscriber)} <> ''
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(profile)} = ${GOOGLE_MAILBOX_SQL.mailbox(subscriber)}))`;
+})();
+// One computed key per address: a Google address's mailbox identity
+// (dots/+"tag" stripped, always resolved to its @gmail.com spelling), or
+// the address itself, LOWER(TRIM)'d, for every other domain. Two rows
+// sharing a mailbox always compute the SAME key regardless of which alias
+// spelling either one uses — collapsing the exact-match-OR-Google-alias-
+// match rule into one equality Postgres can hash-join.
+const MAILBOX_KEY_SQL = (fieldExpr) => {
+  const trimmed = `TRIM(${fieldExpr})`;
+  return `(CASE WHEN ${GOOGLE_MAILBOX_SQL.isGoogle(trimmed)} AND ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} <> ''
+    THEN ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} || '@gmail.com'
+    ELSE LOWER(${trimmed}) END)`;
+};
+// The ONE sendable row per mailbox among ACTIVE rows: DISTINCT ON collapses
+// each mailbox_key to its single earliest (created_at, id) row — the SAME
+// deterministic tie-break every other canonical pick in this codebase uses
+// (customers' twin picker, the reconcile candidate order), applied here
+// directly on newsletter_subscribers's own columns; genuinely one row per
+// key, so it hash-joins as cheaply as opted_out_profiles.
+//
+// The pick runs only over rows that can actually be mailed on their own —
+// active AND past the archived-customer and global-suppression predicates
+// (codex #5165 :235). Otherwise an oldest alias linked to an archived
+// customer wins the pick, is then dropped by the archive predicate, and the
+// live sibling is dropped as non-canonical: the mailbox gets nothing.
+// (Suppression is already inbox-wide for Gmail since #5323, so it filters
+// the pick set the same way it filters the audience.) The CTE is built on
+// the unaliased table so both shared helpers apply to it unchanged.
+const CANONICAL_ACTIVE_MAILBOX_SQL = (qb) => {
+  excludeArchivedCustomers(excludeGloballySuppressed(
+    qb.distinctOn(db.raw(MAILBOX_KEY_SQL('newsletter_subscribers.email')))
+      .select(db.raw(`${MAILBOX_KEY_SQL('newsletter_subscribers.email')} as mailbox_key`), 'newsletter_subscribers.id as canonical_id')
+      .from('newsletter_subscribers')
+      .where('newsletter_subscribers.status', 'active'),
+  )).orderByRaw(`${MAILBOX_KEY_SQL('newsletter_subscribers.email')}, newsletter_subscribers.created_at ASC, newsletter_subscribers.id ASC`);
+};
+function excludeMailboxNotMailable(query) {
+  return query
+    .withMaterialized('opted_out_profiles', (qb) => {
+      qb.select('moc.id as customer_id', 'moc.email as email')
+        .from('notification_prefs as mop')
+        .join('customers as moc', 'moc.id', 'mop.customer_id')
+        .whereNull('moc.deleted_at')
+        .whereRaw("(mop.marketing_offers = false OR mop.email_enabled = false OR LOWER(TRIM(mop.marketing_channel)) = 'sms')");
+    })
+    .withMaterialized('blocked_mailbox_siblings', (qb) => {
+      qb.distinct()
+        .select(db.raw(`${MAILBOX_KEY_SQL('email')} as mailbox_key`))
+        .from('newsletter_subscribers')
+        .whereRaw("status IS DISTINCT FROM 'active'");
+    })
+    .withMaterialized('canonical_active_mailbox', CANONICAL_ACTIVE_MAILBOX_SQL)
+    .whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('opted_out_profiles as oo')
+        .whereRaw(`(oo.customer_id = newsletter_subscribers.customer_id OR ${OPTOUT_SAME_MAILBOX_SQL})`);
+    })
+    .whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('blocked_mailbox_siblings as bm')
+        .whereRaw(`bm.mailbox_key = ${MAILBOX_KEY_SQL('newsletter_subscribers.email')}`);
+    })
+    .whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('canonical_active_mailbox as cam')
+        .whereRaw(`cam.mailbox_key = ${MAILBOX_KEY_SQL('newsletter_subscribers.email')}`)
+        .whereRaw('cam.canonical_id <> newsletter_subscribers.id');
+    });
 }
 
 // Keys that can't be expressed in SQL against newsletter_subscribers — they
@@ -258,7 +437,7 @@ async function countSegmentRecipients(segmentFilter) {
  *   resolveSegmentCustomerIds(); null = no service-line constraint.
  */
 function buildSubscriberQuery(segmentFilter, customerIds = null) {
-  let q = excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' })));
+  let q = excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' }))));
 
   // Service-line / membership constraint, pre-resolved to customer ids.
   if (Array.isArray(customerIds)) q = q.whereIn('customer_id', customerIds);
@@ -362,10 +541,45 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
     .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES);
 }
 
+// The rows a Resume would actually mail: retryable ledger rows with no
+// success signal whose subscriber is still active, not globally suppressed,
+// not an archived customer, and whose mailbox is mailable — not explicitly
+// opted out of marketing and no same-mailbox sibling row in a non-active
+// state (excludeMailboxNotMailable) — the resume precheck's own predicate,
+// in one place. `sendId` is a value, or (with `correlate`) a column reference
+// such as `newsletter_sends.id` when the caller embeds this as an EXISTS
+// subquery.
+function outstandingEligibleDeliveries(sendId, { database = db, correlate = false } = {}) {
+  const base = database('newsletter_send_deliveries')
+    .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
+    .where({ 'newsletter_subscribers.status': 'active' });
+  // A correlated caller passes a column reference; whereColumn quotes it as
+  // an identifier, so nothing is ever interpolated into SQL (pre-push audit).
+  const scoped = correlate
+    ? base.whereColumn('newsletter_send_deliveries.send_id', sendId)
+    : base.where({ 'newsletter_send_deliveries.send_id': sendId });
+  return excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(scoped, 'newsletter_send_deliveries'))));
+}
+
+// Whether a campaign still has recipients a Resume would mail. THE predicate
+// behind "correctable" (codex round 14 on #5187): a fully delivered campaign
+// has a ledger too, and its archive must stay what its recipients received,
+// so a ledger row alone never makes a campaign correctable — and neither do
+// rows whose recipients Resume would exclude and terminalize anyway
+// (unsubscribed, globally suppressed, archived, explicitly opted out;
+// codex round 17 P2).
+async function hasOutstandingDeliveries(sendId, database = db) {
+  // Relinked first, like the resume precheck (codex round 18 P2): a row whose
+  // archived link has a live twin is outstanding, not excluded.
+  await NewsletterSubscribers.relinkArchivedLinkedSubscribers(database);
+  const row = await outstandingEligibleDeliveries(sendId, { database }).first('newsletter_send_deliveries.id');
+  return Boolean(row);
+}
+
 /**
  * THE terminal-skip write. A recipient that fails the eligibility predicate
- * (status active + not globally suppressed + no archived customer link)
- * after selection must never be mailed AND must never stay retryable — a
+ * (status active + not globally suppressed + no archived customer link +
+ * no explicit marketing opt-out) after selection must never be mailed AND must never stay retryable — a
  * resume would otherwise re-queue it, and prepareResumeCampaign would keep
  * counting it as outstanding. Both eligibility gates land here: the
  * pre-dispatch resume sweep (rows still queued/failed) and the per-chunk
@@ -454,6 +668,24 @@ async function sendCampaign(sendId, opts = {}) {
 
   const send = await db('newsletter_sends').where({ id: sendId }).first();
   if (!send) throw new Error('not found');
+  // A version-bound caller (the scheduler tick, the manual send) learns that
+  // the row changed BEFORE any pre-claim gate reads it (codex round 18 P2): a
+  // draft edited after the caller validated it (bodies cleared, segment
+  // emptied) reports VERSION_CHANGED and stays an editable draft, instead of
+  // failing a body or segment gate the caller records as a dispatch failure.
+  // The atomic claim below re-checks the same version.
+  if (opts.expect && !opts.preclaimed) {
+    const changed = send.status !== (opts.expect.status || 'scheduled')
+      || (opts.expect.updatedAt && !(new Date(send.updated_at) < noLaterThan(opts.expect.updatedAt)))
+      || (opts.expect.proofApprovedAt
+        && !(send.proof_approved_at && new Date(send.proof_approved_at) < noLaterThan(opts.expect.proofApprovedAt)));
+    if (changed) {
+      const claimedElsewhere = !['draft', 'scheduled'].includes(send.status);
+      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
+      throw err;
+    }
+  }
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
@@ -584,15 +816,60 @@ async function sendCampaign(sendId, opts = {}) {
     // scheduler tick can both pick up the same row and double-send.
     // The race-loser is tagged so dispatch-side catch handlers can skip
     // the 'failed' flip because the row is actively sending under the winner.
-    const claimed = await db('newsletter_sends')
-      .where({ id: send.id })
-      .whereIn('status', ['draft', 'scheduled'])
+    let claim = db('newsletter_sends').where({ id: send.id });
+    if (opts.expect) {
+      // Version-bound claim (the scheduler tick): the row must still be the
+      // exact scheduled version the tick read and validated — same status,
+      // no later edit (updated_at), no later approval. A PATCH landing
+      // between the tick's read and this claim rewrites the content and
+      // moves updated_at (and returns the row to draft), so the claim finds
+      // nothing and edited, unapproved content is never broadcast. The +1ms
+      // absorbs sub-millisecond precision the driver drops on read.
+      claim = claim.where({ status: opts.expect.status || 'scheduled' });
+      if (opts.expect.updatedAt) claim = claim.where('updated_at', '<', noLaterThan(opts.expect.updatedAt));
+      if (opts.expect.proofApprovedAt) {
+        claim = claim.whereNotNull('proof_approved_at').where('proof_approved_at', '<', noLaterThan(opts.expect.proofApprovedAt));
+      }
+    } else {
+      claim = claim.whereIn('status', ['draft', 'scheduled']);
+    }
+    const claimed = await claim
       .update({ status: 'sending', sending_claim_token: claimToken, updated_at: new Date() })
       .returning('id');
     if (!claimed.length) {
-      const err = new Error('already sent or in progress');
-      err.code = 'ALREADY_CLAIMED';
+      // A version-bound claim finds nothing for two different reasons: the
+      // content was edited (the row is still draft/scheduled — nothing went
+      // out, VERSION_CHANGED), or another claimant (a tick, a second click)
+      // already took the row (sending/sent/failed — ALREADY_CLAIMED, the
+      // winner owns the outcome). Re-read to tell them apart, so a caller
+      // never reports "not sent" for a campaign the winner is sending
+      // (pre-push audit P1). A failed re-read falls back to VERSION_CHANGED.
+      let claimedElsewhere = !opts.expect;
+      if (opts.expect) {
+        try {
+          const current = await db('newsletter_sends').where({ id: send.id }).first('status');
+          claimedElsewhere = !!current?.status && !['draft', 'scheduled'].includes(current.status);
+        } catch (readErr) {
+          logger.warn(`[newsletter] claim re-read for ${send.id} failed: ${readErr.message}`);
+        }
+      }
+      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
       throw err;
+    }
+  }
+
+  // The delivery ledger is the audience boundary: a campaign that already
+  // has delivery rows is resumed, never re-seeded — on EVERY path. A
+  // partially delivered campaign returned to draft (an invalid resume, codex
+  // round 11) and sent again through the normal Send path must reach only
+  // its outstanding ledger rows, never subscribers who joined the segment
+  // since the first pass. Checked after the claim, so the row is ours.
+  if (!opts.existingDeliveriesOnly) {
+    const ledgerRow = await db('newsletter_send_deliveries').where({ send_id: send.id }).first('id');
+    if (ledgerRow) {
+      logger.info(`[newsletter] send ${send.id} already has a delivery ledger — sending to its outstanding rows only, not re-seeding the segment`);
+      opts = { ...opts, existingDeliveriesOnly: true };
     }
   }
 
@@ -634,11 +911,11 @@ async function sendCampaign(sendId, opts = {}) {
       .map((d) => d.subscriber_id)
       .filter((id) => id !== null && id !== undefined)));
     subscribers = retryableSubscriberIds.length
-      ? await excludeArchivedCustomers(excludeGloballySuppressed(
+      ? await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers')
           .where({ status: 'active' })
           .whereIn('id', retryableSubscriberIds),
-      )).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
+      ))).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
       : [];
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger (globally-suppressed excluded)`);
 
@@ -798,9 +1075,9 @@ async function sendCampaign(sendId, opts = {}) {
       // eligible — but the row we selected still carries the OLD (archived)
       // customer_id, which would personalize the email and file the customer
       // touchpoint against the archived profile.
-      const freshCustomerBySub = new Map((await excludeArchivedCustomers(excludeGloballySuppressed(
+      const freshCustomerBySub = new Map((await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
-      ).select('id', 'customer_id'))).map((r) => [r.id, r.customer_id ?? null]));
+      ))).select('id', 'customer_id')).map((r) => [r.id, r.customer_id ?? null]));
       const stillEligible = freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
@@ -1089,33 +1366,96 @@ async function prepareResumeCampaign(sendId) {
     err.code = 'STILL_SENDING';
     throw err;
   }
-
-  // Are there outstanding non-success deliveries to resume? If delivery
-  // rows exist and all of them are already terminal-success, bail early so
-  // the operator knows. If no rows exist yet, the first attempt failed
-  // before pre-seeding and sendCampaign should reseed from subscribers.
+  // A resume mails the rest of the list from what is stored NOW. A campaign
+  // persisted before a stricter claim scan shipped, or one edited after its
+  // first attempt failed, must pass the same validation the manual and
+  // scheduled paths run — before anything is claimed (codex round 8 P1).
+  // Read before validation: whether anyone has received this campaign decides
+  // what an invalid copy may do to its state (below).
   const deliveryTotal = await db('newsletter_send_deliveries')
     .where({ send_id: send.id })
     .count('* as c')
     .first();
   const totalDeliveries = Number(deliveryTotal?.c || 0);
+  const leaseCutoff = new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000);
+
+  const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
+  // A promoted legacy flagship has newsletter_type NULL; the manual and
+  // scheduled paths classify it by its calendar link and validate it as the
+  // flagship type — so does the resume path (codex round 12 P1): its
+  // outstanding recipients must never receive stored copy the current scan
+  // rejects.
+  const typedSend = requiresClaimValidation(send.newsletter_type)
+    ? send
+    : ((send.newsletter_type === null && await isFlagshipSend(send)) ? { ...send, newsletter_type: FLAGSHIP_TYPE_KEY } : null);
+  if (typedSend) {
+    const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
+    const lockedPrices = await lockedPricesForSend(typedSend, db);
+    const { errors } = validateNewsletterDraft(typedSend, { recipientCount: 1, lockedPrices });
+    if (errors.length > 0) {
+      // Nothing is claimed, and the campaign KEEPS its delivered state: a
+      // 'failed' or 'sent' row stays publicly readable (newsletter-feed.js
+      // serves sending/sent/failed — the web version the first batch
+      // received stays up) and is corrected in place through PATCH's
+      // correct-and-resume path; the next Resume re-validates the corrected
+      // copy and, through sendCampaign's ledger guard (codex round 11),
+      // reaches only the recipients still outstanding (codex round 12 P2 —
+      // a return to 'draft' made that link a 404). A live 'sending' owner
+      // was refused above; a STALE one moves to 'failed' with its claim
+      // token revoked — readable and editable, and a stuck original worker
+      // learns through its heartbeat ownership check that it no longer owns
+      // the campaign — as a compare-and-set on the inspected state and lease
+      // (pre-push audit P1).
+      let outcome = 'correct the copy and resume again';
+      if (totalDeliveries === 0 && (send.status === 'failed' || reclaimingStaleSend)) {
+        // Nobody received a zero-ledger campaign (the first attempt failed
+        // before any delivery row was seeded), so there is no web version
+        // to keep and no ledger to resume: it goes back to an editable draft
+        // with its approval cleared (codex round 13 P2) — compare-and-set on
+        // the inspected state and lease, like every other transition here.
+        const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
+        if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
+        const returned = (await reset.update({
+          status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null,
+          sending_claim_token: null, updated_at: new Date(),
+        })) > 0;
+        outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
+      } else if (reclaimingStaleSend) {
+        const released = (await db('newsletter_sends')
+          .where({ id: send.id, status: 'sending' })
+          .where('updated_at', '<=', leaseCutoff)
+          .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
+        if (released) outcome = 'its stale send claim was released; correct the copy and resume again';
+      }
+      const err = new Error(`campaign no longer passes validation; ${outcome}: ${errors.join('; ')}`);
+      err.code = 'VALIDATION_FAILED';
+      err.errors = errors;
+      throw err;
+    }
+  }
+
+  // Are there outstanding non-success deliveries to resume? If delivery
+  // rows exist and all of them are already terminal-success, bail early so
+  // the operator knows. If no rows exist yet, the first attempt failed
+  // before pre-seeding and sendCampaign should reseed from subscribers.
   if (totalDeliveries === 0 && send.status !== 'failed' && !reclaimingStaleSend) {
     const err = new Error('no outstanding deliveries to resume');
     err.code = 'NOTHING_TO_RESUME';
     throw err;
   }
   if (totalDeliveries > 0) {
+    // Repair stale archived links first, as every audience read does: a
+    // retryable row whose subscriber still points at an archived profile
+    // with a live same-email twin is outstanding once relinked, and must not
+    // be counted out (and terminalized below) before sendCampaign's own
+    // sweep would have relinked it (codex round 18 P2).
+    await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
     // Mirror the retry refetch's suppression + archived-customer exclusions so
     // the "anything left to resume?" count matches what sendCampaign will
     // actually send — otherwise a campaign whose only outstanding rows are
     // suppressed/archived would falsely report work remaining (and repeatedly
     // claim a resume that then selects nobody).
-    const outstanding = await excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(
-      db('newsletter_send_deliveries')
-        .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
-        .where({ 'newsletter_send_deliveries.send_id': send.id, 'newsletter_subscribers.status': 'active' }),
-      'newsletter_send_deliveries',
-    )))
+    const outstanding = await outstandingEligibleDeliveries(send.id)
       .count('* as c')
       .first();
     if (Number(outstanding?.c || 0) === 0) {
@@ -1151,8 +1491,15 @@ async function prepareResumeCampaign(sendId) {
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id, status: send.status });
   if (reclaimingStaleSend) {
-    claimQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
+    claimQuery.where('updated_at', '<=', leaseCutoff);
   }
+  // The claim is bound to the exact row version this function validated
+  // (codex round 13 P1): a correction saved between the validation above
+  // and this claim leaves the claim empty, so the corrected, not yet
+  // validated copy is never mailed to the outstanding recipients — the
+  // operator resumes again and the new copy is validated first. The same
+  // bound the manual and scheduled dispatch paths carry.
+  if (send.updated_at) claimQuery.where('updated_at', '<', noLaterThan(send.updated_at));
   // A fresh owner token every (re)claim: a stale-reclaim rotates the token,
   // which is exactly what tells the stuck original worker (via its next
   // heartbeat ownership check) that it no longer owns the campaign.
@@ -1161,8 +1508,18 @@ async function prepareResumeCampaign(sendId) {
     .update({ status: 'sending', scheduled_for: null, sending_claim_token: claimToken, updated_at: new Date() })
     .returning('id');
   if (!claimed.length) {
-    const err = new Error('campaign was claimed by another worker');
-    err.code = 'ALREADY_CLAIMED';
+    // Edited (the row still holds the status we inspected) vs claimed by
+    // another worker (it moved on) — a lost claim is never reported as an
+    // edit or the other way round.
+    let current = null;
+    try { current = await db('newsletter_sends').where({ id: send.id }).first('status'); } catch (readErr) {
+      logger.warn(`[newsletter] resume claim re-read for ${send.id} failed: ${readErr.message}`);
+    }
+    const edited = current?.status === send.status;
+    const err = new Error(edited
+      ? 'campaign changed after it was validated; resume again to validate the new copy'
+      : 'campaign was claimed by another worker');
+    err.code = edited ? 'VERSION_CHANGED' : 'ALREADY_CLAIMED';
     throw err;
   }
 
@@ -1207,6 +1564,14 @@ async function processScheduledSends() {
       // is deliberately re-enabled.
       if (row.proof_approved_at && process.env.GATE_NEWSLETTER_PROOF_APPROVAL !== 'true') {
         logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
+        continue;
+      }
+      // Same rule for the type-specific switch: a proof-approved Pest
+      // Insider issue stays queued while GATE_PEST_INSIDER_PROOF is off. A
+      // Pest Insider issue scheduled by hand has no proof_approved_at and is
+      // unaffected.
+      if (row.proof_approved_at && row.newsletter_type === 'pest-insider-monthly' && !pestInsiderProofLive()) {
+        logger.warn(`[newsletter-scheduler] send ${row.id} is a proof-approved Pest Insider issue but GATE_PEST_INSIDER_PROOF is off — leaving it scheduled`);
         continue;
       }
       const eventSelection = await validateFlagshipEventSelection(row);
@@ -1283,7 +1648,12 @@ async function processScheduledSends() {
           continue;
         }
       }
-      await sendCampaign(row.id);
+      // The claim is bound to the version this tick read and validated: an
+      // edit (or re-approval) landing in between leaves the claim empty and
+      // the row is picked up again, re-validated, on a later tick.
+      await sendCampaign(row.id, {
+        expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at },
+      });
       processed++;
     } catch (err) {
       // ALREADY_CLAIMED = another tick / manual send picked up this row
@@ -1291,6 +1661,10 @@ async function processScheduledSends() {
       // to failed or we'd overwrite an in-flight campaign.
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter-scheduler] send ${row.id} already claimed by another worker — skipping`);
+        continue;
+      }
+      if (err.code === 'VERSION_CHANGED') {
+        logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
       if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
@@ -1346,6 +1720,8 @@ async function markEventsFeatured(send) {
   if (!Array.isArray(ids) || ids.length === 0) return;
 
   const { classifyFreshness } = require('./event-freshness');
+  let occurrences = send.event_occurrences || {};
+  if (typeof occurrences === 'string') { try { occurrences = JSON.parse(occurrences); } catch { occurrences = {}; } }
 
   // Lock + read + write each event row inside a transaction (SELECT ... FOR
   // UPDATE) so two sends that ship the same event can't both read the same
@@ -1363,6 +1739,11 @@ async function markEventsFeatured(send) {
       await trx('events_raw').where({ id }).update({
         times_featured: nextFeatured,
         last_featured_at: new Date(),
+        // The occurrence that shipped, so the calendar-year rule compares its
+        // own year (the send time can fall in the prior December). Prefer the
+        // occurrence locked into the draft: a feed may have advanced this row
+        // in place since the email was rendered.
+        last_featured_occurrence_at: occurrences[String(id)] || row.start_at || null,
         // The editorial star is consumed by shipping: drop featured back to
         // approved so the eligibility override can't re-admit the same
         // event in the next issue.
@@ -1375,4 +1756,7 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+module.exports = {
+  applyRetryableDeliveryFilter,
+  outstandingEligibleDeliveries,
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };

@@ -11,5 +11,5 @@ export function shouldResetCompletionIdempotencyKey(error) {
   const status = Number(error?.status);
   if (!Number.isFinite(status) || status < 400 || status >= 500) return false;
   if (status !== 409) return true;
-  return ["lawn_assessment_stale", "completion_pricing_changed"].includes(error?.code);
+  return ["lawn_assessment_stale", "completion_pricing_changed", "property_service_area_changed"].includes(error?.code);
 }

@@ -48,6 +48,10 @@ jest.mock('../services/service-report/report-data', () => ({
   // the REAL implementation (pdf-cache-config precedent) so this suite keeps
   // exercising the route's actual print path instead of stubbing it out.
   stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
+  // Same precedent for report_copy's own live-only strip (codex P1
+  // 2026-09-28, GATE_REPORT_PRODUCT_COPY) — the route's mode !== 'live'
+  // block calls this unconditionally too.
+  stripLiveOnlyReportProductCopy: jest.requireActual('../services/service-report/report-data').stripLiveOnlyReportProductCopy,
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: jest.fn().mockResolvedValue({}),

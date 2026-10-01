@@ -396,16 +396,20 @@ describe('owner approval content binding', () => {
   // Owner approved every fact-check-clean pest entry 2026-09-27 (after
   // #5106) and house-centipede 2026-09-28 once its range fact-check closed
   // (#5114). The L1b lawn/plant content (119 entries: 72 plant + 47
-  // condition) lands owner-approved nowhere yet — every one stays
-  // `review.status: "draft"` until the owner's review pass, so none of it is
-  // nameable by any engine (Codex #5143's whole reason for existing).
-  test('every pest entry is owner-approved; every plant/condition entry is still draft', () => {
-    const approved = allEntries.filter((entry) => entry.review.status === 'owner_approved');
-    const draft = allEntries.filter((entry) => entry.review.status === 'draft');
-    expect(approved).toHaveLength(239);
-    expect(draft).toHaveLength(119);
-    expect(approved.every((entry) => catalog.sectionOf(entry) === 'pest')).toBe(true);
-    expect(draft.every((entry) => catalog.sectionOf(entry) !== 'pest')).toBe(true);
+  // condition) was approved by owner decision 2026-09-28, so every entry in
+  // every section is nameable — and any later edit to an entry's content
+  // fails here until it is approved again.
+  test('every entry, pest, plant and condition, is owner-approved against its current content', () => {
+    // The 2026-09-30 yard-rotation species set (19 entries) is loaded as
+    // review.status "draft": it is not approved, so it never counts here and
+    // no engine can name it until the owner approves it.
+    const approved = allEntries.filter((entry) => catalog.isApproved(entry));
+    const drafts = allEntries.filter((entry) => !catalog.isApproved(entry));
+    expect(approved).toHaveLength(358);
+    expect(drafts).toHaveLength(19);
+    expect(drafts.every((entry) => entry.review.status === 'draft')).toBe(true);
+    expect(allEntries.filter((entry) => catalog.sectionOf(entry) === 'pest')).toHaveLength(246);
+    expect(allEntries.filter((entry) => catalog.sectionOf(entry) !== 'pest')).toHaveLength(131);
   });
 });
 
@@ -506,10 +510,10 @@ describe('L1: plant and condition sections (index additions, no content)', () =>
   // the pest section (239) is unaffected and still equals the unfiltered
   // catalog's pre-L1b size.
   test('listEntries({ section }) filters by section; L1b landed the 119 plant/condition entries', () => {
-    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
-    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
-    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
-    expect(catalog.listEntries()).toHaveLength(358);
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(246);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(76);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(55);
+    expect(catalog.listEntries()).toHaveLength(377);
     expect(catalog.listEntries({ section: 'plant' }).every((e) => ['turfgrass', 'weed', 'host_plant'].includes(e.kind))).toBe(true);
     expect(catalog.listEntries({ section: 'condition' }).every((e) => ['disease', 'disorder', 'organism'].includes(e.kind))).toBe(true);
   });
@@ -551,10 +555,10 @@ describe('cross-worker slugs (planned_slugs contract)', () => {
   // (pest OR plant/condition) going unbuilt, or a built entry staying listed
   // as planned.
   test('the whole catalog is complete: no entry is missing, and no built entry is still "planned"', () => {
-    expect(allEntries).toHaveLength(358);
-    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
-    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
-    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
+    expect(allEntries).toHaveLength(377);
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(246);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(76);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(55);
     for (const slug of entriesBySlug.keys()) expect(plannedSlugs.has(slug)).toBe(false);
   });
 
@@ -1087,12 +1091,14 @@ describe('loader API surface', () => {
     expect(catalog.listEntries({ kind: 'sign' }).length).toBe(12);
     // L1b's own kind mix: 6 turfgrass + 29 weed + 37 host_plant = 72 plant;
     // 24 disease + 22 disorder = 46 condition kinds, plus sting-nematode
-    // (kind organism) = 47 condition-section entries.
+    // (kind organism) = 47 condition-section entries. The 2026-09-30 draft
+    // set adds 4 weed, 5 disease, 1 disorder and 2 nematode (organism)
+    // entries: 33 weed, 29 disease, 23 disorder.
     expect(catalog.listEntries({ kind: 'turfgrass' }).length).toBe(6);
-    expect(catalog.listEntries({ kind: 'weed' }).length).toBe(29);
+    expect(catalog.listEntries({ kind: 'weed' }).length).toBe(33);
     expect(catalog.listEntries({ kind: 'host_plant' }).length).toBe(37);
-    expect(catalog.listEntries({ kind: 'disease' }).length).toBe(24);
-    expect(catalog.listEntries({ kind: 'disorder' }).length).toBe(22);
+    expect(catalog.listEntries({ kind: 'disease' }).length).toBe(29);
+    expect(catalog.listEntries({ kind: 'disorder' }).length).toBe(23);
   });
 
   test('getNode resolves entries, subgroups, groups, and categories', () => {
@@ -1217,12 +1223,13 @@ describe('unnamed answers show only fixed text (real catalog)', () => {
 });
 
 describe('catalog size (sanity)', () => {
-  // 239 pest (60 owner-A + 179 owner-B/C) + 119 L1b lawn/plant draft entries
-  // (72 plant + 47 condition) = 358.
-  test('exactly 358 entries are loaded (239 pest + 72 plant + 47 condition)', () => {
-    expect(allEntries.length).toBe(358);
-    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
-    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
-    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
+  // 239 pest (60 owner-A + 179 owner-B/C) + 119 L1b lawn/plant entries
+  // (72 plant + 47 condition) = 358 approved, plus the 19 draft entries of the
+  // 2026-09-30 yard-rotation set (7 pest + 4 plant + 8 condition) = 377.
+  test('exactly 377 entries are loaded (246 pest + 76 plant + 55 condition; 358 approved + 19 draft)', () => {
+    expect(allEntries.length).toBe(377);
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(246);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(76);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(55);
   });
 });

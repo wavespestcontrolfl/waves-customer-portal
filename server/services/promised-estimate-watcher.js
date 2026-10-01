@@ -24,7 +24,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
+const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -82,6 +82,7 @@ async function loadUnkeptPromises() {
     `
     SELECT COUNT(*) OVER () AS total_count,
            MIN(c.created_at) OVER () AS oldest_created_at,
+           ARRAY_AGG(c.id::text) OVER () AS all_ids,
            c.id, c.created_at, c.customer_id, c.disposition,
            CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            c.duration_seconds,
@@ -230,7 +231,17 @@ function composePromisedEstimateDigest(rows) {
     `<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=calls">Open call log</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, count: total, oldestDays: oldest };
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full list still lands in `detail`.
+  const headline = `Estimates — ${total} promised quote${total === 1 ? '' : 's'} not sent`;
+  const summary = `Oldest is ${oldest} day${oldest === 1 ? '' : 's'}.`;
+  // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
+  // call ids — a count-only digest can't otherwise tell "same 25" from "25
+  // different calls" when the backlog churns at a flat size.
+  // Full-set identity (all_ids rides every row, computed before LIMIT), so
+  // a promise past the page cap is still tracked.
+  const itemKeys = fullSetItemKeys(promises);
+  return { subject, text, html, count: total, oldestDays: oldest, headline, summary, itemKeys };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.
@@ -301,6 +312,10 @@ async function runPromisedEstimateWatcher(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
+      count: composed.count,
+      itemKeys: composed.itemKeys,
       link: '/admin/pipeline',
       // No rolling window: notifyAdmin's window is measured from created_at,
       // which refreshOnDedupe never advances, so a gap standing longer than

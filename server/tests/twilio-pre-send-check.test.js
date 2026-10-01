@@ -47,6 +47,7 @@ jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => {}) }));
+jest.mock('../services/messaging/sync-optout', () => ({ recordSyncProviderOptOut: jest.fn(async () => {}) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -212,6 +213,20 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const trxInsert = jest.fn(async () => {});
     // knex convention: calling the trx itself as a function selects a table.
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    // codex #5196 P1-B: the in-handoff insert now runs inside a SAVEPOINT
+    // (`trx.transaction(...)`) so a failed insert doesn't abort the whole
+    // handoff transaction — a real knex trx exposes `.transaction()` for
+    // this the same way it exposes `.raw()`; forwarding the SAME mock trx
+    // to the callback is enough to exercise the real code path here, since
+    // this repo's own convention treats a savepoint connection identically
+    // to its parent for table access.
+    trx.transaction = jest.fn((cb) => cb(trx));
     require('../models/db').mockImplementation(() => ({
       insert: jest.fn(async () => { throw new Error('sms_log must not write on the plain db when a trx is held'); }),
     }));
@@ -225,6 +240,58 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       });
       expect(result.success).toBe(true);
       expect(trxInsert).toHaveBeenCalledTimes(1);
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  // codex #5018 r15/r16 P1 follow-up: the ORIGINAL in-handoff insert now
+  // takes the SAME advisory lock key the recovery insert already does
+  // (hashtextextended('sms_log_sid:'||sid, 0)), transaction-scoped on the
+  // held trx, right before it inserts — closing the window where recovery
+  // could run its own check-then-insert while this original was still open
+  // (its insert made but not yet committed, invisible under READ
+  // COMMITTED) and land a genuine duplicate. Real cross-connection blocking
+  // behavior is proven with a real Postgres advisory lock in
+  // call-booking-link-text-postgres.test.js (a mocked trx cannot prove a
+  // second session actually waits); this pins the key + ordering.
+  test('the original in-handoff insert takes the same sms_log_sid advisory lock, on trx, before it inserts', async () => {
+    const order = [];
+    const trxInsert = jest.fn(async () => { order.push('insert'); });
+    const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    trx.raw = jest.fn(async (...args) => { order.push('raw'); return args; });
+    trx.transaction = jest.fn((cb) => cb(trx));
+    require('../models/db').mockImplementation(() => ({ insert: jest.fn(async () => {}) }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM,
+        logInHandoff: true,
+        withSmsHandoff: async dispatch => { await dispatch(trx); return { ok: true }; },
+      });
+      expect(result.success).toBe(true);
+      expect(trx.raw).toHaveBeenCalledWith(
+        expect.stringContaining('pg_advisory_xact_lock(hashtextextended('),
+        ['sms_log_sid:SM_ok'],
+      );
+      // Same key derivation the recovery insert below uses (`sms_log_sid:`
+      // + the exact twilio_sid) — never a different namespace.
+      expect(trx.raw.mock.calls[0][1]).toEqual([`sms_log_sid:${result.sid}`]);
+      expect(order).toEqual(['raw', 'insert']); // lock acquired BEFORE the insert
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  // The lock is transaction-scoped (pg_advisory_xact_lock, never taken on
+  // the plain base connection) — a bare dispatch() call with no trx has
+  // nothing to scope it to, so it is skipped entirely; the insert still
+  // runs on the plain db unchanged.
+  test('a bare dispatch() call with no trx never attempts the advisory lock', async () => {
+    const baseRaw = jest.fn(async () => {});
+    require('../models/db').mockImplementation(() => ({ insert: jest.fn(async () => {}) }));
+    require('../models/db').raw = baseRaw;
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM, logInHandoff: true,
+      });
+      expect(result.success).toBe(true);
+      expect(baseRaw).not.toHaveBeenCalled();
     } finally { require('../models/db').mockReset(); }
   });
 
@@ -243,6 +310,13 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const trxInsert = jest.fn(async () => {});
     // knex convention: calling the trx itself as a function selects a table.
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInserted = [];
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -303,6 +377,13 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
   test('a caller transaction whose commit actually succeeded, but which threw a later error, does not duplicate the sms_log row', async () => {
     const trxInsert = jest.fn(async () => {});
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInsert = jest.fn(async () => {});
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -345,6 +426,13 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const insertError = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
     const trxInsert = jest.fn(async () => { throw insertError; });
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInserted = [];
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -391,6 +479,12 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
   test('a withSmsHandoff caller that does not opt into logInHandoff gets the post-handoff insert on the plain db, never on its own trx (origin/main behavior)', async () => {
     const trxInsert = jest.fn(async () => { throw new Error('non-opt-in caller must never insert on trx'); });
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
     const baseInserted = [];
     const events = [];
     require('../models/db').mockImplementation((table) => {
@@ -1018,31 +1112,30 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(result.success).toBe(true);
   });
 
+  // Codex #5334 P1 (reverses the older "predicate after the guard" placement): the SUPPRESSION gates run AFTER every predicate, so a
+  // hold armed / offer withheld while the predicate was reading is still caught before the SDK.
   test.each([
     ['bare', false],
     ['locked handoff', true],
-  ])('a late final predicate blocks the %s path after the suspended annual guard, before the SDK', async (_label, locked) => {
+  ])('a suppression gate that changes while the final predicate is in flight still blocks the %s path, before the SDK', async (_label, locked) => {
     const events = [];
-    let finishGuard;
-    let announceGuard;
-    let lateCondition = false;
-    const guardStarted = new Promise(resolve => { announceGuard = resolve; });
-    const guardSuspended = new Promise(resolve => { finishGuard = resolve; });
+    let finishFinal;
+    let announceFinal;
+    let lateBlock = false;
+    const finalStarted = new Promise(resolve => { announceFinal = resolve; });
+    const finalSuspended = new Promise(resolve => { finishFinal = resolve; });
     annualHandoffGuard.mockReturnValueOnce(async () => {
-      events.push('guard:start');
-      announceGuard();
-      await guardSuspended;
-      events.push('guard:end');
-      return { blocked: false, reason: null, estimateId: null };
+      events.push('guard');
+      return lateBlock ? { blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' } : { blocked: false, reason: null, estimateId: null };
     });
     const providerPreSendCheck = jest.fn(async () => {
-      events.push('final');
-      return lateCondition
-        ? { ok: false, code: 'GRATITUDE_THREAD_CHANGED', reason: 'thread changed', retryable: false }
-        : { ok: true };
+      events.push('final:start');
+      announceFinal();
+      await finalSuspended;
+      events.push('final:end');
+      return { ok: true };
     });
     const trx = { __isTrx: true };
-
     const resultPromise = TwilioService.sendSMS(TO, 'Reminder body', {
       messageType: 'manual',
       fromNumber: FROM,
@@ -1055,31 +1148,26 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
         },
       } : {}),
     });
-    await guardStarted;
-    expect(providerPreSendCheck).not.toHaveBeenCalled();
+    await finalStarted;
     expect(mockTwilioCreate).not.toHaveBeenCalled();
-    lateCondition = true;
-    finishGuard();
-
+    expect(events).not.toContain('guard'); // the gate has not even started: the predicate is first
+    lateBlock = true;
+    finishFinal();
     const result = await resultPromise;
     expect(events).toEqual(locked
-      ? ['locked', 'guard:start', 'guard:end', 'final']
-      : ['guard:start', 'guard:end', 'final']);
-    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
-    expect(providerPreSendCheck).toHaveBeenCalledWith({
-      channel: 'sms',
-      dbi: locked ? trx : require('../models/db'),
-    });
+      ? ['locked', 'final:start', 'final:end', 'guard']
+      : ['final:start', 'final:end', 'guard']);
+    expect(providerPreSendCheck).toHaveBeenCalledWith({ channel: 'sms', dbi: locked ? trx : require('../models/db') });
     expect(mockTwilioCreate).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      success: false,
-      preSendBlocked: true,
-      code: 'GRATITUDE_THREAD_CHANGED',
-      error: 'thread changed',
-      retryable: false,
-      validator: 'provider_pre_send_check_boundary',
-      deliveryOutcome: 'not_sent',
-    });
+    expect(result).toMatchObject({ success: false, code: 'ANNUAL_OFFER_WITHHELD', deliveryOutcome: 'not_sent' });
+  });
+
+  test('a late-failing final predicate still refuses with its own verdict, never reaching the guard or the SDK', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: false, code: 'GRATITUDE_THREAD_CHANGED', reason: 'thread changed', retryable: false }));
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
+    expect(annualHandoffGuard).not.toHaveBeenCalled();
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'GRATITUDE_THREAD_CHANGED', error: 'thread changed', retryable: false, validator: 'provider_pre_send_check_boundary', deliveryOutcome: 'not_sent' });
   });
 
   test.each([
@@ -1116,7 +1204,7 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
   });
 
-  test('a passing final predicate runs once after the annual guard and before the sync check and SDK', async () => {
+  test('a passing final predicate runs once BEFORE the annual guard (suppression gates last), then the sync check and SDK', async () => {
     const events = [];
     annualHandoffGuard.mockReturnValueOnce(async () => {
       events.push('annual');
@@ -1134,7 +1222,7 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(result).toMatchObject({ success: true, deliveryOutcome: 'accepted' });
     expect(preSendCheck).toHaveBeenCalledTimes(1);
     expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
-    expect(events).toEqual(['annual', 'final', 'sync', 'sdk']);
+    expect(events).toEqual(['final', 'annual', 'sync', 'sdk']);
   });
 
   test('round 8 P1: withheldLinkPolicy "rewrite" strips a withheld estimate link from the body BEFORE the guard check and the SDK call, and the provider is called with the rewritten text', async () => {
@@ -1188,5 +1276,287 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(mockTwilioCreate.mock.calls[0][0].body).toBe('Reminder body');
     expect(result.withheldLinksRewritten).toBeUndefined();
+  });
+});
+
+// codex #5196 r4 P2: onDispatchRejected fires from INSIDE dispatch()'s own
+// messages.create() catch, still holding whatever lock the caller's
+// withSmsHandoff acquired — the sibling of onDispatchAbort/onDispatchStart
+// above, for the "Twilio definitively rejected it" outcome instead of a
+// pre-provider window close.
+describe('onDispatchRejected (codex #5196 r4 P2)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTwilioCreate.mockResolvedValue({ sid: 'SM_ok' });
+    annualHandoffGuard.mockReturnValue(async () => ({ blocked: false, reason: null, estimateId: null }));
+  });
+
+  test('a definitive 4xx rejection calls onDispatchRejected BEFORE the withSmsHandoff callback settles', async () => {
+    const events = [];
+    const onDispatchRejected = jest.fn(async () => { events.push('onDispatchRejected'); });
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+      withSmsHandoff: async dispatch => {
+        events.push('locked');
+        try {
+          await dispatch();
+        } finally {
+          events.push('lock-released');
+        }
+      },
+    })).rejects.toMatchObject({ status: 400, providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+
+    expect(events).toEqual(['locked', 'onDispatchRejected', 'lock-released']);
+    expect(onDispatchRejected).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['timeout', Object.assign(new Error('request timed out'), { code: 'ETIMEDOUT' })],
+    ['reset', Object.assign(new Error('socket reset'), { code: 'ECONNRESET' })],
+    ['HTTP 408', Object.assign(new Error('request timeout'), { status: 408 })],
+    ['HTTP 503', Object.assign(new Error('provider unavailable'), { status: 503 })],
+    ['unknown transport error', new Error('unexpected transport failure')],
+  ])('an SDK %s never calls onDispatchRejected', async (_label, failure) => {
+    const onDispatchRejected = jest.fn();
+    mockTwilioCreate.mockRejectedValueOnce(failure);
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    })).rejects.toBeTruthy();
+
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  // 21610's opt-out is recorded after the lock releases (outer catch), so
+  // the attempt marker must survive until then — the hook must not fire.
+  test('a 21610 opt-out rejection never calls onDispatchRejected, and still records the opt-out', async () => {
+    const { recordSyncProviderOptOut } = require('../services/messaging/sync-optout');
+    const onDispatchRejected = jest.fn();
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('unsubscribed recipient'), { status: 400, code: 21610 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+      withSmsHandoff: async dispatch => dispatch(),
+    })).rejects.toMatchObject({ status: 400, providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+    expect(recordSyncProviderOptOut).toHaveBeenCalledTimes(1);
+  });
+
+  test('a missing SID never calls onDispatchRejected', async () => {
+    const onDispatchRejected = jest.fn();
+    mockTwilioCreate.mockResolvedValueOnce({});
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    })).rejects.toBeTruthy();
+
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  test('a successful send never calls onDispatchRejected', async () => {
+    const onDispatchRejected = jest.fn();
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    });
+
+    expect(result.success).toBe(true);
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  test('onDispatchRejected throwing is swallowed — the classified failure still surfaces unchanged', async () => {
+    const onDispatchRejected = jest.fn(async () => { throw new Error('marker table unreachable'); });
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400, code: 21211 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    })).rejects.toMatchObject({
+      status: 400,
+      code: 21211,
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent' },
+    });
+
+    expect(onDispatchRejected).toHaveBeenCalledTimes(1);
+  });
+
+  test('a caller that never passes onDispatchRejected is unaffected by a definitive rejection', async () => {
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM,
+    })).rejects.toMatchObject({ status: 400, providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+  });
+});
+
+// Codex round-43 P2 (PR #5334): the provider-boundary predicate runs after the disclaimed-number
+// hold's await; repeatable predicates (`afterMarker`, the live-ETA checks) also re-run after the
+// durable attempt marker's await. Predicates without `afterMarker` stay once-only.
+describe('providerPreSendCheck placement at the TRUE provider boundary (round 43)', () => {
+  const { disclaimedNumberBlocksSend } = require('../services/disclaimed-number-holds');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTwilioCreate.mockResolvedValue({ sid: 'SM_ok' });
+    annualHandoffGuard.mockReturnValue(async () => ({ blocked: false, reason: null, estimateId: null }));
+    disclaimedNumberBlocksSend.mockResolvedValue(false);
+  });
+
+  test('order (Codex #5334 P1): provider predicate -> annual guard -> disclaimed-number hold -> sync window check -> SDK', async () => {
+    const events = [];
+    annualHandoffGuard.mockReturnValueOnce(async () => { events.push('annual'); return { blocked: false, reason: null, estimateId: null }; });
+    disclaimedNumberBlocksSend.mockImplementationOnce(async () => { events.push('disclaimed'); return false; });
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn(() => { events.push('sync'); return true; });
+    const providerPreSendCheck = jest.fn(async () => { events.push('final'); return { ok: true }; });
+    mockTwilioCreate.mockImplementationOnce(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, preSendCheck, providerPreSendCheck });
+    expect(result).toMatchObject({ success: true });
+    expect(events).toEqual(['final', 'annual', 'disclaimed', 'sync', 'sdk']);
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+  });
+
+  test('a hold armed DURING the predicate\'s await is caught: the disclaimed-number gate runs AFTER the predicate (Codex #5334 P1)', async () => {
+    let held = false;
+    const providerPreSendCheck = jest.fn(async () => { held = true; return { ok: true }; });
+    disclaimedNumberBlocksSend.mockImplementationOnce(async () => held);
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, code: 'CALLBACK_NUMBER_HOLD', retryable: true });
+  });
+
+  test('a refused predicate stops first (the hold is never read)', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'stale', retryable: false }));
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
+    expect(disclaimedNumberBlocksSend).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+  });
+
+  test('a disclaimed-number hold refuses (retryable) after a passing predicate', async () => {
+    disclaimedNumberBlocksSend.mockResolvedValueOnce(true);
+    const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, code: 'CALLBACK_NUMBER_HOLD', retryable: true });
+  });
+
+  // Codex #5334 P1: with a durable attempt marker, the gates are re-read AFTER the marker write and the repeatable predicate.
+  describe('post-marker: repeatable predicates first, suppression gates last, nothing async before the SDK', () => {
+    test('order: predicate -> annual -> disclaimed -> sync -> marker -> afterMarker -> annual -> disclaimed -> sync -> SDK', async () => {
+      const events = [];
+      annualHandoffGuard.mockReturnValue(async () => { events.push('annual'); return { blocked: false, reason: null, estimateId: null }; });
+      disclaimedNumberBlocksSend.mockImplementation(async () => { events.push('disclaimed'); return false; });
+      const preSendCheck = jest.fn(async () => ({ ok: true }));
+      preSendCheck.isStillValid = jest.fn(() => { events.push('sync'); return true; });
+      const providerPreSendCheck = jest.fn(async () => { events.push('final'); return { ok: true }; });
+      providerPreSendCheck.afterMarker = jest.fn(async () => { events.push('after-marker'); return { ok: true }; });
+      mockTwilioCreate.mockImplementationOnce(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, preSendCheck, providerPreSendCheck, onDispatchStart: jest.fn(async () => { events.push('marker'); }) });
+      expect(result).toMatchObject({ success: true });
+      expect(events).toEqual(['final', 'annual', 'disclaimed', 'sync', 'marker', 'after-marker', 'annual', 'disclaimed', 'sync', 'sdk']);
+    });
+    test('a hold armed while the repeat ran refuses (retryable), undoes the marker, never reaches the SDK', async () => {
+      let held = false;
+      const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+      providerPreSendCheck.afterMarker = jest.fn(async () => { held = true; return { ok: true }; });
+      disclaimedNumberBlocksSend.mockImplementation(async () => held);
+      const onDispatchAbort = jest.fn(async () => {});
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck, onDispatchStart: jest.fn(async () => {}), onDispatchAbort });
+      expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+      expect(mockTwilioCreate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: false, code: 'CALLBACK_NUMBER_HOLD', retryable: true });
+    });
+    test('a send window that closed while the repeat ran refuses (QUIET_HOURS_HOLD), undoes the marker', async () => {
+      let closed = false;
+      const preSendCheck = jest.fn(async () => ({ ok: true }));
+      preSendCheck.isStillValid = jest.fn(() => !closed);
+      const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+      providerPreSendCheck.afterMarker = jest.fn(async () => { closed = true; return { ok: true }; });
+      const onDispatchAbort = jest.fn(async () => {});
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, preSendCheck, providerPreSendCheck, onDispatchStart: jest.fn(async () => {}), onDispatchAbort });
+      expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+      expect(mockTwilioCreate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: false, code: 'QUIET_HOURS_HOLD', retryable: true });
+    });
+    test('an annual-offer withhold that lands after the marker refuses and undoes the marker', async () => {
+      let withheld = false;
+      annualHandoffGuard.mockReturnValue(async () => (withheld ? { blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' } : { blocked: false, reason: null, estimateId: null }));
+      const onDispatchAbort = jest.fn(async () => {});
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, onDispatchStart: jest.fn(async () => { withheld = true; }), onDispatchAbort });
+      expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+      expect(mockTwilioCreate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: false, code: 'ANNUAL_OFFER_WITHHELD' });
+    });
+  });
+
+  test('a once-only predicate (no afterMarker) is NOT re-run after onDispatchStart', async () => {
+    const events = [];
+    const providerPreSendCheck = jest.fn(async () => { events.push('final'); return { ok: true }; });
+    const onDispatchStart = jest.fn(async () => { events.push('marker'); });
+    mockTwilioCreate.mockImplementationOnce(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+    await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck, onDispatchStart });
+    expect(events).toEqual(['final', 'marker', 'sdk']);
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+  });
+
+  test('a repeatable predicate re-runs AFTER the marker; a refusal there undoes the marker and never reaches the SDK', async () => {
+    const events = [];
+    let staleByMarker = false;
+    const providerPreSendCheck = jest.fn(async () => { events.push('final'); return { ok: true }; });
+    providerPreSendCheck.afterMarker = jest.fn(async () => { events.push('after-marker'); return staleByMarker ? { ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'stale', retryable: false } : { ok: true }; });
+    const onDispatchStart = jest.fn(async () => { events.push('marker'); staleByMarker = true; });
+    const onDispatchAbort = jest.fn(async () => { events.push('abort'); });
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck, onDispatchStart, onDispatchAbort });
+    expect(events).toEqual(['final', 'marker', 'after-marker', 'abort']);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'LIVE_ETA_STALE_AT_BOUNDARY', retryable: false });
+  });
+
+  test('a repeatable predicate that still passes after the marker lets the send through, marker kept', async () => {
+    const events = [];
+    const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+    providerPreSendCheck.afterMarker = jest.fn(async () => { events.push('after-marker'); return { ok: true }; });
+    const onDispatchStart = jest.fn(async () => { events.push('marker'); });
+    const onDispatchAbort = jest.fn(async () => { events.push('abort'); });
+    mockTwilioCreate.mockImplementationOnce(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck, onDispatchStart, onDispatchAbort });
+    expect(result).toMatchObject({ success: true });
+    expect(events).toEqual(['marker', 'after-marker', 'sdk']);
+  });
+
+  test('an unreadable repeat (throws, retryable) also undoes the marker and surfaces retryable', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+    providerPreSendCheck.afterMarker = jest.fn(async () => { throw Object.assign(new Error('db down'), { code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true }); });
+    const onDispatchAbort = jest.fn(async () => {});
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck, onDispatchStart: jest.fn(async () => {}), onDispatchAbort });
+    expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test('without an onDispatchStart marker there is nothing to repeat: the flagged predicate runs once', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+    providerPreSendCheck.afterMarker = jest.fn(async () => ({ ok: true }));
+    await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+    expect(providerPreSendCheck.afterMarker).not.toHaveBeenCalled();
+  });
+  // Round 46: the auto-send executor keys its "release, don't fail" path on this exact result shape, so the
+  // pre-marker refusal and the post-marker (afterMarker) refusal must surface IDENTICALLY.
+  test('a retryable LIVE_ETA_CHECK_FAILED_AT_BOUNDARY refusal surfaces with the same shape from the pre-marker and the post-marker invocation', async () => {
+    const verdict = { ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_recheck_failed)', retryable: true };
+    const pre = jest.fn(async () => verdict);
+    const preResult = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck: pre });
+
+    const ok = jest.fn(async () => ({ ok: true }));
+    ok.afterMarker = jest.fn(async () => verdict);
+    const postResult = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck: ok, onDispatchStart: jest.fn(async () => {}), onDispatchAbort: jest.fn(async () => {}) });
+
+    const pick = ({ success, preSendBlocked, code, error, retryable, deliveryOutcome }) => ({ success, preSendBlocked, code, error, retryable, deliveryOutcome });
+    expect(pick(preResult)).toEqual({ success: false, preSendBlocked: true, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', error: 'live ETA unsendable (eta_claim_recheck_failed)', retryable: true, deliveryOutcome: 'not_sent' });
+    expect(pick(postResult)).toEqual(pick(preResult));
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 });

@@ -15,6 +15,12 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  // codex round 3 on #5154: each Rule's flip now runs inside db.transaction
+  // — trx = fn keeps this file's db(table) call-order queue (below) valid,
+  // since every fixture here returns 0 flipped rows, so the marker-record
+  // branch (only entered when something actually flipped) never fires an
+  // extra db() call.
+  fn.transaction = jest.fn(async (run) => run(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({

@@ -24,6 +24,7 @@
 const db = require('../models/db');
 const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
+const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason, priorHoldReasonOf } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 
@@ -939,11 +940,24 @@ async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loser
 // copy comes across RELEASED so the history (who flagged, when) survives
 // (codex r6: absent this, a shared do_not_text/collection_hold aborted the
 // whole merge).
+//
+// The one flag whose REASON matters is collection_hold: only a DISPUTE-reason
+// hold stops automatic card charges (collections/collection-hold.js). When the
+// winner already carries a fallback (wrong-number / wrong-party) hold and the
+// loser's colliding row is a dispute hold, releasing the loser's copy would
+// silently drop the dispute stop — so the winner's surviving row is promoted
+// to the dispute reason first (its who/when history stays; the prior reason is
+// kept in the trailer). The reverse (winner dispute, loser fallback) carries the
+// loser's fallback into the surviving dispute's trailer the same way: the loser's
+// row is released, so without it releasing that dispute would drop the outreach
+// block the fallback carried. A winner dispute that already has a trailer keeps its own.
 async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id');
+  const rows = await trx(table).where(column, loserId).select('id', 'flag', 'reason', 'released_at');
   let moved = 0;
   let released = 0;
-  for (const { id } of rows) {
+  let promoted = 0;
+  let carried = 0;
+  for (const { id, flag, reason, released_at: releasedAt } of rows) {
     try {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id }).update({ [column]: winnerId });
@@ -951,11 +965,54 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
+      if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null) {
+        // Locked: the flag-only release route does not take the merge's customer
+        // locks, so without FOR UPDATE a release landing after this read would
+        // leave the trailer on a released row and drop both holds.
+        const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').forUpdate().first('id', 'reason');
+        if (!winnerRow) {
+          // The winner's hold was released after the collision: nothing collides
+          // now, so the loser's active hold moves across as-is.
+          try {
+            await trx.transaction(async (sp) => {
+              await sp(table).where({ id }).update({ [column]: winnerId });
+            });
+            moved += 1;
+            continue;
+          } catch (e2) {
+            if (!(e2 && e2.code === '23505')) throw e2;
+          }
+        }
+        if (winnerRow) {
+          // Same trailer placeDisputeHold writes: releasing the dispute restores the
+          // fallback hold (collection-hold-admin) instead of dropping its outreach block.
+          // The loser's row is released below, so whatever fallback it carried must end up
+          // on the surviving row. ONE update site: at most one new reason per collision.
+          const loserIsDispute = isDisputeHoldReason(reason);
+          const winnerIsDispute = isDisputeHoldReason(winnerRow.reason);
+          let mergedReason = null;
+          if (loserIsDispute && !winnerIsDispute) {
+            // Loser dispute over the winner's fallback: the winner's row is promoted to the
+            // dispute (a loser dispute that itself carries a trailer keeps only the winner's).
+            mergedReason = embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason);
+            promoted += 1;
+          } else if (winnerIsDispute && !priorHoldReasonOf(winnerRow.reason)) {
+            // Winner's plain dispute: carry the loser's fallback into its trailer, whether the
+            // loser is itself a fallback hold or a dispute that had a fallback under it.
+            const fallback = loserIsDispute ? priorHoldReasonOf(reason) : { prior: reason };
+            if (fallback) {
+              mergedReason = embedPriorHoldReason(winnerRow.reason, fallback.prior);
+              carried += 1;
+            }
+          }
+          if (mergedReason !== null) await trx(table).where({ id: winnerRow.id }).update({ reason: mergedReason });
+        }
+      }
       await trx(table).where({ id }).update({ [column]: winnerId, released_at: trx.fn.now() });
       released += 1;
     }
   }
-  return `moved ${moved}, released ${released} (winner already carried the active flag)`;
+  return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}${carried ? `, carried ${carried} fallback hold(s) into the surviving dispute` : ''}`;
 }
 
 const UNIQUE_COLLISION_HANDLERS = {
@@ -1061,6 +1118,13 @@ function promoteWinnerAsPrimaryRule(winner, loser) {
     && loser.account_id === winner.account_id
     && !winner.is_primary_profile,
   );
+}
+
+// Epoch ms of a Date or timestamp string, or null when empty / unparseable.
+function timestampMs(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
@@ -1224,6 +1288,22 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     // the r15 fix). The restore pass keeps a literal `false`; only null and
     // undefined priors are skipped.
     winnerPriorValues.termite_stations_rented = false;
+  }
+  // Portal activity stamp (GATE_PORTAL_ACTIVITY): the loser's customer_page_views
+  // rows repoint to the winner, so the winner's customers.last_seen_at must
+  // absorb a newer (or only) loser value — GREATEST(winner, loser). It is not a
+  // BACKFILL_FIELDS candidate: a non-empty older winner value would never be
+  // replaced by the generic fill-if-empty rule. The winner's own prior value is
+  // journaled (when it had one) so the undo restores it; a null prior vacates
+  // to null through the generic clear. Never runs a backwards step: an equal
+  // or older loser value leaves the winner untouched.
+  const loserSeenMs = timestampMs(loser.last_seen_at);
+  if (loserSeenMs !== null) {
+    const winnerSeenMs = timestampMs(winner.last_seen_at);
+    if (winnerSeenMs === null || loserSeenMs > winnerSeenMs) {
+      if (winnerSeenMs !== null) winnerPriorValues.last_seen_at = winner.last_seen_at;
+      backfills.last_seen_at = loser.last_seen_at;
+    }
   }
   return { backfills, winnerPriorValues };
 }
@@ -2327,6 +2407,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         }
       }
     }
+    // Customers cannot turn payment receipts off (owner ruling 2026-09-26).
+    // When the sweep moved a duplicate's prefs row whole (no collision, so
+    // mergeSingletonPrefRow never ran), clear a legacy opt-out it carried.
+    if (typeof repointed['notification_prefs.customer_id'] === 'number') {
+      await trx('notification_prefs').where({ customer_id: winnerId, payment_receipt: false })
+        .update({ payment_receipt: true });
+    }
     // An operator's customer link on a call (call_log.metadata.
     // customer_link_override — admin relink) embeds the customer id in
     // jsonb, so the FK repoint above never sees it; the next processing
@@ -3233,7 +3320,7 @@ const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'cus
 // denormalized copy of the customer email. This table MIRRORS the canonical
 // registry in server/services/customer-email-fanout.js (:108-244 — leads,
 // open estimates incl. 'sending', active automation enrollments, queued
-// template runs, referral promoters, billing prefs, open contracts, pending
+// template runs, pending automation intent markers, referral promoters, billing prefs, open contracts, pending
 // booking follow-ups, newsletter subscribers). That module exports functions
 // and a disclosure string, not a machine-readable surface list, so the
 // mirror is BY HAND: extend BOTH in the same commit (same rule as its own
@@ -3286,6 +3373,27 @@ const EMAIL_BOUND_SURFACES = [
     active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled', 'running']),
     label: 'queued template send(s)',
     carriesName: true,
+  },
+  {
+    // Pending email-template-automation INTENT markers (#5154, codex P1
+    // round 7) — the step BEFORE a queued run: a 'pending' marker replays
+    // through the executor later and delivers to the payload's own
+    // customer_email snapshot (the executor looks a live address up only
+    // when the payload has none). customer-email-fanout.js retargets these
+    // (same commit rule as every other surface here), so an undo clearing
+    // the merged-in email must see them exactly like queued runs. Linkage
+    // and address live in the jsonb payload (payload.customer_id /
+    // payload.customer_email, the fan-out's own predicates); the payload
+    // carries no name. Only 'pending' delivers again — processed and
+    // unrecoverable markers are history.
+    table: 'email_template_automation_intents',
+    emailColumn: "payload->>'customer_email'",
+    linkWhere: (q, winnerId) => {
+      q.whereRaw("payload->>'customer_id' = ?", [String(winnerId)]);
+    },
+    active: (q) => q.where('status', 'pending'),
+    label: 'pending automation intent(s)',
+    carriesName: false,
   },
   {
     // first_touch_holds.held_email is a LIVE delivery target (r23 — the
@@ -3423,6 +3531,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   estimates: ['created_at', 'updated_at'],
   automation_enrollments: ['created_at', 'updated_at'],
   email_template_automation_runs: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260928220000.
+  email_template_automation_intents: ['created_at', 'updated_at'],
   notification_prefs: ['created_at', 'updated_at'],
   customer_contracts: ['created_at', 'updated_at'],
   booking_intents: ['created_at', 'updated_at'],
@@ -4891,7 +5001,9 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
         continue;
       }
-      if (backfillValueUnchanged(winner[field], value)) {
+      // mergeWrittenValueUnchanged also matches a timestamp column read back as a
+      // Date against the journal's ISO string (last_seen_at).
+      if (mergeWrittenValueUnchanged(winner[field], value)) {
         winnerPatch[field] = null;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });

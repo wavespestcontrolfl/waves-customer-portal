@@ -15,7 +15,7 @@
  */
 
 const Joi = require('joi');
-const { hasLawnServiceEvidence } = require('./irrigation-weekly-email');
+const { hasLawnServiceEvidence, hasIrrigationEmailOptIn } = require('./irrigation-weekly-email');
 
 // Default free-text cap for fields with no real column-width constraint
 // (the DB-enforced enum columns — preferredDay/preferredTime/
@@ -230,7 +230,10 @@ function customerHasLawnCare(customer = {}) {
 // customer's inches with a 200 — GH codex P2 on #3557).
 async function customerQualifiesForLawnInches(customer = {}) {
   if (customerHasLawnCare(customer)) return true;
-  return hasLawnServiceEvidence(customer.id);
+  if (await hasLawnServiceEvidence(customer.id)) return true;
+  // Opted into the Monday irrigation email without lawn service (owner
+  // 2026-09-28): that email asks for their schedule and links the plan here.
+  return hasIrrigationEmailOptIn(customer.id);
 }
 
 // Normalizes a snake_case `updates` object (already filtered to an allowed-

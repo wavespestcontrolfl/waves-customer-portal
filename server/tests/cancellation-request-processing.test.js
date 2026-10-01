@@ -62,11 +62,23 @@ jest.mock('../services/churn-classifier', () => ({
   classifyChurnReason: jest.fn().mockResolvedValue({ code: 'unclassified', source: 'none' }),
 }));
 
-jest.mock('../services/invoice', () => ({
-  voidOpenInvoicesForCancelledService: jest.fn().mockResolvedValue([]),
+jest.mock('../services/invoice', () => {
   // Mirrors the real exported list — the processor post-checks with it.
-  CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
-}));
+  const RESOLVED = ['void', 'refunded', 'canceled', 'cancelled'];
+  return {
+    voidOpenInvoicesForCancelledService: jest.fn().mockResolvedValue([]),
+    CANCELLED_SERVICE_RESOLVED_STATUSES: RESOLVED,
+    // The shared post-void scope over this suite's in-memory tables: direct
+    // link OR a service-record link (the SQL itself is tested in
+    // invoice-cancel-void-amounts.test.js).
+    unresolvedInvoicesForCancelledService: jest.fn((conn, id) => ({
+      select: async () => (conn.__tables.invoices || [])
+        .filter((r) => (r.scheduled_service_id === id || r.service_record_scheduled_service_id === id)
+          && !RESOLVED.includes(r.status))
+        .map((r) => ({ id: r.id })),
+    })),
+  };
+});
 
 jest.mock('../services/estimate-card-holds', () => ({
   handleCardHoldCancellation: jest.fn().mockResolvedValue({ handled: false, reason: 'no_hold' }),
@@ -410,7 +422,11 @@ describe('processCancellationRequest', () => {
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(AppointmentReminders.handleCancellation).toHaveBeenCalledWith('s1', { sendNotification: false });
     expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('s1');
-    expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1' });
+    // inv1 still holds money after the void, so the late-cancel fee goes to
+    // office review: no card rail runs beside it (same rule as the
+    // follow-through), and the skip is reported.
+    expect(CardHolds.handleCardHoldCancellation).not.toHaveBeenCalled();
+    expect(result.errors).toContain('card_fee_held:s1');
     // Track layer repaired this time.
     const s1 = db.__tables.scheduled_services.find((r) => r.id === 's1');
     expect(s1.track_state).toBe('cancelled');
@@ -493,6 +509,8 @@ describe('processCancellationRequest', () => {
       { id: 'inv3', scheduled_service_id: 'other', status: 'sent' },   // other visit — untouched
       { id: 'inv4', scheduled_service_id: 's1', status: 'paid' },      // captured money — review
       { id: 'inv5', scheduled_service_id: 's1', status: 'refunded' },  // already resolved — fine
+      // linked only through the visit's service record, money captured — review
+      { id: 'inv6', scheduled_service_id: null, service_record_scheduled_service_id: 's1', status: 'paid' },
     ];
     db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
     db.__tables.payments = [];
@@ -501,8 +519,10 @@ describe('processCancellationRequest', () => {
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req6' });
 
     expect(result.cancelledCount).toBe(1);
-    expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4']);
+    expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4', 'invoice_review:inv6', 'card_fee_held:s1']);
+    expect(require('../services/estimate-card-holds').handleCardHoldCancellation).not.toHaveBeenCalled();
     expect(result.ok).toBe(false);
+    expect(require('../services/invoice').unresolvedInvoicesForCancelledService).toHaveBeenCalledWith(db, 's1');
   });
 
   test('a reminder row left uncancelled after the helper runs is surfaced for manual review', async () => {

@@ -251,7 +251,7 @@ const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 // that consolidation necessary; this local pass stays as a backstop for any
 // path that reaches the document without going through that boundary, and
 // must never become the primary enforcement point again.
-function sanitizeReentryCopy(value) {
+export function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -774,18 +774,35 @@ export default function ServiceReportDocument({ data, token }) {
   // inspection-only lawn visit claims a treatment that didn't happen (5th
   // variant of this class: defaults read as evidence).
   if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
+  // A visit with a server watering instruction (banner: hold / water-in) prints
+  // it ONCE, through aftercare.watering above. The hero task, follow-up and
+  // insight actions restate banner lines verbatim (a hold-then-water-in hero
+  // carries both steps, and the water-in step alone once the hold ends), so
+  // every banner line is stripped from them (any other advice stays).
+  // Stripped sentence by sentence: the banner composes a plan sentence onto a
+  // frozen line (partial credit), so the frozen sentence alone must go too.
+  const bannerSentences = hasActualTreatment
+    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    ? (data.reportV2.banner.lines || [])
+      .filter((line) => typeof line === 'string' && line)
+      .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
+      .sort((a, b) => b.length - a.length) : [];
+  const pushAction = (text) => {
+    if (!bannerSentences.length) { pushRec(text); return; }
+    pushRec(bannerSentences.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' '));
+  };
   pushRec(v2NextMove);
   pushRec(termiteNextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
-  pushRec(v2?.snapshot?.customerAction);
-  pushRec(v2?.followUp?.customerAction);
+  pushAction(v2?.snapshot?.customerAction);
+  pushAction(v2?.followUp?.customerAction);
   // wavesNext is what WAVES will do next (future tense, never the past-tense
   // wavesAction) — a commitment, so it belongs in the permanent record.
   pushRec(v2?.snapshot?.wavesNext
     || (Array.isArray(v2?.insights) ? v2.insights : []).map((i) => i?.nextVisitPlan).find(Boolean));
-  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushRec(insight?.customerAction));
+  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushAction(insight?.customerAction));
   pushRec(v2?.mowing?.recommendation);
 
   // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline
@@ -1294,6 +1311,17 @@ export default function ServiceReportDocument({ data, token }) {
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}
+                            {/* Owner-approved product wording
+                                (GATE_REPORT_PRODUCT_COPY, 2026-09-28) is
+                                LIVE-VIEW ONLY (codex P1 2026-09-28): the
+                                server strips `report_copy` from every
+                                pdf/static/sms_preview payload before it
+                                reaches this document (the PDF cache key
+                                doesn't vary on the gate), so there is
+                                nothing to render here — see
+                                stripLiveOnlyReportProductCopy in
+                                report-data.js and ReportViewPage.jsx for the
+                                live-view rendering of this field. */}
                             {/* Legacy lawn reports (no reportV2) carry approved
                                 watering-in guidance ONLY here — dropping it
                                 loses a required instruction. */}

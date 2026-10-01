@@ -30,6 +30,16 @@ function retry(message = 'Appointments changed while saving. Reload and review t
   });
 }
 
+// 55P03 lock_not_available: a NOWAIT row lock found the row already held.
+async function withoutWaiting(read) {
+  try {
+    return await read();
+  } catch (error) {
+    if (error?.code === '55P03') throw retry('Appointments are being updated right now. Try again in a moment.');
+    throw error;
+  }
+}
+
 function visitStamp(row) {
   return {
     service_address_line1: row.service_address_line1,
@@ -83,7 +93,7 @@ function candidateVisits(conn, customerId, { lock = false } = {}) {
     .where('scheduled_date', '>=', etDateString())
     .orderBy('id')
     .select(VISIT_FIELDS);
-  if (lock) query = query.forUpdate();
+  if (lock) query = query.forUpdate().noWait();
   return query;
 }
 
@@ -93,7 +103,7 @@ function recurringRoots(conn, customerId, { lock = false } = {}) {
     .whereNull('recurring_parent_id')
     .orderBy('id')
     .select('*');
-  if (lock) query = query.forUpdate();
+  if (lock) query = query.forUpdate().noWait();
   return query;
 }
 
@@ -104,10 +114,11 @@ function seriesParentId(row) {
 async function prelockVisitContext(trx, customerId) {
   const visits = await candidateVisits(trx, customerId);
   const roots = await recurringRoots(trx, customerId);
-  await lockTechDays(trx, visits.map(row => ({
+  const techDaysLocked = await lockTechDays(trx, visits.map(row => ({
     techId: row.technician_id,
     date: toDateStr(row.scheduled_date),
-  })));
+  })), { wait: false });
+  if (techDaysLocked === false) throw retry();
   const seriesIds = [...new Set([
     ...visits.map(seriesParentId), ...roots.map(row => row.id),
   ].filter(Boolean))].map(String).sort();
@@ -168,8 +179,14 @@ async function lockVisitContext(trx, customerId, prelocked, {
     }
   }
 
-  const visits = await candidateVisits(trx, customerId, { lock: true });
-  const roots = await recurringRoots(trx, customerId, { lock: true });
+  // Never wait on a visit row: this runs under the customer row lock, and a
+  // writer that holds a visit and then wants the customer (the annual-prepay
+  // switch) would deadlock with a waiting staff decision. A busy row is the
+  // same outcome as a changed one: reload and try again, draft kept.
+  const [visits, roots] = await withoutWaiting(async () => [
+    await candidateVisits(trx, customerId, { lock: true }),
+    await recurringRoots(trx, customerId, { lock: true }),
+  ]);
   const changed = visits.length !== prelocked.visits.length
     || visits.some((row, index) => !sameVisitFence(prelocked.visits[index], row))
     || roots.length !== prelocked.rootIds.length
@@ -191,12 +208,13 @@ async function lockVisitContext(trx, customerId, prelocked, {
   const rootsById = new Map(roots.map(row => [String(row.id), row]));
   const missingIds = prelocked.seriesIds.filter(id => !rootsById.has(id));
   if (missingIds.length) {
-    const parents = await trx('scheduled_services')
+    const parents = await withoutWaiting(() => trx('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('id', missingIds)
       .orderBy('id')
       .forUpdate()
-      .select('*');
+      .noWait()
+      .select('*'));
     if (parents.length !== missingIds.length
       || parents.some((row, index) => String(row.id) !== missingIds[index])) {
       throw retry('Recurring plans changed while saving. Reload and review them.');

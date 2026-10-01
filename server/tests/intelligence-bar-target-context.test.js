@@ -842,6 +842,27 @@ test('write scope classes are enforced for resolved and unresolved customers and
   }
 });
 
+// Codex r3 P1 on #5275: the outside-write tools (Sentry/Cloudflare/Railway/
+// GitHub/GSC) are scope 'none' (they touch no customer record), so without an
+// explicit check they would be admitted inside a customer-scoped task even
+// though their preview pulls in unrelated provider free text — the same leak
+// their 'broad' read equivalents are already refused for.
+test('outside-write tools are refused inside a customer-scoped task, admitted outside one', async () => {
+  const { scopeOf } = require('../services/intelligence-bar/scope-policy');
+  const { OUTSIDE_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+  const unresolved = { targets: [], namesRequested: true };
+  for (const toolName of OUTSIDE_WRITE_TOOL_NAMES) {
+    expect(scopeOf(toolName)).toBe('none');
+    expect((await Context.validateRecordTarget({}, context(), { toolName })).code).toBe('customer_scope_required');
+    expect((await Context.validateRecordTarget({}, unresolved, { toolName })).code).toBe('customer_scope_required');
+    // A phone/email literal that resolved nobody keeps the task customer-specific too.
+    expect((await Context.validateRecordTarget({}, { targets: [], contactRequested: true }, { toolName })).code).toBe('customer_scope_required');
+    // No task at all (nothing customer-specific): admitted, like every other scope:'none' writer.
+    expect(await Context.validateRecordTarget({}, { targets: [] }, { toolName })).toBeNull();
+  }
+  expect(OUTSIDE_WRITE_TOOL_NAMES.size).toBe(11);
+});
+
 test('a phone or email literal that resolved nobody fails scoped and selector-free record readers closed', async () => {
   const schema = { properties: { customer_id: { type: 'string' }, days_back: { type: 'number' } } };
   for (const prompt of ['Show the outstanding balance for 941-555-0123', 'What does synthetic.person@example.invalid owe']) {

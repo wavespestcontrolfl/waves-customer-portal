@@ -73,6 +73,51 @@ describe('appointment page state', () => {
     }, NOW).state).toBe('upcoming');
   });
 
+  // codex + independent-reviewer finding on PR #5308: a LONG job's
+  // window_start+2h can pass while its own window_end has not — this page
+  // must agree with reschedule-eligibility.js's max(window_end, start+2h)
+  // rule (visitTimeElapsed), or it offers a "Pick a new time" link the
+  // move-notice window then refuses (a dead end).
+  test('a long job stays upcoming past window_start+2h while its own window_end has not elapsed (agrees with reschedule-eligibility.js)', () => {
+    // 06:00-10:00 viewed at 09:00 ET: window_start+2h (08:00) has passed,
+    // but window_end (10:00) has not.
+    expect(pageState({
+      status: 'confirmed', scheduled_date: '2026-08-01', window_start: '06:00:00', window_end: '10:00:00',
+    }, new Date('2026-08-01T13:00:00.000Z')).state).toBe('upcoming');
+    // 09:00-12:00 viewed at 11:30 ET: window_start+2h (11:00) has passed,
+    // but window_end (12:00) has not.
+    expect(pageState({
+      status: 'confirmed', scheduled_date: '2026-08-01', window_start: '09:00:00', window_end: '12:00:00',
+    }, new Date('2026-08-01T15:30:00.000Z')).state).toBe('upcoming');
+    // The same visit IS past once BOTH window_end and the arrival promise
+    // have elapsed (12:30 ET > window_end 12:00 AND > start+2h 11:00) —
+    // this is a real cutoff, not "window_end present ⇒ always upcoming".
+    expect(pageState({
+      status: 'confirmed', scheduled_date: '2026-08-01', window_start: '09:00:00', window_end: '12:00:00',
+    }, new Date('2026-08-01T16:30:00.000Z')).state).toBe('past');
+  });
+
+  // codex round-5 P2: an overnight window (window_end's clock time before
+  // window_start's, e.g. 23:00-00:30) must be judged on real INSTANTS, not
+  // "is the calendar date before today" — that shortcut called the visit
+  // past the instant the clock crossed midnight, well before either the
+  // job block (00:30 the next day) or the quoted arrival promise (01:00
+  // the next day) had actually elapsed.
+  test('an overnight window crossing midnight stays upcoming until its real end instant, not merely "yesterday"', () => {
+    // 23:00 start, 00:30 end (next calendar day) — viewed at 00:10 the next
+    // day: only 70 minutes past start, well inside both the job block and
+    // the 2-hour arrival promise (01:00). The old date-only rule would call
+    // this "past" the instant the calendar flipped, at 00:00:01.
+    expect(pageState({
+      status: 'confirmed', scheduled_date: '2026-08-01', window_start: '23:00:00', window_end: '00:30:00',
+    }, new Date('2026-08-02T04:10:00.000Z')).state).toBe('upcoming');
+    // Same visit viewed at 01:05 the next day: past both window_end (00:30)
+    // and the arrival promise (01:00) — genuinely elapsed.
+    expect(pageState({
+      status: 'confirmed', scheduled_date: '2026-08-01', window_start: '23:00:00', window_end: '00:30:00',
+    }, new Date('2026-08-02T05:05:00.000Z')).state).toBe('past');
+  });
+
   test('the arrival range is the canonical helper, not a second implementation', () => {
     // AGENTS.md pins customer-facing arrival copy to arrivalWindowRange();
     // the page previously recomputed start+120 in the client, where the

@@ -53,6 +53,12 @@ const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
   'invoice.followup_60_day',
   'invoice.followup_7_day',
   'invoice.followup_90_day',
+  'invoice.followup_combined_3_day',
+  'invoice.followup_combined_10_day',
+  'invoice.followup_combined_17_day',
+  'invoice.followup_combined_30_day',
+  'invoice.followup_combined_60_day',
+  'invoice.followup_combined_90_day',
   'invoice.sent',
   'marketing.newsletter_issue',
   'membership.canceled',
@@ -828,6 +834,41 @@ router.get('/automations', async (req, res, next) => {
       .count('* as count')
       .groupBy('template_key');
     const sendMap = Object.fromEntries(sendRows.map((r) => [r.template_key, Number(r.count || 0)]));
+    // Shadow rollout volume (pre-live fix): shadow mode creates NO
+    // email_messages row, so send_count_30d stays 0 for the whole shadow
+    // period. would_send / would_block come from the automation run ledger
+    // instead — one count per run whose preflight logged that outcome — so
+    // readiness is measurable at any volume (the run-history endpoint is
+    // capped at 100 rows). Grouped by automation_key (a template can be
+    // shared by several automations).
+    const shadowRows = await db('email_template_automation_run_events as e')
+      .join('email_template_automation_runs as r', 'r.id', 'e.run_id')
+      .select('r.automation_key', 'e.event_type')
+      .countDistinct('e.run_id as count')
+      .whereIn('e.event_type', ['would_send', 'would_block'])
+      .where('e.created_at', '>=', since)
+      // Shadow-ORIGIN runs only: a live-origin run that comes due after a
+      // rollback to shadow logs would_send/would_block too, but it is a
+      // dropped live send, not rollout evidence (codex #5418 r2). A promotion
+      // advances origin_mode to 'live', so this also drops promoted runs.
+      .whereRaw("r.context->>'origin_mode' = 'shadow'")
+      // Shadow-period evidence only: once a live attempt promotes the run
+      // (a LATER promoted_from_shadow event) it is a live run, so it stops
+      // counting here and the three badges (would_send / would_block /
+      // send_count) never double-count one run.
+      .whereNotExists(function notPromotedSince() {
+        this.select(db.raw('1'))
+          .from('email_template_automation_run_events as p')
+          .whereRaw('p.run_id = e.run_id')
+          .where('p.event_type', 'promoted_from_shadow')
+          .whereRaw('p.created_at > e.created_at');
+      })
+      .groupBy('r.automation_key', 'e.event_type');
+    const shadowMap = {};
+    for (const r of shadowRows) {
+      shadowMap[r.automation_key] = shadowMap[r.automation_key] || { would_send: 0, would_block: 0 };
+      shadowMap[r.automation_key][r.event_type] = Number(r.count || 0);
+    }
     res.json({
       automations: rows.map((row) => ({
         ...row,
@@ -836,6 +877,8 @@ router.get('/automations', async (req, res, next) => {
         retry_policy: asJson(row.retry_policy),
         quiet_hours: asJson(row.quiet_hours),
         send_count_30d: sendMap[row.template_key] || 0,
+        would_send_30d: shadowMap[row.automation_key]?.would_send || 0,
+        would_block_30d: shadowMap[row.automation_key]?.would_block || 0,
         can_delete: canHardDeleteAutomation(row),
       })),
     });

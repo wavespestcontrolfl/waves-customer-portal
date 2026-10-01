@@ -139,7 +139,8 @@ describe('offer target matrix (owner ruling 2026-08-13, one test per approved ce
   const { pickOfferTarget, startFamilyForIdentity, OFFER_LADDER } = _private;
 
   test('offer vocabulary is unchanged', () => {
-    expect(OFFER_LADDER).toEqual(['pest_control', 'lawn_care', 'tree_shrub', 'termite']);
+    // owner 2026-09-28: the three pillars only — termite left the ladder
+    expect(OFFER_LADDER).toEqual(['pest_control', 'lawn_care', 'tree_shrub']);
   });
 
   // Every ownership combination of {pest, lawn, T&S, termite}, exactly as
@@ -157,7 +158,7 @@ describe('offer target matrix (owner ruling 2026-08-13, one test per approved ce
     [[L, T], P, 'lawn+T&S → pest (lawn owned, so the T&S rule is inert)'],
     [[L, X], P, 'lawn+termite → pest'],
     [[T, X], L, 'T&S+termite → lawn (approved: the T&S rule beats termite→pest)'],
-    [[P, L, T], X, 'pest+lawn+T&S → termite (08-11 ruling, kept)'],
+    [[P, L, T], null, 'pest+lawn+T&S → NO card (owner 2026-09-28: termite is no longer a rung)'],
     [[P, L, X], T, 'pest+lawn+termite → T&S'],
     [[P, T, X], L, 'pest+T&S+termite → lawn'],
     [[L, T, X], P, 'lawn+T&S+termite → pest'],
@@ -545,21 +546,6 @@ describe('buildReportCrossSell', () => {
     expect(offerFingerprint({ ...base, option: { ...base.option, perVisit: 74.51 } })).not.toBe(offerFingerprint(base));
   });
 
-  test('an offer without a reason keeps its pre-V2 fingerprint byte-for-byte (gate-off compatibility)', () => {
-    const { offerFingerprint } = _private;
-    const base = {
-      serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
-      option: { id: 'lawn-basic', label: 'Lawn Care', cadence: '9 applications', perVisit: 74.5, waveguardTier: 'silver', confidence: 'high' },
-    };
-    // The canonical string exactly as main built it before the V2 reason field.
-    const preV2 = ['lawn_care', 'Lawn Care', 'priced', 'add', 'lawn-basic', 'Lawn Care', '9 applications', '74.50', 'silver', 'high'].join('|');
-    const expected = require('crypto').createHash('sha256').update(preV2).digest('hex').slice(0, 32);
-    expect(offerFingerprint(base)).toBe(expected);
-    expect(offerFingerprint({ ...base, reason: null })).toBe(expected);
-    // A reason, when present, still moves the digest.
-    expect(offerFingerprint({ ...base, reason: 'We noted roach activity during this visit.' })).not.toBe(expected);
-  });
-
   test('customer with no recurring ownership at all gets the start-relationship copy stance', async () => {
     // One-time-treatment customer: no upcoming recurring rows, a report
     // identity that resolves no ownership family, no plan-rate rows. There
@@ -617,11 +603,10 @@ describe('buildReportCrossSell', () => {
     expect(result.serviceKey).toBe('tree_shrub');
   });
 
-  test('pest + lawn + tree & shrub customer is offered termite (owner ruling: not mosquito)', async () => {
+  test('pest + lawn + tree & shrub customer gets no card (owner 2026-09-28: termite is not pitched from a report)', async () => {
     const db = dbFor({ serviceTypes: ['Pest Control', 'Lawn Care', 'Tree & Shrub Care'] });
     const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
-    expect(result).not.toBeNull();
-    expect(result.serviceKey).toBe('termite');
+    expect(result).toBeNull();
   });
 
   test('customer owning the whole ladder gets no card (referral only)', async () => {
@@ -1256,6 +1241,24 @@ describe('buildReportCrossSell', () => {
       turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
     });
     const service = SERVICE({ service_type: 'Quarterly Pest Control Service' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
+  });
+
+  test('report-family guard: a RECENT uncorroborated TERMITE report identity still suppresses the card (P0, pre-push finding on the three-pillars change)', async () => {
+    // Termite left the offer ladder (owner 2026-09-28), but a recent,
+    // uncorroborated termite report identity carries the exact same
+    // both-answers-wrong ambiguity as a recent pest/lawn/tree one: the
+    // unseeded-next-visit gap and a just-cancelled termite plan are
+    // indistinguishable. Without the guard this fell through to
+    // startFamilyForIdentity and pitched a "start pest" card to a customer
+    // who may still own a termite plan — exactly the regression this test
+    // pins closed.
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const service = SERVICE({ service_type: 'Termite Bait Station Service' });
     const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
     expect(result).toBeNull();
   });

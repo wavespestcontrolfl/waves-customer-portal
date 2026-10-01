@@ -798,6 +798,10 @@ function candidatesBlockFor(candidates, currentMonth) {
       // through an approved candidate's `difference_from_top` either).
       difference_from_top: approved && top?.entry && isApproved(top.entry) ? differenceFromTop(c, top) : null,
       local: localLabel(c.entry, currentMonth),
+      // A named alternative carries its own catalog warning — "Other
+      // possibilities" must not name brown recluse without its bite line
+      // (the plant engine's #5250 r6 rule). A masked row names nothing.
+      safety_line: approved ? (c.entry.safety_line || null) : null,
     };
   });
   const visible = new Map();
@@ -917,6 +921,17 @@ function firstApprovedLookAlike(entry, shownKind = null) {
   return edges.find((e) => e.photo_can_confirm === false) || edges[0] || null;
 }
 
+/** A curated comparison's photo prompt. The pair names its look-alike, which
+ * need not be among the shown candidates, so that entry's own warning rides
+ * along (the plant engine's #5250 r7 rule). Callers pass only pairs whose
+ * target is approved. */
+function pairPrompt(pair, photoCanConfirm) {
+  const safetyLine = catalog.getEntry(pair.slug)?.safety_line || null;
+  return {
+    ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: photoCanConfirm, ...(safetyLine ? { safety_line: safetyLine } : {}),
+  };
+}
+
 function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
   if (wording === 'pretty_sure') return null;
   const top = candidates[0] || null;
@@ -936,11 +951,11 @@ function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
   const governing = top?.entry ? governingPair(top, second, shownKind) : null;
   if (governing?.photo_can_confirm === false) {
     if (level !== 'entry' || !isApproved(catalog.getEntry(governing.slug))) return { ...NO_PHOTO_CONFIRMS };
-    return { ask: governing.next_photo || null, why: governing.difference || null, photo_can_confirm: false };
+    return pairPrompt(governing, false);
   }
   if (top?.entry && second?.entry && isApproved(top.entry) && isApproved(second.entry)) {
     const pair = pairIfBothApproved(top.entry, second.entry, shownKind);
-    if (pair) return { ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
+    if (pair) return pairPrompt(pair, pair.photo_can_confirm !== false);
   }
   // Entry level with no usable second-candidate pair: the entry's own first
   // look-alike WHOSE OWN TARGET IS APPROVED, read directly so
@@ -955,7 +970,7 @@ function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
     }
     const fallbackPair = firstApprovedLookAlike(top.entry, shownKind);
     if (fallbackPair) {
-      return { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false };
+      return pairPrompt(fallbackPair, fallbackPair.photo_can_confirm !== false);
     }
     // No usable approved pair: the fixed safe retake prompt, so an
     // uncertain entry answer always carries guidance (pre-push audit on

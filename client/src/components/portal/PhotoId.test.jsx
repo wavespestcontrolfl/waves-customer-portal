@@ -716,7 +716,9 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
         ...v2Entry,
         candidates: [
           { slug: 'tropical-fire-ant', common_name: 'Top Species', strength: 'strong', difference_from_top: null, local: 'common_here_now' },
-          { slug: 'alt-1', common_name: 'Alt One', strength: 'possible', difference_from_top: 'Bigger, squarish head.', local: 'common_here_now' },
+          {
+            slug: 'alt-1', common_name: 'Alt One', strength: 'possible', difference_from_top: 'Bigger, squarish head.', local: 'common_here_now', safety_line: 'Toxic to pets if chewed.',
+          },
           { slug: 'alt-2', common_name: 'Alt Two', strength: 'possible', difference_from_top: 'Solid black body.', local: 'uncommon_here' },
         ],
       },
@@ -731,6 +733,8 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
 
     expect(screen.getByText('Alt One')).toBeInTheDocument();
     expect(screen.getByText('Bigger, squarish head.')).toBeInTheDocument();
+    // A named alternative keeps its catalog warning (Codex #5250 r6).
+    expect(screen.getByText('Toxic to pets if chewed.')).toBeInTheDocument();
     expect(screen.getByText('Alt Two')).toBeInTheDocument();
     expect(screen.getByText('Solid black body.')).toBeInTheDocument();
     const strengthChips = screen.getAllByText('Possible match');
@@ -817,7 +821,9 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
       entry: null,
       evidence: {},
       candidates: [],
-      next_photo: { ask: 'A close-up showing the waist from the side would settle it.', why: 'That view separates the two most likely ants.' },
+      next_photo: {
+        ask: 'A close-up showing the waist from the side would settle it.', why: 'That view separates the two most likely ants.', safety_line: 'The compared look-alike can sting.',
+      },
       referral: null,
     };
     api.createPhotoId.mockResolvedValueOnce({
@@ -834,6 +840,8 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('A photo that would help confirm it')).toBeInTheDocument();
     expect(screen.getByText('A close-up showing the waist from the side would settle it.')).toBeInTheDocument();
     expect(screen.getByText('That view separates the two most likely ants.')).toBeInTheDocument();
+    // The compared look-alike's own warning shows with the comparison (Codex #5250 r7).
+    expect(screen.getByText('The compared look-alike can sting.')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Take this photo' }));
     // Back on the photos step, with the retake ask shown as a banner...
@@ -1429,6 +1437,44 @@ describe('lawn/tree_shrub/palm workup card (renders only when data.v2.kind === "
     expect(dialog.textContent).toContain('This needs a licensed arborist or palm specialist');
     expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request service' })).not.toBeInTheDocument();
+  });
+
+  it('a possibility or weed carrying a catalog safety line shows it in the row, the sheet and under the weed chips (Codex #5250 r3)', async () => {
+    const poison = 'Some fairy-ring mushrooms are poisonous; keep children and pets away from them.';
+    const sap = 'The milky sap can irritate skin and eyes.';
+    const withWarnings = {
+      ...workupNamed,
+      subject: { ...workupNamed.subject, weeds: [{ slug: 'spotted-spurge', common_name: 'Spotted Spurge', wording: 'likely', safety_line: sap }] },
+      possibilities: [{ ...workupNamed.possibilities[1], slug: 'fairy-ring', common_name: 'Fairy Ring', safety_line: poison }],
+    };
+    await openLawnResultWith(withWarnings);
+    expect(screen.getByText(sap)).toBeInTheDocument();
+    expect(screen.getByText(poison)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Fairy Ring'));
+    const sheet = await screen.findByRole('dialog', { name: 'Fairy Ring' });
+    expect(within(sheet).getByText(poison)).toBeInTheDocument();
+  });
+
+  it('a referral renders its text once instead of crashing the card, and the named plant shows with its warning (Codex #5250 r4)', async () => {
+    const referralText = 'This needs a licensed arborist or palm specialist; a technician can point you to one.';
+    const petWarning = 'All parts of sago palm are toxic to dogs, cats and horses; call your vet right away if a pet chews any part.';
+    const referred = {
+      ...workupNamed,
+      subject_type: 'tree_shrub',
+      subject: { plant: { slug: 'sago-palm', common_name: 'Sago Palm', source: 'photo', wording: 'pretty_sure', safety_line: petWarning }, weeds: [] },
+      next_step_hint: { kind: 'specialist', text: referralText },
+      referral: { kind: 'arborist', text: referralText },
+    };
+    const dialog = await openLawnResultWith(referred);
+    expect(screen.getAllByText(referralText)).toHaveLength(1);
+    expect(screen.getByText("Plant: Sago Palm — we're pretty sure")).toBeInTheDocument();
+    expect(screen.getByText(petWarning)).toBeInTheDocument();
+    expect(dialog.textContent).toContain('Potassium Deficiency');
+  });
+
+  it('an account grass on file shows as the grass on file', async () => {
+    await openLawnResultWith(workupSymptom);
+    expect(screen.getByText('Grass on file: St. Augustinegrass')).toBeInTheDocument();
   });
 
   it('tapping a possibility opens a sheet with its what_it_means', async () => {

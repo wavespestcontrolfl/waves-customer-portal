@@ -22,6 +22,7 @@ const { buildSeoRequirements } = require('./blog-seo-contract');
 const {
   isFaqBlockedService, PAGE_CITY_SLUGS, ALLOWED_INTERNAL_LINKS, isKnownGoodInternalRoute,
 } = require('./content-guardrails');
+const { buildPhotoSlots } = require('./licensed-photo-library');
 // "List-shaped" detection is shared with the miner's listicle_family bucket
 // (single grammar — a mined listicle opportunity must actually receive the
 // overlay). Never fork a private copy of the regexes here.
@@ -34,6 +35,8 @@ const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
 const spokeSeeder = require('./spoke-seed-seeder');
+// Lazy: the seeder pulls in the quality gate; only backfill rows need it.
+const CITABILITY_BACKFILL_BUCKET = 'citability_backfill';
 const categorySeeder = require('./category-seed-seeder');
 const relatedPostsSelector = require('./related-posts');
 const { resolveSpokeTarget } = require('../content-astro/spoke-routing');
@@ -95,6 +98,23 @@ function resolvedPublishTargetSites(opportunity) {
 }
 
 // ── required-sections matrix (per page-type, per v3.1 brief schema) ─
+
+// citability_backfill gap id (citability-backfill-seeder GAP_CHECKS) → the
+// BINDING required_sections line the refresh agent must satisfy. Each line
+// names the shared guidance code (citability-agent-guidance.js) whose rule
+// it binds; the quality gate's citability_backfill_gaps_cleared check is
+// what verifies it.
+const CITABILITY_GAP_SECTIONS = Object.freeze({
+  named_sources: '[CITABILITY_NAMED_SOURCES] attribute the page\'s technical claims in prose to the specific named authority the evidence comes from (UF/IFAS, FDACS, the EPA product label, the county mosquito program, the CDC) — never "experts say"; never invent an agency, publication, program, or business; a claim with no locatable source is softened or removed',
+  concrete_specifics: '[CITABILITY_CONCRETE_SPECIFICS] where the facts_pack, knowledge base, or an allowed source supplies a measurement, state it as the number with its unit (inches, days, a date window, a percentage) instead of an adjective — not a quota, never a dollar amount, never an invented figure; keep every measurement the page already states',
+  comparison: '[CITABILITY_COMPARISON] the page frames a two-path choice in its title or a heading — render ONE <ComparisonTable> in CATEGORY mode with the decision criteria as rows (no winner, no ranking, cost qualitative, never a named business)',
+  how_to_choose: '[CITABILITY_HOW_TO_CHOOSE] add an H2 "How to choose …" (or "Which option fits your situation") with 3–5 top-level bulleted criteria, each an observable check followed by the option it points to',
+});
+
+// A citability backfill is a targeted edit: the generic refresh asks (a new
+// current-data section, refreshed promo CTAs) would force padding onto it.
+// Slug + dateModified stay; the gap lines are the binding work.
+const CITABILITY_BACKFILL_REFRESH_SECTIONS = Object.freeze(['preserve existing slug', 'update dateModified']);
 
 const REQUIRED_SECTIONS = {
   'city-service': [
@@ -445,8 +465,37 @@ class ContentBriefBuilder {
    * persist=true writes to content_briefs as a new version.
    */
   async compose(opportunityId, { persist = true, skipSerp = false } = {}) {
-    const opp = await queue.getById(opportunityId);
+    let opp = await queue.getById(opportunityId);
     if (!opp) throw new Error(`opportunity ${opportunityId} not found`);
+
+    // Citability backfill: rows wait days under the seeder's pacing, so the
+    // live page is re-scanned first. Live gaps replace the seeded ones and
+    // the topic is re-derived from the page as it reads now; no gap left, or
+    // a target that turned non-indexable, resolves the row without a draft.
+    // An unreadable page keeps the seeded gaps (the refresh gate still fails
+    // closed without a prior version).
+    let citabilityResolution = null;
+    if (opp.bucket === CITABILITY_BACKFILL_BUCKET) {
+      const live = await require('./citability-backfill-seeder').rescanLive(opp).catch((err) => {
+        logger.warn(`[brief-builder] citability live re-scan failed (opp ${opp.id}): ${err.message}`);
+        return null;
+      });
+      if (live && live.ineligible) {
+        citabilityResolution = 'citability_target_not_indexable';
+      } else if (live) {
+        opp = {
+          ...opp,
+          service: live.service || opp.service,
+          signal_metadata: {
+            ...(opp.signal_metadata || {}),
+            citability_gaps: live.gaps,
+            citability_scan: live.results,
+            specialty_topic: live.specialty_topic || null,
+          },
+        };
+        if (!live.gaps.length) citabilityResolution = 'citability_gaps_already_resolved';
+      }
+    }
 
     // Operator-pinned intercept briefs skip signal gathering entirely: the
     // operator manifest IS the signal (decision-router pins the action
@@ -459,7 +508,16 @@ class ContentBriefBuilder {
       : await this._gatherSignals(opp, { skipSerp });
     const existingBriefVersions = await this._countExistingBriefs(opp.id);
 
-    const decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
+    let decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
+    if (citabilityResolution) {
+      // The runner skips a do_not_publish brief with this reason.
+      decision = {
+        ...decision,
+        action_type: 'do_not_publish',
+        human_review_required: false,
+        human_review_reason: citabilityResolution,
+      };
+    }
 
     // Facts pack — the verified facts-bank facts the writer agent may cite.
     // Only assembled for facts-gated content actions with a city × service.
@@ -537,11 +595,16 @@ class ContentBriefBuilder {
     }
 
     // Customer-insight cluster — match topic-ish keywords against
-    // the opportunity's query / service / city.
-    out.customer_signal = await this._matchCustomerCluster(opportunity).catch((err) => {
-      logger.warn(`[brief-builder] customer cluster lookup failed: ${err.message}`);
-      return null;
-    });
+    // the opportunity's query / service / city. Skipped for citability
+    // backfills: their query is NULL, so the matcher would fall back to the
+    // service's top cluster and hand an unrelated customer question to a
+    // targeted edit.
+    if (opportunity.bucket !== CITABILITY_BACKFILL_BUCKET) {
+      out.customer_signal = await this._matchCustomerCluster(opportunity).catch((err) => {
+        logger.warn(`[brief-builder] customer cluster lookup failed: ${err.message}`);
+        return null;
+      });
+    }
 
     // Conversion feedback for this (city, service).
     if (opportunity.service || opportunity.city) {
@@ -704,7 +767,9 @@ class ContentBriefBuilder {
       isAeoGap: AEO_GAP_BUCKETS.has(opportunity.bucket),
       schemaFrozen: opportunity.bucket === 'aeo_question_gap' && decision.action_type === 'refresh_existing_page',
       pageType,
-      requiredSections: REQUIRED_SECTIONS[pageType] || [],
+      requiredSections: opportunity.bucket === CITABILITY_BACKFILL_BUCKET && pageType === 'refresh'
+        ? [...CITABILITY_BACKFILL_REFRESH_SECTIONS]
+        : (REQUIRED_SECTIONS[pageType] || []),
       schemaTypes: SCHEMA_TYPES[pageType] || [],
       voiceConstraints: VOICE_CONSTRAINTS,
     });
@@ -774,6 +839,22 @@ class ContentBriefBuilder {
       ];
     }
 
+    // citability_backfill refreshes: each measured gap becomes a BINDING
+    // section (the data in gsc_signal, the requirement here — the
+    // answer-gap pattern). comparison / how_to_choose are only ever planned
+    // when the scan found the post frames a choice, so this never asks for
+    // a filler table.
+    const citabilityGaps = opportunity.bucket === CITABILITY_BACKFILL_BUCKET
+      && Array.isArray(opportunity.signal_metadata?.citability_gaps)
+      ? opportunity.signal_metadata.citability_gaps.filter((g) => CITABILITY_GAP_SECTIONS[g])
+      : [];
+    if (decision.action_type === 'refresh_existing_page' && citabilityGaps.length) {
+      requiredSections = [
+        ...requiredSections,
+        ...citabilityGaps.map((g) => `citability (${g}): ${CITABILITY_GAP_SECTIONS[g]}`),
+      ];
+    }
+
     // Collapsed city-service demand, same shape and same reason as the
     // family block above. mineNoContentYet emits ONE row per (service, city)
     // target because every query for that segment create-or-refreshes the
@@ -830,16 +911,21 @@ class ContentBriefBuilder {
     const effectivePublishTargetSites = publishTargetSites
       || (decision.action_type === 'new_supporting_blog' ? resolvedPublishTargetSites(opportunity) : null);
 
+    // representative_query fallback: local_gap's keyword lives in
+    // signal_metadata (see _gatherSignals) — a null target_keyword here
+    // is what made the lane hard-fail no_serp_signal. Named once so the
+    // photo_slots computation below (voice_constraints) resolves the SAME
+    // topic string as the brief's own target_keyword, never a second,
+    // independently-drifting copy of this fallback chain.
+    const targetKeyword = opportunity.query || opportunity.signal_metadata?.representative_query || null;
+
     return {
       facts_pack: factsPack,
       opportunity_id: opportunity.id,
       version: existingBriefVersions + 1,
       action_type: decision.action_type,
       target_url: opportunity.page_url || null,
-      // representative_query fallback: local_gap's keyword lives in
-      // signal_metadata (see _gatherSignals) — a null target_keyword here
-      // is what made the lane hard-fail no_serp_signal.
-      target_keyword: opportunity.query || opportunity.signal_metadata?.representative_query || null,
+      target_keyword: targetKeyword,
       city: opportunity.city || null,
       service: opportunity.service || null,
       page_type: pageType,
@@ -898,6 +984,15 @@ class ContentBriefBuilder {
         // so the refresh agent writes self-contained answer blocks without
         // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
         unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
+        // citability_backfill rows: the (live re-scanned) gap list rides the
+        // brief so the refresh agent's CITABILITY MODE addresses exactly the
+        // measured gaps, and the quality gate's evidence exemption and
+        // completion check can read it after the content_briefs round-trip
+        // (isCitabilityBackfillBrief).
+        citability_gaps: opportunity.bucket === CITABILITY_BACKFILL_BUCKET
+          && Array.isArray(opportunity.signal_metadata?.citability_gaps)
+          ? opportunity.signal_metadata.citability_gaps
+          : null,
         // aeo_question_gap rows: the answer-engine evidence that admitted
         // the question (engine names only — competitor names stay in the
         // queue row as reviewer evidence, never in the brief). The quality
@@ -977,6 +1072,18 @@ class ContentBriefBuilder {
           : layered.voiceConstraints;
         const gateRetry = opportunity.signal_metadata?.gate_retry;
         const withRetry = gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
+        // Photo slots for a possible identification ("diagnostic") post (C3,
+        // blog work order 2026-09-28) — supporting-blog and customer-question
+        // are the only page types a diagnostic post can be; the WRITER decides
+        // post_type, not this composer, so the slots ride along unconditionally
+        // on those two page types and the writer only uses them when it lands
+        // on post_type: 'diagnostic'. Sourced ONLY from the licensed photo
+        // library (never a generated/guessed asset) keyed off the brief's own
+        // target_keyword — a slot with no verified match carries photo: null
+        // and is never backfilled with AI art (see licensed-photo-library.js).
+        const withPhotoSlots = (pageType === 'supporting-blog' || pageType === 'customer-question')
+          ? { ...withRetry, photo_slots: buildPhotoSlots(targetKeyword) }
+          : withRetry;
         // Related-post link allowance rides here (not internal_links_to_add,
         // which is a MUST-appear checklist) — see _loadRelatedPosts. No
         // migration: content_briefs has no dedicated column, and
@@ -985,12 +1092,12 @@ class ContentBriefBuilder {
         // round-trips through get_content_brief AND the stored-draft
         // revalidation path (_loadReviewedBrief), so the gate allowance
         // survives a re-check exactly like it did the first time.
-        if (decision.action_type !== 'new_supporting_blog') return withRetry;
+        if (decision.action_type !== 'new_supporting_blog') return withPhotoSlots;
         // Persist independently of lookup results. content_briefs has no
         // target_sites column, so this JSONB marker is also the publisher's
         // durable routing decision after a reviewed brief is reloaded.
         const withRouting = {
-          ...withRetry,
+          ...withPhotoSlots,
           related_posts_target_sites: effectivePublishTargetSites,
         };
         return (Array.isArray(relatedPosts) && relatedPosts.length)
@@ -1153,6 +1260,7 @@ function nextWeekday9amET() {
 module.exports = new ContentBriefBuilder();
 module.exports.ContentBriefBuilder = ContentBriefBuilder;
 module.exports._internals = {
+  CITABILITY_GAP_SECTIONS,
   REQUIRED_SECTIONS,
   SCHEMA_TYPES,
   WORD_COUNT_TARGET,

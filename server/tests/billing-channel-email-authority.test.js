@@ -14,6 +14,14 @@ mockDb.transaction = jest.fn(async (callback) => callback(mockDb));
 
 jest.mock('../models/db', () => mockDb);
 
+// The dispute-hold read: no hold unless a test places one. Its real reads are pinned in the
+// Postgres suites; here the authority's wiring around it is.
+const mockHoldRead = jest.fn(async () => ({ held: false }));
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: (...args) => mockHoldRead(...args),
+}));
+
 const mockWithCustomerCommsLock = jest.fn(async (database, _customerId, callback) => (
   database.transaction(callback)
 ));
@@ -85,7 +93,7 @@ async function runAuthority(overrides = {}, {
   preSendCheck, dispatch = jest.fn(async (database, providerBoundaryCheck) => {
     const verdict = await providerBoundaryCheck({ database });
     return verdict.ok === true ? { messageId: 'provider-1' } : null;
-  }), templateKey, emailSuppression,
+  }), templateKey, emailSuppression, holdExempt,
 } = {}) {
   const requestInput = input(overrides);
   const context = await loadBillingEmailContext(requestInput);
@@ -93,6 +101,7 @@ async function runAuthority(overrides = {}, {
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   const outcome = await dispatchUnderBillingEmailAuthority({
     input: requestInput, recipientEmail: context.recipientEmail, templateKey, emailSuppression, preSendCheck, dispatch, state,
+    ...(holdExempt ? { holdExempt } : {}),
   });
   return { context, outcome, state, dispatch };
 }
@@ -107,6 +116,7 @@ describe('billing channel email authority', () => {
     ));
     mockLockCustomerEmail.mockResolvedValue();
     mockLockSmsPhone.mockResolvedValue();
+    mockHoldRead.mockReset().mockResolvedValue({ held: false });
     mockLoadTemplateByKey.mockResolvedValue({
       template: { template_key: 'billing.notice', send_stream: 'transactional_required' },
     });
@@ -533,5 +543,116 @@ describe('billing channel email authority', () => {
 
     expect(dispatch).toHaveBeenCalledWith(mockDb, expect.any(Function));
     expect(preSendCheck).toHaveBeenCalledTimes(1);
+  });
+
+  // Collections DISPUTE hold at the provider boundary (owner ruling 2026-09-30): the machine-initiated
+  // dunning emails re-read it on the locked handle, so a hold placed AFTER the sender's preflight
+  // (rail-guard consult, rendering, credit application, ledger writes) still stops the send.
+  describe('dispute hold on machine-initiated dunning templates', () => {
+    const DUNNING_TEMPLATES = [
+      'invoice.followup_3_day', 'invoice.followup_90_day', 'billing_late_payment_7_day',
+      'billing_late_payment_90_day', 'payment.microdeposit_verification', 'billing.previsit_balance',
+      'invoice.followup_combined_3_day', 'invoice.followup_combined_90_day',
+    ];
+
+    test.each(DUNNING_TEMPLATES)('%s: a hold placed after the preflight refuses the send as a retryable wait', async (templateKey) => {
+      const requestInput = input();
+      const context = await loadBillingEmailContext(requestInput); // the sender's preflight: not held
+      expect(context.error).toBeUndefined();
+      mockHoldRead.mockResolvedValue({ held: true, reason: 'hold' }); // hold committed during the awaits
+      const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+      const dispatch = jest.fn();
+      const outcome = await dispatchUnderBillingEmailAuthority({
+        input: requestInput, recipientEmail: context.recipientEmail, templateKey, dispatch, state,
+      });
+      expect(outcome).toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({
+        code: 'COLLECTION_HOLD_DEFER', retryable: true, deliveryOutcome: 'not_sent', blocked: true,
+      });
+      expect(state.handoffStarted).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+      // read on the locked handle (savepoint), not the shared pool
+      expect(mockHoldRead).toHaveBeenCalledWith('cust-1', mockDb, { ignoreDisputeHold: false });
+    });
+
+    test('a hold that commits during provider preparation stops the send at the final provider-boundary check', async () => {
+      const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+        mockHoldRead.mockResolvedValue({ held: true, reason: 'hold' }); // lands while the provider request is prepared
+        await providerBoundaryCheck({ database });
+        return { messageId: 'provider-1' };
+      });
+      const { outcome, state } = await runAuthority({}, { templateKey: 'invoice.followup_7_day', dispatch });
+      expect(mockHoldRead).toHaveBeenCalledTimes(2); // before dispatch and again at the boundary
+      expect(outcome).toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'COLLECTION_HOLD_DEFER', retryable: true });
+      expect(state.handoffStarted).toBe(false); // never reached the provider request
+    });
+
+    test('an unanswerable hold lookup holds the send (fail closed)', async () => {
+      mockHoldRead.mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('down') });
+      const { outcome, state, dispatch } = await runAuthority({}, { templateKey: 'invoice.followup_14_day' });
+      expect(outcome).toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'COLLECTION_HOLD_DEFER', retryable: true });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('after the release the same send goes through', async () => {
+      mockHoldRead.mockResolvedValue({ held: true, reason: 'hold' });
+      expect((await runAuthority({}, { templateKey: 'invoice.followup_3_day' })).outcome).toEqual({ ok: false });
+      mockHoldRead.mockResolvedValue({ held: false });
+      const { outcome, state } = await runAuthority({}, { templateKey: 'invoice.followup_3_day' });
+      expect(outcome.ok).toBe(true);
+      expect(state.boundaryBlock).toBeNull();
+    });
+
+    // A realistic predicate: a trusted exemption skips a plain DISPUTE row only; a wrong-number /
+    // wrong-party FALLBACK row always holds (Codex #5424 r13).
+    const holdKind = (kind) => mockHoldRead.mockImplementation(async (_id, _db, opts = {}) => (
+      opts.ignoreDisputeHold && kind === 'dispute' ? { held: false } : { held: true, reason: 'hold' }));
+
+    test.each(['operator', 'customer'])('a trusted %s exemption skips a plain DISPUTE hold', async (holdExempt) => {
+      holdKind('dispute');
+      const { outcome } = await runAuthority({}, { templateKey: 'invoice.followup_3_day', holdExempt });
+      expect(outcome.ok).toBe(true);
+      expect(mockHoldRead).toHaveBeenCalledWith('cust-1', mockDb, { ignoreDisputeHold: true });
+    });
+
+    test.each(['operator', 'customer'])('a trusted %s exemption still waits on a FALLBACK hold (wrong number / wrong party)', async (holdExempt) => {
+      holdKind('fallback');
+      const { outcome, state, dispatch } = await runAuthority({}, { templateKey: 'invoice.followup_3_day', holdExempt });
+      expect(outcome).toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'COLLECTION_HOLD_DEFER', retryable: true });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('an unrecognised exemption value does not exempt', async () => {
+      mockHoldRead.mockResolvedValue({ held: true, reason: 'hold' });
+      const { outcome } = await runAuthority({}, { templateKey: 'invoice.followup_3_day', holdExempt: 'system' });
+      expect(outcome).toEqual({ ok: false });
+    });
+
+    test('a payer-billed invoice is exempt (the email is AP-owned, not the customer\'s)', async () => {
+      rows.invoices = { ...rows.invoices, payer_id: 'payer-1' };
+      try {
+        mockHoldRead.mockResolvedValue({ held: true, reason: 'hold' });
+        // The senders' own ownership guards refuse a payer invoice for the homeowner; the hold check
+        // never applies to it (payer-billed is exempt), so it is not read here.
+        const { outcome, state } = await runAuthority({ invoiceId: 'inv-1' }, { templateKey: 'invoice.followup_3_day' });
+        expect(state.boundaryBlock).toBeNull();
+        expect(outcome.ok).toBe(true);
+        expect(mockHoldRead).not.toHaveBeenCalled();
+      } finally {
+        rows.invoices = { id: 'inv-1', customer_id: 'cust-1', status: 'sent' };
+      }
+    });
+
+    test('templates that are not dunning (a generic billing notice, a receipt) never read the hold', async () => {
+      mockHoldRead.mockResolvedValue({ held: true, reason: 'hold' });
+      for (const templateKey of [undefined, 'billing.notice', 'invoice.receipt', 'billing.receipt_notice']) {
+        const { outcome } = await runAuthority({}, { templateKey });
+        expect(outcome.ok).toBe(true);
+      }
+      expect(mockHoldRead).not.toHaveBeenCalled();
+    });
   });
 });

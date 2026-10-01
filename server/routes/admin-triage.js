@@ -43,7 +43,7 @@ const CONFLICT_RECOVERY_REASONS = new Set([
 ]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
-const { V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_XMIN_TEXT, isListedRouteDecision, routeDecisionsListedScope } = require('../services/call-routing-gates');
 
 // A deny rejects the call's UNIT evidence only when it is a whole-call deny
 // (no wrong_fields) or names the address — a field-scoped deny (service,
@@ -152,25 +152,53 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 // Upsert the single current verdict for a call (re-review overwrites). Links to
 // the enforce-mode route_decision when one exists so calibration can attribute
 // the verdict to the flags that drove the gate.
-async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy }) {
-  const decision = await db('route_decisions')
-    .where({ call_log_id: callLogId, mode: 'enforce' })
-    .orderBy('created_at', 'desc')
-    .first('id');
-  await db('route_feedback')
-    .insert({
-      call_log_id: callLogId,
-      route_decision_id: decision?.id || null,
-      triage_item_id: triageItemId,
-      decision_kind: decisionKind,
-      verdict,
-      wrong_fields: JSON.stringify(verdict === 'deny' ? wrongFields : []),
-      note: note || null,
-      reviewed_by: reviewedBy || null,
-      updated_at: new Date(),
-    })
-    .onConflict('call_log_id')
-    .merge(['route_decision_id', 'triage_item_id', 'decision_kind', 'verdict', 'wrong_fields', 'note', 'reviewed_by', 'updated_at']);
+// The decision row is resolved AND locked (FOR UPDATE) in the same transaction as
+// the feedback write, through the shared withLockedRouteDecisions door: a
+// reprocess refresh (upsertRouteDecision) takes the same row lock, so a verdict
+// and a refresh serialize instead of the verdict attaching to a row that was
+// refreshed under the reviewer (codex #5371 r9 P1). The auto-routed review sends
+// the decision id it DISPLAYED (`routeDecisionId`): that row is checked under the
+// lock, and a submission for a decision that is no longer the newest one (a
+// reprocess since the page loaded) or is not one of the call's decisions is
+// REJECTED (409, STALE_ROUTE_DECISION) instead of landing on a decision the
+// reviewer never saw; so is one whose row was refreshed IN PLACE since it loaded
+// (the same id, a new revision: `routeDecisionRevision`, the row's xmin). No id (an older client, the triage-card verdicts): a verdict
+// that wins the lock freezes the row it names; one that loses attaches to the
+// refreshed newest row it now reads, as before.
+async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy, routeDecisionId = null, routeDecisionRevision = null }) {
+  await withLockedRouteDecisions(db, { callLogId, mode: 'enforce' }, async (trx, rows) => {
+    // Newest first, read AFTER the locks are granted (created_at is refreshed).
+    // The current decision is picked from the SAME set the auto-routed list shows
+    // (isListedRouteDecision / routeDecisionsListedScope share one definition), so
+    // a displayed row is never judged "stale" against a row the list excludes (codex
+    // #5446 r2 P2). Only the auto-routed review is scoped that way: a triage-card verdict
+    // sends no displayed id, so it keeps the true newest enforce row, as before — a
+    // newer version an upgraded pod wrote mid-deploy must never be skipped (#5446 r3).
+    const inScope = decisionKind === 'auto_routed' ? isListedRouteDecision : () => true;
+    const newestOf = (list) => [...list].filter(inScope).sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
+    const picked = resolveDisplayedRouteDecision(rows, routeDecisionId, newestOf, routeDecisionRevision);
+    if (picked.missing || picked.stale) {
+      const err = new Error('This decision changed since it loaded — review the refreshed decision before answering.');
+      err.statusCode = 409;
+      err.code = STALE_ROUTE_DECISION;
+      throw err;
+    }
+    const decision = picked.decision;
+    await trx('route_feedback')
+      .insert({
+        call_log_id: callLogId,
+        route_decision_id: decision?.id || null,
+        triage_item_id: triageItemId,
+        decision_kind: decisionKind,
+        verdict,
+        wrong_fields: JSON.stringify(verdict === 'deny' ? wrongFields : []),
+        note: note || null,
+        reviewed_by: reviewedBy || null,
+        updated_at: new Date(),
+      })
+      .onConflict('call_log_id')
+      .merge(['route_decision_id', 'triage_item_id', 'decision_kind', 'verdict', 'wrong_fields', 'note', 'reviewed_by', 'updated_at']);
+  });
 }
 
 // GET /api/admin/triage?status=open  → list items + per-status counts
@@ -2204,10 +2232,8 @@ router.get('/auto-routed', async (req, res) => {
       // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the
       // DISTINCT ON subquery spans both versions), but a superseded stale
       // decision never duplicates or shadows the fresh one.
-      .whereIn('route_decisions.id', db('route_decisions')
-        .select(db.raw('DISTINCT ON (call_log_id) id'))
-        .whereIn('decision_version', V2_DECISION_VERSIONS)
-        .where('mode', 'enforce')
+      .whereIn('route_decisions.id', routeDecisionsListedScope(db('route_decisions')
+        .select(db.raw('DISTINCT ON (call_log_id) id')))
         .orderByRaw('call_log_id, created_at DESC'))
       .where('route_decisions.final_action_taken', 'auto_route')
       .orderBy('route_decisions.created_at', 'desc')
@@ -2218,6 +2244,9 @@ router.get('/auto-routed', async (req, res) => {
         'route_decisions.created_scheduled_service_id',
         'route_decisions.sms_enqueued',
         'route_decisions.created_at',
+        // the revision the review displays and sends back (xmin; changes on EVERY
+        // update of the row, e.g. a reprocess refresh or the outcome update)
+        db.raw(`${ROUTE_DECISION_XMIN_TEXT} AS route_decision_revision`),
         'call_log.lead_synopsis',
         'call_log.call_summary',
         'call_log.from_phone',
@@ -2251,6 +2280,21 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
     const call = await db('call_log').where({ id: callLogId }).first('id');
     if (!call) return res.status(404).json({ error: 'Call not found' });
 
+    // The decision the reviewer was LOOKING at (the list's route_decision_id). A
+    // malformed id is a 400, never silently ignored; absent = an older client.
+    const rawDecisionId = req.body?.route_decision_id == null ? '' : String(req.body.route_decision_id).trim();
+    if (rawDecisionId && !UUID_RE.test(rawDecisionId)) {
+      return res.status(400).json({ error: 'route_decision_id must be a UUID' });
+    }
+
+    // ...and the revision it displayed (the row's xmin as text): a decision row is
+    // updated IN PLACE after it is shown (a reprocess refresh, the outcome update),
+    // so the id alone is not a revision. Absent = an older client.
+    const rawRevision = req.body?.route_decision_revision == null ? '' : String(req.body.route_decision_revision).trim();
+    if (rawRevision && !/^\d{1,12}$/.test(rawRevision)) {
+      return res.status(400).json({ error: 'route_decision_revision must be a revision token' });
+    }
+
     await upsertFeedback({
       callLogId,
       decisionKind: 'auto_routed',
@@ -2258,9 +2302,13 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
       wrongFields: sanitizeWrongFields(req.body?.wrong_fields),
       note: typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null,
       reviewedBy: req.technicianId,
+      routeDecisionId: rawDecisionId || null,
+      routeDecisionRevision: rawRevision || null,
     });
     res.json({ ok: true, call_log_id: callLogId, verdict });
   } catch (err) {
+    // A stale view: the decision was refreshed or superseded since it loaded.
+    if (err?.code === STALE_ROUTE_DECISION) return res.status(409).json({ error: err.message, code: STALE_ROUTE_DECISION });
     logger.error(`[admin-triage] auto-routed verdict failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to record verdict' });
   }

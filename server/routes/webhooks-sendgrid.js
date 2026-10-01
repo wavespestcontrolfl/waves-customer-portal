@@ -20,6 +20,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { subscriberRowsForBounce, bounceMailbox } = require('../utils/email-equivalence');
 const logger = require('../services/logger');
 const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
@@ -436,7 +437,12 @@ async function handleEvent(ev) {
 async function processWebhookEvent(ev, messageId, email, handler) {
   const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
   if (!eventId) {
-    await handler(db);
+    // Still one transaction (no dedupe ledger row without an event id): the
+    // handlers take the address key before their row writes and record the
+    // suppression on the same connection, so an autocommitted opt-out can never
+    // land ahead of the locked suppression write and let a concurrent
+    // confirmation send in the gap.
+    await db.transaction((trx) => handler(trx));
     return true;
   }
 
@@ -548,7 +554,10 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
         },
         sendIncrement: 'bounced_count',
         reconcileSendStatus: true,
-        subscriberAction: delivery.subscriber_id ? 'bounce_increment' : null,
+        // A delivery whose subscriber id a merge cleared (ON DELETE SET NULL)
+        // still bounce-counts the surviving row when the mailed address is a
+        // Gmail mailbox: that fence never needed the id (codex #5413 r3).
+        subscriberAction: (delivery.subscriber_id || bounceMailbox(delivery.email)) ? 'bounce_increment' : null,
         subscriberAt: now,
       };
 
@@ -878,6 +887,23 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   const updates = computeNewsletterEventUpdates(ev, delivery);
   if (!updates) return;
 
+  // LOCK ORDER: address key BEFORE any newsletter_subscribers row. The DOI
+  // resend (customer-email-fanout resendPendingConfirmation) and the call
+  // pipeline's confirmation send hold the address key and then lock the
+  // subscriber row FOR UPDATE; this handler used to update the subscriber row
+  // first and only then reach recordEmailSuppressionForEvent (which takes the
+  // same key) — an AB-BA that PostgreSQL resolves by aborting this transaction,
+  // and /events answers 200 for a caught failure, so the provider never retries
+  // and the suppression / opt-out is lost. Take the key first, on the same
+  // transaction connection (recordEmailSuppressionForEvent's own lock on that
+  // key then re-enters harmlessly; advisory xact locks are reentrant per
+  // session). Same address it will record for: the event's, else the delivery's.
+  const newsletterGroupKey = newsletterSuppressionGroupKeyForEvent(ev);
+  if (client.isTransaction && shouldRecordNewsletterSuppression(ev, newsletterGroupKey)) {
+    const suppressionAddress = String(ev?.email || delivery.email || '').trim().toLowerCase();
+    if (suppressionAddress) await require('../utils/customer-comms-lock').lockCustomerEmail(client, suppressionAddress);
+  }
+
   if (updates.delivery) {
     await client('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
   }
@@ -887,10 +913,22 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   if (updates.sendIncrement) {
     await client('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
   }
-  if (updates.subscriberAction && delivery.subscriber_id) {
+  if (updates.subscriberAction && (delivery.subscriber_id || updates.subscriberAction === 'bounce_increment')) {
     const at = updates.subscriberAt;
+    // A delivery can be re-pointed at the surviving subscriber when a
+    // customer's email typo merges two subscriber rows (customer-email-fanout).
+    // BOUNCES are fenced to the address the delivery was mailed to: a late
+    // bounce from the dead OLD mailbox must not bounce-count the corrected
+    // address. Opt-outs (unsubscribe / spam complaint) are NEVER fenced: an
+    // opt-out is honored on the subscription even if its address moved —
+    // over-honoring is safe, dropping one is not.
+    // The fence matches by Gmail mailbox identity (any spelling of the same
+    // inbox, every row on it), exact LOWER/TRIM for other domains.
+    const subscriberRow = () => subscriberRowsForBounce(
+      client('newsletter_subscribers'), delivery.subscriber_id, delivery.email,
+    );
     if (updates.subscriberAction === 'bounce_increment') {
-      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+      await subscriberRow().update({
         bounce_count: client.raw('COALESCE(bounce_count,0) + 1'),
         last_bounced_at: at,
         updated_at: at,
@@ -917,7 +955,6 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   // future app sends. Runs even when there's no matching subscriber row; the
   // address/provider signal is still valid. SendGrid's newsletter ASM group is
   // local `marketing_newsletter`, while bounces/spam complaints stay GLOBAL.
-  const newsletterGroupKey = newsletterSuppressionGroupKeyForEvent(ev);
   if (shouldRecordNewsletterSuppression(ev, newsletterGroupKey)) {
     await recordEmailSuppressionForEvent(
       ev,

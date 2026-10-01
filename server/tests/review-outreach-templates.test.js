@@ -110,7 +110,20 @@ describe('review outreach templates', () => {
 
   test('{sender} is the tech on the record, else the company — never the "Your tech" fallback', () => {
     expect(renderOutreachBody('{sender}.', { tech: 'Adam' })).toBe('Adam with Waves.');
-    expect(renderOutreachBody('{sender}.', {})).toBe('Waves Pest Control.');
+    expect(renderOutreachBody('{sender}.', {})).toBe("It's Waves.");
+    // "It's Waves" is a whole sentence: inside one (an operator-edited body)
+    // the company is just "Waves".
+    expect(renderOutreachBody('Hi {first}, this is {sender}. Thanks!', { first: 'Sam' })).toBe('Hi Sam, this is Waves. Thanks!');
+    expect(renderOutreachBody('{sender} here.', {})).toBe('Waves here.');
+    // …and a line break or the end of the message ends the sentence too.
+    expect(renderOutreachBody('Hi {first}! {sender}', { first: 'Sam' })).toBe("Hi Sam! It's Waves");
+    expect(renderOutreachBody('Hi {first}! {sender}\n\n{review_url}', { first: 'Sam', review_url: 'x.co/r' })).toBe("Hi Sam! It's Waves\n\nx.co/r");
+    // The check reads finished words, never an unfilled placeholder.
+    expect(renderOutreachBody('{date}. {sender}.', { date: '6/26' })).toBe("6/26. It's Waves.");
+    expect(renderOutreachBody('Hi {first}\n{sender}.', { first: 'Sam' })).toBe("Hi Sam\nIt's Waves.");
+    // Spaces or tabs next to the boundary don't change it.
+    expect(renderOutreachBody('  {sender}. Thanks!', {})).toBe("  It's Waves. Thanks!");
+    expect(renderOutreachBody('Hi {first}!\t{sender} .', { first: 'Sam' })).toBe("Hi Sam!\tIt's Waves .");
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 

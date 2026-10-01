@@ -101,8 +101,9 @@
       "https://ask.ifas.ufl.edu/publication/ST609"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "515627730c24986e573b23b417af410b8b0e9df43dd926a5b0d61b604c046b7c"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -246,8 +247,9 @@
       "https://ask.ifas.ufl.edu/publication/FR304"
     ],
     "review": {
-      "status": "draft",
-      "notes": "The full nutrient-deficiency profile (manganese, boron) commonly cited for foxtail palm in horticultural sources is not confirmed on a UF/IFAS page opened in this pass; potassium deficiency was added to common_problems as a reasonable, lower-confidence addition."
+      "status": "owner_approved",
+      "notes": "The full nutrient-deficiency profile (manganese, boron) commonly cited for foxtail palm in horticultural sources is not confirmed on a UF/IFAS page opened in this pass; potassium deficiency was added to common_problems as a reasonable, lower-confidence addition.",
+      "approval_hash": "3875aa776e3c0fa06c9cb6246252f641998c7274ce70b362359b8035da9f4ae9"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -375,8 +377,9 @@
       "https://ask.ifas.ufl.edu/publication/st574"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "1ad7a30d24200df6ffc35b1ef46f930b767b7c915e02f56c5f58b178edf66a45"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -516,8 +519,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/palms-and-cycads/sabal-palmetto/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "8030c6b372628e2ee32a3ac251aacb06f4cd17608907babff1e74afb97d2f924"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -653,8 +657,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/palms-and-cycads/coconut-palm"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3cfd153d82940ede5c44979e7a8c987c9fa4a6d938f16ca8b9f792f6e4902614"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -788,8 +793,9 @@
       "https://ask.ifas.ufl.edu/publication/FR309"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Potassium/manganese deficiency and spider mite susceptibility are well documented for areca palm in general horticultural sources but not spelled out on the UF/IFAS pages opened in this pass."
+      "status": "owner_approved",
+      "notes": "Potassium/manganese deficiency and spider mite susceptibility are well documented for areca palm in general horticultural sources but not spelled out on the UF/IFAS pages opened in this pass.",
+      "approval_hash": "49eee0858e05383e4f8b98a3c5cb0bc9361b0d421b8c3f0e15daf90620c24108"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -918,8 +924,9 @@
       "https://ask.ifas.ufl.edu/publication/ST658"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "cc83567e12d7510f318a54c81058ff7b25ad4f13866ee78f52fae7c442ca7fc8"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1054,8 +1061,9 @@
       "https://ask.ifas.ufl.edu/publication/ST441"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d82ce872aff1b4d37cadb4b3dfedef34f3e7b20b789956361f745ef1e476e27d"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1113,7 +1121,7 @@
       {
         "slug": "sylvester-date-palm",
         "difference": "Canary Island date palm has stiff, deep-green leaflets, a very thick trunk; Sylvester date palm has blue-green, drooping leaflets, a thinner trunk.",
-        "next_photo": "A close-up comparing leaflet color and stiffness, plus the trunk texture.",
+        "next_photo": "From a safe distance (zoom in rather than stepping close to the spines), a photo comparing leaflet color and stiffness, plus the trunk texture.",
         "photo_can_confirm": true
       },
       {
@@ -1195,8 +1203,9 @@
       "https://ask.ifas.ufl.edu/publication/ST439"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "a6cce08c0657a364a54a08d1bbbcc58d5444a962155f7305f1a512bd2070c609"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1257,7 +1266,7 @@
       {
         "slug": "canary-island-date-palm",
         "difference": "Sylvester date palm has blue-green, drooping leaflets, a thinner trunk; Canary Island date palm has stiffer, deep-green leaflets, a much thicker trunk.",
-        "next_photo": "A close-up comparing leaflet color and stiffness, plus the trunk texture.",
+        "next_photo": "From a safe distance (zoom in rather than stepping close to the spines), a photo comparing leaflet color and stiffness, plus the trunk texture.",
         "photo_can_confirm": true
       },
       {
@@ -1339,8 +1348,9 @@
       "https://ask.ifas.ufl.edu/fr308"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Range was judged common rather than occasional based on how widely this species is planted in SWFL developments; the cited species page makes no direct comparison to Canary Island date palm's relative prevalence."
+      "status": "owner_approved",
+      "notes": "Range was judged common rather than occasional based on how widely this species is planted in SWFL developments; the cited species page makes no direct comparison to Canary Island date palm's relative prevalence.",
+      "approval_hash": "acf7aaaa443b6d31265c2ba9a0828908f652167e37603b7c1f46b1d7810caad9"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1477,8 +1487,9 @@
       "https://ask.ifas.ufl.edu/publication/ST365"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3ebac4c5abe8d4c77e6f9a3e4289343cab7dce2e24ffc61db20c0fa68212cab9"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1613,8 +1624,9 @@
       "https://ask.ifas.ufl.edu/publication/ST670"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "4269ad7e6276c1c12d453630381008639a419a2f1c4230952c72a7c8cbd5304c"
     },
     "role": "landscape_plant",
     "risk": "low",

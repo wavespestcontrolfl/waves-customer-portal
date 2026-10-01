@@ -9,7 +9,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -29,7 +29,7 @@ const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
+const { seriesCustomerSkipReason } = require('../services/series-customer-eligibility');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -40,11 +40,11 @@ const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
   etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
-  formatETDay, formatETDate, formatETTime,
+  formatETDay, formatETDate, formatETTime, dateOnlyString,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -72,6 +72,10 @@ const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-ass
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
+const {
+  TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  activeIngredientsMentioned, bookedReasonBlock,
+} = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
@@ -1055,6 +1059,11 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   prefNoWeekends: prefNoWeekendsSnapshot,
 }) {
   const dates = new Set();
+  dates.cadenceTargetById = new Map();
+  // Dates of rows this save will INSERT (make-recurring spawn, visit-count /
+  // top-up extension) — new visits at the post-save price that a held
+  // annual-prepay term could select (Codex r6 P1 on #5387).
+  dates.insertDates = [];
   if (!isRecurring) return dates;
   const before = await conn('scheduled_services').where({ id }).first();
   if (!before) return dates;
@@ -1122,6 +1131,14 @@ async function planUpdateDetailsRecurrenceDates(conn, {
       });
       for (const d of childTargets.values()) dates.add(d);
       for (const d of boosterTargets.values()) dates.add(d);
+      // Per-visit destination of the cadence rewrite, for the re-price
+      // guard's secure-prepay coverage overlay (Codex r2 P1 on #5387): the
+      // guards run BEFORE the rewrite re-dates these rows, so a repriced
+      // sibling must be judged at the date the rewrite will give it. A
+      // mismatch with the in-trx rewrite aborts the save (the per-visit
+      // drift check after its planCadenceRewriteTargets call), so this peek
+      // is authoritative.
+      for (const [visitId, d] of [...childTargets, ...boosterTargets]) dates.cadenceTargetById.set(String(visitId), d);
     }
   }
 
@@ -1160,7 +1177,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
     const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
     for (const d of planSpawnChildDates({
       baseDateStr, pattern: recurringPattern, rOpts: editOpts(after), skip, dir, seen, spawnCount, spawnTarget, blackoutDates,
-    })) dates.add(d);
+    })) { dates.add(d); dates.insertDates.push(d); }
   }
 
   // Visit-count reconcile / fixed→ongoing top-up extends of a running plan.
@@ -1204,7 +1221,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
           seen.add(baseDateStr);
           for (const d of planSeriesExtendDates({
             baseDateStr, pattern: parent.recurring_pattern, rOpts, skip, dir, seen, need, blackoutDates,
-          })) dates.add(d);
+          })) { dates.add(d); dates.insertDates.push(d); }
         }
       }
     }
@@ -1335,7 +1352,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
       const noticeOutcome = {};
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-      const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+      const { arrivalWindowRange, formatSmsTimeRange, spokenArrivalWindow } = require('../utils/sms-time-format');
       // Customer-facing time is ALWAYS the 2-hour arrival window from the
       // start — never the exact start or the duration-driven window_end
       // (owner directive; see utils/sms-time-format).
@@ -1355,6 +1372,8 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           day: formatETDay(apptTime),
           date: formatETDate(apptTime),
           time: timeText,
+          // "between 9:00 AM and 11:00 AM" — the phrase every reminder uses.
+          window: spokenArrivalWindow(start),
         }, {
           workflow: 'schedule_update_reschedule',
           entity_type: 'scheduled_service',
@@ -4667,9 +4686,39 @@ const ANCHORED_PRICE_AUTHORITY_KEYS = new Set(['estimated_price', 'primary_line_
 // and voids the remaining safe open invoices so completion re-mints at
 // the new price instead of collecting a stale amount (completion reuses a
 // non-void invoice by scheduled_service_id).
-async function propagatePriceServiceToFollowingSiblings(conn, {
-  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+// The 'following' propagation's lock-and-refuse phase, split out so
+// update-details can run it BEFORE its first route-owned write and the
+// Bill-To combined-session Stripe cancel (Codex r4 P1 on #5253): a refusal
+// here rolls the transaction back, but a Stripe cancel cannot roll back.
+// propagatePriceServiceToFollowingSiblings runs it again on the same
+// inputs — row locks and xact advisory locks are re-entrant, so the second
+// pass only re-checks. Returns the locked sibling targets.
+async function lockAndGuardFollowingSiblings(conn, {
+  editedId, editedRow = null, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields = null,
+  proposedOverlayById = null,
 }) {
+  // C (owner ruling 2026-09-28): this loop re-derives and writes a sibling's
+  // estimated_price below whenever billingRelevant, so each affected sibling
+  // is a repricing write like the edited visit itself — same invoice-mint
+  // race, same fix. Every mint path takes ['schedule.invoice.mint', id]
+  // BEFORE its own visit-row FOR UPDATE (acquireScheduledMintLockChain); the
+  // targetQuery just below already FOR UPDATEs every sibling row up front
+  // (see its own comment), which already blocks a concurrent mint's row
+  // lock — and each sibling's mint lock is also taken (below), so no mint
+  // on a sibling can be mid-flight while its price is rewritten.
+  //
+  // TRY, never the blocking acquire (pre-push audit P1): this call already
+  // runs with the EDITED visit's own mint lock held (taken earlier in
+  // update-details' transaction, before this function is ever reached), so
+  // waiting here for a sibling's lock risks a real ABBA deadlock — a second
+  // concurrent 'following' save on an overlapping part of the same series
+  // can hold that sibling's lock while it waits on the edited visit's,
+  // which this save already holds. A non-blocking try, sorted by id, turns
+  // that into a clean, immediate refusal instead — the whole save rolls
+  // back and the operator retries. The ids come from targetQuery's LOCKED
+  // read below (a second pre-audit P1: an unlocked candidate read could miss
+  // a sibling that joins the set in between); a try never waits, so taking
+  // it after the row locks cannot deadlock.
   const targetQuery = conn('scheduled_services')
     .where(function () { this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }); })
     .where('is_recurring', true)
@@ -4683,9 +4732,35 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     // found nothing — the later UPDATE would just wait, then leave that
     // fresh invoice live and stale. Advisory locks (maintenance + comms)
     // are already held, keeping the advisory-then-rows order.
-    .forUpdate();
+    // NOWAIT (Codex r6 P2 on #5253): this txn already holds its edited
+    // row, so waiting on a peer row can close a cycle with a concurrent
+    // 'following' save from a same-day sibling — Postgres would abort one
+    // side as a raw deadlock. Contention maps to the same retry response
+    // as the sibling mint try-locks below.
+    .forUpdate()
+    .noWait();
   if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
-  const targets = await targetQuery;
+  let targets;
+  try {
+    targets = await targetQuery;
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    throw Object.assign(
+      new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+      { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+    );
+  }
+  if (priceChanged || serviceChanged) {
+    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    for (const id of targets.map((row) => String(row.id)).sort()) {
+      if (!(await tryAcquireScheduledInvoiceMintLock(conn, id))) {
+        throw Object.assign(
+          new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+          { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+        );
+      }
+    }
+  }
   // A SERVICE change is billing-relevant too (Codex #3505 r2 P1): linked
   // invoices describe the old service by line item, and a service-scoped
   // appointment discount keys off the service identity — so the invoice
@@ -4698,18 +4773,93 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
   // visit's own live invoice kept the old amount is the same stale-collect
   // bug the refusal exists for — completion/Charge Now reuse that invoice by
   // scheduled_service_id before the new price is considered.
-  const guardRows = editedRow ? [editedRow, ...targets] : targets;
+  // Each guarded visit is judged as it will stand after this save: the
+  // service/price fields the propagation copies onto every sibling
+  // (proposedFields = computePriceServiceGroupChanges().fields) are overlaid
+  // as _proposed, so the secure-prepay coverage rail sees a sibling whose
+  // service moves INTO a pending term's covered family (pre-push audit P1).
+  const overlay = {};
+  for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
+    if (proposedFields && proposedFields[col] !== undefined) overlay[col] = proposedFields[col];
+  }
+  // Plus each sibling's own series-wide changes (proposedOverlayById: the
+  // cadence rewrite's destination date, a series address move's property):
+  // both land after these guards and can move a repriced sibling INTO a
+  // pending term's window or renewal scope (Codex r2 + r3 P1s on #5387).
+  const withProposed = (row) => {
+    const own = proposedOverlayById?.get(String(row.id));
+    const rowOverlay = own ? { ...overlay, ...own } : overlay;
+    return Object.keys(rowOverlay).length === 0 ? row
+      : { ...row, _proposed: { ...rowOverlay, ...(row._proposed || {}) } };
+  };
+  const guardRows = (editedRow ? [editedRow, ...targets] : targets).map(withProposed);
   let invoiceLinkColumn = false;
   if (billingRelevant && guardRows.length > 0) {
     // Same refusal contract as the plan trim (findBillingCoveredVisits
     // rationale): a partially applied reprice would leave the office
     // believing a series was repriced while paid visits kept old numbers.
-    const covered = await findBillingCoveredVisits(conn, guardRows);
+    // liveInvoice: this writes siblingUpdates.estimated_price below, so it
+    // is a repricing path too, not just the direct invoice-presence probe
+    // the loop runs next — a sibling whose live invoice is linked only
+    // through its service record or a combined-visit packet must refuse
+    // here for the same reason the single-visit repricing guard does.
+    // The secure-prepay coverage rail is PRICE-only (owner ruling on #5253,
+    // reaffirmed on #5387): a service-only 'following' edit keeps every other
+    // live-invoice check but never this one (Codex r6 P1).
+    // ...but a service-only edit can still REPRICE a sibling (a service-scoped
+    // stored discount re-derives its estimated_price above). The rail stays
+    // price-only per ROW: a sibling whose derived final price differs is
+    // judged; one whose price is genuinely unchanged is exempt (still a slot
+    // competitor, never marked). Each judged row also carries the price it
+    // will end up with (_proposedPrice) so the rail can let an edit put a
+    // held visit BACK at the /secure sold price.
+    let railRows = guardRows;
+    let railOn = !!priceChanged;
+    if (proposedFields && targets.length > 0) {
+      const addonTableExists = await conn.schema.hasTable('scheduled_service_addons');
+      const derivedById = new Map();
+      for (const sibling of targets) {
+        const { estimatedPrice } = await deriveSiblingFinancials(conn, sibling, proposedFields, addonTableExists);
+        derivedById.set(String(sibling.id), estimatedPrice);
+      }
+      railRows = guardRows.map((row) => {
+        if (String(row.id) === String(editedId)) {
+          // Service-only: the edited row's own price is unchanged by
+          // definition (priceChanged is false), so it is never judged.
+          return {
+            ...row,
+            ...(proposedFields.estimated_price === undefined ? {} : { _proposedPrice: proposedFields.estimated_price }),
+            ...(!priceChanged ? { _securePrepayExempt: true } : {}),
+          };
+        }
+        const derived = derivedById.get(String(row.id));
+        if (derived === undefined) return row;
+        const unchanged = !moneyValuesDiffer(row.estimated_price, derived);
+        return { ...row, _proposedPrice: derived, ...(!priceChanged && unchanged ? { _securePrepayExempt: true } : {}) };
+      });
+      if (!priceChanged) {
+        railOn = railRows.some((row) => !row._securePrepayExempt && row._proposedPrice !== undefined);
+      }
+    }
+    const covered = await findBillingCoveredVisits(conn, railRows, { liveInvoice: true, securePrepay: railOn });
     if (covered.size > 0) {
       const [firstId, reason] = [...covered.entries()][0];
       const when = guardRows.find((visit) => visit.id === firstId);
       const label = firstId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
       throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
+    }
+    // A /secure card confirmation mid-finish on the edited visit OR any
+    // sibling this propagation would reprice — same VISIT_BUSY_RETRY
+    // contract as the single-visit guard above (findCompletingCardRequest
+    // VisitId's own comment has the full lock-vs-plain-read rationale).
+    const finishingId = await findCompletingCardRequestVisitId(conn, guardRows.map((visit) => visit.id));
+    if (finishingId) {
+      const when = guardRows.find((visit) => visit.id === finishingId);
+      const label = finishingId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
+      throw Object.assign(
+        new Error(`The customer is finishing their card confirmation for ${label} — try the price change again in a moment.`),
+        { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+      );
     }
     invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
     if (invoiceLinkColumn) {
@@ -4741,6 +4891,47 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       }
     }
   }
+  return targets;
+}
+
+// The financials a 'following' propagation writes onto one sibling, derived
+// from the sibling's own add-ons and stored discount over the fields being
+// copied. Shared by the write loop and by the save-time secure-prepay rail,
+// which must judge a sibling by the price it will END UP with (a
+// service-scoped discount can reprice a sibling on a service-only save).
+async function deriveSiblingFinancials(conn, sibling, fields, addonTableExists) {
+  // Fail CLOSED on the read (Codex #3505 r4 P1): recomputing a priced
+  // sibling from an empty add-on list would silently strip its add-on
+  // charges, so an operational query failure must abort the scoped
+  // save — only the missing-table compat case (probed once by the caller)
+  // proceeds add-on-less.
+  let siblingAddons = [];
+  if (addonTableExists) {
+    siblingAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: sibling.id });
+  }
+  const overlaid = { ...sibling, ...fields };
+  const discountScope = await loadStoredDiscountScope(conn, overlaid, siblingAddons);
+  const financials = calculateStoredVisitFinancials(overlaid, siblingAddons, siblingAddons, discountScope);
+  // calculateStoredVisitFinancials returns NULL for a zero subtotal,
+  // and a NULL estimate lets non-callback billing fall back to the
+  // customer's monthly rate — an explicitly free series must stay an
+  // explicit $0 on every propagated row (Codex #3505 r1 P1). The
+  // caller normalizes fields.estimated_price to 0 for that case.
+  const estimatedPrice = financials.price != null
+    ? financials.price
+    : (fields.estimated_price === 0 ? 0 : financials.price);
+  return { financials, estimatedPrice };
+}
+
+async function propagatePriceServiceToFollowingSiblings(conn, {
+  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+  proposedOverlayById = null,
+}) {
+  const targets = await lockAndGuardFollowingSiblings(conn, {
+    editedId, editedRow, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields: fields,
+    proposedOverlayById,
+  });
+  const billingRelevant = priceChanged || serviceChanged;
   // Missing-table compat probe, ONCE — inside the loop the add-on reads run
   // bare so an operational failure aborts the save (see below).
   const addonTableExists = billingRelevant && targets.length > 0
@@ -4787,23 +4978,8 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       // charges, so an operational query failure must abort the scoped
       // save — only the missing-table compat case (probed once above)
       // proceeds add-on-less.
-      let siblingAddons = [];
-      if (addonTableExists) {
-        siblingAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: sibling.id });
-      }
-      const overlaid = { ...sibling, ...fields };
-      const discountScope = await loadStoredDiscountScope(conn, overlaid, siblingAddons);
-      const financials = calculateStoredVisitFinancials(overlaid, siblingAddons, siblingAddons, discountScope);
-      // calculateStoredVisitFinancials returns NULL for a zero subtotal,
-      // and a NULL estimate lets non-callback billing fall back to the
-      // customer's monthly rate — an explicitly free series must stay an
-      // explicit $0 on every propagated row (Codex #3505 r1 P1). The
-      // caller normalizes fields.estimated_price to 0 for that case.
-      if (cols.estimated_price) {
-        siblingUpdates.estimated_price = financials.price != null
-          ? financials.price
-          : (fields.estimated_price === 0 ? 0 : financials.price);
-      }
+      const { financials, estimatedPrice } = await deriveSiblingFinancials(conn, sibling, fields, addonTableExists);
+      if (cols.estimated_price) siblingUpdates.estimated_price = estimatedPrice;
       if (cols.discount_dollars) siblingUpdates.discount_dollars = financials.appointmentDiscountDollars;
     }
     await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);
@@ -5530,6 +5706,9 @@ function recurringWithoutBillableAmount({
 // inside recurringWithoutBillableAmount.
 async function seriesExtensionUnbillable(conn, {
   parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc,
+  // The cancel-reseed's in-term placement selects add-ons by the replaced
+  // occurrence, not the visit's own day — the check reads the same set.
+  addonDate = null,
 }) {
   if (!dates.length) return null;
   const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
@@ -5551,7 +5730,7 @@ async function seriesExtensionUnbillable(conn, {
     : null;
   let floor = Infinity;
   for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
     const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
     floor = Math.min(floor, price);
   }
@@ -5719,6 +5898,62 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    // Customer-sent visit-prep photos chip (customer-visit-photos scope doc
+    // §5.4 item 2, PR 3b) — dark unless visitPrepPhotosLive() (gate off
+    // keeps the payload byte-identical: the field is omitted below, not
+    // sent false). Codex r1 P2 on this PR: the day-view `services` array is
+    // ALREADY filtered to live statuses (`.whereNotIn(... 'cancelled',
+    // 'rescheduled')`), so grouping off it alone misses a HIDDEN member of
+    // a frozen visit (e.g. a cancelled row a regroup left behind) that
+    // still carries photos — that member's own stop would read false. This
+    // resolves membership with its OWN batched query straight off
+    // scheduled_services (every status), one extra query, never per-row:
+    // for a row with a visit_id, its members are every scheduled_services
+    // row sharing that visit_id with the SAME technician_id (null-safe —
+    // two nulls match) AND the SAME calendar date (`dateOnlyString`, since
+    // pg returns a DATE column as a JS Date), in ANY status, plus the row
+    // itself. This is deliberately the SAME technician+date restriction PR
+    // 3a's Visit Brief section uses (its own techStopMemberIds, Codex r1
+    // P1 there) — a frozen visit can keep visit_id on a member dispatch
+    // reassigned or moved to another day, and that member's photos belong
+    // to someone ELSE's stop now; the chip and the brief must always agree
+    // on who owns a photo. The ONE photo query then runs over the UNION of
+    // every candidate id this membership query found (not just today's
+    // `services` ids), so a hidden member's own photos are found too.
+    const prepPhotosLive = visitPrepPhotosLive();
+    const customerSentPhotosByServiceId = new Map();
+    if (prepPhotosLive) {
+      const visitIds = [...new Set(services.map((s) => s.visit_id).filter(Boolean))];
+      const visitMemberRows = visitIds.length
+        ? await db('scheduled_services').whereIn('visit_id', visitIds)
+          .select('id', 'visit_id', 'technician_id', 'scheduled_date')
+        : [];
+      const candidatesByVisitId = new Map();
+      for (const row of visitMemberRows) {
+        if (!candidatesByVisitId.has(row.visit_id)) candidatesByVisitId.set(row.visit_id, []);
+        candidatesByVisitId.get(row.visit_id).push(row);
+      }
+      const allCandidateIds = new Set(services.map((s) => s.id));
+      for (const row of visitMemberRows) allCandidateIds.add(row.id);
+      const photoRows = allCandidateIds.size
+        ? await db('visit_prep_photos').whereIn('scheduled_service_id', [...allCandidateIds]).distinct('scheduled_service_id')
+        : [];
+      const serviceIdsWithPhotos = new Set(photoRows.map((r) => r.scheduled_service_id));
+      for (const s of services) {
+        let memberIds;
+        if (s.visit_id) {
+          const sDate = dateOnlyString(s.scheduled_date);
+          memberIds = (candidatesByVisitId.get(s.visit_id) || [])
+            .filter((c) => (c.technician_id || null) === (s.technician_id || null) && dateOnlyString(c.scheduled_date) === sDate)
+            .map((c) => c.id);
+          if (!memberIds.includes(s.id)) memberIds.push(s.id);
+        } else {
+          memberIds = [s.id];
+        }
+        customerSentPhotosByServiceId.set(s.id, memberIds.some((id) => serviceIdsWithPhotos.has(id)));
+      }
+    }
+
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -5861,6 +6096,7 @@ router.get('/', async (req, res, next) => {
             prepaidApplied: checkoutInvoicePrepaidApplied,
             annualCoverageValidated,
             perApplicationFee: s.per_application_fee,
+            primaryLinePrice: s.primary_line_price,
           }),
         }) || predictCompletionBilling({
           lane: lane.mode,
@@ -5931,6 +6167,7 @@ router.get('/', async (req, res, next) => {
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
+        ...(prepPhotosLive ? { customerSentPhotos: customerSentPhotosByServiceId.get(s.id) === true } : {}),
         // Verdict computed once per row; traceVariant drives the tracer's
         // capture mode client-side (codex P2 r3: typed lawn visits must
         // outline the lawn, not run the building-perimeter workflow).
@@ -6246,6 +6483,9 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
+          // Stamped combined-invoice provenance (PR #5021): lets the sibling
+          // lookup skip its per-visit fallback read on the week feed.
+          'scheduled_services.first_application_invoice_id',
           'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
@@ -6452,6 +6692,7 @@ router.get('/week', async (req, res, next) => {
               prepaidApplied: checkoutInvoicePrepaidApplied,
               annualCoverageValidated,
               perApplicationFee: s.per_application_fee,
+              primaryLinePrice: s.primary_line_price,
             }),
           }) || predictCompletionBilling({
             lane: lane.mode,
@@ -12861,6 +13102,32 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         );
       }
     }
+    // Repricing guard (owner ruling 2026-09-28): a visit's price cannot
+    // change while money is already committed on it at the OLD price —
+    // staff void/release that first. The one exemption is a FREE re-service
+    // conversion (reServiceConversionZeroPrice, above), which voids this
+    // visit's own open invoices as part of the SAME save, so there is
+    // nothing stale left for the new $0 to collide with.
+    //
+    // `priceEditPosted` is ONLY "does this save's plan touch price at all" —
+    // a question about the posted request, not the stored row, so it needs
+    // no DB read and can't go stale. It decides whether to take the mint
+    // lock at all. Whether the price actually CHANGES (and so whether the
+    // coverage check has to run) is decided ONLY inside the transaction,
+    // after that lock is held — a pre-transaction row read here would be a
+    // TOCTOU: a concurrent save could change the row's price between that
+    // read and this transaction taking the mint lock, and comparing against
+    // the stale value could skip the refusal on a save that races in with
+    // the real committed-money conflict (pre-push audit P1, this PR).
+    // Every anchored price-authority key counts, not only estimated_price:
+    // under a stamped $0, dropping primary_line_price alone changes what the
+    // visit bills (hasAuthoritativeZeroPrice), so it is a re-price too.
+    const postedPriceKeys = [...ANCHORED_PRICE_AUTHORITY_KEYS].filter((key) => updates[key] !== undefined);
+    const priceEditPosted = postedPriceKeys.length > 0;
+    // A service change re-describes the visit's invoice lines, so it takes
+    // the mint lock too (Codex r1 P1 on #5253): a concurrent mint then waits
+    // and builds from the new service. The refusal itself stays price-only.
+    const serviceEditPosted = updates.service_id !== undefined || updates.service_type !== undefined;
     // Same retired-for-sale gate as POST / (codex r13 on #4786), on the
     // catalog ids this save ADDS — the resolved primary service and any
     // add-on line not already on the visit. A grandfathered visit that keeps
@@ -13009,6 +13276,76 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
     const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../services/appointment-address');
     const addressPlan = propertyId !== undefined ? await planAppointmentAddress(db, req.params.id, propertyId) : null;
+    // The edited visit as it will stand once this save commits, for the
+    // secure-prepay coverage rail: every coverage column this save posts,
+    // plus the property on an address change. Read at call time (updates is
+    // still normalized inside the transaction). ONE builder shared by the
+    // single-visit price guard and both 'following' guard calls, so no
+    // guard judges the edited visit on a narrower overlay (pre-push audits
+    // found the date, start time, service, then the 'following' path).
+    // Series siblings the cadence rewrite will re-date (Codex pre-push P1 on
+    // #5387): not repriced, but their NEW dates change which visits take a
+    // term's sold slots, so they join the coverage pass as context rows
+    // (_coverageContext — candidates, never themselves marked). Read on the
+    // guard's trx; the rewrite's own destination guard aborts on drift.
+    // Per-visit series-wide changes this save will make to OTHER rows of
+    // the series: the cadence rewrite's destination date and the address
+    // move's property (addressPlan.rows). One map for every guard.
+    // Post-save shapes of the rows this save will INSERT (spawn / extension;
+    // plannedRecurrenceDates.insertDates), built from the edited visit as it
+    // will stand. Judged by the secure-prepay rail ONLY (synthetic ids never
+    // reach an id-keyed invoice read); a hit refuses the save against the
+    // edited visit (Codex r6 P1 on #5387).
+    // Children resolve the CURRENT catalog identity at insert
+    // (resolveSeriesChildIdentity, as both real insert paths do), never the
+    // parent's possibly pre-rename label (Codex r7 P1 on #5387).
+    const plannedInsertCandidates = async (conn, row) => {
+      const dates = plannedRecurrenceDates.insertDates || [];
+      if (dates.length === 0) return [];
+      const postSaveParent = { ...row, ...saveCoverageProposed() };
+      const identity = await resolveSeriesChildIdentity(conn, postSaveParent);
+      return dates.map((date, index) => ({
+      ...postSaveParent,
+      service_type: identity.service_type,
+      service_id: identity.service_id,
+      ...(identity.service_key ? { service_key_snapshot: identity.service_key } : {}),
+      id: `planned-insert-${index}`,
+      scheduled_date: date,
+      status: 'pending',
+      is_recurring: true,
+      is_callback: false,
+      recurring_parent_id: row.recurring_parent_id || row.id,
+      annual_prepay_term_id: null,
+      prepaid_amount: null,
+      prepaid_method: null,
+      _proposed: undefined,
+      _coverageContext: undefined,
+      _plannedInserts: undefined,
+      }));
+    };
+    const saveSeriesOverlayById = () => {
+      const byId = new Map();
+      const put = (id, patch) => byId.set(String(id), { ...(byId.get(String(id)) || {}), ...patch });
+      for (const [id, date] of plannedRecurrenceDates.cadenceTargetById || []) put(id, { scheduled_date: date });
+      if (addressPlan) for (const row of addressPlan.rows) put(row.id, { property_id: addressPlan.propertyId });
+      return byId;
+    };
+    const cadenceCoverageContext = async (conn, cols) => {
+      const overlays = saveSeriesOverlayById();
+      const ids = [...overlays.keys()].filter((id) => id !== String(req.params.id));
+      if (ids.length === 0) return [];
+      const select = ['id', ...SECURE_PREPAY_COVERAGE_COLUMNS.filter((col) => cols && col in cols)];
+      const rows = await conn('scheduled_services').whereIn('id', ids).select(select);
+      return rows.map((row) => ({ ...row, _proposed: overlays.get(String(row.id)) }));
+    };
+    const saveCoverageProposed = () => {
+      const proposed = {};
+      for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
+        if (updates[col] !== undefined) proposed[col] = updates[col];
+      }
+      if (addressPlan) proposed.property_id = addressPlan.propertyId;
+      return proposed;
+    };
     // Plan the full series before acquiring ANY scheduling lock. Revalidate
     // the same membership and route keys after locking, before assignment.
     const assignmentPlan = assignmentShouldRun
@@ -13086,19 +13423,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
-      // A zero-price re-service conversion voids this visit's invoices below
-      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
-      // while the issued-invoice closeout locks the invoice FIRST and the
-      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
-      // closeout serializes on the scheduled-service invoice-mint advisory
-      // lock ahead of its invoice lock; the conversion takes the same lock
-      // here — after the occupancy rung (slot-reservation's order) and
-      // before any row lock — so the two run strictly one after the other
-      // whichever starts first.
-      if (reServiceConversionZeroPrice) {
-        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-        await acquireScheduledInvoiceMintLock(trx, req.params.id);
-      }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
       // revalidate after locking: an assignment may finish while we wait.
@@ -13148,6 +13472,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           const { lockTechDays } = require('../services/scheduling/tech-day-lock');
           arrivalRouteFenceKeys = new Set(await lockTechDays(trx, preFence));
         }
+      }
+      // A zero-price re-service conversion voids this visit's invoices below
+      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
+      // while the issued-invoice closeout locks the invoice FIRST and the
+      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
+      // closeout serializes on the scheduled-service invoice-mint advisory
+      // lock ahead of its invoice lock; the conversion takes the same lock
+      // here — after the occupancy rung AND the tech-day fence above, and
+      // before any row lock — so the two run strictly one after the other
+      // whichever starts first.
+      //
+      // A plain repricing save takes the SAME lock, for a different race
+      // (owner ruling 2026-09-28, PR "the re-price block"): every invoice-
+      // minting path takes this lock before it mints, so acquiring it here
+      // — before the findBillingCoveredVisits check further below, and
+      // before this visit's own scheduled_services row is ever locked or
+      // written — means no invoice can be minted at the OLD price while
+      // this save is deciding whether to allow the new one. Held through
+      // the write below (transaction-scoped advisory lock — released on
+      // commit/rollback). Gated on `priceEditPosted` (the request shape),
+      // never on a pre-transaction DB comparison — see its own comment
+      // above.
+      //
+      // Taken AFTER the tech-day fence (Codex P2 on #5253): a save that
+      // combines a price/service edit with a technician assignment used to
+      // take this mint lock BEFORE the fence above, while a concurrent
+      // accept of a reservation-held appointment (estimate-public.js, its
+      // "RUNG 1 FIRST" block) takes the tech-day fence FIRST and this same
+      // mint lock after — an ABBA deadlock. Moved here, after the fence, so
+      // both paths agree: occupancy -> tech-day fence -> mint, in that
+      // order, before any row lock.
+      if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
       // Save-time eligibility for the FINAL technician on the FINAL date
       // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
@@ -13346,6 +13704,203 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
             statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
           });
+        }
+      }
+
+      // The repricing refusal (owner ruling 2026-09-28): decided HERE, under
+      // this visit's row lock — taken now if nothing above took it
+      // (re-entrant otherwise), after the customer row lock (ordering
+      // contract) — and BEFORE the first route-owned write and the Bill-To
+      // session release further down (the first Stripe cancel this route can
+      // reach; see "EVERY refusal is decided BEFORE the first Stripe
+      // cancel"). The mint lock taken above keeps every invoice minter out;
+      // the row lock serializes the writers that commit money without it — a
+      // hand prepayment, an annual-prepay term stamp, a card hold or a
+      // card-fee capture all write this row (Codex r1 P1 + parallel review on
+      // #5253). The row's CURRENT price is read under these locks, never
+      // before the transaction.
+      // A free re-service conversion is a re-price like any other (owner
+      // ruling 2026-09-28 on #5253 r3): ANY live invoice blocks it — direct,
+      // service-record, packet, or a line already on a payer statement —
+      // and staff void or release first. Its own void cleanup below never
+      // sees indirect links and skips frozen statement lines, so waiving
+      // even the direct ones left old-price money on a $0 visit. A
+      // series-wide conversion zeroes every upcoming sibling too, so each of
+      // those is locked and guarded the same way here, before the first
+      // write and the Bill-To Stripe cancel (Codex r3 P1).
+      if (priceEditPosted) {
+        const priceGuardCols = await trx('scheduled_services').columnInfo();
+        const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
+        if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
+        if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
+        if (priceGuardCols.source_estimate_id) priceGuardSelect.push('source_estimate_id');
+        // The secure-prepay coverage rail inside findBillingCoveredVisits
+        // (securePendingPrepayCoverageReasons) reads its canonical predicates
+        // straight off this SAME locked row — never a second query of its
+        // own — so every column coverageRowsForTerm's matching needs rides
+        // along here too, each column-guarded like the ones above.
+        for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
+          if (priceGuardCols[col] && !priceGuardSelect.includes(col)) priceGuardSelect.push(col);
+        }
+        const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
+        const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
+        if (priceActuallyChanging) {
+          // The secure-prepay coverage rail inside findBillingCoveredVisits
+          // (liveInvoice) must judge this visit as it will stand once this
+          // save commits — the row above is read pre-write, and the same
+          // save can move its date or start time (slot order), change its
+          // service (coverage family) or move it to another property
+          // (renewal scope). Every coverage-relevant column this save posts
+          // is overlaid on the locked row (_proposed), never one column at a
+          // time: pre-push audits found the date, then the start time, then
+          // the service identity missing from narrower overlays.
+          if (priceGuardRow) {
+            priceGuardRow._proposed = saveCoverageProposed();
+            if (updates.estimated_price !== undefined) priceGuardRow._proposedPrice = updates.estimated_price;
+            priceGuardRow._coverageContext = await cadenceCoverageContext(trx, priceGuardCols);
+            priceGuardRow._plannedInserts = await plannedInsertCandidates(trx, priceGuardRow);
+          }
+          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
+          const estimateReason = covered.size > 0 ? null
+            : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
+          if (covered.size > 0 || estimateReason) {
+            const reason = estimateReason || [...covered.entries()][0][1];
+            throw Object.assign(
+              httpError(409, `Can't change this visit's price: it's ${reason}. Void or release that first, then set the new price.`),
+              { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+            );
+          }
+          // A /secure card confirmation mid-finish ('completing') is not
+          // durable yet, so the rails above can't see it (Codex r8 P1 on
+          // #5253). Refuse with a retry rather than race it. The consent
+          // amount itself is LEAST-stamped at render and caps the charge, so
+          // a confirmation that lands after this save can never charge more
+          // than the customer was shown. See findCompletingCardRequestVisitId
+          // for the lock-vs-plain-read contract this shares with
+          // finishVerifiedSecureCapture.
+          if (await findCompletingCardRequestVisitId(trx, [req.params.id])) {
+            throw Object.assign(
+              new Error('The customer is finishing their card confirmation for this visit — try the price change again in a moment.'),
+              { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+            );
+          }
+        }
+      }
+      // The series-wide free conversion's sibling set — exactly the rows the
+      // conversion block below zeroes: a TEMPLATE edit (no
+      // recurring_parent_id), not scoped this_only, upcoming pending/
+      // confirmed children. Rows locked FOR UPDATE by id, then each mint lock
+      // TRIED (never waited on — this save already holds the edited visit's
+      // mint lock; same ABBA reasoning as the 'following' propagation).
+      if (reServiceConversionZeroPrice
+        && !(wantsPriceServiceScope && normalizePriceServiceScope(priceServiceScope) === 'this_only')) {
+        const sibGuardCols = await trx('scheduled_services').columnInfo();
+        const sibSelf = sibGuardCols.recurring_parent_id
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('recurring_parent_id')
+          : null;
+        if (sibGuardCols.recurring_parent_id && sibSelf && !sibSelf.recurring_parent_id) {
+          const sibSelect = ['id', 'scheduled_date'];
+          if (sibGuardCols.annual_prepay_term_id) sibSelect.push('annual_prepay_term_id');
+          if (sibGuardCols.prepaid_amount) sibSelect.push('prepaid_amount');
+          // Same secure-prepay coverage columns as the primary price guard's
+          // priceGuardSelect above — read once here, off this SAME locked
+          // sibling row, rather than a second query inside
+          // findBillingCoveredVisits.
+          for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
+            if (sibGuardCols[col] && !sibSelect.includes(col)) sibSelect.push(col);
+          }
+          const convSiblings = await trx('scheduled_services')
+            .where({ recurring_parent_id: req.params.id })
+            .whereIn('status', ['pending', 'confirmed'])
+            .orderBy('id', 'asc')
+            .forUpdate()
+            .noWait()
+            .select(...sibSelect)
+            // Same NOWAIT → retry mapping as lockAndGuardFollowingSiblings.
+            .catch((err) => {
+              if (err?.code !== '55P03') throw err;
+              throw Object.assign(
+                new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+              );
+            });
+          if (convSiblings.length > 0) {
+            const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            for (const id of convSiblings.map((row) => String(row.id)).sort()) {
+              if (!(await tryAcquireScheduledInvoiceMintLock(trx, id))) {
+                throw Object.assign(
+                  new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+                  { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+                );
+              }
+            }
+            // Judged as the conversion leaves them (Codex r7 P1 on #5387): the
+            // seriesUpdates below turn these siblings into free re-service
+            // callbacks, which canonical prepay coverage excludes — the
+            // secure-prepay rail must see that post-save identity, exactly as
+            // the edited row does. The invoice rails are unaffected.
+            const conversionOverlay = {};
+            for (const col of ['is_callback', 'service_id', 'service_type']) {
+              if (updates[col] !== undefined) conversionOverlay[col] = updates[col];
+            }
+            const sibCovered = await findBillingCoveredVisits(trx, convSiblings.map((row) => (
+              Object.keys(conversionOverlay).length === 0 ? row
+                : { ...row, _proposed: { ...(row._proposed || {}), ...conversionOverlay } })), { liveInvoice: true });
+            if (sibCovered.size > 0) {
+              const [firstId, reason] = [...sibCovered.entries()][0];
+              const when = convSiblings.find((visit) => visit.id === firstId);
+              throw Object.assign(
+                httpError(409, `Can't convert this series to a free re-service: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Void or release that first, or convert this appointment only.`),
+                { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+              );
+            }
+            // Same VISIT_BUSY_RETRY contract as the single-visit and
+            // 'following' sibling guards — a /secure card confirmation
+            // mid-finish on any zeroed sibling.
+            const sibFinishingId = await findCompletingCardRequestVisitId(trx, convSiblings.map((visit) => visit.id));
+            if (sibFinishingId) {
+              const when = convSiblings.find((visit) => visit.id === sibFinishingId);
+              throw Object.assign(
+                new Error(`The customer is finishing their card confirmation for the ${dateOnly(when?.scheduled_date) || 'later'} visit — try converting the series again in a moment.`),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+              );
+            }
+          }
+        }
+      }
+
+      // The 'following' price/service propagation's sibling locks and
+      // refusals, decided HERE — before the first route-owned write and the
+      // Bill-To combined-session Stripe cancel further down (Codex r4 P1 on
+      // #5253). Same conditions and inputs as the propagation call below;
+      // nothing between here and there writes the edited row's price,
+      // service, date or series fields, so the sibling set is the same.
+      if (wantsPriceServiceScope && !reServiceTransition
+        && normalizePriceServiceScope(priceServiceScope) === 'following') {
+        const earlyBeforeRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+        if (earlyBeforeRow && !earlyBeforeRow.is_recurring && earlyBeforeRow.recurring_parent_id) {
+          throw httpError(400, 'Booster visits keep their own pricing — a price/service change can only be applied to following visits from a base series appointment.');
+        }
+        if (earlyBeforeRow?.is_recurring) {
+          const earlyGroups = computePriceServiceGroupChanges(earlyBeforeRow, updates);
+          if (earlyGroups.changed) {
+            await lockAndGuardFollowingSiblings(trx, {
+              editedId: req.params.id,
+              editedRow: {
+                ...earlyBeforeRow,
+                _proposed: saveCoverageProposed(),
+                _coverageContext: await cadenceCoverageContext(trx, earlyBeforeRow),
+              },
+              parentId: earlyBeforeRow.recurring_parent_id || req.params.id,
+              fromDateStr: earlyBeforeRow.recurring_parent_id
+                ? (dateOnly(earlyBeforeRow.scheduled_date) || etDateString())
+                : null,
+              serviceChanged: earlyGroups.serviceChanged,
+              priceChanged: earlyGroups.priceChanged,
+              proposedFields: earlyGroups.fields,
+              proposedOverlayById: saveSeriesOverlayById(),
+            });
+          }
         }
       }
 
@@ -14265,7 +14820,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // sibling update loop): the edited visit's own live invoice
             // refuses a 'following' save exactly like a sibling's would
             // (Codex #3505 r8 P1).
-            editedRow: priceServiceBeforeRow,
+            editedRow: priceServiceBeforeRow ? {
+              ...priceServiceBeforeRow,
+              _proposed: saveCoverageProposed(),
+              _coverageContext: await cadenceCoverageContext(trx, priceServiceBeforeRow),
+            } : priceServiceBeforeRow,
+            proposedOverlayById: saveSeriesOverlayById(),
             parentId: scopeParentId,
             // A parent edit covers the WHOLE remaining plan — a date
             // threshold there would race the cadence rewrite that re-dates
@@ -14419,6 +14979,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               seenDates,
               blackoutDates: rewriteBlackoutDates,
             });
+            // Per-visit drift check (Codex pre-push P1 on #5387): the re-price
+            // guards judged each sibling at the date the UNLOCKED peek
+            // predicted (plannedRecurrenceDates.cadenceTargetById), and
+            // guardRecurrenceDestination below only checks that a date is
+            // in the locked SET. A visit landing anywhere else — or a target
+            // the peek never planned — means the guards judged the wrong
+            // series; refuse with the same retry the lock-set drift uses.
+            {
+              const planned = plannedRecurrenceDates.cadenceTargetById || new Map();
+              const actual = new Map([...childTargets, ...boosterTargets].map(([id, d]) => [String(id), d]));
+              const drifted = actual.size !== planned.size
+                || [...actual].some(([id, d]) => planned.get(id) !== d);
+              if (drifted) {
+                throw Object.assign(
+                  new Error('This plan changed while saving — reload and save again.'),
+                  { statusCode: 409, isOperational: true, code: 'SERIES_CHANGED_RETRY' },
+                );
+              }
+            }
             // All-or-nothing: blackout exhaustion can leave the generator
             // mapping only a prefix of the pending children. Committing the
             // parent's new cadence while later children keep their old dates
@@ -15942,13 +16521,47 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // lookup failure all refuse the same way, since a MINT decision must fail
 // CLOSED. Returns the structured refusal, or null for a definitive 'none'
 // (nothing to refuse — the ordinary precedence below runs).
-function siblingCoverageRefusal(verdict) {
+// hasOwnPrice (#5237 review P2): a priced visit reaches this only as a
+// stamped covered member, where setting a price is not an escape hatch — the
+// copy must not send staff round the same 409.
+// The 'covered' copy follows the combined invoice's collection state (Codex
+// r5 P2 on #5237) — the schedule sheet's own classifier
+// (collectionStateForCoveredInvoice), never a second one. "Collect on that
+// invoice" only when it is actually collectible from this customer.
+function coveredRefusalMessage(invoice, { hasOwnPrice = false } = {}) {
+  const tail = hasOwnPrice ? ' Completing the visit will not create a new charge.' : '';
+  const state = invoice
+    ? collectionStateForCoveredInvoice(invoice, invoiceAmountDue(invoice))
+    : { state: 'collect_on_combined_invoice', reason: null };
+  if (state.state === 'settled') {
+    if (state.reason === 'invoice_processing') {
+      return `This visit is billed on the combined trip invoice, whose payment is still processing — do not collect again; verify it settles.${tail}`;
+    }
+    if (state.reason === 'payer_billed' || state.reason === 'withdrawn_from_customer') {
+      return `This visit is billed on the combined trip invoice, which is billed to a third-party payer — do not collect from the customer.${tail}`;
+    }
+    return `This visit is billed on the combined trip invoice, which is already paid — do not collect again.${tail}`;
+  }
+  return hasOwnPrice
+    ? 'This visit is billed on the combined trip invoice — collect on that invoice. Completing the visit will not create a new charge; to bill it separately, ask the office to adjust the combined invoice.'
+    : 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.';
+}
+
+function siblingCoverageRefusal(verdict, { hasOwnPrice = false } = {}) {
   if (verdict.status === 'none') return null;
   if (verdict.status === 'covered') {
     return {
       refused: true,
       reason: 'sibling_invoice_covered',
-      message: 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
+      // #5237 review P2: the Invoices page's manual-create endpoint
+      // (admin-invoices.js POST /) only links via serviceRecordId — a
+      // pre-completion visit has none yet, so a "split it off from the
+      // Invoices page" instruction was a dead end that would just 409 on
+      // the next Charge Now. No staff-facing action un-stamps a covered
+      // member today; the honest instructions are collect on the combined
+      // invoice (completing the visit reuses it too — never a second
+      // charge) or have the office adjust the combined invoice by hand.
+      message: coveredRefusalMessage(verdict.invoice, { hasOwnPrice }),
     };
   }
   if (verdict.status === 'needs_review') {
@@ -15993,21 +16606,48 @@ async function resolveScheduledServiceCharge({
   // unconditionally, so all three can never disagree about whether a
   // sibling COULD be covering this trip. `svc` absent (pure/unit-test
   // callers) reads as ineligible — byte-identical to before for them.
+  // Priced-covered-member widening (Codex r21 P1 on PR #5021, deferred to
+  // this follow-up — see isSiblingCoverageEligibleVisit's own header,
+  // billing-lane.js): a NON-ANCHOR row staff priced AFTER its trip's
+  // combined invoice already existed must still be asked — only this one
+  // extra DB round trip (itself a no-op DB call for the common unstamped
+  // row — see isPricedCoveredMemberVisit's own fast path), and an anchor's
+  // own priced mint never reaches it (the same predicate keeps anchors out
+  // on their own scheduled_service_id match).
+  const isPricedCoveredMember = hasOwnPrice && svc && dbConn
+    ? await require('../services/estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
+    : false;
   const eligibleForCoverageLookup = isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType, isPricedCoveredMember,
   });
   if (eligibleForCoverageLookup && svc && dbConn) {
     let verdict;
     try {
-      verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+      // Own-row refund precedence (#5237 review r2 P2): completion checks
+      // THIS VISIT's own refunded invoice BEFORE ever consulting the
+      // sibling group — a priced covered member split off by hand and
+      // refunded still carries the combined-invoice stamp, so the ordinary
+      // sibling verdict below would otherwise report 'covered' on the
+      // (still live) combined invoice while completion parks it for manual
+      // review. Scoped to the priced-covered-member widening only
+      // (isPricedCoveredMember true) — every unpriced-sibling caller is
+      // unaffected. Reuses completion's own classifier
+      // (pricedCoveredMemberOwnRefundHold → completionTerminalInvoiceLookup)
+      // so the two can never disagree.
+      const ownRefund = isPricedCoveredMember
+        ? await require('../services/estimate-first-application-invoice').pricedCoveredMemberOwnRefundHold(svc, dbConn)
+        : null;
+      verdict = ownRefund ? { status: 'needs_review', invoice: ownRefund } : await siblingInvoiceCoverageVerdict(svc, dbConn);
     } catch {
       verdict = { status: 'error' };
     }
-    const refusal = siblingCoverageRefusal(verdict);
+    const refusal = siblingCoverageRefusal(verdict, { hasOwnPrice });
     if (refusal) return refusal;
   }
-  // Owner ruling — REFUSE AFTER A VOID: the priced row is never refused
-  // here. The unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
+  // Owner ruling — REFUSE AFTER A VOID: an ordinary priced row (not a
+  // confirmed priced covered member, which the gate above already sent
+  // through the sibling verdict — #5237) is never refused here. The
+  // unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
   // already covers "the combined invoice died" — a priced visit's own mint
   // always proceeds to completionInvoiceAmount below, exactly as before the
   // round-10 priced-branch detour (removed; replaced by the single rule).
@@ -16086,10 +16726,36 @@ function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
+  // Shape-only eligibility, PRICE-BLIND (Codex r2 P1 on 2ac5813cf0): the
+  // route's own pre-lock read of svc can be stale by the time this mint
+  // transaction's row lock (acquireScheduledMintLockChain, ahead of this
+  // recheck) actually commits — reconcileRecentUnstampedAccepts /
+  // stampGroupRevalidated can stamp a priced sibling in exactly that
+  // window. Deciding "maybe a covered member" from svc's OWN captured
+  // first_application_invoice_id column (as this used to) missed that
+  // race outright: a not-yet-stamped snapshot returned null here and the
+  // mint proceeded with NO in-lock recheck at all. So this outer gate no
+  // longer looks at price or the stamp at all — every visit whose SHAPE
+  // (estimate-linked, not a callback, not an always-free type) could ever
+  // carry a stamp gets the closure below; the closure alone decides,
+  // re-reading the stamp FRESH under the lock every time.
   if (!isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice: false, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
   return async (trx) => {
+    if (hasOwnPrice) {
+      const { isPricedCoveredMemberVisit } = require('../services/estimate-first-application-invoice');
+      // A NARROW shape ({id} only — no first_application_invoice_id key)
+      // forces readFirstApplicationStamp's own by-id fallback read instead
+      // of its fast path off svc's stale pre-lock object (that fast path
+      // is exactly what let the race above through): the row this trx
+      // already holds FOR UPDATE makes this read authoritative.
+      const isPricedCoveredMember = await isPricedCoveredMemberVisit({ id: svc?.id }, trx);
+      if (!isSiblingCoverageEligibleVisit({
+        sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+        isPricedCoveredMember,
+      })) return;
+    }
     let recheck;
     try {
       // noWait (codex round-6 P1): this recheck runs AFTER
@@ -17171,7 +17837,384 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // with a fee preview and waiver control — the dispatch series cancel — where
 // a live hold is handled, not a reason to refuse. Money already TAKEN (prepay
 // term, prepaid_amount, an invoice holding money) is checked either way.
-async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) {
+// `liveInvoice` (repricing guard, PUT /:id/update-details): also count ANY
+// live attached invoice that hasn't taken money yet — a draft never sent, a
+// sent/viewed/overdue invoice sitting unpaid, or a $0 one — because
+// completion and Charge Now reuse it at the OLD price.
+// It also discovers invoices linked through a service record or a
+// combined-visit packet (Codex r2 P1 on #5253), so money or a live invoice
+// on an indirectly linked invoice blocks too. One more indirect link
+// (owner-ordered follow-up to #5253, Codex round 9):
+//   - a combined first-application invoice for a non-anchor member visit.
+//     estimate-converter.js stamps EVERY covered member (anchor and
+//     siblings alike) with the SAME invoice id on
+//     scheduled_services.first_application_invoice_id — a link deliberately
+//     separate from invoices.scheduled_service_id (which only ever names the
+//     anchor) — so a member visit's own re-price has no other way to find
+//     the invoice covering it (memberBillingInvoiceRows: any non-void
+//     invoice on the anchor that bills the member by its own lines).
+// A free re-service conversion gets no exemption (owner ruling 2026-09-28,
+// #5253 r3: "same rule as any re-price") — staff void or release first. None
+// of the three existing callers (the plan trim, the series-cancel fee rails,
+// the price/service sibling propagation before this option was threaded
+// onto it) ever needed to know about an invoice nobody has paid — so this
+// stays opt-in, default false, keeping every pre-existing call
+// byte-identical.
+// Money committed at the ESTIMATE level for a visit created or adopted from
+// one (Codex r8 P1 on #5253) — invisible to findBillingCoveredVisits, which
+// keys on the visit: a received, not-yet-applied estimate deposit (keyed by
+// estimate_id; read under the deposit-ledger lock so a concurrent receipt
+// can't slip between this check and the price write), and an annual-prepay
+// term still payment_pending whose prepay invoice is live (a pending term
+// deliberately stamps nothing onto its visits until payment). Returns a
+// refusal reason, or null.
+async function findEstimateScopedCommitment(conn, estimateId) {
+  if (!estimateId) return null;
+  if (await conn.schema.hasTable('estimate_deposits')) {
+    const Deposits = require('../services/estimate-deposits');
+    await Deposits.acquireEstimateDepositLedgerLock(conn, estimateId);
+    const pending = await Deposits.pendingDepositCredit(estimateId, conn);
+    if (pending && pending.amount > 0) return 'carrying an estimate deposit that has not been applied yet';
+  }
+  if (await conn.schema.hasTable('annual_prepay_terms')) {
+    const term = await conn('annual_prepay_terms as t')
+      .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
+      .where('t.source_estimate_id', estimateId)
+      .where('t.status', 'payment_pending')
+      .whereNotIn('inv.status', ['void', 'refunded', 'canceled', 'cancelled'])
+      .first('t.id');
+    if (term) return 'on an annual prepay invoice that is still open at the old price';
+  }
+  return null;
+}
+
+// Combined first-application invoices that still bill each member visit
+// (owner ruling 2026-09-29 on #5301 — the simple rule, no replacement-chain
+// tracing): every NON-void invoice on the member's anchor visit, plus the
+// stamp itself, plus any non-void invoice on ANOTHER visit that itemizes
+// the member directly (found without the stamp, so a member an old pod's
+// mint left unstamped is still covered — the itemized discovery below),
+// that bills THIS member by its own lines — an itemized
+// invoice names each visit it bills (client_id scheduled_<id>_primary,
+// which every service mint writes); an unitemized base-application invoice
+// ("First service application") bills every member; the live stamp bills
+// its members by construction. Locks: the anchor's mint lock is TRIED
+// first (invoice creation serializes on it, so no new invoice appears
+// before this save commits), then the candidate invoices are locked AND
+// read in one NOWAIT statement. Contention is a VISIT_BUSY_RETRY, never a
+// wait (this save already holds a visit row; the card-charge path locks
+// invoice then visit). Returns rows in findBillingCoveredVisits' shape.
+async function memberBillingInvoiceRows(conn, ids) {
+  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('../services/invoice');
+  const originalIdOf = new Map((ids || []).filter((id) => id != null).map((id) => [String(id), id]));
+  const memberIds = [...originalIdOf.keys()];
+  if (memberIds.length === 0) return [];
+  const busy = () => Object.assign(
+    new Error('An invoice for this visit is being updated or charged right now — try the price change again in a moment.'),
+    { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+  );
+  // Two ways to find a combined invoice that still bills a member:
+  //  1. the STAMP — scheduled_services.first_application_invoice_id, written
+  //     at accept time or later by reconcileRecentUnstampedAccepts;
+  //  2. the invoice's OWN itemized lines — a non-void invoice whose
+  //     line_items carry client_id scheduled_<member>_primary (jsonb
+  //     containment, so it works with the column typed jsonb). An invoice an
+  //     old pod minted during the pre-deploy write gap leaves its members
+  //     UNSTAMPED until the reconciliation runs; a member repriced in that
+  //     window would otherwise pass this guard and be stamped afterwards
+  //     (Codex on #5301). Invoices whose own scheduled_service_id IS the
+  //     member are excluded — the direct read already covers those.
+  // The alias keys the discovery apart from the locked read below (and gives
+  // the test harness an exact table string to key on).
+  const readStamps = () => conn('scheduled_services as ss')
+    .join('invoices as inv', 'inv.id', 'ss.first_application_invoice_id')
+    .whereIn('ss.id', memberIds)
+    .select('ss.id as member_id', 'inv.id as stamp_id', 'inv.scheduled_service_id as anchor_id');
+  const itemizedIdsOf = (inv) => {
+    let items = inv.line_items;
+    if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
+    items = Array.isArray(items) ? items : [];
+    return { items, itemized: items.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ''))?.[1]).filter(Boolean) };
+  };
+  const readItemized = async () => {
+    const containment = memberIds.map(() => 'itemized.line_items @> ?::jsonb').join(' OR ');
+    // Scoped to the members' own customers (Codex r1 P2 on #5374): a combined
+    // first-application invoice is minted for the anchor's customer, and its
+    // members are that same customer's visits (estimate-first-application-
+    // invoice.js), so the indexed invoices.customer_id bounds the jsonb
+    // containment scan to one customer's invoices instead of the table.
+    const rows = await conn('invoices as itemized')
+      .whereIn('itemized.customer_id', conn('scheduled_services').whereIn('id', memberIds).select('customer_id'))
+      .whereNotIn('itemized.status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+      .whereRaw(`(${containment})`, memberIds.map((id) => JSON.stringify([{ client_id: `scheduled_${id}_primary` }])))
+      .select('itemized.id', 'itemized.scheduled_service_id', 'itemized.line_items');
+    return rows.filter((row) => {
+      const { itemized } = itemizedIdsOf(row);
+      return memberIds.some((member) => itemized.includes(member) && String(row.scheduled_service_id) !== member);
+    });
+  };
+  let stamps;
+  let discovered;
+  let candidates;
+  try {
+    // Anchor mint locks are TRIED (never waited on) until the anchor set is
+    // stable: discovery -> try-lock every anchor it names -> discover again,
+    // because an invoice minted on a not-yet-locked anchor between the read
+    // and the lock would otherwise be missed. Once an anchor's lock is held
+    // no new invoice can appear on it before this save commits.
+    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    const lockedAnchors = new Set();
+    for (let pass = 0; ; pass += 1) {
+      stamps = await readStamps();
+      discovered = await readItemized();
+      const wanted = new Set([
+        ...stamps.map((row) => row.anchor_id),
+        ...discovered.map((row) => row.scheduled_service_id),
+      ].filter(Boolean).map(String));
+      const fresh = [...wanted].filter((anchorId) => !lockedAnchors.has(anchorId)).sort();
+      if (fresh.length === 0) break;
+      if (pass >= 3) throw busy();
+      for (const anchorId of fresh) {
+        if (!(await tryAcquireScheduledInvoiceMintLock(conn, anchorId))) throw busy();
+        lockedAnchors.add(anchorId);
+      }
+    }
+    if (stamps.length === 0 && discovered.length === 0) return [];
+    const anchorIds = [...lockedAnchors].sort();
+    const stampIds = [...new Set(stamps.map((row) => String(row.stamp_id)))].sort();
+    const discoveredIds = [...new Set(discovered.map((row) => String(row.id)))].sort();
+    // ONE locked read: NOWAIT row locks on every candidate (this save holds
+    // a visit row; the card-charge path locks invoice then visit, so a wait
+    // here could deadlock). The reconciliation writer
+    // (estimate-first-application-invoice.js stampGroupRevalidated) locks
+    // invoice then visit rows too but takes no mint lock; it needs no
+    // serialization with this guard — the guard no longer depends on the
+    // stamp, and a stamp landing after this save is only a link.
+    candidates = await conn('invoices')
+      .where(function () {
+        this.whereIn('id', [...new Set([...stampIds, ...discoveredIds])]).orWhereIn('scheduled_service_id', anchorIds);
+      })
+      .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+      .orderBy('id')
+      .forUpdate()
+      .noWait()
+      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    throw busy();
+  }
+  const billedIds = (inv) => {
+    const { items, itemized } = itemizedIdsOf(inv);
+    const aggregate = itemized.length === 0 && items.some((li) => /^first (service )?application$/i.test(String(li?.description || '').trim()));
+    return { itemized, aggregate };
+  };
+  const stampByMember = new Map(stamps.map((row) => [String(row.member_id), row]));
+  const out = [];
+  for (const member of memberIds) {
+    const stamp = stampByMember.get(member);
+    const seen = new Set();
+    for (const inv of candidates) {
+      const { itemized, aggregate } = billedIds(inv);
+      const viaStamp = stamp && (String(inv.id) === String(stamp.stamp_id)
+        || (String(inv.scheduled_service_id) === String(stamp.anchor_id) && (aggregate || itemized.includes(member))));
+      // Unstamped (or differently stamped) member itemized on another
+      // visit's invoice; the member's own-visit invoices are the direct
+      // read's job.
+      const viaLines = itemized.includes(member) && String(inv.scheduled_service_id) !== member;
+      if (!(viaStamp || viaLines) || seen.has(String(inv.id))) continue;
+      seen.add(String(inv.id));
+      out.push({
+        scheduled_service_id: originalIdOf.get(member),
+        status: inv.status,
+        credit_applied: inv.credit_applied ?? 0,
+        line_items: inv.line_items,
+        stripe_payment_intent_id: inv.stripe_payment_intent_id ?? null,
+        total: inv.total,
+        _openReason: 'attached to a combined first-application invoice that is still open at the old price',
+      });
+    }
+  }
+  return out;
+}
+
+// The /secure card-confirmation page's annual-prepay PICK, not yet paid
+// (owner ruling 2026-09-29, "rebuild on the canonical coverage rule"). A
+// payment_pending term stamps nothing on scheduled_services until its
+// invoice is paid (annual-prepay-renewals.js seeds/stamps coverage only on
+// activation — deliberately, per its own comments), so the direct
+// annual_prepay_term_id / prepaid_amount checks in findBillingCoveredVisits
+// never see it: a visit that term would stamp on payment could otherwise be
+// repriced right out from under a card-confirmation page the customer
+// already committed to. Coverage here is decided with the EXACT SAME
+// canonical predicates payment activation itself uses
+// (annual-prepay-renewals.js's coverageRowsForTerm: customer, service type,
+// callback exclusion, term ownership, term window, sold visit count/slots)
+// — never a hand-built date/service-type window of this route's own (a
+// first attempt hand-rolled that window and Codex kept finding edges).
+//
+// Lock order (Codex requirement 4): selectSecurePlan
+// (secure-appointment-plans.js) takes the SAME per-customer advisory
+// namespace (admin-customers.js's ANNUAL_PREPAY_LOCK_NS, via
+// lockAndAssertNoAnnualPrepayOverlap) as the FIRST lock of its own mint
+// transaction, before any row lock — topUpRecurringSeriesLocked's try-lock
+// just below documents that every other acquirer of this namespace holds it
+// the same way. This guard already holds the edited visit's row (and,
+// upstream in the update-details save, the customer row FOR UPDATE — Codex
+// #4716) by the time it runs, so a BLOCKING acquire of this namespace here
+// could open a new ABBA cycle against selectSecurePlan's own
+// visit-then-customer order; pg_try_advisory_xact_lock (never blocks)
+// cannot. A miss means a prepay_annual selection is minting for this exact
+// customer right now — refuse with a retry rather than let this save's price
+// write and that mint's price read race each other (VISIT_BUSY_RETRY, same
+// contract as the sibling mint-lock refusals elsewhere in this file).
+// Deliberately reads ONLY what the caller's own `visits` rows already carry
+// (no fresh scheduled_services query of its own): the three callers
+// (the price guard's priceGuardRow, the series-conversion convSiblings, the
+// 'following' propagation's guardRows) each already lock and select this
+// row once, widened below to carry what coverageRowsForTerm's predicates
+// need — never a second, differently-shaped read that every one of this
+// file's many bespoke test fakes for 'scheduled_services' would also have
+// to grow a chain for. A visit whose caller happens not to carry
+// customer_id (a rare bare `{ id }` fallback when the row itself wasn't
+// found) is simply skipped here — every other check in this function still
+// covers it.
+// Every scheduled_services column coverageRowsForTerm's predicates read
+// (window, slot order, service family, callback, term ownership, renewal
+// scope). The update-details price guard selects these on its locked row
+// and overlays whichever this save posts (_proposed).
+const SECURE_PREPAY_COVERAGE_COLUMNS = ['customer_id', 'scheduled_date', 'window_start', 'service_type',
+  'service_id', 'service_key_snapshot', 'status', 'is_recurring', 'recurring_pattern', 'recurring_parent_id',
+  'property_id', 'is_callback', 'prepaid_method', 'source_estimate_id', 'annual_prepay_term_id'];
+
+// Locks each customer's annual-prepay namespace (try-lock — see the header
+// comment above) and returns every held term, grouped by customer id.
+async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
+  const { ANNUAL_PREPAY_LOCK_NS } = require('./admin-customers')._private;
+  for (const customerId of customerIds) {
+    const lockResult = await conn.raw(
+      'SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked',
+      [ANNUAL_PREPAY_LOCK_NS, String(customerId)],
+    );
+    if (!advisoryTryLockAcquired(lockResult)) {
+      throw Object.assign(
+        new Error('An annual prepay selection for this customer is being confirmed right now — try the price change again in a moment.'),
+        { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+      );
+    }
+  }
+  // Every term that holds money at the price it was minted with, whose
+  // canonical coverage decides which visits it stamps:
+  //  - an UNPAID pick (payment_pending with a live prepay invoice), minus
+  //    dispute-suspended terms — suspendActiveTermsForDisputedInvoice flips
+  //    those BACK to payment_pending on purpose so their visits bill per
+  //    application during the dispute (Codex r3 P1 on #5387);
+  //  - every term with PAID coverage live today, read through the canonical
+  //    coveredTermsAsOf (active / renewal_pending, paid-pending, and decided
+  //    lapses such as an end_at_term cancel riding out its paid window —
+  //    Codex r4 P1), never a status list of this route's own.
+  // A term's canonical set is exactly what its next refreshTermSnapshot
+  // stamps (completed visits stay in the sold count), so a visit in it is
+  // committed money whether or not it is stamped yet. has_linked_visit
+  // decides only whether the first-activation window slide is projected.
+  const NO_MONEY_HELD = ['void', 'refunded', 'canceled', 'cancelled'];
+  const disputeSuspendedColumn = await conn.schema.hasColumn('annual_prepay_terms', 'dispute_suspended_at');
+  const hasLinkedVisit = conn.raw(
+    'EXISTS (SELECT 1 FROM scheduled_services ss_link WHERE ss_link.annual_prepay_term_id = t.id) AS has_linked_visit',
+  );
+  let unpaidPicksQuery = conn('annual_prepay_terms as t')
+    .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
+    .whereIn('t.customer_id', customerIds)
+    .where('t.status', 'payment_pending')
+    .whereNotIn('inv.status', NO_MONEY_HELD);
+  if (disputeSuspendedColumn) unpaidPicksQuery = unpaidPicksQuery.whereNull('t.dispute_suspended_at');
+  const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+  const [unpaidPicks, liveTerms] = await Promise.all([
+    unpaidPicksQuery.select('t.*', hasLinkedVisit),
+    coveredTermsAsOf(conn).whereIn('t.customer_id', customerIds).select('t.*', hasLinkedVisit),
+  ]);
+  const termsByCustomer = new Map();
+  for (const term of new Map([...unpaidPicks, ...liveTerms].map((t) => [String(t.id), t])).values()) {
+    const key = String(term.customer_id);
+    termsByCustomer.set(key, [...(termsByCustomer.get(key) || []), term]);
+  }
+  return termsByCustomer;
+}
+
+// True when this save puts an UNSTAMPED visit back at the price the /secure
+// plan was sold at (its per_visit_amount baseline). Such an edit can never
+// leave the old-price invoice covering a different price, so the rail lets
+// it through — it is exactly the repair the stamp-time hold's office alert
+// asks for. A visit the term already stamped (prepaid money on it) is never
+// exempt, and neither is any move AWAY from the sold price.
+async function editRestoresSoldPrice(conn, term, row, proposedPrice) {
+  if (proposedPrice === undefined || proposedPrice === null || proposedPrice === '') return false;
+  if (row?.prepaid_amount != null && Number(row.prepaid_amount) > 0) return false;
+  const { securePlanSoldPerVisitCents } = require('../services/annual-prepay-renewals');
+  const soldCents = await securePlanSoldPerVisitCents(term, conn);
+  return soldCents != null && Math.round(Number(proposedPrice) * 100) === soldCents;
+}
+
+async function securePendingPrepayCoverageReasons(conn, visits) {
+  const marks = new Map();
+  const customerIds = [...new Set(visits.map((v) => v.customer_id).filter(Boolean).map(String))].sort();
+  if (customerIds.length === 0 || !(await conn.schema.hasTable('annual_prepay_terms'))) return marks;
+  const termsByCustomer = await lockAndLoadHeldPrepayTerms(conn, customerIds);
+
+  const { coverageRowsForTerm } = require('../services/annual-prepay-renewals');
+  const today = etDateString();
+  const reasonFor = (term) => (term.status === 'payment_pending'
+    ? 'on an annual prepay invoice from the card-confirmation page that is still open at the old price'
+    : 'covered by an annual prepay paid at the old price');
+  for (const [customerId, terms] of termsByCustomer) {
+    const customerVisits = visits.filter((v) => String(v.customer_id) === customerId);
+    // ONE coverage pass per customer and term with every candidate this
+    // save touches, each in its post-save shape (Codex r2 P1 on #5387):
+    //  - the visits being repriced (judged; marked against themselves);
+    //  - cadence / address context rows (compete for slots; never marked);
+    //  - rows this save will INSERT (judged; marked against the visit whose
+    //    save creates them). Their key starts with '!' so it sorts BEFORE
+    //    every real uuid: the insert's real id is unknown, so a date/time
+    //    tie at the sold-slot boundary counts it as covered (Codex r8 P1).
+    // First entry per id wins, so a judged row outranks the same row as
+    // context.
+    const candidates = new Map();
+    const add = (row, ownerId, label, proposedPrice = undefined) => {
+      if (!candidates.has(String(row.id))) candidates.set(String(row.id), { row, ownerId, label, proposedPrice });
+    };
+    // A row flagged _securePrepayExempt (a service-only save that leaves its
+    // price unchanged) still competes for slots but is never judged.
+    for (const v of customerVisits) add({ ...v, ...(v._proposed || {}) }, v._securePrepayExempt ? null : v.id, '', v._proposedPrice);
+    for (const v of customerVisits) {
+      for (const row of v._coverageContext || []) add({ ...row, ...(row._proposed || {}) }, null, '');
+      for (const row of v._plannedInserts || []) {
+        add({ ...row, id: `!planned:${v.id}:${row.id}` }, v.id, 'adding a visit this save creates, which would be ');
+      }
+    }
+    const extraCandidateRows = [...candidates.values()].map((c) => c.row);
+    for (const term of terms) {
+      const covered = await coverageRowsForTerm(term, conn, {
+        extraCandidateRows,
+        // A never-activated term is judged on the window a payment TODAY
+        // would give it (the first-activation slide; Fable review P2 on
+        // #5387). A later payment slides further — a known limit, stated on
+        // the PR. An activated term keeps its stored window.
+        projectFirstActivationOn: term.has_linked_visit ? null : today,
+      });
+      for (const row of covered) {
+        const hit = candidates.get(String(row.id));
+        if (hit?.ownerId == null || marks.has(hit.ownerId)) continue;
+        // The repair the office alert asks for: a visit held out of the stamp
+        // for a changed price may go BACK to the sold price. Never a planned
+        // insert, never a visit the term already stamped.
+        if (!hit.label && await editRestoresSoldPrice(conn, term, hit.row, hit.proposedPrice)) continue;
+        marks.set(hit.ownerId, `${hit.label}${reasonFor(term)}`);
+      }
+    }
+  }
+  return marks;
+}
+
+async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false, securePrepay = liveInvoice } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   // The term LINK outlives the coverage: a voided/refunded prepay flips the
@@ -17191,7 +18234,15 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
     liveTermIds = new Set(liveTerms.map((t) => t.id));
   }
   for (const v of visits) {
-    if (v.annual_prepay_term_id && liveTermIds.has(v.annual_prepay_term_id)) mark(v.id, 'covered by an annual prepay term');
+    if (v.annual_prepay_term_id && liveTermIds.has(v.annual_prepay_term_id)) {
+      // A bare term LINK on an unstamped visit that this save puts back at
+      // the /secure sold price is the repair path, not held money (see
+      // editRestoresSoldPrice); a stamped visit stays covered.
+      const repair = securePrepay && liveInvoice && v.customer_id
+        ? await editRestoresSoldPrice(conn, { id: v.annual_prepay_term_id, customer_id: v.customer_id }, v, v._proposedPrice)
+        : false;
+      if (!repair) mark(v.id, 'covered by an annual prepay term');
+    }
     // Hand-collected prepayment (cash / phone card / Zelle), single-visit or
     // stamped across the series by POST /:id/prepaid. Cancelling one of these
     // silently is money taken for a visit that never happens (Codex #3337 P1).
@@ -17264,7 +18315,55 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
     const invoiced = await conn('invoices')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
-      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id');
+      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+    // liveInvoice also reaches an invoice
+    // this visit carries WITHOUT its own
+    // invoices.scheduled_service_id — the two indirect links the repricing
+    // guard has to check because the direct query above misses them:
+    //   • service-record-linked — most post-completion invoices carry ONLY
+    //     service_record_id, never scheduled_service_id (invoice.js, and
+    //     invoice-issued-closeout's linkedVisitForInvoice, which resolves a
+    //     visit the very same way for the reverse lookup).
+    //   • a combined-visit packet invoice — ONE invoice bills several
+    //     visits; only the packet's anchor gets invoices.scheduled_service_id,
+    //     every other billed member is findable only through its own
+    //     visit_completion_packet_items row (scheduled_service_id → invoice_id).
+    // Both are read only under this option — the pre-existing callers never
+    // asked "does this visit carry an unpaid invoice at all," only "has
+    // money already moved," so widening the match set here would change
+    // their answer for a case they were never built to consider.
+    if (liveInvoice) {
+      if (await conn.schema.hasTable('service_records')) {
+        const srLinked = await conn('invoices as inv')
+          .join('service_records as sr', 'sr.id', 'inv.service_record_id')
+          .whereIn('sr.scheduled_service_id', ids)
+          .whereNotIn('inv.status', [...NO_MONEY_HELD])
+          .select(
+            'sr.scheduled_service_id as scheduled_service_id',
+            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+          );
+        invoiced.push(...srLinked);
+      }
+      if (await conn.schema.hasTable('visit_completion_packet_items')) {
+        const packetLinked = await conn('visit_completion_packet_items as p')
+          .join('invoices as inv', 'inv.id', 'p.invoice_id')
+          .whereIn('p.scheduled_service_id', ids)
+          .whereNotIn('inv.status', [...NO_MONEY_HELD])
+          .select(
+            'p.scheduled_service_id as scheduled_service_id',
+            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+          );
+        invoiced.push(...packetLinked);
+      }
+      // Combined first-application invoice, non-anchor member (see the
+      // comment above this function). scheduled_services.first_application_
+      // invoice_id is the only durable link for a member other than the
+      // anchor — invoices.scheduled_service_id names only the anchor.
+      // hasColumn-guarded: the column postdates some schemas.
+      if (await conn.schema.hasColumn('scheduled_services', 'first_application_invoice_id')) {
+        invoiced.push(...await memberBillingInvoiceRows(conn, ids));
+      }
+    }
     const hasDepositCreditLine = (items) => {
       try {
         const arr = typeof items === 'string' ? JSON.parse(items) : items;
@@ -17288,10 +18387,60 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
         // conservative: no Stripe round-trip in a refusal path, and an
         // already-dead PI just means the operator voids the invoice first.
         mark(inv.scheduled_service_id, 'attached to an invoice with a card payment that can still settle');
+      } else if (liveInvoice) {
+        // Nothing above fired, yet a live invoice is attached: a draft never
+        // sent, a sent/viewed/overdue invoice sitting unpaid, or a $0 one.
+        // Completion and Charge Now reuse any live attached invoice, so it
+        // would keep billing the OLD price (Codex r1 P1: a $0 draft too) —
+        // the same "any live invoice" rule the sibling propagation already
+        // applies (Codex #3505 r7, owner decision). The combined
+        // first-application read above tags its rows with a more specific
+        // `_openReason` so the refusal names which invoice is still open;
+        // every other source falls back to the generic wording.
+        mark(inv.scheduled_service_id, inv._openReason || 'attached to an invoice that is still open at the old price');
       }
     }
   }
+  // The /secure card-confirmation page's unpaid annual-prepay pick — its own
+  // rail, not part of the invoice-status ladder above (see
+  // securePendingPrepayCoverageReasons' own header comment). liveInvoice-only
+  // (Codex requirement 5): the plan trim and the series-cancel fee rails
+  // never called findBillingCoveredVisits with it and must stay
+  // byte-identical.
+  if (liveInvoice && securePrepay) {
+    const securePending = await securePendingPrepayCoverageReasons(conn, visits);
+    for (const [id, reason] of securePending) mark(id, reason);
+  }
   return covered;
+}
+
+// A /secure card confirmation mid-finish ('completing') for one of these
+// visits is not durable yet, so the money-committed rails findBillingCovered
+// Visits runs can't see it (Codex r8 P1 on #5253; broadened to sibling
+// guards on #5253 follow-up) — a plain read, kept OUTSIDE that function
+// deliberately: this is a transient contention signal (VISIT_BUSY_RETRY,
+// retry the save) never a durable committed-money refusal
+// (REPRICE_BLOCKED_COMMITTED_MONEY). finishVerifiedSecureCapture
+// (appointment-card-request.js) takes this SAME visit's scheduled-invoice
+// mint lock around its pending→completing claim and its completing→
+// completed write, so a capture mid-claim or mid-final-write is already
+// serialized by the mint lock this route holds (taken above for the edited
+// visit, try-locked for siblings) — a capture waits for that lock, or this
+// save's own lock acquisition blocks until the capture's claim/write
+// commits and releases it. This plain read exists ONLY to catch the window
+// a capture sits 'completing' WITHOUT holding the lock — between its claim
+// commit and its later completing→completed write, which spans an
+// out-of-transaction Stripe SetupIntent re-read and so cannot hold a
+// transaction-scoped advisory lock the whole time. Returns the first
+// covered visit id, or null.
+async function findCompletingCardRequestVisitId(conn, visitIds) {
+  const ids = [...new Set((visitIds || []).filter((id) => id != null))];
+  if (ids.length === 0 || !(await conn.schema.hasTable('appointment_card_requests'))) return null;
+  const finishing = await conn('appointment_card_requests')
+    .whereIn('scheduled_service_id', ids)
+    .where({ status: 'completing' })
+    .first('scheduled_service_id');
+  return finishing ? finishing.scheduled_service_id : null;
 }
 
 // Reconcile a recurring series to an exact number of upcoming visits — the
@@ -17345,6 +18494,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // auto-dispatch due date honoured). Not compared against the broader
   // reader: its raw scheduled_date would let a dispatch shift win.
   cadenceFloorRow = null,
+  // Post-cancel reseed only (GATE_CANCEL_RESEED_IN_TERM): picks the ONE
+  // extend date itself, given this writer's own weekend / blackout / season
+  // shift and the series' occupied dates; null falls back to the cadence
+  // generator (the series-end append). Only honoured with extendByOne.
+  placementPicker = null,
+  // With a picked date: the plan position of the occurrence it replaces.
+  // Recurring add-ons follow that occurrence, not the off-cadence day the
+  // replacement lands on (a patterned add-on is due only on exact cadence
+  // dates, so the new day would silently drop it).
+  placementAddonDate = null,
 }) {
   const live = await liveUpcomingSeriesVisits(trx, parentId);
   const target = extendByOne
@@ -17467,16 +18626,24 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // Extend dates from the shared generator (update-details' pre-trx lock
   // plan runs the same one).
   const extendBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
-  const extendDates = planSeriesExtendDates({
+  const pickedDate = (extendByOne && need === 1 && placementPicker)
+    ? placementPicker({
+      shift: (d) => seasonalSafeShift(d, parent.recurring_pattern, skipParent, dirParent, extendBlackoutDates),
+      takenDates: seen,
+    })
+    : null;
+  result.placement = pickedDate ? 'in_term' : 'series_end';
+  const extendDates = pickedDate ? [pickedDate] : planSeriesExtendDates({
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
     blackoutDates: extendBlackoutDates,
   });
   // Billable-amount gate on the dates this writer will add (shared helper —
   // rationale on seriesExtensionUnbillable). Trims and unchanged counts never
   // reach here.
+  const pickedAddonDate = (pickedDate && placementAddonDate) ? placementAddonDate : null;
   const unbillableExtend = await seriesExtensionUnbillable(trx, {
     parent, dates: extendDates, cols, parentAddons, storedDiscountScope,
-    blackoutDates: extendBlackoutDates, skipParent, seriesCioc,
+    blackoutDates: extendBlackoutDates, skipParent, seriesCioc, addonDate: pickedAddonDate,
   });
   if (unbillableExtend) {
     throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
@@ -17518,6 +18685,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // carry the flag that would auto-extend past the count just set. The
     // ongoing top-up is the mirror case and stamps the flag on.
     if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
+    // An in-term reseed lands off-cadence: stamp it as a one-off exception
+    // holding the replaced occurrence's slot (rebooker.dateExceptionStamp's
+    // shape), so the extend anchor, the series sweep and a later replacement
+    // all read its cadence position, never the off-cadence day.
+    if (pickedAddonDate && cols.date_exception && cols.date_exception_cadence_date) {
+      data.date_exception = true;
+      data.date_exception_cadence_date = pickedAddonDate;
+      if (cols.date_exception_source) data.date_exception_source = 'cancel_reseed';
+      if (cols.date_exception_at) data.date_exception_at = new Date();
+    }
     if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
@@ -17532,7 +18709,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, pickedAddonDate || nd, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -18168,7 +19345,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // its own plan_ending alert path — never topped up here); the customer must
 // have no deleted_at, no GENUINE service hold (service_paused_at set with
 // any reason other than the billing-only, auto-clearable
-// 'autopay_final_failure' — see TOPUP_CUSTOMER_INELIGIBILITY_RULES),
+// 'autopay_final_failure' — see series-customer-eligibility.js),
 // active !== false, and a pipeline_stage outside FORMER_CUSTOMER_STAGES
 // (customer-stages.js — the one churned/former vocabulary every KPI/
 // eligibility surface shares) — read with FOR UPDATE, the same row lock
@@ -18190,34 +19367,12 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // number of rows in one run.
 const TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN = 24;
 
-// Table-driven customer eligibility for the top-up (one independent check
-// per row, evaluated in order) — dedupes the branch-per-reason shape into a
-// single loop so a new disqualifying condition is one more row, not one more
-// `if`. Reused nowhere else today; kept next to its one caller.
-// service_paused_at is set two ways, and only one of them is a genuine
-// scheduling hold (Codex GitHub round 2 P1). billing-cron sets it with
-// reason 'autopay_final_failure' when the 3-retry ladder exhausts — that
-// stops the DUES CRON only; migration 20260801200000 (billing-copy-no-
-// false-interruption) is explicit that this reason has "no scheduling
-// consumer" anywhere in the app, and visits continue on schedule. An
-// operator can also set the SAME column by hand for a genuine whole-
-// account hold (any OTHER reason value, e.g. the 2026-09-11 owner-directed
-// pause) — billing-pause.js's own contract already draws this exact line
-// ("ONLY 'autopay_final_failure' pauses auto-clear... a pause an operator
-// set by hand is a human decision"). Reuse that constant rather than
-// hand-rolling a second copy of the distinction. An unset/unknown reason
-// on a paused row is treated as a hold (fail closed — never top up a
-// customer someone paused without a legible, auto-clearable reason).
-const TOPUP_CUSTOMER_INELIGIBILITY_RULES = [
-  ['customer_deleted', (c) => !!c.deleted_at],
-  ['customer_service_held', (c) => !!c.service_paused_at && c.service_pause_reason !== AUTO_CLEARABLE_REASON],
-  ['customer_inactive', (c) => c.active === false],
-  ['customer_churned', (c) => FORMER_CUSTOMER_STAGES.includes(c.pipeline_stage)],
-];
+// Customer eligibility for the top-up: the shared table in
+// services/series-customer-eligibility.js (deleted, genuinely held,
+// inactive, churned), which the pest-rides-lawn preview also reads, so the
+// two can never disagree about who is eligible.
 function topupCustomerSkipReason(customer) {
-  if (!customer) return 'customer_not_found';
-  const hit = TOPUP_CUSTOMER_INELIGIBILITY_RULES.find(([, test]) => test(customer));
-  return hit ? hit[0] : null;
+  return seriesCustomerSkipReason(customer);
 }
 
 // Top-up v1 scope cut (Codex GitHub rounds 2-3): the customer-wide,
@@ -18331,9 +19486,9 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 
 // A held family (lawn_care / mosquito / tree_shrub — cancellation-
 // resolution/holds.js's startHold, HOLDABLE_FAMILIES) promises "no visits
-// before resume_on": every one of the family's upcoming visits was moved out
-// to no earlier than that date and the monthly component (when the customer
-// is on one) suspended. Top-up must honor that same promise rather than
+// before resume_on": every one of the family's visits inside the pause was
+// skipped (a prepaid one moved to on or after that date) and the monthly
+// component (when the customer is on one) suspended. Top-up must honor that same promise rather than
 // booking a fresh visit into the held window. Codex GitHub r6 P1.
 //
 // Reuses holds.js's own family classifier (familyOfServiceRow,
@@ -18347,8 +19502,8 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 //
 // "Active" uses the EXACT status/column semantics runPlanHoldLifecycle
 // itself reads: status: 'active' AND resume_on in the future. A hold whose
-// resume_on has already arrived is not fenced here — startHold moves every
-// visit in the family to no earlier than resume_on, so a visit ON that date
+// resume_on has already arrived is not fenced here — startHold leaves no
+// family visit before resume_on, so a visit ON that date
 // is exactly what the hold always intended to let through once it ends;
 // runPlanHoldLifecycle's own cron flips status to 'resumed' shortly after,
 // independently of top-up.
@@ -18497,6 +19652,19 @@ async function topupSeriesSkipReason(conn, parent, parentId, cols) {
     if (await test(conn, parent, parentId, cols)) return reason;
   }
   return null;
+}
+
+// All-hits variant for the pest-rides-lawn preview (Codex P2 round on PR
+// #5290): topupSeriesSkipReason itself stays first-hit and byte-identical
+// (the nightly top-up only ever needs ONE reason to skip a write), but the
+// preview's `reasons` array documents that it lists EVERY applicable gate.
+// Same table, same sequential DB-read order, just never short-circuited.
+async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
+  const hits = [];
+  for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
+    if (await test(conn, parent, parentId, cols)) hits.push(reason);
+  }
+  return hits;
 }
 
 // Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
@@ -18835,7 +20003,7 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 //     'recurring_cancel_reseed' stamp, written in the adding transaction);
 //   - the root's window is unplaceable even after the top-up's floor;
 //   - the customer is deleted / held / inactive / churned
-//     (TOPUP_CUSTOMER_INELIGIBILITY_RULES, FOR UPDATE like the top-up);
+//     (series-customer-eligibility.js, FOR UPDATE like the top-up);
 //   - annual-prepay series, family on plan hold, duplicate series
 //     (TOPUP_SERIES_INELIGIBILITY_RULES);
 //   - the annual-prepay namespace is busy (a term is being created);
@@ -19065,7 +20233,19 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
   const reductionIds = await readPlanReductionIds(trx, {
     customerId: parent.customer_id, parentId, candidateIds: laterCancelledPlanRowIds(seriesRows, cancelled.id),
   });
-  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds) };
+  return {
+    window,
+    counting,
+    expected,
+    upcomingPlanCount,
+    anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds),
+    seriesRows,
+    todayET,
+    // The occurrence an in-term replacement stands in for: its plan position
+    // (an earlier in-term replacement carries the slot it replaced as its
+    // date_exception_cadence_date).
+    replacedOccurrenceDate: planPositionDate(cancelled),
+  };
 }
 
 // Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
@@ -19094,7 +20274,9 @@ async function probeReseedOverlaps(trx, { parent, parentId, added }) {
 
 // Step 5 — the idempotency stamp, same trx as the insert, so a rolled-back
 // add leaves no stamp and a committed add can never be repeated.
-function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates }) {
+function stampReseed(trx, {
+  parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates, placement = 'series_end',
+}) {
   return trx('activity_log').insert({
     customer_id: parent.customer_id,
     action: 'recurring_cancel_reseed',
@@ -19104,7 +20286,7 @@ function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, add
       recurring_parent_id: String(parentId),
       added_service_ids: added.map((c) => String(c.id)),
       term_index: term.window.index, term_start: term.window.start, term_end: term.window.end,
-      counting: term.counting, expected: term.expected, overlap_dates: overlapDates,
+      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement,
     }),
   });
 }
@@ -19140,7 +20322,9 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // population (Codex r8 P1): 24 live rows of which some are callbacks /
 // included follow-ups would clamp live + 1 back to 24 and add nothing. The
 // cap is enforced here, on the plan-row population, instead.
-async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, anchorFloor }) {
+async function addOneReseedVisit(trx, {
+  parent, parentId, cols, upcomingPlanCount, anchorFloor, placementPicker = null, placementAddonDate = null,
+}) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
   const reconcileParent = normalizedWindow
@@ -19161,8 +20345,10 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
       // the only consumer of the claim token, is unreachable.
       claimToken: null,
       ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
+      placementPicker,
+      placementAddonDate,
     });
-    return { added: result.added, reconcileParent };
+    return { added: result.added, reconcileParent, placement: result.placement || 'series_end' };
   } catch (e) {
     // The unbillable-extension refusal fires before any write, so the trx is
     // intact; it is terminal (a retry would read the same template).
@@ -19208,14 +20394,33 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor });
+  // In-term placement (GATE_CANCEL_RESEED_IN_TERM, read live): the gap the
+  // cancel left inside this term, else the series-end append as before.
+  const { cancelReseedInTermLive } = require('../config/feature-gates');
+  const placementPicker = cancelReseedInTermLive()
+    ? ({ shift, takenDates }) => require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
+      rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates, cancelledDate: cancelled.scheduled_date,
+    })
+    : null;
+  const add = await addOneReseedVisit(trx, {
+    parent,
+    parentId,
+    cols,
+    upcomingPlanCount: term.upcomingPlanCount,
+    anchorFloor: term.anchorFloor,
+    placementPicker,
+    placementAddonDate: placementPicker ? term.replacedOccurrenceDate : null,
+  });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {
-    await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates });
+    await stampReseed(trx, {
+      parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates, placement: add.placement,
+    });
   }
   return {
     added: add.added,
+    placement: add.placement,
     skipped: add.added.length ? null : 'not_placed',
     counting: term.counting, expected: term.expected, parentId, customerId: parent.customer_id, overlapWarnings: overlapDates,
   };
@@ -19263,7 +20468,7 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
     // Same terminal re-check the auto-extend and the top-up run: a series
     // cancel can take the per-parent lock right after our commit.
     await cancelSpawnedReminderIfVisitTerminal(conn, child.id, 'recurring-cancel-reseed');
-    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (term had ${result.counting}/${result.expected})`);
+    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (${result.placement === 'in_term' ? 'inside the term' : 'at the series end'}; term had ${result.counting}/${result.expected})`);
   }
   return result;
 }
@@ -20565,6 +21770,24 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         // just the facts: a served brief's cached access codes must not
         // reach the former technician once the recheck has the signal.
         if (!stillOwned) return { brief: null };
+        // "Seen" stamp for the customer-flagged photos (PR 3a): same
+        // fire-and-forget, whereNull-guarded, first-time-only pattern as
+        // pest_identifications.report_first_viewed_at
+        // (public-pest-identifier.js) — never adds latency or failure to
+        // the brief read, and the guard makes concurrent reads idempotent.
+        // ASSIGNED-TECHNICIAN reads only (isTechnicianRequest): an
+        // admin/dispatcher previewing the same stop must not mark a
+        // customer's photos "seen" before the technician has actually
+        // opened them. Runs only after the reassignment recheck above
+        // confirms this request still owns the stop.
+        if (isTechnicianRequest(req) && facts.customerFlagged?.length) {
+          const submissionIds = facts.customerFlagged.map((c) => c.id);
+          void db('visit_prep_submissions')
+            .whereIn('id', submissionIds)
+            .whereNull('tech_seen_at')
+            .update({ tech_seen_at: db.fn.now() })
+            .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
+        }
         return { ...payload, facts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
@@ -20600,6 +21823,38 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
     res.json(await withFacts(served));
+  } catch (err) { next(err); }
+});
+
+// GET /:id/visit-prep-photos
+// Short-lived signed VIEW urls for the stop's customer-sent visit-prep
+// photos (PR 3a — the tech Visit Brief panel's "Customer flagged"
+// thumbnails). Gate off (GATE_VISIT_PREP_PHOTOS) = 404, same generic shape
+// every other gated route in this lane answers with. Authorization is
+// EXACTLY GET /:id/visit-brief's own model: one ownership-scoped fetch
+// (technicianCurrentVisitFilter — a technician request is scoped to their
+// OWN current assignment; an admin/office request is unscoped) plus a
+// reassignment recheck AFTER the (S3-signing) work, since dispatch can
+// reassign the stop while those signed urls are being minted — a former
+// technician must never receive a batch of live links into a customer's
+// home.
+router.get('/:id/visit-prep-photos', async (req, res, next) => {
+  try {
+    const { visitPrepPhotosLive } = require('../config/feature-gates');
+    if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Not found' });
+    const VisitPrep = require('../services/visit-prep');
+    const photos = await VisitPrep.stopPhotoViewUrls(svc);
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return res.status(404).json({ error: 'Not found' });
+    res.json({ photos });
   } catch (err) { next(err); }
 });
 
@@ -23016,12 +24271,15 @@ function customerFacingCompanionTypes(companions) {
 // are technician-recorded visit data with the same provenance split as the
 // primary findings. `findingsType` may be null on companion-only profiles
 // (e.g. lawn_tree_shrub_combo): the block then carries companions alone.
-function renderTypedGroupLines(sections) {
+// Under GATE_REPORT_WRITER_RULES the product application record (termite
+// treatment names, EPA numbers, gallons, footage) stays out of the prompt;
+// its names still feed the trade-name output screen.
+function renderTypedGroupLines(sections, { withholdProductRecord = false } = {}) {
   const parts = [];
   if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
   if (sections.objectives?.length) parts.push(`Recorded treatment objectives (targets only — not proof of a sighting, inspection, or completed application):\n${sections.objectives.join('\n')}`);
-  if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
+  if (sections.products.length && !withholdProductRecord) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
   if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
   if (sections.customer.length) parts.push(`Customer communication (the homeowner's words / what was discussed — attribute it, NEVER present as a technician-verified finding):\n${sections.customer.join('\n')}`);
   return parts;
@@ -23048,14 +24306,14 @@ function copyActivityScore(type, values, submitted) {
 // "Next steps selected" line for either the primary or companion sections.
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, companionFindings = [],
-  allowedCompanionTypes = [], activityScore = null,
+  allowedCompanionTypes = [], activityScore = null, withholdProductRecord = false,
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
     : { work: [], observations: [], products: [], advice: [], customer: [] };
   const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
-  const primaryParts = renderTypedGroupLines(primarySections);
+  const primaryParts = renderTypedGroupLines(primarySections, { withholdProductRecord });
   const allowed = new Set(allowedCompanionTypes);
   // The profile's declared companion set bounds the work — every AUTHORIZED
   // companion renders (no arbitrary numeric cap; a >4-companion profile must
@@ -23075,7 +24333,7 @@ function buildTypedFindingsPromptBlock({
       const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
       const activityLine = typedActivityLine(entry.type, entry?.activityScore);
       if (activityLine) sections.observations.push(activityLine);
-      const parts = renderTypedGroupLines(sections);
+      const parts = renderTypedGroupLines(sections, { withholdProductRecord });
       if (!parts.length) return null;
       const label = ActivityIndicators.findingsSchemaForType(entry.type)?.label || entry.type;
       return `Companion findings (${label}):\n${parts.join('\n')}`;
@@ -23111,6 +24369,11 @@ router.post('/generate-report', async (req, res) => {
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
     } = req.body;
+    // GATE_REPORT_WRITER_RULES, read once per request. It applies only to
+    // writers in its scope (never lawn or tree/shrub/palm — owner
+    // 2026-09-30, another lane owns them); see report-writer-rules.js.
+    const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
+    const writerRulesGate = reportWriterRulesLive();
 
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
@@ -23319,7 +24582,7 @@ router.post('/generate-report', async (req, res) => {
 
 ## CONTEXT
 
-This prompt generates copy for two sections of a branded, customer-facing service report PDF for **Waves Pest Control & Lawn Care** — a premium home services provider in Southwest Florida. The sections appear inside a formal document alongside customer info, property details, product tables, and safety guidance.
+This prompt generates copy for two sections of a branded, customer-facing service report PDF for **Waves Pest Control** — a premium home services provider in Southwest Florida. The sections appear inside a formal document alongside customer info, property details, product tables, and safety guidance.
 
 The two sections are:
 
@@ -23498,34 +24761,6 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     const promptObs = obs.map((x) => redactAccessCodes(x));
     const promptRecs = recs.map((x) => redactAccessCodes(x));
     const promptConcern = redactAccessCodes(concernText);
-    const userMessage = `Generate the service report copy for this visit.
-
-INPUTS
-
-Client Full Name: ${customerName || 'Not specified'}
-Service Type: ${serviceType || 'Not specified'}
-Technician Full Name: ${technicianName || 'Not specified'}
-Service Date: ${serviceDate || 'Not specified'}
-Arrival Time: ${arrivalTime || 'Not specified'}
-
-[COMPLETED WORK]
-Service Notes: ${promptNotes || 'Not specified'}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
-Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
-Products Applied / Active Ingredients: ${productsText || 'Not specified'}
-
-[OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
-Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
-
-[REPORTED BY CUSTOMER]
-Customer interaction: ${customerInteraction || 'Not specified'}
-Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
-
-[FUTURE ADVICE — not completed work]
-Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
-
-Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
 
     // TECHNICIAN PHOTO OBSERVATIONS (GATE_REPORT_PHOTO_CONTENT, owner spec
     // 2026-09-27): the tech's own reviewed/edited captions for this visit's
@@ -23763,6 +24998,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
               companionFindings: companionEntries,
               allowedCompanionTypes,
               activityScore: typedActivityScoreNum,
+              withholdProductRecord: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
@@ -23808,6 +25044,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
+
+    const writerRulesOn = writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext);
 
     // Strict re-check of the input gate now that companion authorization is
     // known: if companion facts were the ONLY thing that opened the gate and
@@ -23863,6 +25101,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         products: Array.isArray(products) ? products : [],
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
+        writerRules: writerRulesOn,
       });
       contextText = ctx.contextText || '';
       contextSignals = ctx.signals || {};
@@ -23919,21 +25158,28 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     let commsBlock = '';
     if (includeCustomerComms === true && groundingCustomerId) {
       try {
-        const { buildCompletionCommsContext } = require('../services/completion-comms-context');
-        const comms = await buildCompletionCommsContext({
+        const { buildCompletionCommsContext, buildCustomerWordsContext } = require('../services/completion-comms-context');
+        // Under the writer rules only the customer's own words, labeled and
+        // scrubbed (buildCustomerWordsContext); otherwise the mixed log.
+        const comms = await (writerRulesOn ? buildCustomerWordsContext : buildCompletionCommsContext)({
           customerId: groundingCustomerId,
           scheduledServiceId,
         });
         if (comms.text) {
-          commsBlock = `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
+          commsBlock = writerRulesOn
+            ? `\n\n${CUSTOMER_WORDS_HEADER}\n${comms.promptHint}\n${redactAccessCodes(comms.text)}`
+            : `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
         }
       } catch (commsErr) {
         logger.warn(`[generate-report] comms context failed: ${commsErr.message}`);
       }
     }
 
-    const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
-    const effectiveSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, reportPromptContext);
+    const effectiveSystemPrompt = selectReportCopyPrompt(
+      systemPrompt,
+      groundingServiceType,
+      writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
+    );
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -23941,12 +25187,66 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         retryable: true,
       });
     }
-    const fullUserMessage = `${userMessage}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
+    const userMessage = `Generate the service report copy for this visit.
+
+INPUTS
+
+Client Full Name: ${customerName || 'Not specified'}
+Service Type: ${serviceType || 'Not specified'}
+Technician Full Name: ${technicianName || 'Not specified'}
+Service Date: ${serviceDate || 'Not specified'}
+Arrival Time: ${arrivalTime || 'Not specified'}
+
+${writerRulesOn
+    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
+    : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
+Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
+${writerRulesOn
+    ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)
+    : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
+
+[OBSERVED BY TECHNICIAN]
+Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
+Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
+
+[REPORTED BY CUSTOMER]
+Customer interaction: ${customerInteraction || 'Not specified'}
+Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
+
+[FUTURE ADVICE — not completed work]
+Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
+
+Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
+    // Why the customer booked (scheduled_services.customer_request*, filled
+    // by re-service bookings), which no writer read before. Writer rules
+    // and authorized grounding only; a failed read just leaves it out.
+    let bookedReason = '';
+    if (writerRulesOn && groundingCustomerId && scheduledServiceId) {
+      try {
+        const booked = await db('scheduled_services').where({ id: scheduledServiceId })
+          .first('customer_request', 'customer_request_source', 'customer_request_pests');
+        const { scrubCustomerText } = require('../services/completion-comms-context');
+        const block = bookedReasonBlock(booked, scrubCustomerText);
+        if (block) bookedReason = `\n\n${block}`;
+      } catch { /* no booked reason: the paragraph leads with the work */ }
+    }
+    const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
     // prompt and all visit facts participate in the cache identity.
     const cacheKey = crypto.createHash('sha256')
       .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
+      // Under the writer rules product names never reach the prompt, so what
+      // the output screens check joins the key instead: a draft screened for
+      // one product set is never served for another.
+      .update(writerRulesOn
+        ? `|withheld:${JSON.stringify([
+          productsText,
+          (Array.isArray(products) ? products : []).map((prod) => [prod?.productId || null, prod?.name || null]),
+          typedProductNameGuards,
+        ])}`
+        : '')
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
@@ -23961,11 +25261,38 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // The builder propagates a catalog failure only when an id-only product
     // depends on it for its name — the guard cannot run complete, so fail
     // retryable like the other grounding outages (codex r49).
+    // Under the writer rules no product may be named, not only this
+    // visit's: a catalog product the prompt itself mentions (a note saying
+    // "the customer asked about <product>") joins the trade-name screen.
+    const mentionedCatalogNames = [];
+    const mentionedCatalogActives = [];
+    if (writerRulesOn) {
+      try {
+        const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
+        for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
+          const named = Boolean(row?.name)
+            && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
+          if (named) mentionedCatalogNames.push(row.name);
+          // Its actives too: a draft must not swap the named product for
+          // its active ingredient; and an active the prompt names on its own
+          // ("azoxystrobin" in a note) is screened even with no product name.
+          if (row?.active_ingredient && (named || activeIngredientsMentioned(fullUserMessage, row.active_ingredient))) {
+            mentionedCatalogActives.push(row.active_ingredient);
+          }
+        }
+      } catch (err) {
+        logger.warn(`[generate-report] catalog name screen build failed — failing retryable: ${err.message}`);
+        return res.status(503).json({
+          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          retryable: true,
+        });
+      }
+    }
     let screenTradeNames;
     try {
       screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
         products: Array.isArray(products) ? products : [],
-        extraNames: [...typedProductNameGuards, ...fallbackProductNames],
+        extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
       });
     } catch (err) {
@@ -23975,10 +25302,46 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         retryable: true,
       });
     }
+    // Under the writer rules the copy may not name an active ingredient
+    // either: this visit's catalog actives join the rules screen (fail-soft
+    // to the screen's common list when the catalog read misses).
+    const visitActiveIngredients = [...mentionedCatalogActives];
+    if (writerRulesOn) {
+      // By id, and by name for name-only products (a legacy or restored row
+      // has productId null), the same two ways the grounding loader matches.
+      const selectedProducts = Array.isArray(products) ? products : [];
+      const productIds = selectedProducts.map((prod) => prod?.productId).filter(Boolean);
+      const productNames = [...new Set([
+        ...selectedProducts.filter((prod) => !prod?.productId).map((prod) => String(prod?.name || '').trim()),
+        ...(selectedProducts.length ? [] : fallbackProductNames),
+      ].filter(Boolean))];
+      if (productIds.length || productNames.length) {
+        try {
+          const rows = await db('products_catalog')
+            .where((q) => {
+              if (productIds.length) q.whereIn('id', productIds);
+              if (productNames.length) q.orWhereIn('name', productNames);
+            })
+            .select('active_ingredient');
+          visitActiveIngredients.push(...(Array.isArray(rows) ? rows : []).map((row) => row?.active_ingredient).filter(Boolean));
+        } catch (err) {
+          // The screen cannot run complete without this visit's actives —
+          // fail retryable like the trade-name guard, never screen weaker.
+          logger.warn(`[generate-report] active-ingredient screen build failed — failing retryable: ${err.message}`);
+          return res.status(503).json({
+            error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+            retryable: true,
+          });
+        }
+      }
+    }
+    const writerRulesScreen = (text) => (writerRulesOn
+      ? writerRulesRejection(text, { activeIngredients: visitActiveIngredients })
+      : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
-      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null),
+      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
@@ -23993,26 +25356,41 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           retryable: true,
         });
       }
+      // Under the writer rules the last-resort copy echoes only recorded
+      // items the rules allow: an item with a timeframe, price, amount or
+      // other forbidden term is left out rather than published, and free-text
+      // recommendations are left out entirely (aftercare, next-visit timing
+      // and handling advice belong to the report's own sections).
+      const rulesItems = (items) => (writerRulesOn
+        ? items.filter((item) => !writerRulesScreen(String(item || '')))
+        : items);
       const report = buildDeterministicReportCopy({
         serviceType: fallbackServiceType,
-        areas: promptAreas,
-        actions: [...promptActions, ...typedFallbackActions],
+        areas: rulesItems(promptAreas),
+        actions: rulesItems([...promptActions, ...typedFallbackActions]),
         // Typed structured findings ride the fallback as technician work /
         // observations / next steps (profile-confirmed above; product
         // application fields excluded) — a typed-only request must not 503
         // when the free-text fields are empty. All free-text inputs arrive
         // pre-redacted (codex r34).
-        observations: [...promptObs, ...typedFallbackObservations],
-        recommendations: [...promptRecs, ...typedFallbackNextSteps],
-        ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
-        customerConcern: promptConcern,
-        applicationRecords: deterministicApplications,
+        observations: rulesItems([...promptObs, ...typedFallbackObservations]),
+        recommendations: writerRulesOn ? [] : [...promptRecs, ...typedFallbackNextSteps],
+        // A zero rating ("Recorded pest activity was none.") names no place
+        // checked, a property-wide absence the writer rules refuse (rule 4):
+        // under the rules it is left out, so the recorded work still ships.
+        ratingLabel: ratingNum !== null && !(writerRulesOn && ratingNum === 0) ? PEST_ACTIVITY_LABELS[ratingNum] : null,
+        customerConcern: rulesItems([promptConcern])[0] || '',
+        // The writer rules drop the recorded footage ("with 120 linear ft
+        // recorded") from the last-resort copy too.
+        applicationRecords: writerRulesOn
+          ? deterministicApplications.map(({ areaValue, areaUnit, ...application }) => application)
+          : deterministicApplications,
       });
       // Same request-specific trade-name guard as the AI path (codex r19):
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && screenTradeNames(report) ? null : report;
+      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
@@ -24042,6 +25420,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       model: generated.model,
       fallbackUsed: generated.failures.length > 0,
       hasGrounding: !!groundingCustomerId,
+      ...(writerRulesOn ? { writerRules: true } : {}),
       ...contextSignals,
     });
     res.json({ report, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
@@ -25305,6 +26684,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
   // writer's helpers, so the behavioural suite can drive each one against a
@@ -25451,6 +26831,7 @@ router._test = {
   isDuplicateActiveSeries,
   resolveDuplicateActiveSeries,
   normalizeTopUpWindow,
+  assignableRecurringTemplateTechnicianId,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,
   acquireRecurringSeriesMaintenanceLock,
@@ -25495,6 +26876,8 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+module.exports.findCompletingCardRequestVisitId = findCompletingCardRequestVisitId;
+module.exports.findEstimateScopedCommitment = findEstimateScopedCommitment;
 // The billable-amount booking gate — also consumed lazily by the IB
 // create_appointment proposal and executor for its single visit
 // (ADMIN-BUG-R12), same avoid-a-route-load-cycle reason as above.
@@ -25533,3 +26916,23 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
+// Read-only reuse for the pest-rides-the-lawn-rhythm READ-ONLY PREVIEW
+// (services/rider-series-preview.js — the write engine itself is #5268,
+// paused): the SAME series-eligibility table the nightly top-up already
+// applies (annual prepay / family plan hold / duplicate active series),
+// consumed with NO lock taken — the preview never writes, so it skips the
+// per-customer annual-prepay advisory try-lock this file's own cancel-reseed
+// path takes (above, inline) before calling this same function on that
+// path; a lock is meaningless (and misleading — it would silently no-op)
+// for a read that commits nothing. Lazy require only, same avoid-a-route-
+// load-cycle reason as every other export in this block.
+module.exports.topupSeriesSkipReason = topupSeriesSkipReason;
+// All-hits twin of the above, same read-only posture — see its own comment.
+module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
+// The override-aware address resolver the duplicate-series guard scopes on
+// (see its own header comment above topUpScopeInput): read-only reuse for
+// the preview's AND the ops report script's own property-scope resolution
+// (resolveSeriesPropertyScope, services/rider-series-preview.js) — one
+// address resolver, so "same property" can never mean something different
+// in the duplicate guard than it does in the pest-rides-lawn preview.
+module.exports.topUpScopeInput = topUpScopeInput;

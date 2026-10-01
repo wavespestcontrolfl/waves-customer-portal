@@ -70,7 +70,9 @@ describe('source contracts', () => {
   });
   test('the operator\'s resend-receipt route is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
-    expect(source).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,1200}receipt can only be sent for paid invoices[\s\S]{0,900}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId: req\.technicianId \|\| null \}\);[\s\S]{0,400}const \{ sendReceiptEmail \} = require/);
+    // After the receipt-job claim (a queued receipt cannot deliver during the
+    // closeout), before either leg.
+    expect(source).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,1200}receipt can only be sent for paid invoices[\s\S]{0,600}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: !invoice\.receipt_sent_at \}\)[\s\S]{0,2000}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId: req\.technicianId \|\| null \}\);[\s\S]{0,400}if \(via === 'email' \|\| via === 'both'\) \{\s*emailResult = await sendReceiptEmail/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
@@ -186,7 +188,9 @@ describe('source contracts', () => {
     const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const detailsTrxAt = schedule.indexOf("const commsPeek = await trx('scheduled_services')");
     const occupancyAt = schedule.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);', detailsTrxAt);
-    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
+    // The re-price block (owner 2026-09-28) takes the same lock at the same
+    // point for a price edit, so the condition now names both.
+    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
     const firstRowLockAt = schedule.indexOf('.forUpdate()', detailsTrxAt);
     const conversionVoidAt = schedule.indexOf('await voidConversionInvoicesRestoringCredits({ trx, ids: nonAccruedIds, voidUpdate });', detailsTrxAt);
     expect(detailsTrxAt).toBeGreaterThan(-1);

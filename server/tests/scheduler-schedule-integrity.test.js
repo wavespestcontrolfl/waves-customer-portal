@@ -43,7 +43,7 @@ test.each([
   [{ acceptedScheduleGaps: 1 }, 'acceptedScheduleGaps=1'],
   [{ prepayCoverageGaps: 1 }, 'prepayCoverageGaps=1'],
 ])('the existing daily tick surfaces integrity-check status %j', async (result, message) => {
-  runScheduleIntegrityWatchdog.mockResolvedValue({ skipped: false, stale: 0, unpricedSeries: 0,
+  runScheduleIntegrityWatchdog.mockResolvedValue({ skipped: false, unpricedSeries: 0,
     lawnEmailGaps: 0, lawnGapCheckFailed: false, acceptedScheduleGaps: 0,
     acceptedScheduleCheckFailed: false, prepayCoverageGaps: 0, alerted: 0, ...result });
   initScheduledJobs();

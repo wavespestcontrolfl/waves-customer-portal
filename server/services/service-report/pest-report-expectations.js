@@ -146,6 +146,43 @@ function rainfastClauseText(products) {
   return rainfastLabel ? ` Your treatment is rain-fast about ${rainfastLabel} after it dries, per the label.` : '';
 }
 
+// Forward-looking heavy-rain caveat text — LIVE view only (see
+// buildRainExpectation's forecastHeavyRain param doc). Shared between the
+// "attached to the trailing-week fact" case and the "no settled trailing
+// total to attach it to" case below (codex P2 deferred finding c, #5137) so
+// the two can never drift into different wording for the same signal.
+const HEAVY_RAIN_FORECAST_CAVEAT = 'Heavy rain right after a treatment can reduce it — if you\'re seeing activity after a downpour, let us know.';
+
+// The opening rain line: the trailing-week fact (+ optional rainfast/forecast
+// clauses) when a settled week is available, OR — when it is not — the live
+// forecast caveat on its own (codex P2 deferred finding c, #5137: a same-day
+// live report with an OPEN trailing-week window has no settled fact to
+// attach the caveat to; settledWeekWeatherForRender, reports-public.js,
+// withholds it from every render, live included). Returns null when there
+// is nothing to say. Extracted so this "what opens the rain block" decision
+// doesn't compound buildRainExpectation's own branch count.
+function buildTrailingWeekRainLine({
+  rainInches, rainConfidence, products, forecastHeavyRain,
+}) {
+  // The caveat is a treatment claim: an inspection- or sweep-only visit (no
+  // recorded application) never gets it, attached or standalone (codex r2
+  // on #5265).
+  const treatmentCaveat = forecastHeavyRain && (products || []).length > 0;
+  if (rainInches == null) return treatmentCaveat ? HEAVY_RAIN_FORECAST_CAVEAT : null;
+  const inchesText = formatInches(rainInches);
+  let sentence = rainConfidence === 'low'
+    // Low-confidence (city-collective fallback) hedges the number rather
+    // than stating it as an exact property read.
+    ? `Rain gauges for your area suggest roughly ${inchesText}" over the past week — local totals can vary.`
+    : `It's rained about ${inchesText}" at your property over the past week.`;
+  sentence += rainfastClauseText(products);
+  // Forward-looking heavy-rain caveat — LIVE view only (see param doc).
+  // Never a claim that rain can't otherwise affect the treatment beyond the
+  // label facts above.
+  if (treatmentCaveat) sentence += ` ${HEAVY_RAIN_FORECAST_CAVEAT}`;
+  return sentence;
+}
+
 // ── Rain and your treatment ──────────────────────────────────────────────
 // weekWeather: { rainInches, rainConfidence } from application-conditions.js
 //   fetchServiceWeekWeather (7-day trailing window ending on the service date).
@@ -167,24 +204,10 @@ function buildRainExpectation({
   const rainConfidence = weekWeather?.rainConfidence || null;
   const lines = [];
 
-  if (rainInches != null) {
-    const inchesText = formatInches(rainInches);
-    let sentence = rainConfidence === 'low'
-      // Low-confidence (city-collective fallback) hedges the number rather
-      // than stating it as an exact property read.
-      ? `Rain gauges for your area suggest roughly ${inchesText}" over the past week — local totals can vary.`
-      : `It's rained about ${inchesText}" at your property over the past week.`;
-
-    sentence += rainfastClauseText(products);
-
-    // Forward-looking heavy-rain caveat — LIVE view only (see param doc).
-    // Never a claim that rain can't otherwise affect the treatment beyond
-    // the label facts above.
-    if (forecastHeavyRain) {
-      sentence += ' Heavy rain right after a treatment can reduce it — if you\'re seeing activity after a downpour, let us know.';
-    }
-    lines.push(sentence);
-  }
+  const trailingWeekLine = buildTrailingWeekRainLine({
+    rainInches, rainConfidence, products, forecastHeavyRain,
+  });
+  if (trailingWeekLine) lines.push(trailingWeekLine);
 
   // Ants-after-rain expectation — owner ruling 2026-09-28: NEVER on the
   // calendar month alone. Requires an actual rain signal: >= 0.5" during
@@ -261,6 +284,20 @@ const SPIDER_ACTION_RE = /\b(eave|eaves|web|webs|webbing|soffit|cobweb)\b/i;
 // exterior areas." is a web action (opens the section) but says nothing
 // about where, so it gets location-neutral wording.
 const EAVE_ACTION_RE = /\b(eave|eaves|soffit|soffits)\b/i;
+// Actual evidence webs were REMOVED, as opposed to merely an eave/soffit
+// LOCATION being named (codex P2 deferred finding b, #5137): the
+// completedActions "serviced-eaves" choice ("Completed the recorded eave and
+// soffit service.", client/src/lib/service-completion-choices.js) matches
+// SPIDER_ACTION_RE purely because it names the eaves — it records no web
+// work of any kind and could just as easily be a residual application or an
+// inspection. Every wording this module can produce opens with "We knocked
+// down webs...", so that claim needs an action that actually says so: either
+// it names web(s)/webbing/a cobweb directly (the completedActions
+// "removed-webs" choice), or it explicitly SWEPT (protocols.json's "Swept
+// eaves, window frames, door frames, and lanai" — sweeping IS the
+// web-removal act). A location-only eave action with none of that wording
+// gets no card at all rather than an invented "we knocked down webs" claim.
+const WEB_REMOVAL_ACTION_RE = /\b(webs?|webbing|cobweb|swept|sweep(?:ing)?)\b/i;
 const SPIDER_TARGET_RE = /spider/i;
 // Ant-specific wording (colony, "ants may show up more", the treated-band
 // trail claim) needs an application the tech actually TAGGED for ants —
@@ -315,6 +352,17 @@ function buildSpiderExpectation({ actionLabels = [], actionEntries = [], applica
   // No recorded eave/web/soffit action => no section, regardless of any
   // spider-targeted product (see module note above).
   if (!actionHit) return null;
+
+  // Web-removal evidence, specifically — not just an eave/soffit-NAMED
+  // action (codex P2 deferred finding b, #5137; see WEB_REMOVAL_ACTION_RE
+  // above). Every wording below claims webs were knocked down; a
+  // location-only "Completed the recorded eave and soffit service." with no
+  // web-removal/sweep evidence anywhere on the visit earns no card, gate on
+  // or off, residual or not — an unproven "we knocked down webs" claim is
+  // never invented just because a treatment happened to reach the eaves.
+  const webRemovalNamed = (actionLabels || []).some((label) => WEB_REMOVAL_ACTION_RE.test(cleanText(label)))
+    || (actionEntries || []).some((entry) => WEB_REMOVAL_ACTION_RE.test(cleanText(entry?.label)));
+  if (!webRemovalNamed) return null;
 
   // A genuine eave TREATMENT recorded for the visit — not just a sweep
   // (protocol marks a sweep treatmentApplied: false, and that alone is not
@@ -584,6 +632,7 @@ module.exports = {
   buildWhatToExpect,
   buildPestExpectations,
   toExpectationProduct,
+  isExteriorApplicationArea,
   formatRainfastMinutes,
   formatInches,
 };

@@ -354,6 +354,14 @@ describe('buildAnswer — next_photo', () => {
     });
   });
 
+  test('the compared look-alike\'s warning rides with the comparison, even when it is not a candidate', () => {
+    // one-way-ant's own look-alike is fire-ant, which the model never listed.
+    const built = buildAnswer(baseCtx({ candidates: [cand('one-way-ant', 0.60)] }));
+    expect(built.answer.level).toBe('entry');
+    expect(built.candidatesBlock.map((c) => c.slug)).toEqual(['one-way-ant']);
+    expect(built.nextPhoto).toMatchObject({ photo_can_confirm: true, safety_line: 'Stings burn and can trigger allergic reactions.' });
+  });
+
   test('an unapproved answer with no look-alike pair gets the fixed retake prompt', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('pending-verification-ant', 0.95)] }));
     expect(built.entry).toBeNull();
@@ -493,6 +501,7 @@ describe('buildAnswer — candidates block hides an unapproved candidate\'s iden
       strength: 'possible',
       difference_from_top: null,
       local: null,
+      safety_line: null,
     }]);
   });
 
@@ -502,6 +511,17 @@ describe('buildAnswer — candidates block hides an unapproved candidate\'s iden
     ], CURRENT_MONTH);
     expect(visible.map((candidate) => candidate.slug)).toEqual([
       'fire-ant', 'ghost-ant', 'white-footed-ant',
+    ]);
+  });
+
+  test('a named alternative carries its own warning; a masked one carries none', () => {
+    const visible = engine.candidatesBlockFor([
+      cand('ghost-ant', 0.7), cand('fire-ant', 0.3), cand('unreviewed-ant', 0.2),
+    ], CURRENT_MONTH);
+    expect(visible.map((c) => [c.common_name, c.safety_line])).toEqual([
+      ['Ghost Ant', null],
+      ['Fire Ant', 'Stings burn and can trigger allergic reactions.'],
+      ['an ant', null],
     ]);
   });
 });
@@ -1418,10 +1438,12 @@ describe('L1: pest engine reads only the pest section', () => {
     const real = jest.requireActual('../services/species-catalog');
     const all = real.listEntries();
     const pestOnly = real.listEntries({ section: 'pest' });
-    expect(all.length).toBe(358);
-    expect(pestOnly.length).toBe(239);
+    // 358 approved + the 19 draft entries of the 2026-09-30 yard-rotation
+    // set (7 pest, 4 plant, 8 condition).
+    expect(all.length).toBe(377);
+    expect(pestOnly.length).toBe(246);
     expect(pestOnly.every((e) => real.sectionOf(e) === 'pest')).toBe(true);
-    expect(all.filter((e) => real.sectionOf(e) !== 'pest')).toHaveLength(119);
+    expect(all.filter((e) => real.sectionOf(e) !== 'pest')).toHaveLength(131);
   });
 
   // Codex #5143 r1 P2: filtering the PROMPT to pest-section entries doesn't

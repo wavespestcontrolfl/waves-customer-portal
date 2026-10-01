@@ -128,7 +128,14 @@ function customLinkClause(rescheduleUrl) {
 //     static template text can't mask the loss (codex r3 P2). The list is
 //     the SHARED map the template write validator enforces at save time
 //     (codex r8 P1) — one source, so save and render can never disagree.
-async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {
+//   templateBody: render THIS snapshot of the row's body instead of
+//     re-reading it (customTemplateSnapshot) — the send-time re-render that
+//     drops a link the landed-state check just revoked must not touch the
+//     live row a second time: an admin edit, disable, or a required-
+//     placeholder removal between the pre-move check and the send would
+//     otherwise strand the customer with NO move notice at all, even
+//     though the visit already moved (codex round-2 P1 on PR #5308).
+async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId, templateBody = null }) {
   const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
   return renderSmsTemplate(CUSTOM_TEMPLATE_KEY, {
     first_name: firstName || 'there',
@@ -143,6 +150,7 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
   }, {
     noVariants: true,
     requiredVars: REQUIRED_TEMPLATE_PLACEHOLDERS[CUSTOM_TEMPLATE_KEY],
+    ...(templateBody != null ? { templateBody } : {}),
   });
 }
 
@@ -173,6 +181,48 @@ function measureAsSent(body) {
   const { countSegments } = require('./messaging/segment-counter');
   const sent = normalizeGsmPunctuation(stripSmsUrlScheme(body));
   return { sent, ...countSegments(sent) };
+}
+
+// Renders BOTH the linked and no-link variants of a Quick Move SMS through
+// the SAME renderer, and reports the WORSE (larger) segment count of the
+// two — a short-domain shortlink config, or a short legacy code, can make
+// the linked clause SHORTER than the fixed no-link reply fallback, so "the
+// no-link variant is always shorter" is not a safe assumption (codex round-3
+// P2). commit() and previewMovedSms both call this ONE function so the
+// sheet's advisory counter and the enforcer can never drift (codex round-4
+// P2 on PR #5308: previewMovedSms measured only the linked body, so the
+// sheet could green-light a boundary note that commit() then refused,
+// after the dispatcher had already acted on "fits").
+// `renderWithUrl(url)` is the caller's own render call shaped for its rung
+// (Custom vs preset+note) — called once with the real/placeholder url and
+// once with null. Returns { ok: false } if either render fails (caller
+// decides the failure reason); otherwise both bodies plus each one's own
+// measurement and `worst`, the measureAsSent() result for whichever body
+// costs more — segment count first, then, on a tie, whichever actually
+// used more of its last segment's capacity (codex round-5 P2: a bare
+// segmentCount tie always kept the linked variant, so previewMovedSms's
+// `remaining` could report the headroom of the variant with MORE room left,
+// when a landed-state revocation is free to send the other one).
+function usedCapacity(seg) {
+  return seg.encoding === 'GSM_7' ? seg.gsmSlotCount : seg.sent.length;
+}
+async function measureWorstLinkVariant(renderWithUrl, url) {
+  const withLinkBody = await renderWithUrl(url);
+  if (!withLinkBody) return { ok: false };
+  const noLinkBody = await renderWithUrl(null);
+  if (!noLinkBody) return { ok: false };
+  const withLinkSeg = measureAsSent(withLinkBody);
+  const noLinkSeg = measureAsSent(noLinkBody);
+  let worst = withLinkSeg;
+  if (noLinkSeg.segmentCount > withLinkSeg.segmentCount) {
+    worst = noLinkSeg;
+  } else if (noLinkSeg.segmentCount === withLinkSeg.segmentCount
+    && usedCapacity(noLinkSeg) > usedCapacity(withLinkSeg)) {
+    worst = noLinkSeg;
+  }
+  return {
+    ok: true, withLinkBody, noLinkBody, withLinkSeg, noLinkSeg, worst,
+  };
 }
 
 // The v3 rung's single render path — sendMovedSms and commit()'s pre-move
@@ -208,6 +258,27 @@ async function renderV3MovedBody({ firstName, serviceType, date, window, weather
     noVariants: true,
     ...(templateBody != null ? { templateBody } : {}),
   });
+}
+
+// The Custom rung's row as it stands NOW — the ONE observation the
+// pre-move segment cap measures against, pinned onto prebuiltSms so the
+// SEND (including a link-revoked re-render — see renderCustomMovedBody's
+// templateBody param) renders from this snapshot and never re-reads the
+// live row (codex round-2 P1 on PR #5308: a second read means a row an
+// admin disabled, or edited to drop a required placeholder or grow past
+// the segment cap, between the pre-move check and the send would silently
+// strand an already-moved visit with no notice at all). Unlike
+// v3TemplateSnapshot there is no dark-gate/absent-row fallback rung for
+// Custom (renderCustomMovedBody's own header: "there is no honest fallback
+// rung") — { state: 'absent' } / { state: 'disabled' } both end the move
+// notice at custom_message_unavailable, exactly like a render returning
+// null does today. A READ FAILURE throws — callers fail the move closed
+// (note_cap_unavailable), same posture as v3TemplateSnapshot.
+async function customTemplateSnapshot() {
+  const row = await db('sms_templates').where({ template_key: CUSTOM_TEMPLATE_KEY }).first('body', 'is_active');
+  if (!row) return { state: 'absent' };
+  if (row.is_active === false || !row.body) return { state: 'disabled' };
+  return { state: 'live', body: String(row.body) };
 }
 
 // The v3 row as it stands NOW — the one observation both the pre-move cap
@@ -358,18 +429,24 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
       return { ok: false, reason: 'note_cap_unavailable' };
     }
   }
-  const body = isCustom
-    ? await renderCustomMovedBody({
+  // Measures BOTH the linked and no-link variants — the SAME shared helper
+  // commit() uses, so the sheet's advisory counter and the enforcer can
+  // never drift (codex round-4 P2 on PR #5308: this preview used to measure
+  // only the linked body, so it could tell the sheet a boundary note fits
+  // when commit() — which already checked both — would then refuse it,
+  // after the dispatcher had already acted on "fits").
+  const measured = await measureWorstLinkVariant((rescheduleUrl) => (isCustom
+    ? renderCustomMovedBody({
       firstName: service.first_name,
       serviceType: service.service_type,
       date: target.date,
       window: target.window,
       customMessage: message || CUSTOM_DEFAULT_MESSAGE,
-      rescheduleUrl: url,
+      rescheduleUrl,
       serviceId,
     })
-    : await renderPresetMovedNotice({ service, reasonCode, target, note: message, rescheduleUrl: url, serviceId, templateBody });
-  if (!body) {
+    : renderPresetMovedNotice({ service, reasonCode, target, note: message, rescheduleUrl, serviceId, templateBody })), url);
+  if (!measured.ok) {
     return {
       ok: false,
       // A preset rung with a live snapshot that failed to render is a
@@ -378,9 +455,9 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
       reason: isCustom ? 'custom_message_unavailable' : (templateBody ? 'note_cap_unavailable' : 'uncapped'),
     };
   }
-  const seg = measureAsSent(body);
+  const seg = measured.worst;
   const perSegment = seg.encoding === 'GSM_7' ? 153 : 67;
-  const used = seg.encoding === 'GSM_7' ? seg.gsmSlotCount : seg.sent.length;
+  const used = usedCapacity(seg);
   return {
     ok: true,
     segments: seg.segmentCount,
@@ -1406,6 +1483,26 @@ async function getOptions(serviceId, { caller = null } = {}) {
 // without it — the copy is optional, the tech's response is not.
 const FORECAST_DECORATION_TIMEOUT_MS = 1500;
 
+// The landed-state link re-check every notified Quick Move send runs before
+// it renders anything (see sendMovedSms's own header comment, kept there):
+// a prebuiltSms carrying a body (Custom) or a v3/url key (preset+note) —
+// i.e. commit() pre-measured something — re-validates that MEASURED url
+// through pinnedUrl (the builder's full eligibility, including the C3/C6
+// dead-link move-window guard, judged on the POST-move/landed row); a call
+// with no pre-move measurement at all mints/looks up fresh. Extracted
+// verbatim out of sendMovedSms to keep its branching from growing past its
+// pre-round-5 baseline (AGENTS.md: extract new decision paths into small
+// named helpers rather than grow an already-flagged function) — no
+// behavior change.
+async function resolveLandedMovedSms(prebuiltSms, serviceId, customer) {
+  if (prebuiltSms?.body || (prebuiltSms && 'url' in prebuiltSms)) {
+    return prebuiltSms.url
+      ? (await buildRescheduleLink(serviceId, { customerId: customer.id, pinnedUrl: prebuiltSms.url })).url
+      : null;
+  }
+  return (await buildRescheduleLink(serviceId, { customerId: customer.id })).url;
+}
+
 async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false }, operatorInitiated = false, prebuiltSms = null }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
@@ -1414,25 +1511,14 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   // Moved-first means the new slot is already booked — no confirmation
   // reply to ask for. Adjustments self-serve through the same tokenized
   // /reschedule link the 72h/24h reminders send. A capped move reuses what
-  // commit() built for its pre-move segment check. Custom: the exact
-  // { url, body } — templates are admin-editable and the shortener can
-  // fall back to the LONG url, so rebuilding either here could exceed the
-  // cap the check passed (codex pre-push P1). Preset with a note: the
-  // MEASURED url is re-validated here (pinnedUrl — the builder's grouped /
-  // frozen checks run on the POST-move state and hand back that same url
-  // or none; never a lookup or a mint), so a visit grouped in between gets
-  // no link the page refuses (r2 P2) and the body can only shrink against
-  // the measurement (pre-push P1). A measured "no link" stays no link.
-  let rescheduleUrl;
-  if (prebuiltSms?.body) {
-    rescheduleUrl = prebuiltSms.url;
-  } else if (prebuiltSms && 'url' in prebuiltSms) {
-    rescheduleUrl = prebuiltSms.url
-      ? (await buildRescheduleLink(serviceId, { customerId: customer.id, pinnedUrl: prebuiltSms.url })).url
-      : null;
-  } else {
-    rescheduleUrl = (await buildRescheduleLink(serviceId, { customerId: customer.id })).url;
-  }
+  // commit() built for its pre-move segment check. The no-link fallback is
+  // NOT always shorter than the linked clause (codex round-3 P2: a short-
+  // domain shortlink config, or a short legacy code, can make the link
+  // clause shorter than the fixed reply fallback) — commit() measures BOTH
+  // variants against the cap before the move commits, so a revocation swap
+  // below is safe in either direction; never re-derive that assumption
+  // here. See resolveLandedMovedSms for the actual re-check.
+  const rescheduleUrl = await resolveLandedMovedSms(prebuiltSms, serviceId, customer);
   // gate_locked carries the portal fix-it nudge ahead of the reschedule
   // clause on whichever rung renders — the customer must hear how to fix
   // next time's access even when v3 is absent and v2 falls in.
@@ -1515,16 +1601,36 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   //     row is load-bearing as the absent-v2 fallback body; never delete.
   let body = null;
   let renderedKey = null;
+  // The legacy rung keeps the v2 kill-switch key above (see the metadata
+  // comment) but must record the row it really rendered as template_key.
+  let legacyRendered = false;
   if (isCustom) {
     // Custom rung: the dispatcher's message IS the lead, the move line +
     // link close it out. The normal path uses the exact body commit()'s
-    // pre-move segment check validated. The render-here path only serves a
-    // caller that didn't prevalidate; it re-runs the cap itself, and a
-    // missing/disabled row (its own kill switch — there is no honest
-    // fallback rung, the older bodies all render a reason the dispatcher
-    // didn't pick) reports the customer was NOT texted.
-    if (prebuiltSms?.body) {
+    // pre-move segment check validated — UNLESS the landed-state re-check
+    // above (rescheduleUrl, via pinnedUrl) just revoked the pre-move-
+    // measured link: the visit's own slot now falls inside the move-notice
+    // window, or it went grouped/frozen, since the pre-move build
+    // (independent-reviewer finding on PR #5308 — the Custom rung's
+    // pre-move build runs with assumeConfirmed, which the link builder
+    // deliberately exempts from the move-window guard, so this send-time
+    // re-check is the only place it can catch a visit that landed too soon
+    // to move online again — including a plain read failure, {failed:true},
+    // which also lands rescheduleUrl on null).
+    if (prebuiltSms?.body && rescheduleUrl === prebuiltSms.url) {
       body = prebuiltSms.body;
+    } else if (prebuiltSms?.body) {
+      // Swap to noLinkBody — the SAME no-link render commit() already
+      // produced and measured against the cap pre-move, alongside the
+      // linked one (codex round-3 P2: the no-link fallback is not always
+      // shorter, so both were checked; the naive "dropping the link only
+      // shrinks it" assumption missed a short-domain/short-code case that
+      // grows past the cap). A plain property swap — never a re-render,
+      // never a live re-read of the template row, so an admin edit/
+      // disable/placeholder removal/lengthening in the meantime cannot
+      // strand the customer with no notice at all (codex round-2 P1) or
+      // exceed a cap already proven to hold (codex round-3 P2).
+      body = prebuiltSms.noLinkBody;
     } else {
       body = await renderCustomMovedBody({
         firstName: customer.first_name,
@@ -1561,6 +1667,19 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       return { sent: false, reason: 'missing_template' };
     }
     if (pinnedState !== 'absent') {
+      // Unlike the Custom rung, v3 ALWAYS re-renders here rather than
+      // reusing a pre-move body verbatim — two of its inputs are allowed to
+      // differ from what the pre-move cap measured (a grouped stop's landed
+      // window, and the weather lead's real clock/calendar-dependent
+      // wording; both were measured at their LONGEST pre-move, never
+      // understated). A pinned noLinkBody from commit() would freeze those
+      // at their pre-move (target-based, worst-case) values, which could
+      // name the WRONG window for a grouped stop by the time this send
+      // actually runs (independent-reviewer finding, round 3) — so the
+      // landed-state link revocation (rescheduleUrl, resolved above) simply
+      // flows into this SAME render, never a separate frozen swap.
+      // templateBody still pins commit()'s row snapshot, so this never
+      // re-reads the live row regardless of which url it renders with.
       body = await renderV3MovedBody({
         firstName: customer.first_name,
         serviceType: job.service_type,
@@ -1611,7 +1730,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
         ...longFormVars,
         weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
       }, renderContext);
-      if (body) renderedKey = 'rain_out_moved_v2';
+      if (body) { renderedKey = 'rain_out_moved_v2'; legacyRendered = true; }
     }
   }
   if (!body) {
@@ -1622,8 +1741,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   // Dispatcher note rides AFTER whichever rung rendered — it decorates the
   // templated copy, never replaces it (the reply-to-adjust link and weather
   // grounding stay intact). commit() already sanitized it and, on the v3
-  // rung, held body + note to the segment cap pre-move. The custom rung
-  // embeds the message as its opening line, so no append there.
+  // rung, held body + note to the segment cap pre-move (both the linked and
+  // no-link variants — codex round-3 P2). The custom rung embeds the
+  // message as its opening line, so no append there.
   if (!isCustom) body = withTeamNote(body, customerNote);
 
   const result = await sendCustomerMessage({
@@ -1661,7 +1781,8 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // (is_active=false), and stamping a retired key suppresses every send
     // as a sentinel "success". The legacy-render fallback stamps the v2 key
     // for the same reason — an absent v2 row (rolled-back migration) counts
-    // as active there, so the fallback still texts.
+    // as active there, so the fallback still texts. templateKey below still
+    // names the legacy row, since that is what rendered the body.
     metadata: {
       original_message_type: renderedKey,
       reason_code: reasonCode,
@@ -1670,6 +1791,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       // carrying a dispatcher-authored note — reads as system-generated in
       // the durable record (codex r2 P2).
       ...(actorUserId ? { adminUserId: actorUserId } : {}),
+      // The row that rendered the body, for the template audit. Same as
+      // original_message_type except on the legacy rung, which keeps v2's
+      // kill-switch key there but rendered the legacy rain_out_moved row.
+      templateKey: legacyRendered ? 'rain_out_moved' : renderedKey,
     },
   });
   if (result?.blocked || result?.sent === false) {
@@ -1730,6 +1855,180 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
 // How long a Quick Move series-text claim (series_moves.notified_at with
 // customer_notified=false) stays exclusive before a retry may reclaim it.
 const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;
+
+// commit()'s pre-move Custom-rung SMS preparation, extracted verbatim so
+// commit() itself doesn't keep growing past its pre-round-5 baseline
+// (AGENTS.md: extract new decision paths into small named helpers rather
+// than grow an already-flagged function) — no behavior change. The
+// dispatcher's message is the SMS's opening line (route scope would fan
+// one customer's situation out to strangers — commit() itself still
+// refuses that before calling in), and the assembled SMS must fit
+// MOVED_SMS_MAX_SEGMENTS. A blank message is allowed (owner ruling
+// 2026-08-24) — the template already carries the full notice, so
+// CUSTOM_DEFAULT_MESSAGE fills the front instead of rejecting. The exact
+// send body is rendered here, pre-move, through the same
+// renderCustomMovedBody + link the send will use — reject BEFORE anything
+// moves, never after. The template row is snapshotted FIRST
+// (customTemplateSnapshot, mirroring the preset rung's v3TemplateSnapshot)
+// and pinned onto prebuiltSms.templateBody: the send (and its own
+// link-revoked re-render — see sendMovedSms) renders from THIS snapshot,
+// never a live re-read, so a template disabled/edited/lengthened between
+// this check and the send cannot strand an already-moved visit with no
+// notice at all (codex round-2 P1 on PR #5308).
+// Returns { ok: false, reason } to refuse the move, or { ok: true,
+// prebuiltSms } — prebuiltSms is null when notifyCustomer is false.
+async function prepareCustomRungSms({ serviceId, service, target, note, notifyCustomer }) {
+  if (!notifyCustomer) return { ok: true, prebuiltSms: null };
+  let snap;
+  try {
+    snap = await customTemplateSnapshot();
+  } catch (err) {
+    logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} snapshot read failed for ${serviceId} — move refused: ${err.message}`);
+    return { ok: false, reason: 'note_cap_unavailable' };
+  }
+  // No honest fallback rung for Custom (renderCustomMovedBody's own header:
+  // "there is no honest fallback rung, the older bodies all render a reason
+  // the dispatcher didn't pick") — a missing/disabled row is the SAME kill
+  // switch a null render already reported; pinning the observation here
+  // just moves it earlier so the send can never act on a DIFFERENT read of
+  // the row than this check made.
+  if (snap.state !== 'live') {
+    logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} ${snap.state} — move refused for ${serviceId}`);
+    return { ok: false, reason: 'custom_message_unavailable' };
+  }
+  let url;
+  try {
+    url = await preMoveRescheduleUrl(serviceId, service);
+  } catch (err) {
+    logger.warn(`[rain-out] pre-move link build failed for ${serviceId} — move refused: ${err.message}`);
+    return { ok: false, reason: 'note_cap_unavailable' };
+  }
+  // Renders and measures BOTH the linked and no-link variants — the SAME
+  // shared helper previewMovedSms uses, so the sheet's advisory counter and
+  // this enforcer can never drift (codex round-4 P2 on PR #5308). Null
+  // render here means an admin edit deleted a required placeholder from the
+  // row the snapshot above already confirmed live (renderCustomMovedBody
+  // passes requiredVars — enforced inside getTemplate on the body that
+  // renders, pre-substitution): the ONE remaining reason a live snapshot
+  // fails to render (mirrors the preset rung's own "a live snapshot that
+  // FAILS to render refuses the move" case). Either way the message that IS
+  // the reason can't send, so fail the move here instead of silently moving
+  // the visit messageless.
+  const measured = await measureWorstLinkVariant((rescheduleUrl) => renderCustomMovedBody({
+    firstName: service.first_name,
+    serviceType: service.service_type,
+    date: target.date,
+    window: target.window,
+    customMessage: note || CUSTOM_DEFAULT_MESSAGE,
+    rescheduleUrl,
+    serviceId,
+    templateBody: snap.body,
+  }), url);
+  if (!measured.ok) return { ok: false, reason: 'custom_message_unavailable' };
+  const { withLinkBody: body, noLinkBody } = measured;
+  // Template statics can carry send-layer blockers the note guards never
+  // saw — reject pre-move, not after (codex r9 P2). Checked on BOTH
+  // variants: only the link clause differs between them.
+  if (customBodySendBlocked(body)) {
+    logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} assembled body trips the send guards for ${serviceId} — rejecting pre-move`);
+    return { ok: false, reason: 'custom_message_unavailable' };
+  }
+  if (customBodySendBlocked(noLinkBody)) {
+    logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} no-link variant trips the send guards for ${serviceId} — rejecting pre-move`);
+    return { ok: false, reason: 'custom_message_unavailable' };
+  }
+  // The NO-LINK variant is NOT always shorter (codex round-3 P2): on the
+  // short-domain shortlink config, or a short legacy code, the link clause
+  // (` New time & other options: ${url}`) can be SHORTER than the fixed
+  // 46-char reply fallback (' Need a different time? Reply to this
+  // message.') — so a landed-state revocation could GROW a boundary-sized
+  // body past the cap AFTER the move. Refuse the move if EITHER variant
+  // would exceed it: the send below can then swap link ⇄ no-link freely and
+  // never re-check.
+  if (measured.worst.segmentCount > MOVED_SMS_MAX_SEGMENTS) {
+    return { ok: false, reason: 'note_too_many_segments' };
+  }
+  // The send reuses this exact { url, body } verbatim, or — if the
+  // landed-state link re-check revokes url — swaps in noLinkBody, the SAME
+  // no-link render just measured above (never a second render, never a
+  // live re-read). Both variants are already proven to fit, so the swap can
+  // never fail the cap post-move.
+  return { ok: true, prebuiltSms: { url, body, noLinkBody, templateBody: snap.body } };
+}
+
+// commit()'s pre-move preset-reason-with-a-note SMS preparation, extracted
+// verbatim for the same reason as prepareCustomRungSms above — no behavior
+// change. The same 2-segment cap, measured on the v3 notice + the appended
+// note (the note rides the anchor stop only, so route scope measures the
+// anchor's text — siblings get the standard copy). Reject BEFORE the move
+// so the dispatcher shortens the note instead of the customer paying for a
+// third segment. An uncapped rung (v3 gate dark) skips the check. The send
+// acts on what was OBSERVED here, never on a re-read: it renders the
+// measured row snapshot (a row an admin edit grew in between could exceed
+// the cap — codex pre-push P1), honours a disabled / absent row the way
+// this check saw it (a row enabled in between would render a body the cap
+// never saw — r2 P2), and rebuilds the link with the SAME existing code
+// through the builder's post-move eligibility checks (a visit grouped or
+// frozen in between must not be handed a link the page refuses — r2 P2).
+// BOTH the linked and no-link bodies are measured here (codex round-3 P2):
+// the no-link fallback is NOT always shorter — a short-domain shortlink
+// config or a short legacy code can make the link clause shorter than the
+// fixed reply fallback, so a landed-state revocation could otherwise GROW a
+// boundary-sized body past the cap with no post-render check to catch it.
+// The two moving parts the send re-renders — the weather lead and a
+// grouped stop's landed window — were measured at their longest. Only
+// called when notifyCustomer, note and service.phone are all already
+// truthy (a customer with no phone is never held to the cap: nothing sends
+// — sendMovedSms answers no_phone and the move proceeds un-texted, which
+// the sheet reports — so a message that never goes out must not block the
+// move, codex r5 P2).
+// Returns { ok: false, reason } to refuse the move, or { ok: true,
+// prebuiltSms } — prebuiltSms may be null (no v3 row at all) or carry only
+// { v3: snap.state } (row present but not live).
+async function prepareNoteRungSms({ serviceId, service, target, note, reasonCode }) {
+  let snap;
+  try {
+    snap = await v3TemplateSnapshot();
+  } catch (err) {
+    // Fail closed: an unreadable row is not an uncapped rung.
+    logger.warn(`[rain-out] v3 template snapshot read failed for ${serviceId} — move refused: ${err.message}`);
+    return { ok: false, reason: 'note_cap_unavailable' };
+  }
+  if (!snap) return { ok: true, prebuiltSms: null };
+  const prebuiltSms = { v3: snap.state };
+  if (snap.state !== 'live') return { ok: true, prebuiltSms };
+  let url;
+  try {
+    url = await preMoveRescheduleUrl(serviceId, service);
+  } catch (err) {
+    logger.warn(`[rain-out] pre-move link build failed for ${serviceId} — move refused: ${err.message}`);
+    return { ok: false, reason: 'note_cap_unavailable' };
+  }
+  prebuiltSms.url = url;
+  // Renders and measures BOTH the linked and no-link variants — the SAME
+  // shared helper previewMovedSms uses, so the sheet's advisory counter and
+  // this enforcer can never drift (codex round-4 P2 on PR #5308). This is
+  // ONLY a pre-move cap measurement — unlike the Custom rung, the send
+  // never reuses either body verbatim: it always re-renders (still from
+  // this SAME pinned templateBody, no live read) with the LANDED
+  // window/weather lead, which this worst-case pre-move measurement
+  // deliberately does not carry (a grouped stop's window in particular can
+  // differ by the time the send actually runs).
+  const measured = await measureWorstLinkVariant((rescheduleUrl) => renderPresetMovedNotice({
+    service, reasonCode, target, note, serviceId, rescheduleUrl, templateBody: snap.body,
+  }), url);
+  // A live snapshot that fails to render (a transient renderer error —
+  // getTemplate swallows its own) is not an uncapped rung either.
+  if (!measured.ok) return { ok: false, reason: 'note_cap_unavailable' };
+  // See the header comment above: the no-link variant can be LONGER than
+  // the linked one, so both must fit before the move commits.
+  if (measured.worst.segmentCount > MOVED_SMS_MAX_SEGMENTS) {
+    return { ok: false, reason: 'note_too_many_segments' };
+  }
+  prebuiltSms.templateBody = snap.body;
+  return { ok: true, prebuiltSms };
+}
+
 async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
@@ -1780,108 +2079,25 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   if (reasonCode === 'gate_locked' && scope === 'route') {
     return { ok: false, reason: 'gate_route_scope' };
   }
-  // Custom reason: the dispatcher's message is the SMS's opening line, so
-  // it's as stop-specific as the note (route scope would fan one customer's
-  // situation out to strangers — single stop only), and the assembled SMS
-  // must fit MOVED_SMS_MAX_SEGMENTS. A blank message is allowed (owner
-  // ruling 2026-08-24) — the template already carries the full notice, so
-  // CUSTOM_DEFAULT_MESSAGE fills the front instead of rejecting. The exact
-  // send body is rendered here, pre-move, through the same
-  // renderCustomMovedBody + link the send will use — reject BEFORE anything
-  // moves, never after.
+  // Custom reason: single stop only (route scope would fan one customer's
+  // situation out to strangers) — commit()'s pre-move SMS prep otherwise
+  // lives in prepareCustomRungSms (see its own header comment for the
+  // snapshot-pinning and dual-variant-measurement rationale). Preset
+  // reason with a note delegates the same way to prepareNoteRungSms.
   let prebuiltSms = null;
   if (reasonCode === CUSTOM_REASON) {
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
-    if (notifyCustomer) {
-      let url;
-      try {
-        url = await preMoveRescheduleUrl(serviceId, service);
-      } catch (err) {
-        logger.warn(`[rain-out] pre-move link build failed for ${serviceId} — move refused: ${err.message}`);
-        return { ok: false, reason: 'note_cap_unavailable' };
-      }
-      const body = await renderCustomMovedBody({
-        firstName: service.first_name,
-        serviceType: service.service_type,
-        date: target.date,
-        window: target.window,
-        customMessage: note || CUSTOM_DEFAULT_MESSAGE,
-        rescheduleUrl: url,
-        serviceId,
-      });
-      // Null render = the row is missing/disabled (the ops kill switch) OR
-      // an admin edit deleted a required placeholder (renderCustomMovedBody
-      // passes requiredVars — enforced inside getTemplate on the body that
-      // renders, pre-substitution). Either way the message that IS the
-      // reason can't send, so fail the move here instead of silently
-      // moving the visit messageless.
-      if (!body) return { ok: false, reason: 'custom_message_unavailable' };
-      // Template statics can carry send-layer blockers the note guards
-      // never saw — reject pre-move, not after (codex r9 P2).
-      if (customBodySendBlocked(body)) {
-        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} assembled body trips the send guards for ${serviceId} — rejecting pre-move`);
-        return { ok: false, reason: 'custom_message_unavailable' };
-      }
-      if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
-        return { ok: false, reason: 'note_too_many_segments' };
-      }
-      // The send reuses this exact { url, body } — templates are
-      // admin-editable, so a re-render at send time could exceed the cap
-      // this check just passed (codex pre-push P1).
-      prebuiltSms = { url, body };
-    }
+    const prepared = await prepareCustomRungSms({
+      serviceId, service, target, note, notifyCustomer,
+    });
+    if (!prepared.ok) return prepared;
+    prebuiltSms = prepared.prebuiltSms;
   } else if (notifyCustomer && note && service.phone) {
-    // Preset reason with a note: the same 2-segment cap, measured on the
-    // v3 notice + the appended note (the note rides the anchor stop only,
-    // so route scope measures the anchor's text — siblings get the
-    // standard copy). Reject BEFORE the move so the dispatcher shortens
-    // the note instead of the customer paying for a third segment. An
-    // uncapped rung (v3 gate dark) skips the check. The send acts on what
-    // was OBSERVED here, never on a re-read: it renders the measured row
-    // snapshot (a row an admin edit grew in between could exceed the cap —
-    // codex pre-push P1), honours a disabled / absent row the way this
-    // check saw it (a row enabled in between would render a body the cap
-    // never saw — r2 P2), and rebuilds the link with the SAME existing
-    // code through the builder's post-move eligibility checks (a visit
-    // grouped or frozen in between must not be handed a link the page
-    // refuses — r2 P2; the code is the one measured, so the body can only
-    // shrink). The two moving parts the send re-renders — the weather
-    // lead and a grouped stop's landed window — were measured at their
-    // longest. A customer with no phone is never held to the cap: nothing
-    // sends (sendMovedSms answers no_phone and the move proceeds un-texted,
-    // which the sheet reports), so a message that never goes out must not
-    // block the move (codex r5 P2).
-    let snap;
-    try {
-      snap = await v3TemplateSnapshot();
-    } catch (err) {
-      // Fail closed: an unreadable row is not an uncapped rung.
-      logger.warn(`[rain-out] v3 template snapshot read failed for ${serviceId} — move refused: ${err.message}`);
-      return { ok: false, reason: 'note_cap_unavailable' };
-    }
-    if (snap) {
-      prebuiltSms = { v3: snap.state };
-      if (snap.state === 'live') {
-        let url;
-        try {
-          url = await preMoveRescheduleUrl(serviceId, service);
-        } catch (err) {
-          logger.warn(`[rain-out] pre-move link build failed for ${serviceId} — move refused: ${err.message}`);
-          return { ok: false, reason: 'note_cap_unavailable' };
-        }
-        prebuiltSms.url = url;
-        const body = await renderPresetMovedNotice({
-          service, reasonCode, target, note, serviceId, rescheduleUrl: url, templateBody: snap.body,
-        });
-        // A live snapshot that fails to render (a transient renderer error —
-        // getTemplate swallows its own) is not an uncapped rung either.
-        if (!body) return { ok: false, reason: 'note_cap_unavailable' };
-        if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
-          return { ok: false, reason: 'note_too_many_segments' };
-        }
-        prebuiltSms.templateBody = snap.body;
-      }
-    }
+    const prepared = await prepareNoteRungSms({
+      serviceId, service, target, note, reasonCode,
+    });
+    if (!prepared.ok) return prepared;
+    prebuiltSms = prepared.prebuiltSms;
   }
   // "Running behind" can only push a same-day visit LATER. The generic
   // same-day options are now+2h/+4h with no regard for the current window,
@@ -2212,7 +2428,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
               'schedule_conflict',
               'Rain-out series shift needs a look',
               `A rain-out moved a recurring visit to ${target.date} but its future visits could not shift with it (a later occurrence conflicts). The plan's cadence no longer follows the moved visit — adjust from dispatch.`,
-              { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, targetDate: target.date, reasonCode } }
+              { link: `/admin/dispatch?tab=schedule&date=${String(target.date).split('T')[0]}&appointment=${encodeURIComponent(job.id)}`,
+                metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, targetDate: target.date, reasonCode } }
             );
             if (!card) {
               logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — series cadence broken with no admin card; targetDate=${target.date} reason=${reasonCode}`);

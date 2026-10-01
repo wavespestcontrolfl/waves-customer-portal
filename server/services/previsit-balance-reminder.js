@@ -298,6 +298,7 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
     customerId: visit.customer_id,
     purpose: 'balance_reminder',
     offLedgerBalanceCents: duesCents,
+    source: 'previsit_balance_reminder',
     logTag: 'previsit-balance',
   };
   const episode = channels ? (await reminderProgress(visit.customer_id, 'previsit_balance_reminder', channels))
@@ -513,7 +514,7 @@ function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledger
           const duesCents = await currentDuesCents({ ...locked.customer, id: visit.customer_id }, savepoint, now);
           const policies = await previsitPolicySnapshots(replayContext?.selected_channels || [channel], {
             customerId: visit.customer_id, purpose: 'balance_reminder', offLedgerBalanceCents: duesCents,
-            excludeLedgerIds, logTag: 'previsit-balance', database: savepoint, now,
+            excludeLedgerIds, source: 'previsit_balance_reminder', logTag: 'previsit-balance', database: savepoint, now,
           });
           const incomplete = policies.find((policy) => policy.balanceIncomplete);
           if (incomplete) return { ...PREVISIT_AUTHORITY_BUSY,
@@ -647,7 +648,12 @@ async function deliverLegacySms({ visit, amount, duesCents, fresh, smsPolicyPerm
       metadata: { scheduled_service_id: visit.id, amount },
     });
     const delivered = !result.blocked && result.sent !== false;
-    if (!delivered) await ContactLedger.markSendFailed(smsLedger, { code: result.code || 'blocked' });
+    if (!delivered) {
+      // A dispute hold that landed after the preflight is a WAIT: release the reservation, no failed
+      // row; the claim is released by the caller so the reminder is retried after the release.
+      if (require('./collections/collection-hold').isHoldSuppression(result)) await ContactLedger.releaseHeldReservation(smsLedger);
+      else await ContactLedger.markSendFailed(smsLedger, { code: result.code || 'blocked' });
+    }
     return delivered;
   } catch (smsErr) {
     logger.warn(`[previsit-balance] SMS failed for visit ${visit.id}: ${smsErr.message}`);
@@ -669,7 +675,9 @@ async function deliverLegacyEmail({ visit, amount, fresh, emailLegAvailable }) {
     });
     const delivered = emailResult?.ok === true;
     if (!delivered) {
-      await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+      // Dispute hold after the preflight: a WAIT (see deliverLegacySms) - release, do not stamp failed.
+      if (require('./collections/collection-hold').isHoldSuppression(emailResult)) await ContactLedger.releaseHeldReservation(emailLedger);
+      else await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
     }
     return delivered;
   } catch (emailErr) {
@@ -774,5 +782,12 @@ module.exports = {
   leadDays,
   DUES_GRACE_DAYS,
   OVERDUE_AFTER_DAYS,
+  // The same two dark levers runSweep() itself checks before it does
+  // anything (PREVISIT_BALANCE_REMINDER=true AND the seeded SMS template
+  // active) — exported so balance-reminder.js's dailyCheck() can tell
+  // whether ITS replacement is actually live before retiring under
+  // GATE_BALANCE_REMINDER_LEGACY_OFF (dunning unification round-2 review).
+  gateEnabled,
+  smsTemplateActive,
   _test: { previsitQuoteAuthority },
 };

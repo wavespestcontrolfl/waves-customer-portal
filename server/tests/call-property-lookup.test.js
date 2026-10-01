@@ -10,7 +10,7 @@
 
 jest.mock('../models/db', () => {
   const fn = jest.fn();
-  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings, rows: [{ locked: true }] }));
   fn.fn = { now: () => 'NOW()' };
   return fn;
 });
@@ -60,7 +60,7 @@ function mockRowDb(row, updateBuilder, extra = {}) {
 
 function builder(result) {
   const b = {};
-  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset', 'insert', 'onConflict', 'merge']) b[m] = jest.fn(() => b);
+  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotExists', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset', 'insert', 'onConflict', 'merge', 'forUpdate', 'noWait']) b[m] = jest.fn(() => b);
   b.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return b;
 }
@@ -284,6 +284,77 @@ describe('runCallPropertyLookup', () => {
     // …but the commercial classification NEVER lands on customers
     // (customers.property_type feeds service_taxability — owner ruling).
     expect(mirror.property_type).toBeUndefined();
+  });
+
+  test('an open geocode review quarantines the mirrored coordinates but not a residential type fill', async () => {
+    const previousGate = process.env.GATE_GEOCODE_REVIEW;
+    const previousTransaction = db.transaction;
+    process.env.GATE_GEOCODE_REVIEW = 'true';
+    db.transaction = jest.fn(async callback => callback(db));
+    try {
+      const propertyRow = {
+        id: 'p1', customer_id: 'c1', active: true, is_primary: true,
+        latitude: null, longitude: null, property_type: null,
+        address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
+        address_key: require('../services/customer-properties').addressKey({
+          address_line1: '123 Sample Cove', city: 'Bradenton', zip: '34212',
+        }),
+      };
+      const customerRow = {
+        id: 'c1', address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', zip: '34212',
+        latitude: null, longitude: null, property_type: null,
+      };
+      // With the review gate on, every write runs inside the fence, so the
+      // call order differs from mockRowDb's; answer each query by its shape
+      // and keep every customers query so each write's predicate is checkable.
+      const byShape = (read, written) => {
+        const query = builder(undefined);
+        query.then = (resolve, reject) => Promise.resolve(
+          query.update.mock.calls.length ? written : read,
+        ).then(resolve, reject);
+        return query;
+      };
+      const customerQueries = [];
+      db.mockImplementation((table) => {
+        if (table === 'property_lookups') return builder(undefined);
+        if (table === 'scheduled_services') return builder([]);
+        if (table === 'customer_properties') {
+          return byShape(propertyRow, [{ latitude: 27.5, longitude: -82.4, property_type: 'single_family' }]);
+        }
+        if (table === 'customers') {
+          const query = byShape(customerRow, 1);
+          customerQueries.push(query);
+          return query;
+        }
+        return builder(1);
+      });
+      performPropertyLookup.mockResolvedValueOnce({
+        satellite: { inServiceArea: true },
+        enriched: {
+          lat: 27.5, lng: -82.4, propertyType: 'Single Family',
+          _observed: { propertyType: true }, fieldVerifyFlags: [],
+        },
+      });
+
+      expect((await runCallPropertyLookup({ propertyId: 'p1' })).filled)
+        .toEqual(['latitude', 'longitude', 'property_type']);
+
+      const writes = customerQueries.filter(query => query.update.mock.calls.length);
+      expect(writes).toHaveLength(2);
+      const [typeWrite, coordinateWrite] = writes;
+      expect(typeWrite.update.mock.calls[0][0]).toMatchObject({
+        property_type: expect.objectContaining({ bindings: ['single_family'] }),
+      });
+      expect(typeWrite.update.mock.calls[0][0]).not.toHaveProperty('latitude');
+      expect(typeWrite.whereNotExists).not.toHaveBeenCalled();
+      expect(coordinateWrite.update.mock.calls[0][0].latitude).toMatchObject({ bindings: [27.5] });
+      expect(coordinateWrite.update.mock.calls[0][0]).not.toHaveProperty('property_type');
+      expect(coordinateWrite.whereNotExists).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_GEOCODE_REVIEW;
+      else process.env.GATE_GEOCODE_REVIEW = previousGate;
+      db.transaction = previousTransaction;
+    }
   });
 
   test('an address edited during the lookup discards the customer mirror (fence survives the live re-read)', async () => {
@@ -1006,7 +1077,10 @@ describe('reconcileCustomerMirrors', () => {
     };
     const joined = builder([
       // Coords missing on the customer, present on the primary property.
-      { customer_id: 'c1', latitude: '27.5', longitude: '-82.4', cp_type: 'single_family', ...base },
+      {
+        customer_id: 'c1', property_id: 'p1', property_customer_id: 'c1',
+        latitude: '27.5', longitude: '-82.4', cp_type: 'single_family', ...base,
+      },
       // Commercial type must never reach customers (taxability ruling) and
       // this row has no coordinate gap → nothing to write, skipped.
       {
@@ -1031,14 +1105,56 @@ describe('reconcileCustomerMirrors', () => {
     });
     const filled = await _private.reconcileCustomerMirrors();
     expect(filled).toBe(1);
-    expect(upd.where).toHaveBeenCalledTimes(1);
+    expect(upd.where).toHaveBeenCalledTimes(2);
     expect(upd.where).toHaveBeenCalledWith({ id: 'c1' });
-    const mirror = upd.update.mock.calls[0][0];
-    expect(mirror.latitude).toMatchObject({ bindings: [27.5] });
-    expect(mirror.property_type).toMatchObject({ bindings: ['single_family'] });
+    const metadataMirror = upd.update.mock.calls[0][0];
+    const coordinateMirror = upd.update.mock.calls[1][0];
+    expect(metadataMirror.property_type).toMatchObject({ bindings: ['single_family'] });
+    expect(metadataMirror).not.toHaveProperty('latitude');
+    expect(coordinateMirror.latitude).toMatchObject({ bindings: [27.5] });
+    expect(coordinateMirror).not.toHaveProperty('property_type');
     // The captured address columns are re-asserted in the UPDATE predicate.
-    const reassert = upd.whereRaw.mock.calls[0];
-    expect(reassert[1]).toEqual(['123 Sample Cove', '', 'Bradenton', '34212']);
+    for (const reassert of upd.whereRaw.mock.calls) {
+      expect(reassert[1]).toEqual(['123 Sample Cove', '', 'Bradenton', '34212']);
+    }
+  });
+
+  test('review quarantine guards coordinates without suppressing property-type repair', async () => {
+    process.env.GATE_GEOCODE_REVIEW = 'true';
+    const joined = builder([{
+      customer_id: 'c1', property_id: 'p1', property_customer_id: 'c1',
+      c_line1: '123 Sample Cove', c_line2: null, c_city: 'Bradenton', c_zip: '34212',
+      address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', zip: '34212',
+      latitude: '27.5', longitude: '-82.4', cp_type: 'single_family',
+    }]);
+    const customerLock = builder({ id: 'c1' });
+    const propertyLock = builder({ id: 'p1', customer_id: 'c1' });
+    const metadataUpdate = builder(1);
+    const coordinateUpdate = builder(0);
+    const settingsWrite = builder(1);
+    let customerCalls = 0;
+    db.transaction = jest.fn(async callback => callback(db));
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('customers as c')) return joined;
+      if (table === 'customers') {
+        customerCalls += 1;
+        if (customerCalls === 1) return customerLock;
+        return customerCalls === 2 ? metadataUpdate : coordinateUpdate;
+      }
+      if (table === 'customer_properties') {
+        return propertyLock;
+      }
+      if (table === 'system_settings') return settingsWrite;
+      return builder(1);
+    });
+
+    expect(await _private.reconcileCustomerMirrors()).toBe(1);
+    expect(joined.whereNotExists).not.toHaveBeenCalled();
+    expect(metadataUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      property_type: expect.anything(),
+    }));
+    expect(metadataUpdate.whereNotExists).not.toHaveBeenCalled();
+    expect(coordinateUpdate.whereNotExists).toHaveBeenCalledTimes(1);
   });
 });
 

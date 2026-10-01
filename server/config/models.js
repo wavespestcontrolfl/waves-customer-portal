@@ -117,18 +117,20 @@ function anthropicAcceptsEffort(model, level) {
 // a no-thinking reply ends the turn with no text. Sonnet 5 also thinks by
 // default, but its lanes' caps were already tuned against it in production
 // (previsit brief 1000 → 2000 → 3000), so it is left out and this stays
-// inert for today's traffic.
-const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+// inert for today's traffic. Sonnet 5.5 and later cannot turn thinking off
+// (even `between_tools` returns progress-update thinking blocks), so they
+// take the floor like Opus 5.5.
+const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
 // live inbound/sandbox chain both rely on picking it with that literal still
-// sent. Opus 5.5 and later minors/majors (5-5, 5-6, 6, 7, …), plus Fable and
-// Mythos, are the ones that 400 on it outright. One id shape, so a future
-// Opus minor needs a change here only, never at either call site that reads
-// this.
-const ANTHROPIC_THINKING_REQUIRED_RE = /^claude-opus-5-[0-9]|^claude-opus-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+// sent. Opus 5.5 and later minors/majors (5-5, 5-6, 6, 7, …), Sonnet 5.5 and
+// later (its floor is `between_tools`), plus Fable and Mythos, are the ones
+// that 400 on it outright. One id shape per family, so a future minor needs a
+// change here only, never at either call site that reads this.
+const ANTHROPIC_THINKING_REQUIRED_RE = /^claude-opus-5-[0-9]|^claude-opus-[6-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 // What a CALLER needs to know before building a request: can `thinking` be
 // sent as `{ type: 'disabled' }` at all? The two voice-relay lanes that
 // always send it check this before picking a model.
@@ -151,12 +153,38 @@ const DEFAULTS = Object.freeze({
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
   VOICE_JUDGE: 'claude-opus-4-8',
+  // Newsletter writer + event-curation scoring (owner ruling 2026-09-27):
+  // Opus 5.5 at effort 'max' — Opus 5.5 defaults to 'medium', so the
+  // newsletterWriter policy pins effort explicitly rather than relying on
+  // the model's own default.
+  NEWSLETTER: 'claude-opus-5-5',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
   OPENAI_FRONTIER: 'gpt-6-astra',
   OPENAI_ESTIMATE_VISION: 'gpt-6-sol',
   OPENAI_IMAGE_SCREEN: 'gpt-5.6-sol',
+  // Plant/tree/shrub/palm photo ID second opinion (owner ruling 2026-09-28,
+  // replaces the 09-26 "no Claude" ruling for the PLANT ENGINE ONLY — the
+  // pest engine's photoIdVision ladder is unchanged): Gemini 3.8 Flash first,
+  // GPT-6 Sol as the second opinion.
+  OPENAI_PLANT_ID: 'gpt-6-sol',
+  // Lawn visit assessment backup leg (owner ruling 2026-09-29): GPT-6 Sol
+  // replaces Astra, matching the plant engine's second opinion — about a
+  // third of Astra's cost and no worse on the hardest photo tests.
+  OPENAI_LAWN_ASSESSMENT: 'gpt-6-sol',
+  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): Claude
+  // Fable 5.1 at high effort, a deciding third look only when a scope is
+  // still unsure after the second opinion. requires:'deep' in MODEL_CATALOG
+  // below; dispatched through services/llm/call.js like every other route,
+  // which already sizes max_tokens for always-thinking models and reads the
+  // answer past any thinking block (anthropicText) — see plant-engine.js.
+  PLANT_ID_REFEREE: 'claude-fable-5-1',
+  // Lawn visit assessment name referee (owner ruling 2026-09-29): Claude Fable
+  // 5.1 at high effort, a tie-break on grass type / finding names only, and
+  // only when Gemini and the Sol second opinion disagreed. Dark behind
+  // GATE_LAWN_ASSESSMENT_REFEREE.
+  LAWN_ASSESSMENT_REFEREE: 'claude-fable-5-1',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
@@ -205,6 +233,13 @@ const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC ||
 // set deliberately.
 const VOICE_JUDGE = process.env.MODEL_VOICE_JUDGE || DEFAULTS.VOICE_JUDGE;
 
+// Newsletter writer + event-curation scoring (owner ruling 2026-09-27:
+// stop skipping the weekly issue — auto-curation was starving at 0-5
+// approved events/week). Own selector rather than riding FLAGSHIP/WORKHORSE
+// so this one lane can move to Opus 5.5 without affecting every other
+// FLAGSHIP/WORKHORSE call site.
+const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
+
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
 const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini' });
@@ -238,6 +273,21 @@ const OPENAI_ESTIMATE_VISION = process.env.MODEL_OPENAI_ESTIMATE_VISION || DEFAU
 // 2026-09-25 lab GPT-5.6 Sol judged the uniform badge's chest side 12 of 12
 // from badge/placket positions; Claude Opus got it wrong in both directions.
 const OPENAI_IMAGE_SCREEN  = process.env.MODEL_OPENAI_IMAGE_SCREEN || DEFAULTS.OPENAI_IMAGE_SCREEN;
+// Plant photo ID second opinion (owner ruling 2026-09-28). Its own selector,
+// off OPENAI_FRONTIER / OPENAI_ESTIMATE_VISION, so this one lane can move
+// independently of the pest identifier's second look and the estimate vision
+// fallback.
+const OPENAI_PLANT_ID      = process.env.MODEL_OPENAI_PLANT_ID     || DEFAULTS.OPENAI_PLANT_ID;
+// Lawn visit assessment backup (owner ruling 2026-09-29). Its own selector,
+// off OPENAI_FRONTIER / OPENAI_PLANT_ID, so the lawn lane moves independently
+// of the pest identifier's Astra second look and the plant engine.
+const OPENAI_LAWN_ASSESSMENT = process.env.MODEL_OPENAI_LAWN_ASSESSMENT || DEFAULTS.OPENAI_LAWN_ASSESSMENT;
+// Plant photo ID referee (owner ruling 2026-09-28) — explicit opt-in via
+// GATE_PLANT_ID_REFEREE (server/config/feature-gates.js), never automatic.
+const PLANT_ID_REFEREE     = process.env.MODEL_PLANT_ID_REFEREE    || DEFAULTS.PLANT_ID_REFEREE;
+// Lawn visit assessment name referee (owner ruling 2026-09-29) — explicit
+// opt-in via GATE_LAWN_ASSESSMENT_REFEREE, never automatic.
+const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEFAULTS.LAWN_ASSESSMENT_REFEREE;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -314,6 +364,13 @@ const MODEL_CATALOG = {
   'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'adaptive' } },
   'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
   'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // Sonnet 5.5 (released 2026-09-28) rejects `thinking: { type: 'disabled' }`
+  // (anthropicThinkingAlwaysOn); its lowest setting is `between_tools`, which
+  // `voice.thinking` hands the voice relay's sandbox / eval-harness path so a
+  // test call keeps up-front thinking off. `requires: 'deep'` keeps it off the
+  // WORKHORSE / FAST / VOICE pickers, whose call sites were not migrated —
+  // same containment as Opus 5.5 above.
+  'claude-sonnet-5-5': { label: 'Claude Sonnet 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'between_tools' } },
   // Fable's thinking blocks + refusal semantics are handled only by
   // services/llm/deep.js, so only DEEP / EXTREME selectors may take it.
   'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep' },
@@ -363,6 +420,16 @@ const ROUTES = Object.freeze({
   smsDraftDefault:   Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // default draft; OpenAI Sol backup
   smsDraftSaveSale:  Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // cancel/complaint draft; OpenAI Sol backup
   smsToneRewrite:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // tone rewrite; OpenAI Terra backup
+  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28,
+  // plant-engine.js's runReferee): single-leg, no automatic fallback — a
+  // referee miss leaves the Gemini -> Sol escalation result unchanged rather
+  // than trying a third provider. `effort: 'high'` reaches only the
+  // Anthropic leg (services/llm/call.js#dispatch).
+  plantIdReferee:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: PLANT_ID_REFEREE, effort: 'high' }),
+  // Lawn visit assessment name referee (owner ruling 2026-09-29,
+  // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
+  // miss leaves Gemini's read exactly as it was.
+  lawnAssessmentReferee: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: LAWN_ASSESSMENT_REFEREE, effort: 'high' }),
 });
 
 // Generated-text policies always cross providers. The shared LLM dispatcher
@@ -451,10 +518,11 @@ const TEXT_POLICIES = Object.freeze({
     // One multimodal call per lawn visit (services/lawn-visit-assessment.js,
     // GATE_LAWN_VISIT_ASSESSMENT). Owner ruling 2026-09-08 (DECISIONS.md): the
     // Gemini vision model reads every visit photo at once; when it misses,
-    // GPT-6 Astra takes over. No Claude leg and no parallel providers — the
-    // one lane that deliberately departs from the Claude-fallback rule.
+    // OpenAI takes over — GPT-6 Sol since the 2026-09-29 ruling (was Astra).
+    // No Claude leg and no parallel providers — the one lane that
+    // deliberately departs from the Claude-fallback rule.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
-    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
   photoIdVision: Object.freeze({
     name: 'photoIdVision',
@@ -466,6 +534,20 @@ const TEXT_POLICIES = Object.freeze({
     // no Claude leg (DECISIONS.md 2026-09-26). Honors GEMINI_VISION_MODEL.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+  }),
+  plantIdVision: Object.freeze({
+    name: 'plantIdVision',
+    // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
+    // 2026-09-28 — replaces the 09-26 "Gemini -> Astra, no Claude" ruling
+    // FOR THE PLANT ENGINE ONLY (the pest engine's photoIdVision above is
+    // unchanged): Gemini 3.8 Flash reads the photo; a miss, an unsure answer
+    // (PHOTO_ID_ESCALATE_BELOW) or a risky runner-up goes to GPT-6 Sol as the
+    // second opinion. Sequential, same GEMINI_VISION_MODEL override as
+    // photoIdVision. A scope still unsure after this second opinion may get
+    // one more look from Claude Fable 5.1 (ROUTES.plantIdReferee), gated
+    // behind GATE_PLANT_ID_REFEREE — not part of this two-provider policy.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
   visitBrief: Object.freeze({
     name: 'visitBrief',
@@ -500,6 +582,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE_JUDGE }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  newsletterWriter: Object.freeze({
+    name: 'newsletterWriter',
+    // Owner ruling 2026-09-27: the newsletter is WRITTEN by Opus 5.5 at
+    // effort 'max', and community-event curation scoring rides the same
+    // model/effort (event-curation.js). `effort` on a route is honored only
+    // on the Anthropic leg (services/llm/call.js#dispatch); a caller that
+    // needs a lighter interactive path (the admin Compose UI) overrides it
+    // per-call rather than moving the whole policy off 'max'.
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: NEWSLETTER, effort: 'max' }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
 });
 
 module.exports = {
@@ -520,6 +613,7 @@ module.exports = {
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,
+  NEWSLETTER,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,
@@ -531,6 +625,10 @@ module.exports = {
   OPENAI_FRONTIER,
   OPENAI_ESTIMATE_VISION,
   OPENAI_IMAGE_SCREEN,
+  OPENAI_PLANT_ID,
+  OPENAI_LAWN_ASSESSMENT,
+  PLANT_ID_REFEREE,
+  LAWN_ASSESSMENT_REFEREE,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
   EMBEDDING_DIMS,

@@ -508,7 +508,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
 // A payload `temperature` is read by the Gemini leg only. Current Anthropic
 // models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
 // this leg never forwards it.
-function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens }) {
+function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort }) {
   const content = [...withImageLabels(images, toAnthropicImage, (label) => ({ type: 'text', text: label })),
     ...documents.map((doc) => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data } }))];
   if (text) content.push({ type: 'text', text });
@@ -523,8 +523,15 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
   if (tools) req.tools = tools;
   const outputConfig = {};
   if (jsonMode && jsonSchema) outputConfig.format = { type: 'json_schema', schema: anthropicSchema(jsonSchema) };
-  const effort = anthropicEffortFor(model);
-  if (effort) outputConfig.effort = effort;
+  // `effort` is a per-route request (models.js TEXT_POLICIES leg / ROUTES
+  // entry, e.g. newsletterWriter's primary: { ..., effort: 'max' }) —
+  // resolved the same way deep.js's per-call effort is: honored only when
+  // the model actually SERVING the request accepts that exact level
+  // (anthropicEffortFor falls back to the pinned MODEL_ANTHROPIC_EFFORT, or
+  // the model's own default, exactly as before when no effort is requested
+  // or the served model doesn't support it).
+  const resolvedEffort = anthropicEffortFor(model, effort);
+  if (resolvedEffort) outputConfig.effort = resolvedEffort;
   if (Object.keys(outputConfig).length) req.output_config = outputConfig;
   return req;
 }
@@ -539,7 +546,14 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
 // and the lanes' own Ajv validators still enforce the full schema on the
 // answer, so only the wire copy sent to Anthropic drops them. Deep copy; the
 // caller's schema object is never mutated.
-const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set(['minItems', 'maxItems', 'minLength', 'maxLength']);
+// Numeric bounds too: `For 'number' type, properties maximum, minimum are not
+// supported` is a 400 on EVERY call (the plant photo ID referee's first live
+// run failed 3/3 on 2026-09-29, #5307), so any lane whose schema bounds a
+// number could never be answered by an Anthropic leg, primary or fallback.
+const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set([
+  'minItems', 'maxItems', 'minLength', 'maxLength',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+]);
 function anthropicSchema(schema) {
   return JSON.parse(JSON.stringify(schema, (key, value) => (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key) ? undefined : value)));
 }
@@ -557,7 +571,7 @@ function anthropicVerdict(resp, maxTokens) {
   return 'anthropic_incomplete';
 }
 
-async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel } = {}) {
+async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel, effort } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   // Ledger latency. With no budget the SDK keeps its default retries, so one
@@ -565,7 +579,9 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
   const t0 = nowMs();
   try {
     const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const req = anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens });
+    const req = anthropicRequest({
+      model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort,
+    });
     // maxRetries:0 whenever a budget is supplied — the SDK's per-request
     // timeout applies to EACH attempt, so its default retry policy (2 retries)
     // could hold a caller for ~3x its ceiling. Callers with a timeoutMs budget
@@ -591,7 +607,12 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
 }
 
 /**
- * Dispatch a models.ROUTES entry ({ provider, model }) to the matching provider.
+ * Dispatch a models.ROUTES entry ({ provider, model, effort? }) to the
+ * matching provider. `effort` is an Anthropic-only route field (e.g.
+ * TEXT_POLICIES.newsletterWriter.primary: { ..., effort: 'max' }) forwarded
+ * to callAnthropic → anthropicEffortFor, which honors it only when the model
+ * actually serving the request accepts that exact level; ignored on
+ * OpenAI/Gemini routes.
  * payload: { system, text, images, documents, jsonMode, jsonSchema, maxTokens, tools, temperature,
  *            thinkingLevel (Gemini), reasoningEffort (OpenAI), anthropicClient, laneId,
  *            promptVersion } (`anthropicClient` supports
@@ -606,7 +627,14 @@ async function dispatch(route, payload = {}) {
     case PROVIDER.GEMINI:
       if (args.documents?.length) return { ok: false, reason: 'unsupported_pdf_provider' };
       return callGemini(args);
-    case PROVIDER.ANTHROPIC: return callAnthropic(args);
+    // `route.effort` (a models.js TEXT_POLICIES leg / ROUTES entry field,
+    // e.g. newsletterWriter's primary) reaches ONLY the Anthropic leg —
+    // OpenAI/Gemini have no equivalent concept and callOpenAI/callGemini
+    // simply ignore an unrecognized payload field, so this must not be
+    // spread into `args` above (a route with no `effort` behaves exactly as
+    // before: `effort: undefined` resolves through anthropicEffortFor
+    // exactly like omitting it).
+    case PROVIDER.ANTHROPIC: return callAnthropic({ ...args, effort: route.effort });
     default: return { ok: false, reason: `unknown_provider_${route.provider}` };
   }
 }

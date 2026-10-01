@@ -562,9 +562,26 @@ describe('pest week-weather lookup is opt-in per caller (source wiring)', () => 
     expect(src).toMatch(/const pestWeekWeatherEligible = opts\.pestWeekWeather === true[\s\S]{0,300}?pestWeekWeatherEligible\n\s*\? await resolvePestWeekWeatherForBuild\(service, serviceLine, knex, opts\.mode\)\n\s*: \{ weekWeather: null, uncacheable: false, reason: null \}/);
   });
 
-  test('the /data response builder (which also serves the direct PDF route) opts in', () => {
+  test('buildServiceReportV1ResponseData threads its own pestExpectationsWeather opt-in through to pestWeekWeather (codex P2 #5137 deferred finding a)', () => {
     const src = read('routes/reports-public.js');
-    expect(src).toMatch(/pinnedLawnHistoryIdentity,[^\n]*\bexpectationFactsOut,[\s\S]{0,400}?pestWeekWeather: true,\n\s*\}\);/);
+    expect(src).toMatch(/pinnedLawnHistoryIdentity,[^\n]*\bexpectationFactsOut,[\s\S]{0,400}?pestWeekWeather: pestExpectationsWeather,\n\s*\}\);/);
+  });
+
+  test('the /data response builder (which also serves the direct PDF route) opts in; the Q&A endpoint (/ask) does not', () => {
+    const src = read('routes/reports-public.js');
+    // Direct PDF route.
+    expect(src).toMatch(/mode: 'pdf', pestPressureConfig,[\s\S]{0,700}?pestExpectationsWeather: true,/);
+    // /data route.
+    expect(src).toMatch(/composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,[\s\S]{0,500}?pestExpectationsWeather: true,/);
+    // /ask calls the builder with only `{ mode: 'live' }` — no opt-in, so it
+    // never pays for either weather lookup (answerServiceReportQuestion
+    // never reads data.pestReportV2.expectations).
+    expect(src).toMatch(/const data = await buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\);/);
+  });
+
+  test('the live heavy-rain NWS forecast fetch is also gated on pestExpectationsWeather, not mode/recency alone', () => {
+    const src = read('routes/reports-public.js');
+    expect(src).toMatch(/const forecastHeavyRain = pestExpectationsWeather && expectationsGateOn && mode === 'live' && isRecentServiceDate\(service\.service_date\)/);
   });
 
   test('pdf-queue opts in', () => {

@@ -390,11 +390,14 @@ describe('event freshness — routine recurrence and editorial newness', () => {
     }))).toBe(false);
   });
 
-  test('annual occurrences revive only after a trustworthy 300-day cooldown', () => {
-    const reference = new Date('2026-07-14T12:00:00Z');
+  test('annual occurrences revive once a NEW ET calendar year starts (owner ruling 2026-09-27, replaces the 300-day cooldown)', () => {
+    const reference = new Date('2026-07-14T12:00:00Z'); // event's own start_at is undefined here, so etYearOf falls back to reference's ET year (2026)
     const annual = { event_type: 'annual', recurrence_type: 'annual', times_featured: 1 };
-    expect(isEditoriallyNewEvent({ ...annual, last_featured_at: '2025-09-18T12:00:00Z' }, reference)).toBe(false); // 299d
-    expect(isEditoriallyNewEvent({ ...annual, last_featured_at: '2025-09-17T12:00:00Z' }, reference)).toBe(true);  // 300d
+    // Featured earlier in the SAME ET year (2026) as the occurrence being checked → still blocked, however close the two dates otherwise are.
+    expect(isEditoriallyNewEvent({ ...annual, last_featured_at: '2026-07-01T12:00:00Z' }, reference)).toBe(false);
+    // Featured in the PRIOR ET year (2025) → eligible, even though it's less than 300 days back.
+    expect(isEditoriallyNewEvent({ ...annual, last_featured_at: '2025-09-18T12:00:00Z' }, reference)).toBe(true);
+    expect(isEditoriallyNewEvent({ ...annual, last_featured_at: '2025-12-31T23:59:59Z' }, reference)).toBe(true); // still 2025 in ET
     expect(isEditoriallyNewEvent(annual, reference)).toBe(false); // history with no timestamp fails closed
   });
 
@@ -546,6 +549,18 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     bindings.forEach((b) => expect(new Date(b).getTime()).toBe(expected));
     // Preserves the existing value when the condition is false (manual curation).
     expect(lower).toMatch(/else events_raw\.normalized_at end/);
+  });
+
+  test('a pending row moved to a different ET day re-opens curation and is re-queued for the normalizer', () => {
+    const f = revivalResetFields();
+    const curated = f.curated_at.toSQL().sql.toLowerCase();
+    expect(curated).toMatch(/events_raw\.admin_status = 'pending'/);
+    expect(curated).toMatch(/events_raw\.approved_via is null/);
+    expect(curated).toMatch(/\(events_raw\.start_at at time zone 'america\/new_york'\)::date is distinct from \(excluded\.start_at at time zone 'america\/new_york'\)::date/);
+    expect(f.score_breakdown.toSQL().sql.toLowerCase()).toMatch(/is distinct from/);
+    // Freshness is date-dependent, so the moved row is re-queued for the normalizer too.
+    expect(f.normalized_at.toSQL().sql.toLowerCase()).toMatch(/is distinct from/);
+    expect(f.freshness_revival_pending.toSQL().sql.toLowerCase()).toMatch(/is distinct from/);
   });
 
   test('re-queues via normalized_at + sets the explicit revival marker — never nulls the NOT NULL freshness_status', () => {
@@ -751,17 +766,22 @@ describe('event ingestion normalizeExtractedEvent — validation (no auto-approv
     expect(dated.row.admin_status).toBeUndefined();
     const tier2Dated = normalizeExtractedEvent(tier2, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
     expect(tier2Dated.autoApprove).toBeUndefined();
-    expect(Object.keys(dated).sort()).toEqual(['row']);
+    expect(Object.keys(dated).sort()).toEqual(['legacyExternalId', 'row']);
   });
 
-  test('canonicalizes the dedup key and validates URLs', () => {
-    const { row } = normalizeExtractedEvent(tier1, {
+  test('canonicalizes the dedup key (ET calendar day + ET wall-clock time) and validates URLs', () => {
+    const { row, legacyExternalId } = normalizeExtractedEvent(tier1, {
       title: 'BOAT Parade',
       startAt: '2026-06-14T10:00:00-04:00',
       eventUrl: 'https://x.co/parade',
       imageUrl: 'javascript:alert(1)',
     }, NOW);
-    expect(row.external_id).toBe(`boat parade|${new Date('2026-06-14T10:00:00-04:00').toISOString()}|https://x.co/parade`);
+    // New key shape: title|ET-date T ET-wall-clock|url — see
+    // extractedEventDedupKeys. 10:00-04:00 is 10:00am ET.
+    expect(row.external_id).toBe('boat parade|2026-06-14T10:00|https://x.co/parade');
+    // Legacy (pre-fix) shape is still computed alongside it, for the
+    // upsert's key-migration lookup (event-ingestion-extracted-datetime.test.js).
+    expect(legacyExternalId).toBe(`boat parade|${new Date('2026-06-14T10:00:00-04:00').toISOString()}|https://x.co/parade`);
     expect(row.image_url).toBeNull();
     expect(row.event_url).toBe('https://x.co/parade');
   });
@@ -906,6 +926,13 @@ describe('newsletter computeNewsletterEventUpdates', () => {
     test('skips subscriber action when no subscriber_id (legacy import row)', () => {
       const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null }), now);
       expect(u.subscriberAction).toBeNull();
+    });
+    test('a merge-cleared subscriber_id still bounce-counts a Gmail mailbox (codex #5413 r3)', () => {
+      const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null, email: 'john.doe@gmail.com' }), now);
+      expect(u.subscriberAction).toBe('bounce_increment');
+      for (const email of ['old@example.test', 'john@gmail.com@invalid.test', '.john@gmail.com']) {
+        expect(computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null, email }), now).subscriberAction).toBeNull();
+      }
     });
     test('idempotent — already-bounced row is a no-op', () => {
       const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ bounced_at: now }), now);
@@ -1448,6 +1475,47 @@ describe('sendgrid newsletter suppression ledger writes', () => {
       status: 'unsubscribed',
       unsubscribed_at: expect.any(Date),
     }));
+  });
+
+  test('a bounce is fenced to the address the delivery was mailed to', async () => {
+    // A delivery re-pointed at the surviving subscriber by a typo-correction
+    // merge must not let a late bounce from the OLD mailbox bounce-count the
+    // corrected address.
+    const { client, calls } = fakeClient();
+    await handleNewsletterEvent({ event: 'bounce', type: 'bounce', email: 'Old.Typo@Example.com' }, {
+      id: 'delivery-5', send_id: 'send-5', subscriber_id: 16, email: ' Old.Typo@example.com ',
+    }, client);
+    const q = calls.newsletter_subscribers[0];
+    expect(q.where).toHaveBeenCalledWith({ id: 16 });
+    expect(q.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['old.typo@example.com']);
+    expect(q.update).toHaveBeenCalled();
+  });
+
+  test('a Gmail bounce matches the subscriber by mailbox identity (any spelling), not by id', async () => {
+    const { client, calls } = fakeClient();
+    await handleNewsletterEvent({ event: 'bounce', type: 'bounce', email: 'John.Doe+home@googlemail.com' }, {
+      id: 'delivery-6', send_id: 'send-6', subscriber_id: 17, email: 'John.Doe+home@googlemail.com',
+    }, client);
+    const q = calls.newsletter_subscribers[0];
+    expect(q.where).not.toHaveBeenCalled();
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("IN ('gmail.com', 'googlemail.com')"), ['johndoe', expect.stringMatching(/gmail|googlemail/)]);
+    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ last_bounced_at: expect.any(Date) }));
+  });
+
+  test('opt-outs are never fenced by address: unsubscribe and spam complaint always apply', async () => {
+    for (const ev of [
+      { event: 'spamreport', email: 'Old.Typo@Example.com' },
+      { event: 'dropped', reason: 'Unsubscribed Address', email: 'Old.Typo@Example.com' },
+    ]) {
+      const { client, calls } = fakeClient();
+      await handleNewsletterEvent(ev, {
+        id: 'delivery-5', send_id: 'send-5', subscriber_id: 16, email: ' Old.Typo@example.com ',
+      }, client);
+      const q = calls.newsletter_subscribers[0];
+      expect(q.where).toHaveBeenCalledWith({ id: 16 });
+      expect(q.whereRaw).not.toHaveBeenCalled();
+      expect(q.update).toHaveBeenCalled();
+    }
   });
 });
 

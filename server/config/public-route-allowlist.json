@@ -18,23 +18,28 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing.",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast and yard-calendar share one handler, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing. The visitPrepPreParserGuard entry is the visit-prep photos sub-gate + token-shape check (GATE_VISIT_PREP_PHOTOS) mounted ahead of the shared body parsers so a dark or malformed photos request 404s before any parse (always next() or 404). The mapImagePreGuard entry is the estimate map-image proxy's pre-limiter guard (GET/HEAD /api/estimates/:token/map/(satellite|overlay) only, case-insensitive): it stamps no-store/CORP/no-referrer headers and answers the generic 404 for the overlay while GATE_ESTIMATE_SHOW_YOUR_WORK is dark, before the global limiter (always next() or 404). The /api/booking/preferred-time entry is the /book \"Can't find a time?\" request's pre-router guard (GATE_BOOK_PREFERRED_TIME): it stamps no-store/noindex/no-referrer and answers the generic 404 for every method while the gate is dark, ahead of cors(), the global limiter and the body parsers (always next() or 404).",
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
+        "USE /api/booking/preferred-time (inline function#7df2f03e)",
+        "USE /api/estimates (mapImagePreGuard#f8502fdf)",
         "USE /api/ops/digest (inline function#4a372dfc)",
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/appointment (inline function#e6220f30)",
+        "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
         "USE /api/public/careers (inline function#1ef2d7c2)",
         "USE /api/public/careers/interview (inline function#656a8908)",
         "USE /api/public/inspection (inline function#ae857f75)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
         "USE /api/public/mcp (inline function#6af8a3db)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
+        "USE /api/public/yard-calendar (inline function#a972e744)",
         "USE /api/public/pest-identifier (inline function#14727834)",
         "USE /api/public/reservice (inline function#d0926d91)",
-        "USE /api/public/secure-card (inline function#8abc12e6)"
+        "USE /api/public/secure-card (inline function#8abc12e6)",
+        "USE /api/public/track (trackPublicPreparser#a6e0dc6f)"
       ]
     },
     {
@@ -47,6 +52,18 @@
         "USE /api/public/blog-read-depth (inline function#0943925b)",
         "USE /api/public/blog-read-depth (inline function#af835d81)",
         "USE /api/public/blog-read-depth (inline function#e7d9b29e)"
+      ]
+    },
+    {
+      "router": "server/routes/public-map-image.js",
+      "mount": "/api/public/map-image",
+      "reason": "Signed satellite image proxy: the lead-form lookup, customer service report and portal station map carry short-lived HMAC-signed paths (services/signed-map-image.js, key derived from REPORT_PIN_SECRET||JWT_SECRET, 2 h expiry; 24 h for the lead-form lookup) instead of Google Static Maps URLs that embedded the server Maps key. The route reads ONLY the signed token in the path — never a query param — rebuilds the keyless Static Maps URL from the signed, range-checked lat/lng/zoom/size/scale/maptype, appends the key inside the fetch and streams the bytes, so it cannot become an open proxy or SSRF. Every refusal (bad shape/signature, expired, no key, upstream failure) answers one generic 404 with no-store/no-referrer/CORP cross-origin; its own 60 req/min per-IP (IPv6 /64) limiter (429 stamped with the same headers) fronts the mount, which is mounted in server/index.js above the global cors(), the global limiter and the body parsers (so an OPTIONS preflight also gets the router's generic 404, not cors()'s 204); no server-side image cache. The router stamps the privacy headers and applies the limiter to EVERY request under the mount (any method/subpath, case-insensitive, trailing slash) and ends in a terminal catch-all that answers the same generic 404 for anything but a valid GET/HEAD /:token (the inline USE entries — header stamp, terminal 404, and a last error handler that turns any error, e.g. a malformed percent-encoding, into that same 404 — and the limiter USE entry). See docs/public-route-contracts.md.",
+      "routes": [
+        "GET /api/public/map-image/:token",
+        "USE /api/public/map-image (express-rate-limit({ handler#94fc883d }))",
+        "USE /api/public/map-image (inline function#0946a58f)",
+        "USE /api/public/map-image (inline function#322aaeb5)",
+        "USE /api/public/map-image (inline function#9f9f4d83)"
       ]
     },
     {
@@ -130,6 +147,16 @@
       ]
     },
     {
+      "router": "server/routes/outbound-redirect.js",
+      "mount": "/go",
+      "reason": "Prep-guide outside-link click logger + 302 — destinations are pre-registered outbound_links rows resolved by code only (no URL in the request, so not an open redirect); per-route limiter; see docs/public-route-contracts.md",
+      "routes": [
+        "GET /go/:code",
+        "USE /go (express-rate-limit({ handler#f2668dc4 }))",
+        "USE /go (inline function#29df873e)"
+      ]
+    },
+    {
       "router": "server/routes/og-preview.js",
       "mount": "/og",
       "reason": "Link-preview images for iMessage/SMS/email crawlers (no login possible; owner sign-off 2026-09-28). Only /og/report/:token.jpg reads its token: 32-hex gate, typedReportDelivery suppression, no-store/noindex/no-referrer, per-IP limiter; unknown links get the byte-identical default card. /og/<kind>.jpg are fixed brand images with no token and no lookup.",
@@ -153,10 +180,11 @@
     {
       "router": "server/routes/well-known.js",
       "mount": "/.well-known",
-      "reason": "Apple app-site-association + Android assetlinks — the platforms fetch these anonymously by contract",
+      "reason": "Apple app-site-association + Android assetlinks — the platforms fetch these anonymously by contract; security.txt (RFC 9116) is static public disclosure-contact text",
       "routes": [
         "GET /.well-known/apple-app-site-association",
-        "GET /.well-known/assetlinks.json"
+        "GET /.well-known/assetlinks.json",
+        "GET /.well-known/security.txt"
       ]
     },
     {
@@ -200,6 +228,8 @@
       "routes": [
         "GET /api/estimates/:token",
         "GET /api/estimates/:token/data",
+        "GET /api/estimates/:token/map/overlay",
+        "GET /api/estimates/:token/map/satellite",
         "GET /api/estimates/:token/pdf",
         "GET /api/estimates/:token/service-details/:serviceKey/pdf",
         "GET /api/estimates/:token/warranty-comparison/pdf",
@@ -372,7 +402,8 @@
       "reason": "Tokenized live technician-tracking map linked from appointment SMS",
       "routes": [
         "GET /api/public/track/:token",
-        "POST /api/public/track/:token/stops-ahead"
+        "POST /api/public/track/:token/stops-ahead",
+        "POST /api/public/track/:token/view"
       ]
     },
     {
@@ -433,12 +464,13 @@
     {
       "router": "server/routes/appointment-public.js",
       "mount": "/api/public/appointment",
-      "reason": "Tokenized appointment confirm / calendar links from SMS/email; the USE entry is the router's 404-when-dark gate (always next() or 404)",
+      "reason": "Tokenized appointment confirm / calendar links from SMS/email; the USE entry is the router's 404-when-dark gate (always next() or 404) POST /:token/photos (GATE_VISIT_PREP_PHOTOS, dark): customer attaches up to 3 photos + a note to that visit; token-format gate, sub-gate 404 before its limiter, /64-keyed 6-per-min limiter, eligibility 404, multer only after all of that, stop-locked write; sends nothing.",
       "routes": [
         "USE /api/public/appointment (inline function#43251846)",
         "GET /api/public/appointment/:token",
         "GET /api/public/appointment/:token/calendar.ics",
-        "POST /api/public/appointment/:token/confirm"
+        "POST /api/public/appointment/:token/confirm",
+        "POST /api/public/appointment/:token/photos"
       ]
     },
     {
@@ -550,6 +582,14 @@
       ]
     },
     {
+      "router": "server/routes/public-yard-calendar.js",
+      "mount": "/api/public/yard-calendar",
+      "reason": "SWFL yard pressure calendar for the marketing sites and the customer app — public reference content derived from the owner-approved species catalog. Read-only GET, no DB, no LLM, no PII; month/grass validated; CDN-cacheable",
+      "routes": [
+        "GET /api/public/yard-calendar"
+      ]
+    },
+    {
       "router": "server/routes/public-ai-intake.js",
       "mount": "/api/public/ai-intake",
       "reason": "Public AI intake chat — gated + rate-limited lead funnel",
@@ -615,7 +655,8 @@
         "GET /api/booking/status/:code",
         "POST /api/booking/capture-intent",
         "POST /api/booking/confirm",
-        "POST /api/booking/find-slots"
+        "POST /api/booking/find-slots",
+        "POST /api/booking/preferred-time"
       ]
     },
     {
@@ -673,16 +714,13 @@
       "reason": "Tokenized review-request funnel from post-service SMS (format-gated, limited)",
       "routes": [
         "GET /api/rate/:token",
-        "GET /api/rate/:token/go",
-        "POST /api/rate/:token/generate-review",
-        "POST /api/rate/:token/score",
-        "POST /api/rate/:token/submit"
+        "GET /api/rate/:token/go"
       ]
     },
     {
       "router": "server/routes/review-public.js",
       "mount": "/api/review",
-      "reason": "Tokenized review capture page from customer comms",
+      "reason": "Tokenized review capture page from customer comms (POST retired: 410 Gone, no DB access)",
       "routes": [
         "GET /api/review/:token",
         "POST /api/review/:token"

@@ -30,7 +30,7 @@ function makeDuplicateLookup(existing) {
 
 function makeTrx(calls) {
   const account = { id: 'acct-1' };
-  return jest.fn((table) => {
+  const trx = jest.fn((table) => {
     const q = {
       insert: jest.fn((row) => {
         calls.push({ table, row });
@@ -50,6 +50,12 @@ function makeTrx(calls) {
     };
     return q;
   });
+  // codex #5196 P1-A: createCustomer now takes lockSmsPhone(trx, phone) as
+  // the first statement of this transaction (fencing this admin-UI mint
+  // against call-booking-link-text.js's phone-locked handoff) — a real knex
+  // trx carries `.raw` directly on the transaction object, same as `db`.
+  trx.raw = jest.fn(async () => ({}));
+  return trx;
 }
 
 describe('intelligence bar create_customer', () => {

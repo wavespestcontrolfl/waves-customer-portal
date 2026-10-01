@@ -311,6 +311,7 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
       original_message_type: 'auto_reply',
       customerLocationId: location.id,
       lead_source: leadSource.source,
+      templateKey: 'lead_auto_reply_biz',
     },
   }).catch(async (err) => {
     await resolveLeadAutoReplyClaim(phoneDigits, err?.providerOutcome || null);

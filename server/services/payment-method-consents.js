@@ -12,7 +12,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
+const { getConsentText, consentVersionForVariant } = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
 const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'autopay_setup_link', 'portal_autopay_enable', 'portal_set_default']);
@@ -33,6 +33,9 @@ async function recordConsent({
   // 'prepay_card' snapshots the annual-prepay authorization (immediate
   // charge + future invoices) instead of the base card text — the UI must
   // have rendered the SAME variant at the checkbox (GATE_PREPAY_CARD_AND_CHARGE).
+  // 'after_visit_prepay' / 'after_visit_card' (GATE_PAY_AFTER_FIRST_VISIT)
+  // snapshot the charge-after-the-first-visit authorization and are recorded
+  // under the v12_2026-09-30 label (consentVersionForVariant).
   consentVariant = null,
   // Authorization that came from a SIGNED AGREEMENT rather than a consent
   // checkbox (termite annual plan charged at signature, owner ruling
@@ -63,14 +66,14 @@ async function recordConsent({
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,
     source,
-    consent_text_version: consentTextVersion || CONSENT_VERSION,
+    consent_text_version: consentTextVersion || consentVersionForVariant(consentVariant, methodType),
     consent_text_snapshot: consentText,
     ip,
     user_agent: userAgent,
     ...(evidenceContractId ? { evidence_contract_id: evidenceContractId } : {}),
   }).returning('*');
 
-  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${CONSENT_VERSION}, methodType=${methodType})`);
+  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${consentTextVersion || consentVersionForVariant(consentVariant, methodType)}, methodType=${methodType})`);
   return row;
 }
 
