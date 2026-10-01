@@ -582,9 +582,10 @@ describe('admin communications SMS route', () => {
     test('schedule-sms refuses a draft whose link points at a live street-level hold (409, nothing queued); a clear visit queues', async () => {
       const hold = require('../services/street-level-hold');
       const spy = jest.spyOn(hold, 'isStreetLevelHoldVisit').mockImplementation(async (id) => id === VISIT_A);
+      const inserts = [];
       db.mockImplementation((table) => {
         const first = jest.fn(async () => (table === 'customers' ? { id: 'cust-A', phone: '+15551234567' } : null));
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), insert: jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'sched-1' }]) })) };
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), insert: jest.fn((row) => { inserts.push({ table, row }); return { returning: jest.fn(async () => [{ id: 'sched-1' }]) }; }) };
       });
       try {
         await withServer(async (baseUrl) => {
@@ -596,7 +597,11 @@ describe('admin communications SMS route', () => {
           const held = await post({ linkedVisitIds: [VISIT_B, VISIT_A] });
           expect(held.status).toBe(409);
           expect((await held.json()).code).toBe('street_level_hold');
+          expect(inserts.filter((i) => i.table === 'sms_log')).toHaveLength(0);   // nothing queued for the held draft
           expect((await post({ linkedVisitIds: [VISIT_B] })).status).not.toBe(409);
+          // A queued draft keeps its linked visits so the cron replay re-checks the hold at DELIVERY.
+          const queued = inserts.find((i) => i.table === 'sms_log');
+          expect(JSON.parse(queued.row.metadata).linked_scheduled_service_ids).toEqual([VISIT_B]);
         });
       } finally {
         spy.mockRestore();

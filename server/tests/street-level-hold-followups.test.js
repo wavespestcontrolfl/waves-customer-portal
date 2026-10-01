@@ -72,6 +72,17 @@ describe('finding 3: an uncleared street-level hold is not a missed visit, a no-
   });
 });
 
+describe('finding 5 (scheduled path): the linked visits survive the queue so the hold is re-checked at delivery', () => {
+  test('/schedule-sms persists them on the queued row and the cron replay forwards them into the send metadata', () => {
+    const route = read('../routes/admin-communications.js');
+    expect(route).toContain('if (scheduledLinkedVisitIds.length) metaObj.linked_scheduled_service_ids = scheduledLinkedVisitIds;');
+    const cron = read('../services/scheduler.js');
+    expect(cron).toContain('{ linked_scheduled_service_ids: claimMeta.linked_scheduled_service_ids }');
+    // ...which the shared send step reads (every linked visit is checked).
+    expect(read('../services/messaging/send-customer-message.js')).toContain('metadata?.linked_scheduled_service_ids');
+  });
+});
+
 describe('finding 6: the office approval is bound to the address it was given for', () => {
   // A fake trx / conn: the visit row, the live-hold lookup, the hold card.
   const makeConn = ({ visit = { source_action: 'voice_agent', source_call_log_id: 'call-1', ...ADDRESS }, held = true, card = { id: 'card-1', status: 'open', payload: { street_level_address: true, scheduled_service_id: 'v1' } }, history = true, status = 'confirmed' } = {}) => {

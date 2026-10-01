@@ -3929,6 +3929,9 @@ router.post('/schedule-sms', async (req, res, next) => {
         if (usedDecisionId) metaObj.agent_decision_id = usedDecisionId;
         if (parkedIds.length) metaObj.parked_decision_ids = parkedIds;
         if (scheduledHumanAuthored) metaObj.human_authored = true;
+        // The visits the draft's links point at: the cron replay forwards them so the shared send step
+        // re-checks for a street-level hold at DELIVERY (a visit can become one after this enqueue).
+        if (scheduledLinkedVisitIds.length) metaObj.linked_scheduled_service_ids = scheduledLinkedVisitIds;
         const metadata = Object.keys(metaObj).length ? JSON.stringify(metaObj) : null;
 
         const [inserted] = await trx('sms_log')

@@ -4899,6 +4899,11 @@ function initScheduledJobs() {
               parkedDecisionIds: Array.isArray(claimMeta.parked_decision_ids) && claimMeta.parked_decision_ids.length
                 ? claimMeta.parked_decision_ids
                 : undefined,
+              // The composer draft's linked visits (persisted by /schedule-sms): the shared send step holds the
+              // text at delivery while any of them is a live street-level address hold.
+              ...(Array.isArray(claimMeta.linked_scheduled_service_ids) && claimMeta.linked_scheduled_service_ids.length
+                ? { linked_scheduled_service_ids: claimMeta.linked_scheduled_service_ids }
+                : {}),
             },
           };
           // LIVE ETA at the TRUE provider boundary (Codex round-40 P2): the recheck above ran
