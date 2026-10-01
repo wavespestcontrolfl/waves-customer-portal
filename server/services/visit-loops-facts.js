@@ -309,9 +309,10 @@ async function loadCommitments({ conn, customerId, now }) {
   });
   const byRecent = (a, b) => (rowSourceAt(b)?.getTime() || 0) - (rowSourceAt(a)?.getTime() || 0);
 
-  // A text/email the customer sent that asks us for something (basis 'request')
-  // is the customer waiting on us; so is a customer-party call row.
-  const isWaiting = (r) => (r.__source === 'call' ? r.party === 'customer' : r.sms_context?.basis === 'request');
+  // customerWaiting: a text/email the customer sent that asks us for something
+  // (basis 'request'). A customer-party CALL row is something the customer
+  // promised us, so it appears in neither list.
+  const isWaiting = (r) => r.__source !== 'call' && r.sms_context?.basis === 'request';
   const isWeOwe = (r) => (r.__source === 'call' ? r.party === 'waves' : r.party === 'waves' && r.sms_context?.basis !== 'request');
 
   const weOwe = unique.filter(isWeOwe).sort(byRecent).slice(0, LIST_MAX).map((r) => ({

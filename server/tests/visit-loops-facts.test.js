@@ -289,7 +289,7 @@ describe('weOwe and customerWaiting', () => {
     expect(listSmsCommitments).not.toHaveBeenCalled();
   });
 
-  test('call gate on: waves-party call promises become weOwe, customer-party rows customerWaiting', async () => {
+  test('call gate on: waves-party call promises become weOwe; customer-party call rows appear nowhere', async () => {
     featureGates.gates.callCommitments = true;
     listOpenCommitments.mockResolvedValue([
       callRow({}),
@@ -298,7 +298,8 @@ describe('weOwe and customerWaiting', () => {
     const out = await run(ctxConn({}));
     expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', limit: 50 }));
     expect(out.weOwe).toEqual([{ kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow', source: 'call' }]);
-    expect(out.customerWaiting).toEqual([{ kind: 'send_photos', description: 'Send photos of the fence', since: '2026-09-29' }]);
+    expect(out.customerWaiting).toEqual([]);
+    expect(out.weOwe).toHaveLength(1);
   });
 
   test('sms gate on: basis request is the customer waiting, basis promise is ours; due text from sms_context, else ET stamp', async () => {
