@@ -1,29 +1,37 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DOSE_UNITS, doseOverLabel, doseText, injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText, parseDose, trunkInchesText,
+  DOSE_UNITS, doseOverLabel, doseText, injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText,
+  injectionRecordView, parseDose, recordForProduct, recordWithBand, trunkInchesText,
 } from './injection-dose';
 
 // Owner ruling 2026-09-29: an injection is measured in tsp or fl oz like
 // everything else. The catalog keeps each Arborjet label in mL per inch of
-// trunk or per palm; the injection record never shows or takes mL.
+// trunk or per palm; the injection record never shows or takes mL. Owner
+// rulings 2026-10-01: the dose is worked out from the label's own bands, only
+// for labels read in full (shared/injection-label-bands.json).
 
 const IMA_JET_10 = { name: 'Arborjet Ima-Jet 10', default_rate: '1-6', default_unit: 'ml/inch dbh' };
-const PALM_JET = { name: 'Arborjet Palm-Jet Palm Nutrition', default_rate: '5-30', default_unit: 'ml/palm' };
-
-const PHOSPHO_JET = { name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', default_rate: '3.5-7', default_unit: 'ml/inch dbh' };
 const IMA_JET = { name: 'Arborjet Ima-Jet Systemic Insecticide', default_rate: '2-8', default_unit: 'ml/inch dbh' };
+const PHOSPHO_JET = { name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', default_rate: '3.5-7', default_unit: 'ml/inch dbh' };
+const MN_JET = { name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' };
+const PALM_JET = { name: 'Arborjet Palm-Jet Palm Nutrition', default_rate: '5-30', default_unit: 'ml/palm' };
+const PROPIZOL = { name: 'Arborjet Propizol Injectable Fungicide', default_rate: '10-20', default_unit: 'ml/inch dbh' };
+const BANDED = [IMA_JET, PHOSPHO_JET, MN_JET, PALM_JET];
 
 describe('injectionLabelRate', () => {
   it('reads an Arborjet label in mL per inch of trunk or per palm, with its band table', () => {
-    expect(injectionLabelRate(IMA_JET_10)).toMatchObject({ low: 1, high: 6, basis: 'inch', pick: 'Label rate' });
-    expect(injectionLabelRate(IMA_JET_10).bands.map((band) => [band.low, band.high])).toEqual([[1, 2], [3, 6]]);
-    expect(injectionLabelRate(IMA_JET).bands.map((band) => band.key)).toEqual(['aphids_scales', 'borers']);
-    expect(injectionLabelRate(PHOSPHO_JET)).toMatchObject({ low: 3.5, high: 7, basis: 'inch', pick: null });
+    expect(injectionLabelRate(IMA_JET)).toMatchObject({ low: 2, high: 8, basis: 'inch', pick: 'Target pest' });
+    expect(injectionLabelRate(IMA_JET).bands.map((band) => [band.key, band.low, band.high])).toEqual([['sap_feeders', 2, 4], ['borers_heavy', 4, 8]]);
+    expect(injectionLabelRate(IMA_JET).note).toMatch(/under 12 in use the lower rate/);
+    expect(injectionLabelRate(PHOSPHO_JET)).toMatchObject({ basis: 'inch', pick: null });
+    expect(injectionLabelRate(PHOSPHO_JET).bands.map((band) => [band.low, band.high])).toEqual([[3.5, 3.5], [3.5, 5], [5, 7]]);
+    expect(injectionLabelRate(MN_JET).bands.map((band) => [band.low, band.high])).toEqual([[5, 5], [10, 15]]);
     expect(injectionLabelRate(PALM_JET)).toMatchObject({ low: 5, high: 30, basis: 'palm', pick: 'Palm size' });
-    expect(injectionLabelRate({ defaultRate: '10', defaultUnit: 'mL/inch DBH' })).toMatchObject({ low: 10, high: 10, basis: 'inch', bands: null });
   });
 
-  it('has no band table for an injectable it does not know, or a unit that does not match the table', () => {
+  it('has no band table for a label not read in full, an unknown injectable, or a unit that does not match', () => {
+    expect(injectionLabelRate(IMA_JET_10)).toMatchObject({ low: 1, high: 6, basis: 'inch', bands: null, pick: null });
+    expect(injectionLabelRate(PROPIZOL).bands).toBeNull();
     expect(injectionLabelRate({ name: 'Some Injectable', default_rate: '1-6', default_unit: 'ml/inch dbh' }).bands).toBeNull();
     expect(injectionLabelRate({ ...PALM_JET, default_unit: 'ml/inch dbh' }).bands).toBeNull();
   });
@@ -31,7 +39,8 @@ describe('injectionLabelRate', () => {
   it('is null for any other label', () => {
     expect(injectionLabelRate({ default_rate: '5-10', default_unit: 'ml/gal' })).toBeNull();
     expect(injectionLabelRate({ default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' })).toBeNull();
-    expect(injectionLabelRate({ default_rate: 'see label', default_unit: 'ml/inch dbh' })).toBeNull();
+    expect(injectionLabelRate({ ...PHOSPHO_JET, default_rate: 'see label' })).toBeNull();
+    expect(injectionLabelRate({ ...PHOSPHO_JET, default_rate: '' })).toBeNull();
     expect(injectionLabelRate({})).toBeNull();
     expect(injectionLabelRate(null)).toBeNull();
   });
@@ -39,50 +48,55 @@ describe('injectionLabelRate', () => {
 
 describe('the label band that applies', () => {
   it('waits for the tech to pick a band the label splits by pest, season or palm size', () => {
-    const rate = injectionLabelRate(IMA_JET_10);
+    const rate = injectionLabelRate(IMA_JET);
     expect(injectionBand(rate, 10, '')).toBeNull();
     expect(injectionDoseText(rate, 10, '')).toBeNull();
-    expect(injectionBand(rate, 10, 'low')).toMatchObject({ low: 1, high: 2 });
+    expect(injectionBand(rate, 10, 'sap_feeders')).toMatchObject({ low: 2, high: 4 });
   });
 
-  it('picks a size-banded label by the trunk', () => {
+  it("picks PHOSPHO-jet's band by the trunk, as its label does", () => {
     const rate = injectionLabelRate(PHOSPHO_JET);
     expect(injectionBand(rate, '', '')).toBeNull();
     expect(injectionBand(rate, 11.9, '')).toMatchObject({ key: 'under_12' });
-    expect(injectionBand(rate, 12, '')).toMatchObject({ key: '12_up' });
+    expect(injectionBand(rate, 12, '')).toMatchObject({ key: '12_to_24' });
+    expect(injectionBand(rate, 24, '')).toMatchObject({ key: '12_to_24' });
+    expect(injectionBand(rate, 24.1, '')).toMatchObject({ key: 'over_24' });
   });
 
-  it('works out no dose for an injectable with no band table', () => {
-    const rate = injectionLabelRate({ name: 'Some Injectable', default_rate: '1-6', default_unit: 'ml/inch dbh' });
-    expect(injectionDoseText(rate, 10, '')).toBeNull();
-    expect(injectionLabelText(rate)).toBe('¼ – 1 tsp per inch of trunk');
+  it('works out no dose for a label not read in full', () => {
+    for (const product of [IMA_JET_10, PROPIZOL]) {
+      const rate = injectionLabelRate(product);
+      expect(injectionDoseText(rate, 10, '')).toBeNull();
+    }
+    expect(injectionLabelText(injectionLabelRate(IMA_JET_10))).toBe('¼ – 1 tsp per inch of trunk');
   });
 });
 
 describe('the rate and dose as the tech reads them', () => {
   it('reads the label per inch of trunk, or per palm, in spoons or ounces', () => {
-    const rate = injectionLabelRate(IMA_JET_10);
-    expect(injectionLabelText(rate)).toBe('¼ – 1 tsp per inch of trunk');
-    expect(injectionLabelText(rate, rate.bands[0])).toBe('¼ tsp per inch of trunk');
+    const rate = injectionLabelRate(IMA_JET);
+    expect(injectionLabelText(rate)).toBe('½ – 1½ tsp per inch of trunk');
+    expect(injectionLabelText(rate, rate.bands[0])).toBe('½ – ¾ tsp per inch of trunk');
     expect(injectionLabelText(injectionLabelRate(PALM_JET))).toMatch(/ fl oz per palm$/);
   });
 
   it('works out the dose for the trunk measured, from the band', () => {
-    const rate = injectionLabelRate(IMA_JET_10);
-    // 10 in on the low rate: 10-20 mL, never the label's 60 mL top.
-    expect(injectionDoseText(rate, 10, 'low')).toBe('2¼ – 4 tsp');
-    expect(injectionDoseText(rate, 10, 'high')).toBe('1¼ – 2 fl oz');
-    expect(injectionDoseText(rate, '', 'low')).toBeNull();
-    expect(injectionDoseText(rate, 0, 'low')).toBeNull();
-    // PHOSPHO-jet under 12 in is one rate: 3.5 mL per inch.
-    expect(injectionDoseText(injectionLabelRate(PHOSPHO_JET), 10, '')).not.toMatch(/ – /);
+    const phospho = injectionLabelRate(PHOSPHO_JET);
+    // 10 in: 3.5 mL per inch only (35 mL); 18 in: 3.5-5 (63-90 mL); 30 in: 5-7.
+    expect(injectionDoseText(phospho, 10, '')).toBe('1.18 fl oz');
+    expect(injectionDoseText(phospho, 18, '')).toBe('2¼ – 3 fl oz');
+    expect(injectionDoseText(phospho, 30, '')).toBe('5¼ – 7 fl oz');
+    const imaJet = injectionLabelRate(IMA_JET);
+    expect(injectionDoseText(imaJet, 10, 'sap_feeders')).toBe('¾ – 1¼ fl oz');
+    expect(injectionDoseText(imaJet, '', 'sap_feeders')).toBeNull();
+    expect(injectionDoseText(imaJet, 0, 'sap_feeders')).toBeNull();
     // Per palm, whatever the palm's trunk.
     const palm = injectionLabelRate(PALM_JET);
     expect(injectionDoseText(palm, '', 'small')).toBe(injectionDoseText(palm, 40, 'small'));
   });
 
   it('never reads mL', () => {
-    for (const product of [IMA_JET_10, IMA_JET, PHOSPHO_JET, PALM_JET]) {
+    for (const product of BANDED) {
       const rate = injectionLabelRate(product);
       expect(injectionLabelText(rate)).not.toMatch(/\bml\b/i);
       for (const band of rate.bands) {
@@ -92,126 +106,124 @@ describe('the rate and dose as the tech reads them', () => {
   });
 });
 
-describe('the shown range stays inside the label band', () => {
-  const ML_PER_FL_OZ = 29.5735;
-  const AMOUNT = /^(≈ )?(\d*)([⅛¼⅜½⅝¾⅞]?)(\.\d+)?$/;
-  const FRACTION = { '': 0, '⅛': 0.125, '¼': 0.25, '⅜': 0.375, '½': 0.5, '⅝': 0.625, '¾': 0.75, '⅞': 0.875 };
-  const toMl = (amount, unit) => {
-    const m = AMOUNT.exec(amount.trim());
-    if (!m) throw new Error(`unreadable amount "${amount}"`);
-    const n = Number(m[2] || 0) + FRACTION[m[3]] + Number(m[4] || 0);
-    return (unit === 'tsp' ? n / 6 : n) * ML_PER_FL_OZ;
-  };
-  const shownMl = (text) => {
-    const [, ends, unit] = /^(.+) (tsp|fl oz)$/.exec(text);
-    return ends.split(' – ').map((end) => toMl(end, unit));
-  };
-
-  it('never shows an end outside the exact band limits, for any trunk', () => {
-    for (const product of [IMA_JET_10, IMA_JET, PHOSPHO_JET, { name: 'Arborjet Propizol', default_rate: '10-20', default_unit: 'ml/inch dbh' },
-      { name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' }, PALM_JET]) {
-      const rate = injectionLabelRate(product);
-      for (const pick of rate.bands.map((band) => band.key)) {
-        for (let inches = 1; inches <= 48; inches += 1) {
-          const band = injectionBand(rate, inches, pick);
-          const text = injectionDoseText(rate, inches, pick);
-          const per = rate.basis === 'palm' ? 1 : inches;
-          const ends = shownMl(text);
-          // Display rounds to 3 places at most; allow that and nothing more.
-          const slack = 0.0005 * ML_PER_FL_OZ;
-          for (const ml of ends) {
-            expect(ml, `${product.name} ${pick} at ${inches} in: ${text}`).toBeLessThanOrEqual(band.high * per + slack);
-            if (ends.length > 1) expect(ml, `${product.name} ${pick} at ${inches} in: ${text}`).toBeGreaterThanOrEqual(band.low * per - slack);
-          }
-        }
+const ML_PER_FL_OZ = 29.5735;
+const AMOUNT = /^(≈ )?(\d*)([⅛¼⅜½⅝¾⅞]?)(\.\d+)?$/;
+const FRACTION = { '': 0, '⅛': 0.125, '¼': 0.25, '⅜': 0.375, '½': 0.5, '⅝': 0.625, '¾': 0.75, '⅞': 0.875 };
+const readAmount = (amount) => {
+  const m = AMOUNT.exec(amount.trim());
+  if (!m) throw new Error(`unreadable amount "${amount}"`);
+  return Number(m[2] || 0) + FRACTION[m[3]] + Number(m[4] || 0);
+};
+const shownMl = (text) => {
+  const [, ends, unit] = /^(.+) (tsp|fl oz)$/.exec(text);
+  return ends.split(' – ').map((end) => (unit === 'tsp' ? readAmount(end) / 6 : readAmount(end)) * ML_PER_FL_OZ);
+};
+// Every band of every banded label, at trunks 0.5-48 in.
+const everyDose = (fn) => {
+  for (const product of BANDED) {
+    const rate = injectionLabelRate(product);
+    for (const pick of rate.bands.map((band) => band.key)) {
+      for (let tenths = 5; tenths <= 480; tenths += 1) {
+        const inches = tenths / 10;
+        const band = injectionBand(rate, inches, pick);
+        const text = injectionDoseText(rate, inches, pick);
+        if (band && text) fn({ product, rate, pick, inches, band, text, per: rate.basis === 'palm' ? 1 : inches });
       }
     }
-  });
+  }
+};
 
-  it('reads a single-rate band as one amount', () => {
-    const rate = injectionLabelRate({ name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' });
-    expect(injectionLabelText(rate, rate.bands[0])).toBe('1 tsp per inch of trunk');
-    // 50 mL is 1.69 fl oz: 1½ would be 11% short, so the exact amount reads.
-    expect(injectionDoseText(rate, 10, 'low')).toBe('1.69 fl oz');
+describe('the shown dose stays inside the label band', () => {
+  const slack = 0.0005 * ML_PER_FL_OZ;
+
+  it('never shows an end outside the exact band limits, for any trunk', () => {
+    everyDose(({ product, pick, inches, band, text, per }) => {
+      const ends = shownMl(text);
+      for (const ml of ends) {
+        expect(ml, `${product.name} ${pick} at ${inches} in: ${text}`).toBeLessThanOrEqual(band.high * per + slack);
+        if (ends.length > 1) expect(ml, `${product.name} ${pick} at ${inches} in: ${text}`).toBeGreaterThanOrEqual(band.low * per - slack);
+      }
+    });
   });
 
   it('never shows a single-rate dose more than 5% under it', () => {
-    const phospho = injectionLabelRate(PHOSPHO_JET);
-    // 10.5 in at 3.5 mL per inch: 36.75 mL, never "≈ 1 fl oz" (29.6 mL).
-    expect(injectionDoseText(phospho, 10.5, '')).toBe('1.24 fl oz');
-    const mnJet = injectionLabelRate({ name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' });
-    for (const [rate, pick] of [[phospho, ''], [mnJet, 'low']]) {
-      for (let tenths = 10; tenths <= 119; tenths += 1) {
-        const inches = tenths / 10;
-        const exact = injectionBand(rate, inches, pick).low * inches;
-        const [shown] = shownMl(injectionDoseText(rate, inches, pick));
-        expect(shown, `${inches} in`).toBeGreaterThanOrEqual(exact * 0.95 - 1e-9);
-        expect(shown, `${inches} in`).toBeLessThanOrEqual(exact + 0.0005 * ML_PER_FL_OZ);
-      }
-    }
+    // PHOSPHO-jet at 10.5 in is 36.75 mL: never "≈ 1 fl oz" (29.6 mL).
+    expect(injectionDoseText(injectionLabelRate(PHOSPHO_JET), 10.5, '')).toBe('1.24 fl oz');
+    // Mn-jet's low rate at 10 in is 50 mL: 1½ fl oz would be 11% short.
+    expect(injectionDoseText(injectionLabelRate(MN_JET), 10, 'low')).toBe('1.69 fl oz');
+    everyDose(({ band, text, per, inches }) => {
+      if (band.low !== band.high) return;
+      const [shown] = shownMl(text);
+      expect(shown, `${inches} in: ${text}`).toBeGreaterThanOrEqual(band.low * per * 0.95 - 1e-9);
+    });
   });
-});
-
-describe('the dose shown passes the label check', () => {
-  const AMOUNT = /^(?:≈ )?(\d*)([⅛¼⅜½⅝¾⅞]?)(\.\d+)?$/;
-  const FRACTION = { '': 0, '⅛': 0.125, '¼': 0.25, '⅜': 0.375, '½': 0.5, '⅝': 0.625, '¾': 0.75, '⅞': 0.875 };
-  const topOf = (text) => {
-    const [, ends, unit] = /^(.+) (tsp|fl oz)$/.exec(text);
-    const m = AMOUNT.exec(ends.split(' – ').pop().trim());
-    return { amount: Number(m[1] || 0) + FRACTION[m[2]] + Number(m[3] || 0), unit: unit === 'tsp' ? 'tsp' : 'fl_oz' };
-  };
 
   it('never warns on the top of the dose it suggests', () => {
-    const products = [IMA_JET_10, IMA_JET, PHOSPHO_JET, PALM_JET,
-      { name: 'Arborjet Propizol', default_rate: '10-20', default_unit: 'ml/inch dbh' },
-      { name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' }];
-    for (const product of products) {
-      const rate = injectionLabelRate(product);
-      for (const band of rate.bands) {
-        for (let tenths = 5; tenths <= 480; tenths += 1) {
-          const inches = tenths / 10;
-          const text = injectionDoseText(rate, inches, band.key);
-          if (!text) continue;
-          const { amount, unit } = topOf(text);
-          expect(doseOverLabel(rate, inches, amount, unit, band.key), `${product.name} ${band.key} ${inches} in: ${text}`).toBe(false);
-        }
-      }
-    }
+    everyDose(({ product, rate, pick, inches, text }) => {
+      const [, ends, unit] = /^(.+) (tsp|fl oz)$/.exec(text);
+      const top = readAmount(ends.split(' – ').pop());
+      expect(doseOverLabel(rate, inches, top, unit === 'tsp' ? 'tsp' : 'fl_oz', pick), `${product.name} ${pick} ${inches} in: ${text}`).toBe(false);
+    });
   });
 });
 
 describe('doseOverLabel', () => {
-  // 10-inch trunk at 1-6 mL per inch: the label allows up to 60 mL (2.03 fl oz).
-  const rate = injectionLabelRate(IMA_JET_10);
+  const imaJet = injectionLabelRate(IMA_JET);
 
-  it('checks the dose against the label\'s exact limit for the trunk', () => {
-    expect(doseOverLabel(rate, 10, 2, 'fl_oz')).toBe(false);
-    expect(doseOverLabel(rate, 10, 12, 'tsp')).toBe(false);
-    expect(doseOverLabel(rate, 10, 2.03, 'fl_oz')).toBe(true);
-    expect(doseOverLabel(rate, 10, 13, 'tsp')).toBe(true);
-    expect(doseOverLabel(rate, 10, 3, 'fl_oz')).toBe(true);
+  it("checks the dose against the band's exact limit for the trunk", () => {
+    // 10 in for sap feeders: up to 40 mL (1.35 fl oz).
+    expect(doseOverLabel(imaJet, 10, 1.25, 'fl_oz', 'sap_feeders')).toBe(false);
+    expect(doseOverLabel(imaJet, 10, 1.4, 'fl_oz', 'sap_feeders')).toBe(true);
+    expect(doseOverLabel(imaJet, 10, 1.4, 'fl_oz', 'borers_heavy')).toBe(false);
+    // A PHOSPHO-jet tree of 18 in: 5 mL per inch is the limit (90 mL, 3.04 fl oz).
+    const phospho = injectionLabelRate(PHOSPHO_JET);
+    expect(doseOverLabel(phospho, 18, 3, 'fl_oz')).toBe(false);
+    expect(doseOverLabel(phospho, 18, 3.1, 'fl_oz')).toBe(true);
+  });
+
+  it("falls back to the label's top rate until the band is settled", () => {
+    expect(doseOverLabel(imaJet, 10, 2.7, 'fl_oz', '')).toBe(false);
+    expect(doseOverLabel(imaJet, 10, 2.75, 'fl_oz', '')).toBe(true);
   });
 
   it('checks a palm dose per palm', () => {
     const palm = injectionLabelRate(PALM_JET);
-    expect(doseOverLabel(palm, '', 1, 'fl_oz')).toBe(false);
-    expect(doseOverLabel(palm, '', 1.02, 'fl_oz')).toBe(true);
-  });
-
-  it('checks against the band once it is settled', () => {
-    // 10 in on the low rate (1-2 mL per inch): the limit is 20 mL, not 60.
-    expect(doseOverLabel(rate, 10, 4, 'tsp', 'low')).toBe(false);
-    expect(doseOverLabel(rate, 10, 1, 'fl_oz', 'low')).toBe(true);
-    expect(doseOverLabel(rate, 10, 1, 'fl_oz', 'high')).toBe(false);
-    // A PHOSPHO-jet tree under 12 in: 3.5 mL per inch is the limit.
-    const phospho = injectionLabelRate(PHOSPHO_JET);
-    expect(doseOverLabel(phospho, 10, 1.2, 'fl_oz')).toBe(true);
-    expect(doseOverLabel(phospho, 14, 1.2, 'fl_oz')).toBe(false);
+    expect(doseOverLabel(palm, '', 1, 'fl_oz', 'large')).toBe(false);
+    expect(doseOverLabel(palm, '', 1.02, 'fl_oz', 'large')).toBe(true);
+    expect(doseOverLabel(palm, '', 0.5, 'fl_oz', 'small')).toBe(true);
   });
 
   it('has nothing to say without a trunk size or a dose', () => {
-    expect(doseOverLabel(rate, '', 5, 'fl_oz')).toBe(false);
-    expect(doseOverLabel(rate, 10, '', 'fl_oz')).toBe(false);
+    expect(doseOverLabel(imaJet, '', 5, 'fl_oz', 'sap_feeders')).toBe(false);
+    expect(doseOverLabel(imaJet, 10, '', 'fl_oz', 'sap_feeders')).toBe(false);
+  });
+});
+
+describe('the record and its product', () => {
+  it('reads the band picked for this product only', () => {
+    const products = [{ name: IMA_JET.name, rate: injectionLabelRate(IMA_JET) }];
+    const record = { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH', labelBand: { product: IMA_JET.name, key: 'sap_feeders' } };
+    expect(injectionRecordView(record, products)).toMatchObject({ pickKey: 'sap_feeders', trunkInches: '10', doseRange: '¾ – 1¼ fl oz' });
+    expect(injectionRecordView({ ...record, labelBand: { product: 'Other', key: 'sap_feeders' } }, products).pickKey).toBe('');
+    expect(injectionRecordView({}, products)).toMatchObject({ pickKey: '', rate: null, doseRange: null });
+  });
+
+  it('starts a new product without the old dose and band, keeping the trunk', () => {
+    const record = { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH', dose: '1 fl oz', labelBand: { product: IMA_JET.name, key: 'sap_feeders' } };
+    expect(recordForProduct(record, PHOSPHO_JET.name)).toEqual({
+      product: PHOSPHO_JET.name, productAuto: false, sizeClassOrDbh: '10 in DBH', dose: '', labelBand: null,
+    });
+    expect(recordForProduct(record, IMA_JET.name, { productAuto: true })).toEqual({ ...record, productAuto: true });
+    // A palm size set by the old palm band goes with it.
+    expect(recordForProduct({ product: PALM_JET.name, sizeClassOrDbh: 'Small palm' }, '', { palmSizeFromBand: true }).sizeClassOrDbh).toBe('');
+  });
+
+  it("makes a palm band the record's palm size", () => {
+    const palm = injectionLabelRate(PALM_JET);
+    expect(recordWithBand({ product: PALM_JET.name }, palm, 'medium')).toEqual({
+      product: PALM_JET.name, labelBand: { product: PALM_JET.name, key: 'medium' }, sizeClassOrDbh: 'Medium palm',
+    });
+    expect(recordWithBand({ product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' }, injectionLabelRate(IMA_JET), 'sap_feeders').sizeClassOrDbh).toBe('10 in DBH');
   });
 });
 

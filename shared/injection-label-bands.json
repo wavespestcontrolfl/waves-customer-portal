@@ -1,41 +1,21 @@
 [
   {
-    "product": "IMA-jet 10",
-    "label": "EPA 74578-6",
-    "match": "\\bima[\\s-]*jet[\\s-]*10\\b",
-    "basis": "inch",
-    "pick": "Label rate",
-    "bands": [
-      {
-        "key": "low",
-        "label": "Low rate",
-        "low": 1,
-        "high": 2
-      },
-      {
-        "key": "high",
-        "label": "Larger tree or heavier pressure",
-        "low": 3,
-        "high": 6
-      }
-    ]
-  },
-  {
-    "product": "IMA-jet",
-    "label": "EPA 74578-1",
+    "product": "IMA-jet Systemic Insecticide",
+    "source": "IMA-jet label, EPA 74578-1 (arborjet.com IMA-jet_WebsiteLabel_2020-1.pdf): 2.0-4.0 mL per inch DBH for adelgids, aphids, gall wasps, lacebugs, leafhoppers, leaf miners, mealybugs, psyllids, soft scales, thrips, whiteflies; 4.0-8.0 mL for borers, beetles, royal palm bug, sawfly larvae, spotted lanternfly and the same sap feeders at the higher rate. Under 12 in use the lower rate; over 24 in always the highest; severe infestation, the highest.",
     "match": "\\bima[\\s-]*jet\\b(?![\\s-]*10\\b)",
     "basis": "inch",
     "pick": "Target pest",
+    "note": "Label: under 12 in use the lower rate; over 24 in, or a severe infestation, use the highest rate.",
     "bands": [
       {
-        "key": "aphids_scales",
-        "label": "Aphids or scales",
+        "key": "sap_feeders",
+        "label": "Aphids, scales, whiteflies and other sap feeders",
         "low": 2,
         "high": 4
       },
       {
-        "key": "borers",
-        "label": "Borers (EAB)",
+        "key": "borers_heavy",
+        "label": "Borers, beetles, lanternfly, or a heavy sap-feeder infestation",
         "low": 4,
         "high": 8
       }
@@ -43,56 +23,50 @@
   },
   {
     "product": "PHOSPHO-jet",
-    "label": "EPA 74578-3: 3.5 under 12 in, up to 7 for larger trees",
+    "source": "PHOSPHO-jet label, EPA 74578-3 (arborjet.com PHOSPHO-jet_websitelabel_8.5x11_1072020.pdf): 3.5 mL per inch DBH in trees less than 12 in; 3.5 to 5.0 for trees 12 to 24 in; 5.0 to 7.0 in trees greater than 24 in.",
     "match": "\\bphospho[\\s-]*jet\\b",
     "basis": "inch",
     "bands": [
       {
         "key": "under_12",
         "label": "Under 12 in",
-        "maxInches": 12,
+        "below": 12,
         "low": 3.5,
         "high": 3.5
       },
       {
-        "key": "12_up",
-        "label": "12 in and up",
-        "minInches": 12,
+        "key": "12_to_24",
+        "label": "12 to 24 in",
+        "from": 12,
+        "through": 24,
         "low": 3.5,
+        "high": 5
+      },
+      {
+        "key": "over_24",
+        "label": "Over 24 in",
+        "above": 24,
+        "low": 5,
         "high": 7
       }
     ]
   },
   {
-    "product": "Propizol",
-    "label": "micro-injection use rate table, EPA 74578-8",
-    "match": "\\bpropizol\\b",
-    "basis": "inch",
-    "bands": [
-      {
-        "key": "label",
-        "label": "Label rate",
-        "low": 10,
-        "high": 20
-      }
-    ]
-  },
-  {
     "product": "Mn-jet Fe",
-    "label": "label insert",
+    "source": "Mn-jet Fe insert rev 8.2017 (arborjet.com): Low Rate 5 mL/inch DBH (early summer to maturity, through the growing season); High Rate 10-15 mL/inch DBH (late summer or fall).",
     "match": "\\bmn[\\s-]*jet\\b",
     "basis": "inch",
     "pick": "Season",
     "bands": [
       {
         "key": "low",
-        "label": "Low rate",
+        "label": "Growing season (low rate)",
         "low": 5,
         "high": 5
       },
       {
         "key": "late_season",
-        "label": "Late summer or fall",
+        "label": "Late summer or fall (high rate)",
         "low": 10,
         "high": 15
       }
@@ -100,7 +74,7 @@
   },
   {
     "product": "PALM-jet Mg",
-    "label": "palm rates table",
+    "source": "PALM-jet Mg label (arborjet.com PALM-jet-Mg_Website_Label.pdf): Small 6-12 ft spread = 5-10 mL/palm; Medium 12-24 ft = 10-20 mL/palm; Large 24-48 ft = 20-30 mL/palm.",
     "match": "\\bpalm[\\s-]*jet\\b",
     "basis": "palm",
     "pick": "Palm size",

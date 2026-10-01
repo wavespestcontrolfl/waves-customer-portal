@@ -75,7 +75,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
-import { DOSE_UNITS, doseOverLabel, doseText, injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText, parseDose, quantityOf, trunkInchesText } from "../../lib/injection-dose";
+import { DOSE_UNITS, doseText, injectionBand, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -11000,7 +11000,7 @@ export function treeShrubCloseoutBlocksClient({
     const inches = trunkInchesText(injection.sizeClassOrDbh);
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
     else if (labelRate?.basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
-    const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand.key : "";
+    const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand?.key || "" : "";
     const pickedBand = labelRate?.pick ? injectionBand(labelRate, inches, bandKey) : null;
     if (labelRate?.pick && !pickedBand) {
       push(`Pick the ${labelRate.pick.toLowerCase()} for the injection dose.`, "injectionRecord.labelBand");
@@ -11023,6 +11023,286 @@ export function treeShrubCloseoutBlocksClient({
   return blocks;
 }
 
+// The injection product's label in tsp or fl oz: the band that applies (or
+// the whole label until one does), the label's own rule for choosing, and the
+// pick the label leaves to the tech.
+function InjectionLabelFields({ rate, band, pickKey, onPick, select, colors }) {
+  const hint = { fontSize: 14, color: colors.muted };
+  return (
+    <>
+      <div style={hint}>
+        Label: <strong style={{ color: colors.text }}>{injectionLabelText(rate, band)}</strong>
+        {band && rate.bands.length > 1 ? ` (${band.label.toLowerCase()})` : ""}
+      </div>
+      {rate.note && <div style={hint}>{rate.note}</div>}
+      {!rate.bands && (
+        <div style={hint}>No dose is worked out for this product until its label is checked. Dose from the label.</div>
+      )}
+      {rate.pick && (
+        <label style={{ display: "grid", gap: 4, fontSize: 14, color: colors.muted }}>
+          {rate.pick}
+          <select aria-label={rate.pick} value={pickKey} onChange={(e) => onPick(e.target.value)} style={select}>
+            <option value="" disabled>{`Pick the ${rate.pick.toLowerCase()}`}</option>
+            {rate.bands.map((option) => (
+              <option key={option.key} value={option.key}>
+                {`${option.label}: ${injectionLabelText(rate, option)}`}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+    </>
+  );
+}
+
+// The dose: what the label works out for this tree (or palm), and the dose
+// the tech put in as a number of tsp or fl oz, noted when it is over the label.
+function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
+  const { rate: labelRate, trunkInches, doseRange, dose, unreadableDose } = view;
+  // The unit a dose is entered in: the saved dose's own, so clearing its
+  // amount never switches tsp to fl oz under the tech.
+  const [doseUnitPick, setDoseUnitPick] = useState(() => dose.unit || "fl_oz");
+  // What the tech is typing: the record keeps only a number it can read
+  // ("1 1/2" reads 1.5), never digits run together.
+  const [doseTyped, setDoseTyped] = useState(null);
+  const doseDraft = typedDraft(doseTyped, record.dose);
+  const doseUnit = dose.unit || doseUnitPick;
+  const overLabel = view.overLabel(doseUnit);
+  const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const hint = { fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  const perPalm = labelRate?.basis === "palm";
+  return (
+    <>
+      {doseRange && (
+        <div style={{ border: `1px solid ${colors.border}`, borderRadius: 10, padding: "10px 12px", background: colors.card }}>
+          <div style={hint}>{perPalm ? "Dose per palm" : "Dose for this tree"}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: colors.text }}>{doseRange}</div>
+          <div style={hint}>
+            {perPalm ? "Rounded inside the label." : `Rounded inside the label for a ${trunkInches}-inch trunk.`}
+          </div>
+        </div>
+      )}
+      <div style={caption}>
+        <span>{perPalm ? "Dose you put in, per palm" : "Dose you put in"}</span>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 8 }}>
+          <input
+            inputMode="decimal"
+            aria-label="Dose amount"
+            value={doseDraft ?? dose.amount}
+            onChange={(e) => {
+              const typed = e.target.value;
+              const stored = doseText(quantityOf(typed), doseUnit);
+              setDoseUnitPick(doseUnit);
+              setDoseTyped({ typed, stored });
+              onDose(stored);
+            }}
+            placeholder="Dose"
+            style={input}
+          />
+          <select
+            aria-label="Dose unit"
+            value={doseUnit}
+            onChange={(e) => {
+              setDoseUnitPick(e.target.value);
+              if (dose.amount) onDose(doseText(dose.amount, e.target.value));
+            }}
+            style={select}
+          >
+            {DOSE_UNITS.map((unit) => (
+              <option key={unit.value} value={unit.value}>{unit.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {doseTypingUnreadable && <div style={problem}>Enter the dose as a number, like 1.5 or 1 1/2.</div>}
+      {unreadableDose && !doseDraft && (
+        <div style={problem}>
+          {`The saved dose "${unreadableDose}" is not a number of tsp or fl oz. Enter it again.`}
+        </div>
+      )}
+      {overLabel && (
+        <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
+          {`${doseText(dose.amount, doseUnit)} is more than the label allows ${perPalm ? "per palm" : `for a ${trunkInches}-inch trunk`}${doseRange ? ` (${doseRange})` : ""}. Check the label before you inject.`}
+        </div>
+      )}
+    </>
+  );
+}
+
+// The tree's trunk in inches for a per-inch label (a saved size in another
+// unit is shown, to enter again); otherwise the size as typed. A banded palm
+// label's pick is the palm's size, so it has no field here.
+function InjectionSizeFields({ record, view, onSize, input, colors }) {
+  const { rate: labelRate, trunkInches, unreadableTrunk } = view;
+  const [trunkTyped, setTrunkTyped] = useState(null);
+  const trunkDraft = typedDraft(trunkTyped, record.sizeClassOrDbh);
+  const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  return (
+    <>
+      {labelRate?.basis === "inch" ? (
+        <label style={caption}>
+          Trunk (inches across, chest high)
+          <input
+            inputMode="decimal"
+            value={trunkDraft ?? trunkInches}
+            onChange={(e) => {
+              const typed = e.target.value;
+              // Only a trunk above zero is stored; "." or "0" stays a draft.
+              const inches = quantityOf(typed);
+              const stored = Number(inches) > 0 ? `${inches} in DBH` : "";
+              setTrunkTyped({ typed, stored });
+              onSize(stored);
+            }}
+            placeholder="Inches"
+            style={input}
+          />
+        </label>
+      ) : labelRate?.basis === "palm" && labelRate.bands ? null : (
+        <input
+          value={record.sizeClassOrDbh || ""}
+          onChange={(e) => onSize(e.target.value)}
+          placeholder="DBH / palm size"
+          style={input}
+        />
+      )}
+      {labelRate?.basis === "inch" && trunkTypingUnreadable && (
+        <div style={problem}>Enter the trunk as a number of inches, like 10 or 10.5.</div>
+      )}
+      {unreadableTrunk && !trunkDraft && (
+        <div style={problem}>{`The saved size "${unreadableTrunk}" is not in inches. Enter the trunk in inches.`}</div>
+      )}
+    </>
+  );
+}
+
+// The injection record (owner rulings 2026-09-29, 2026-10-01): the product,
+// its label in tsp or fl oz, the band and trunk that settle the dose, and the
+// dose itself as a number of tsp or fl oz.
+function TreeShrubInjectionRecord({ value, onChange, injectionProducts, input, select, colors }) {
+  const setInjectionField = (field, nextValue) =>
+    onChange({ ...value, injectionRecord: { ...(value.injectionRecord || {}), [field]: nextValue } });
+  // The injection dose in the truck's measures (lib/injection-dose.js): the
+  // record's product, if it is one of this visit's injection products, brings
+  // its label rate in mL per inch of trunk or per palm, shown in tsp or fl oz
+  // with the dose for the tree measured. The dose is a number of tsp or fl oz.
+  const record = value.injectionRecord || {};
+  const [otherProduct, setOtherProduct] = useState(false);
+  const view = injectionRecordView(record, injectionProducts);
+  const { chosen: chosenInjection, rate: labelRate, pickKey, band } = view;
+  // A banded palm label's pick is the palm's size (the record's size).
+  const palmSizeFromBand = labelRate?.basis === "palm" && Boolean(labelRate.bands);
+  const setProduct = (product, productAuto) =>
+    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, palmSizeFromBand }) });
+  // One injection product on this visit: the record names it, until the tech
+  // chooses or types a product of their own (then it is never put back). A
+  // product the form named itself follows the visit: when that product leaves
+  // the visit, the record names the new only one, or none.
+  const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
+  // The record marks a product the form named (productAuto), so a restored
+  // draft still knows it may follow the visit.
+  const productTouched = useRef(false);
+  useEffect(() => {
+    if (productTouched.current) return;
+    const stale = Boolean(record.product) && record.productAuto === true &&
+      !injectionProducts.some((product) => product.name === record.product);
+    if ((!record.product && onlyInjection) || stale) {
+      setProduct(onlyInjection, Boolean(onlyInjection));
+    }
+  }, [onlyInjection, record.product, injectionProducts]);
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {injectionProducts.length > 0 && (
+        <select
+          aria-label="Injection product"
+          value={otherProduct ? "__other__" : chosenInjection?.name || ""}
+          onChange={(e) => {
+            const picked = e.target.value;
+            productTouched.current = true;
+            setOtherProduct(picked === "__other__");
+            setProduct(picked === "__other__" ? "" : picked, false);
+          }}
+          style={select}
+        >
+          <option value="" disabled>Injection product</option>
+          {injectionProducts.map((product) => (
+            <option key={product.name} value={product.name}>{product.name}</option>
+          ))}
+          <option value="__other__">Other product…</option>
+        </select>
+      )}
+      {(!injectionProducts.length || otherProduct || (record.product && !chosenInjection)) && (
+        <input
+          value={record.product || ""}
+          onChange={(e) => {
+            productTouched.current = true;
+            setProduct(e.target.value, false);
+          }}
+          placeholder="Injection product"
+          style={input}
+        />
+      )}
+      {labelRate && (
+        <InjectionLabelFields
+          rate={labelRate}
+          band={band}
+          pickKey={pickKey}
+          onPick={(key) => onChange({ ...value, injectionRecord: recordWithBand(record, labelRate, key) })}
+          select={select}
+          colors={colors}
+        />
+      )}
+      <InjectionSizeFields
+        record={record}
+        view={view}
+        onSize={(size) => setInjectionField("sizeClassOrDbh", size)}
+        input={input}
+        colors={colors}
+      />
+      <InjectionDoseFields
+        record={record}
+        view={view}
+        onDose={(dose) => setInjectionField("dose", dose)}
+        input={input}
+        select={select}
+        colors={colors}
+      />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          type="number"
+          value={record.numberOfPorts ?? ""}
+          onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
+          placeholder="Ports"
+          style={input}
+        />
+        <input
+          type="date"
+          value={record.followUpDate || ""}
+          onChange={(e) => setInjectionField("followUpDate", e.target.value)}
+          style={input}
+        />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          value={record.plantSpecies || ""}
+          onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
+          placeholder="Plant species"
+          style={input}
+        />
+        <input
+          value={record.targetIssue || ""}
+          onChange={(e) => setInjectionField("targetIssue", e.target.value)}
+          placeholder="Injection target issue"
+          style={input}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function TreeShrubCloseoutBlock({
   value,
   onChange,
@@ -11038,76 +11318,7 @@ export function TreeShrubCloseoutBlock({
   const select = { ...(selectStyle || baseInputStyle), marginBottom: 8 };
   const textarea = { ...(textareaStyle || baseInputStyle), marginBottom: 8, minHeight: 82 };
   const setField = (field, nextValue) => onChange({ ...value, [field]: nextValue });
-  const setInjectionField = (field, nextValue) =>
-    onChange({
-      ...value,
-      injectionRecord: {
-        ...(value.injectionRecord || {}),
-        [field]: nextValue,
-      },
-    });
   const injectionVisible = value.injectionPerformed || productFlags.hasInjectionProduct;
-  // The injection dose in the truck's measures (lib/injection-dose.js): the
-  // record's product, if it is one of this visit's injection products, brings
-  // its label rate in mL per inch of trunk or per palm, shown in tsp or fl oz
-  // with the dose for the tree measured. The dose is a number of tsp or fl oz.
-  const record = value.injectionRecord || {};
-  const [otherProduct, setOtherProduct] = useState(false);
-  // The unit a dose is entered in: the saved dose's own, so clearing its
-  // amount never switches tsp to fl oz under the tech.
-  const [doseUnitPick, setDoseUnitPick] = useState(() => parseDose(record.dose).unit || "fl_oz");
-  // The label band the tech picks (target pest, season, palm size), saved
-  // with the record for the product it was picked for (a restored draft keeps
-  // it); trunk size settles a size-banded label.
-  const bandPick = record.labelBand || {};
-  // What the tech is typing in the dose and trunk fields: the record keeps
-  // only a number it can read ("1 1/2" reads 1.5), never digits run together.
-  // A draft stands only while the record still holds what it stored; any
-  // other change to the record (another product, a restored draft) wins.
-  const [doseTyped, setDoseTyped] = useState(null);
-  const [trunkTyped, setTrunkTyped] = useState(null);
-  const doseDraft = doseTyped && doseTyped.stored === String(record.dose || "") ? doseTyped.typed : null;
-  const trunkDraft = trunkTyped && trunkTyped.stored === String(record.sizeClassOrDbh || "") ? trunkTyped.typed : null;
-  const chosenInjection = injectionProducts.find((product) => product.name === record.product) || null;
-  const labelRate = chosenInjection?.rate || null;
-  const pickKey = bandPick.product === record.product ? bandPick.key : "";
-  const trunkInches = trunkInchesText(record.sizeClassOrDbh);
-  // A saved size that is not a number of inches ("30 cm DBH"): shown, to
-  // enter again in inches, never read as inches.
-  const unreadableTrunk =
-    labelRate?.basis === "inch" && String(record.sizeClassOrDbh || "").trim() && !trunkInches
-      ? String(record.sizeClassOrDbh).trim()
-      : "";
-  const band = labelRate ? injectionBand(labelRate, trunkInches, pickKey) : null;
-  const doseRange = labelRate ? injectionDoseText(labelRate, trunkInches, pickKey) : null;
-  const dose = parseDose(record.dose);
-  // A saved dose the form cannot read as tsp or fl oz: shown, to enter again.
-  const unreadableDose = String(record.dose || "").trim() && !dose.amount ? String(record.dose).trim() : "";
-  const doseUnit = dose.unit || doseUnitPick;
-  const overLabel = Boolean(labelRate) && doseOverLabel(labelRate, trunkInches, dose.amount, doseUnit, pickKey);
-  const doseTyping = doseDraft ?? dose.amount;
-  const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
-  const trunkTyping = trunkDraft ?? trunkInches;
-  const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
-  // One injection product on this visit: the record names it, until the tech
-  // chooses or types a product of their own (then it is never put back). A
-  // product the form named itself follows the visit: when that product leaves
-  // the visit, the record names the new only one, or none.
-  const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
-  // The record marks a product the form named (productAuto), so a restored
-  // draft still knows it may follow the visit.
-  const productTouched = useRef(false);
-  useEffect(() => {
-    if (!injectionVisible || productTouched.current) return;
-    const stale = Boolean(record.product) && record.productAuto === true &&
-      !injectionProducts.some((product) => product.name === record.product);
-    if ((!record.product && onlyInjection) || stale) {
-      onChange({ ...value, injectionRecord: { ...record, product: onlyInjection, productAuto: Boolean(onlyInjection) } });
-    }
-  }, [injectionVisible, onlyInjection, record.product, injectionProducts]);
-  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
-  const hint = { fontSize: 14, color: colors.muted };
-  const problem = { fontSize: 14, color: colors.error };
   return (
     <div style={{ display: "grid", gap: 8 }}>
       {blocks.length > 0 && (
@@ -11250,184 +11461,14 @@ export function TreeShrubCloseoutBlock({
         Injection add-on performed
       </label>
       {injectionVisible && (
-        <div style={{ display: "grid", gap: 8 }}>
-          {injectionProducts.length > 0 && (
-            <select
-              aria-label="Injection product"
-              value={otherProduct ? "__other__" : chosenInjection?.name || ""}
-              onChange={(e) => {
-                const picked = e.target.value;
-                productTouched.current = true;
-                setOtherProduct(picked === "__other__");
-                onChange({ ...value, injectionRecord: { ...record, product: picked === "__other__" ? "" : picked, productAuto: false } });
-              }}
-              style={select}
-            >
-              <option value="" disabled>Injection product</option>
-              {injectionProducts.map((product) => (
-                <option key={product.name} value={product.name}>{product.name}</option>
-              ))}
-              <option value="__other__">Other product…</option>
-            </select>
-          )}
-          {(!injectionProducts.length || otherProduct || (record.product && !chosenInjection)) && (
-            <input
-              value={record.product || ""}
-              onChange={(e) => {
-                productTouched.current = true;
-                onChange({ ...value, injectionRecord: { ...record, product: e.target.value, productAuto: false } });
-              }}
-              placeholder="Injection product"
-              style={input}
-            />
-          )}
-          {labelRate && (
-            <div style={hint}>
-              Label: <strong style={{ color: colors.text }}>{injectionLabelText(labelRate, band)}</strong>
-              {band && labelRate.bands.length > 1 ? ` (${band.label.toLowerCase()})` : ""}
-            </div>
-          )}
-          {labelRate && !labelRate.bands && (
-            <div style={hint}>No dose is worked out for this product: its label rate depends on the tree. Dose from the label.</div>
-          )}
-          {labelRate?.pick && (
-            <label style={caption}>
-              {labelRate.pick}
-              <select
-                aria-label={labelRate.pick}
-                value={pickKey}
-                onChange={(e) => {
-                  const labelBand = { product: record.product, key: e.target.value };
-                  // A palm label's band is the palm's size: the record's size
-                  // is that band, never a second answer that can disagree.
-                  const palmSize = labelRate.basis === "palm" ? labelRate.bands.find((option) => option.key === labelBand.key)?.label : null;
-                  onChange({ ...value, injectionRecord: { ...record, labelBand, ...(palmSize ? { sizeClassOrDbh: palmSize } : {}) } });
-                }}
-                style={select}
-              >
-                <option value="" disabled>{`Pick the ${labelRate.pick.toLowerCase()}`}</option>
-                {labelRate.bands.map((option) => (
-                  <option key={option.key} value={option.key}>
-                    {`${option.label}: ${injectionLabelText(labelRate, option)}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {labelRate?.basis === "inch" ? (
-            <label style={caption}>
-              Trunk (inches across, chest high)
-              <input
-                inputMode="decimal"
-                value={trunkTyping}
-                onChange={(e) => {
-                  const typed = e.target.value;
-                  // Only a trunk above zero is stored; "." or "0" stays a draft.
-                  const inches = quantityOf(typed);
-                  const stored = Number(inches) > 0 ? `${inches} in DBH` : "";
-                  setTrunkTyped({ typed, stored });
-                  setInjectionField("sizeClassOrDbh", stored);
-                }}
-                placeholder="Inches"
-                style={input}
-              />
-            </label>
-          ) : labelRate?.basis === "palm" && labelRate.bands ? null : (
-            <input
-              value={record.sizeClassOrDbh || ""}
-              onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
-              placeholder="DBH / palm size"
-              style={input}
-            />
-          )}
-          {labelRate?.basis === "inch" && trunkTypingUnreadable && (
-            <div style={problem}>Enter the trunk as a number of inches, like 10 or 10.5.</div>
-          )}
-          {unreadableTrunk && !trunkDraft && (
-            <div style={problem}>{`The saved size "${unreadableTrunk}" is not in inches. Enter the trunk in inches.`}</div>
-          )}
-          {doseRange && (
-            <div style={{ border: `1px solid ${colors.border}`, borderRadius: 10, padding: "10px 12px", background: colors.card }}>
-              <div style={hint}>{labelRate.basis === "palm" ? "Dose per palm" : "Dose for this tree"}</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: colors.text }}>{doseRange}</div>
-              <div style={hint}>
-                {labelRate.basis === "palm" ? "Rounded inside the label." : `Rounded inside the label for a ${trunkInches}-inch trunk.`}
-              </div>
-            </div>
-          )}
-          <div style={caption}>
-            <span>{labelRate?.basis === "palm" ? "Dose you put in, per palm" : "Dose you put in"}</span>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 8 }}>
-              <input
-                inputMode="decimal"
-                aria-label="Dose amount"
-                value={doseTyping}
-                onChange={(e) => {
-                  const typed = e.target.value;
-                  const stored = doseText(quantityOf(typed), doseUnit);
-                  setDoseUnitPick(doseUnit);
-                  setDoseTyped({ typed, stored });
-                  setInjectionField("dose", stored);
-                }}
-                placeholder="Dose"
-                style={input}
-              />
-              <select
-                aria-label="Dose unit"
-                value={doseUnit}
-                onChange={(e) => {
-                  setDoseUnitPick(e.target.value);
-                  if (dose.amount) setInjectionField("dose", doseText(dose.amount, e.target.value));
-                }}
-                style={select}
-              >
-                {DOSE_UNITS.map((unit) => (
-                  <option key={unit.value} value={unit.value}>{unit.label}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          {doseTypingUnreadable && <div style={problem}>Enter the dose as a number, like 1.5 or 1 1/2.</div>}
-          {unreadableDose && !doseDraft && (
-            <div style={problem}>
-              {`The saved dose "${unreadableDose}" is not a number of tsp or fl oz. Enter it again.`}
-            </div>
-          )}
-          {overLabel && (
-            <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
-              {`${doseText(dose.amount, doseUnit)} is more than the label allows ${labelRate.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`}${doseRange ? ` (${doseRange})` : ""}. Check the label before you inject.`}
-            </div>
-          )}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              type="number"
-              value={record.numberOfPorts ?? ""}
-              onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
-              placeholder="Ports"
-              style={input}
-            />
-            <input
-              type="date"
-              value={record.followUpDate || ""}
-              onChange={(e) => setInjectionField("followUpDate", e.target.value)}
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={record.plantSpecies || ""}
-              onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
-              placeholder="Plant species"
-              style={input}
-            />
-            <input
-              value={record.targetIssue || ""}
-              onChange={(e) => setInjectionField("targetIssue", e.target.value)}
-              placeholder="Injection target issue"
-              style={input}
-            />
-          </div>
-        </div>
+        <TreeShrubInjectionRecord
+          value={value}
+          onChange={onChange}
+          injectionProducts={injectionProducts}
+          input={input}
+          select={select}
+          colors={colors}
+        />
       )}
     </div>
   );

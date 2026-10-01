@@ -70,6 +70,10 @@ function injectionLabelOf(catalog = {}) {
   const per = rest.join('/').trim().toLowerCase();
   const basis = /^(inch|in\b)/.test(per) ? 'inch' : /^palm/.test(per) ? 'palm' : null;
   if (!basis) return null;
+  // The same rate the client reads (injectionLabelRate): one or two positive
+  // numbers. A row without one shows no band picker, so none is required.
+  const bounds = String(catalog.default_rate ?? catalog.defaultRate ?? '').split(/\s*(?:-|–|to)\s*/).map(Number);
+  if (bounds.length > 2 || bounds.some((n) => !(n > 0))) return null;
   const name = String(catalog.name || '');
   return { basis, table: INJECTION_LABEL_BANDS.find((row) => row.match.test(name) && row.basis === basis) || null };
 }
@@ -504,7 +508,7 @@ function validateTreeShrubCloseout({
       pushBlock(blocks, 'tree_shrub_injection_dbh_inches', 'Enter the trunk in inches.', 'injectionRecord.sizeClassOrDbh');
     }
     if (label?.table?.pick) {
-      const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand.key : '';
+      const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand?.key || '' : '';
       const band = label.table.bands.find((option) => option.key === bandKey);
       if (!band) {
         pushBlock(blocks, 'tree_shrub_injection_band_required', `Pick the ${label.table.pick.toLowerCase()} for the injection dose.`, 'injectionRecord.labelBand');
