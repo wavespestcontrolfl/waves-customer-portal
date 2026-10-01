@@ -26,6 +26,8 @@ function planArgs(over = {}) {
     alreadySent: false,
     gateOn: true,
     ruleGateOn: true,
+    frozenAt: new Date().toISOString(),
+    nowMs: Date.now(),
     ...over,
   };
 }
@@ -116,7 +118,7 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     const state = {
       record: { id: 'rec-1', structured_notes: {} },
       svc: { id: 'svc-1', customer_id: 'cust-1', cust_phone: '+19415550100' },
-      notes: { lawnWateringFreeze: { wateringInstruction: HOLD }, ...notes },
+      notes: { lawnWateringFreeze: { wateringInstruction: HOLD, frozenAt: new Date().toISOString() }, ...notes },
       isBackfill: false,
       deliveryMode: 'auto_send',
       internalOnly: false,
@@ -338,6 +340,27 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
       expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'skipped_quiet_hours', lawnWateringSmsDeliveryUnverifiedAt: null });
       expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
     });
+  });
+});
+
+describe('freshness: never yesterday\'s instruction', () => {
+  // 2:40 PM ET on Sep 30.
+  const FROZEN = '2026-09-30T18:40:00Z';
+  const at = (iso) => Date.parse(iso);
+  test('same ET day before the deadline sends', () => {
+    expect(lawnWateringSmsPlan(planArgs({ frozenAt: FROZEN, nowMs: at('2026-09-30T19:00:00Z') })).send).toBe(true);
+  });
+  test('a completion resumed the next ET day is stale', () => {
+    // 12:30 AM ET Oct 1.
+    expect(lawnWateringSmsPlan(planArgs({ frozenAt: FROZEN, nowMs: at('2026-10-01T04:30:00Z') }))).toEqual({ send: false, reason: 'stale' });
+  });
+  test('past the instruction deadline is stale, even the same day', () => {
+    const instruction = { ...HOLD, expiresAt: '2026-09-30T22:00:00.000Z' };
+    expect(lawnWateringSmsPlan(planArgs({ instruction, frozenAt: FROZEN, nowMs: at('2026-09-30T22:00:00Z') }))).toEqual({ send: false, reason: 'stale' });
+    expect(lawnWateringSmsPlan(planArgs({ instruction, frozenAt: FROZEN, nowMs: at('2026-09-30T21:59:00Z') })).send).toBe(true);
+  });
+  test('an unknown freeze time fails closed', () => {
+    expect(lawnWateringSmsPlan(planArgs({ frozenAt: null }))).toEqual({ send: false, reason: 'stale' });
   });
 });
 

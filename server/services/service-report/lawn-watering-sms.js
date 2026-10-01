@@ -24,6 +24,7 @@
 
 const logger = require('../logger');
 const { lawnWateringSmsLive, lawnWateringRuleLive } = require('../../config/feature-gates');
+const { etDateString } = require('../../utils/datetime-et');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
@@ -69,6 +70,8 @@ function lawnWateringSmsPlan({
   alreadySent = false,
   gateOn = false,
   ruleGateOn = false,
+  frozenAt = null,
+  nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
   if (!ruleGateOn) return { send: false, reason: 'rule_gate_off' };
@@ -82,6 +85,14 @@ function lawnWateringSmsPlan({
   }
   const lines = wateringLinesOf(instruction);
   if (!lines.length) return { send: false, reason: 'no_lines' };
+  // Fresh only: the lines say "today" / "tonight" and name clock times on the
+  // visit's own day, so a completion resumed on a later ET day, or after the
+  // instruction's deadline, never sends them. An unknown freeze time fails closed.
+  const frozenMs = frozenAt ? Date.parse(frozenAt) : NaN;
+  if (!Number.isFinite(frozenMs)) return { send: false, reason: 'stale' };
+  if (etDateString(new Date(nowMs)) !== etDateString(new Date(frozenMs))) return { send: false, reason: 'stale' };
+  const expiresMs = instruction.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
+  if (Number.isFinite(expiresMs) && nowMs >= expiresMs) return { send: false, reason: 'stale' };
   return { send: true, vars: { watering_lines: lines.join(' ') } };
 }
 
@@ -115,6 +126,8 @@ async function sendLawnWateringSms(args, deps) {
       alreadySent: lawnWateringSmsAlreadyHandled(notes),
       gateOn,
       ruleGateOn,
+      frozenAt: notes?.lawnWateringFreeze?.frozenAt || null,
+      nowMs: Date.now(),
     });
     if (!plan.send) return { status: `skip_${plan.reason}` };
 
