@@ -25,7 +25,7 @@ describe('billingFingerprint', () => {
   test('reads through the given connection; null on no customer, a failed read, or no row', async () => {
     const dbh = { raw: jest.fn(async () => ({ rows: [{ fingerprint: 'abc' }] })) };
     expect(await billingFingerprint('c1', dbh)).toBe('abc');
-    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(10).fill('c1'));
+    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(12).fill('c1'));
     expect(await billingFingerprint(null, dbh)).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => { throw new Error('down'); } })).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => ({ rows: [] }) })).toBeNull();
@@ -86,7 +86,7 @@ describe('Zelle at the provider boundary: the full recheck\'s own checks run aga
 
 // Codex round-51 P1: account credit that would cover the invoice is billing state too
 test('the fingerprint hashes the customer\'s account credit and auto-apply setting', () => {
-  expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit) FROM customers WHERE id = ?");
+  expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit,");
 });
 
 // Local Codex review pass 1: payer activation, self-pay overrides and the estimate-deposit ledger are billing state too
@@ -94,7 +94,7 @@ test('the fingerprint hashes payer activation, self-pay overrides and estimate d
   expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', p.id, p.active)");
   expect(BILLING_FINGERPRINT_SQL).toContain('self_pay_override IS TRUE');
   expect(BILLING_FINGERPRINT_SQL).toContain('FROM estimate_deposits d');
-  expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(10);
+  expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(12);
 });
 
 // Codex round-53: retry fields drive the failed-payment balance; a denial approved with Zelle off is rechecked when it is set up
@@ -117,4 +117,11 @@ describe('a denial that stood because Zelle was not set up', () => {
     delete process.env.ZELLE_RECIPIENT;
     await expect(denial({ invoiceId: null, recipientConfigured: true })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false });
   });
+});
+
+// Codex round-54 P1: the dues authority (billing mode / rate / tier, the saved methods a surcharge is computed from, annual-prepay
+// terms) is billing state too
+test('the fingerprint hashes the monthly-dues authority', () => {
+  for (const t of ['billing_mode, monthly_rate, waveguard_tier', 'autopay_enabled, autopay_payment_method_id) FROM customers WHERE id = ?',
+    'FROM payment_methods WHERE customer_id = ?', 'card_funding', 'FROM annual_prepay_terms WHERE customer_id = ?']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
 });

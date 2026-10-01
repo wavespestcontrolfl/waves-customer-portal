@@ -307,7 +307,8 @@ describe('mutation sweep: no near-miss of a rendered sentence is accepted', () =
   test('the unmodified sentences all pass (the sweep is meaningful)', () => {
     let n = 0;
     for (const { ctx, inbound } of sets) for (const t of sentencesOf(ctx)) { n += 1; expect({ t, ok: gate(t, ctx, inbound) }).toEqual({ t, ok: true }); }
-    expect(n).toBeGreaterThanOrEqual(10);
+    // (9: the fixture's partially paid invoice is unmodeled, so no balance sentence - Codex round-54 P2)
+    expect(n).toBeGreaterThanOrEqual(9);
   });
 
   test('every single-word deletion that is not itself a rendered sentence is held', () => {
@@ -630,4 +631,10 @@ test.each(['Your cash is here.', 'The check is here.', 'That check cleared.'])('
 });
 test.each(['Please bring the check to the visit.', 'You can leave the cash with the tech.'])('not a status: %s', (b) => {
   expect(c.assertsPaymentStatus(b, { inboundText: 'Can I pay cash?' })).toBe(false);
+});
+
+// Codex round-54 P2: a cut invoice history may hide more owed - no balance figure
+test('a positive balance is not stated when the invoice history is cut / unmodeled', () => {
+  expect(kinds(billing({ outstandingBalance: 95 }))).toContain('balance');
+  expect(kinds(billing({ outstandingBalance: 95, hasUnmodeledInvoice: true }))).not.toContain('balance');
 });

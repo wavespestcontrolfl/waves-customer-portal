@@ -6,7 +6,8 @@
 // / policy, the re-service handoff) before Twilio. Repeating the full recheck at the provider boundary would need a second pool
 // connection while the handoff holds one (a pool of 2 can deadlock). Instead the fingerprint of every row the recheck reads is taken
 // BEFORE that recheck, and re-read at the boundary in ONE query on the handoff's own connection: any change in between (a payment
-// landing, an invoice settling or being withdrawn, a plan, a payer assignment, account credit that would cover it) refuses the send as RETRYABLE - the retry reruns the
+// landing, an invoice settling or being withdrawn, a plan, a payer assignment, account credit that would cover it, the dues authority:
+// billing mode / rate / tier, the saved methods a surcharge is computed from, annual-prepay terms) refuses the send as RETRYABLE - the retry reruns the
 // full recheck on the new state. Content-based (md5 of the rows), so a write that does not bump updated_at still counts.
 const db = require('../models/db');
 
@@ -26,7 +27,11 @@ const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
    WHERE p.id IN (SELECT payer_id FROM customers WHERE id = ? UNION SELECT payer_id FROM scheduled_services WHERE customer_id = ?)),
   (SELECT string_agg(concat_ws('|', d.id, d.status, d.credited_amount, d.refunded_amount), ',' ORDER BY d.id) FROM estimate_deposits d
    WHERE d.customer_id = ? OR d.estimate_id IN (SELECT id FROM estimates WHERE customer_id = ?)),
-  (SELECT concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit) FROM customers WHERE id = ?)
+  (SELECT concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit, billing_mode, monthly_rate, waveguard_tier,
+     autopay_enabled, autopay_payment_method_id) FROM customers WHERE id = ?),
+  (SELECT string_agg(concat_ws('|', id, processor, is_default, autopay_enabled, method_type, card_funding, stripe_payment_method_id), ',' ORDER BY id)
+   FROM payment_methods WHERE customer_id = ?),
+  (SELECT string_agg(concat_ws('|', id, status, term_start, term_end, monthly_rate), ',' ORDER BY id) FROM annual_prepay_terms WHERE customer_id = ?)
 )) AS fingerprint`;
 
 const BILLING_FINGERPRINT_PARAMS = (BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length;

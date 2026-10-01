@@ -236,7 +236,8 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
 function balanceSentences(billing, onPlan) {
   if (onPlan) return [];
   const owed = finiteCents(billing.outstandingBalance);
-  if (owed > 0 && billing.hasUncountedPartialDue !== true) return [{ kind: 'balance', text: `Your account balance is ${money(owed)}.` }];
+  // a cut invoice history (or an own invoice the renderer cannot model) may hide more owed: no balance figure either (Codex round-54 P2)
+  if (owed > 0 && billing.hasUncountedPartialDue !== true && !hasUnmodeledInvoice(billing)) return [{ kind: 'balance', text: `Your account balance is ${money(owed)}.` }];
   if (owed === 0 && !hasOutstandingObligation(billing)) return [{ kind: 'no_balance', text: 'Your account has no balance due.' }];
   return [];
 }
