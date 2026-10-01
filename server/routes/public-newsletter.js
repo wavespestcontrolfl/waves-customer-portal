@@ -451,7 +451,7 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     if (req.body.source === WAITLIST_SOURCE
         && (result.action === 'confirmation_sent' || result.action === 'confirmation_resent')) {
       try {
-        await applyWaitlistTags(result.subscriber, req.body.tags);
+        await applyWaitlistTags(result.subscriber, req.body.tags, { zip: req.body.zip, city: req.body.city });
       } catch (e) {
         logger.error(`[newsletter] waitlist tags not saved for subscriber id=${result.subscriber?.id} code=${e.code || 'unknown'}`);
       }

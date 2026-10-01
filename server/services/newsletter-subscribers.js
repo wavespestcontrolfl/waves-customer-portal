@@ -319,32 +319,39 @@ async function insertNewSubscriber({ lc, firstName, lastName, source, requireCon
 // ---------------------------------------------------------------------------
 // Out-of-area waitlist location tags. The astro websites' out-of-area card
 // posts source 'out_of_area_waitlist' with tags ['out_of_area_waitlist',
-// 'zip:34205', 'city:ruskin'] so the office can see where waitlisters live.
+// 'zip:34205', 'city:ruskin'] (newer sites also send top-level zip/city, which
+// win) so the office can see where waitlisters live.
 // Only that source's two location tags are persisted, into the existing
 // newsletter_subscribers.tags jsonb array; anything else in the posted tags is
 // dropped. Values are PII-adjacent: validated here, never logged.
 const WAITLIST_SOURCE = 'out_of_area_waitlist';
 const WAITLIST_CITY_MAX = 40;
 
-function sanitizeWaitlistTags(rawTags) {
+function waitlistCitySlug(value) {
+  if (typeof value !== 'string') return null;
+  const slug = value.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, WAITLIST_CITY_MAX)
+    .replace(/-+$/g, '');
+  return slug || null;
+}
+
+// `fields` = the body's top-level { zip, city } (newer sites), which win over
+// the zip:/city: entries in `rawTags` (older deployed sites send only tags).
+function sanitizeWaitlistTags(rawTags, fields = {}) {
   const out = [WAITLIST_SOURCE];
-  if (!Array.isArray(rawTags)) return out;
-  let zip = null;
-  let city = null;
-  for (const raw of rawTags.slice(0, 20)) {
-    if (typeof raw !== 'string') continue;
-    const tag = raw.trim();
-    if (zip === null) {
-      const m = /^zip:(\d{5})$/i.exec(tag);
-      if (m) { zip = m[1]; continue; }
-    }
-    if (city === null && /^city:/i.test(tag)) {
-      const slug = tag.slice(5).trim().toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, WAITLIST_CITY_MAX)
-        .replace(/-+$/g, '');
-      if (slug) city = slug;
+  let zip = typeof fields?.zip === 'string' && /^\d{5}$/.test(fields.zip.trim()) ? fields.zip.trim() : null;
+  let city = waitlistCitySlug(fields?.city);
+  if (Array.isArray(rawTags)) {
+    for (const raw of rawTags.slice(0, 20)) {
+      if (typeof raw !== 'string') continue;
+      const tag = raw.trim();
+      if (zip === null) {
+        const m = /^zip:(\d{5})$/i.exec(tag);
+        if (m) { zip = m[1]; continue; }
+      }
+      if (city === null && /^city:/i.test(tag)) city = waitlistCitySlug(tag.slice(5));
     }
   }
   if (zip) out.push(`zip:${zip}`);
@@ -356,10 +363,10 @@ function sanitizeWaitlistTags(rawTags) {
 // replacing any zip:/city: tag from an earlier attempt. Only a 'pending' row is
 // touched (this signup just created or re-armed it), so an anonymous post can't
 // rewrite tags on an already-confirmed subscriber. Returns the update count.
-async function applyWaitlistTags(subscriber, rawTags, dbh = null) {
+async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
   if (!subscriber || !subscriber.id) return 0;
   const conn = dbh || db;
-  const fresh = sanitizeWaitlistTags(rawTags);
+  const fresh = sanitizeWaitlistTags(rawTags, fields);
   const existing = Array.isArray(subscriber.tags) ? subscriber.tags : [];
   const kept = existing.filter((t) => typeof t !== 'string'
     || (!/^(zip|city):/i.test(t) && t !== WAITLIST_SOURCE));

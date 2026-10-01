@@ -89,6 +89,24 @@ describe('sanitizeWaitlistTags', () => {
   });
 });
 
+describe('sanitizeWaitlistTags top-level zip/city', () => {
+  test('top-level fields win over tags; tags are the fallback', () => {
+    expect(sanitizeWaitlistTags(['zip:33570', 'city:ruskin'], { zip: '34266', city: 'Arcadia' }))
+      .toEqual(['out_of_area_waitlist', 'zip:34266', 'city:arcadia']);
+    expect(sanitizeWaitlistTags(['zip:33570', 'city:ruskin'], {}))
+      .toEqual(['out_of_area_waitlist', 'zip:33570', 'city:ruskin']);
+    expect(sanitizeWaitlistTags(undefined, { zip: '34266' }))
+      .toEqual(['out_of_area_waitlist', 'zip:34266']);
+  });
+
+  test('a bad top-level value falls back to the tag, never stored raw', () => {
+    expect(sanitizeWaitlistTags(['zip:33570', 'city:ruskin'], { zip: '3426', city: '***' }))
+      .toEqual(['out_of_area_waitlist', 'zip:33570', 'city:ruskin']);
+    expect(sanitizeWaitlistTags([], { zip: 34266, city: { a: 1 } })).toEqual(['out_of_area_waitlist']);
+    expect(sanitizeWaitlistTags([], { city: `Sun City ${'x'.repeat(100)}` })[1].length).toBeLessThanOrEqual(5 + 40);
+  });
+});
+
 describe('applyWaitlistTags', () => {
   test('replaces earlier zip/city tags, keeps unrelated tags, CASes on pending', async () => {
     await applyWaitlistTags(
@@ -118,6 +136,23 @@ describe('POST /subscribe', () => {
     expect(mockNsUpdates).toHaveLength(1);
     expect(JSON.parse(mockNsUpdates[0].patch.tags))
       .toEqual(['out_of_area_waitlist', 'zip:33570', 'city:ruskin']);
+  });
+
+  test('top-level zip/city body fields are persisted as tags', async () => {
+    await post({
+      email: 'waitlister@example.com',
+      source: 'out_of_area_waitlist',
+      tags: ['out_of_area_waitlist', 'zip:34266', 'city:arcadia'],
+      zip: '34266',
+      city: 'Arcadia',
+    });
+    expect(JSON.parse(mockNsUpdates[0].patch.tags))
+      .toEqual(['out_of_area_waitlist', 'zip:34266', 'city:arcadia']);
+  });
+
+  test('other sources ignore top-level zip/city too', async () => {
+    await post({ email: 'a@example.com', source: 'public_form', zip: '34266', city: 'Arcadia' });
+    expect(mockNsUpdates).toHaveLength(0);
   });
 
   test('a re-submit on a pending row also records the tags', async () => {

@@ -1899,11 +1899,11 @@ records one deduped analytics row then 302s to the DB-locked event
 URL; unknown token = untracked redirect, never blocks the reader)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
-and ONLY `source: "out_of_area_waitlist"` also reads the optional body `tags` array —
-the astro out-of-area card sends `["out_of_area_waitlist", "zip:NNNNN", "city:slug"]` —
-keeping at most one `zip:` tag that is exactly 5 digits and one `city:` tag normalized to a
+and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`
+strings (newer sites; they win) and the optional `tags` array (older sites send only
+`["out_of_area_waitlist", "zip:NNNNN", "city:slug"]`), keeping at most one `zip:` tag that is exactly 5 digits and one `city:` tag normalized to a
 lowercase hyphen slug capped at 40 chars, plus the fixed `out_of_area_waitlist` tag; every
-other posted tag is dropped, and every other source ignores `tags` entirely. The write goes
+other posted tag is dropped, and every other source ignores `tags`/`zip`/`city` entirely. The write goes
 to the existing `newsletter_subscribers.tags` jsonb, replaces that row's earlier `zip:`/`city:`
 tags, and only touches the signup's own `pending` row (a new or re-armed double-opt-in), so an
 anonymous post cannot retag an already-confirmed subscriber. It is best-effort: a failure
