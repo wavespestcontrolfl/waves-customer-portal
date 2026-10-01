@@ -166,7 +166,7 @@ function conflictsChanged() {
 }
 
 async function probeMoveConflicts({
-  conn, target, excludeServiceIds, options = {}, travel,
+  conn, target, excludeServiceIds, options = {}, travel, arrivalExcludeServiceIds,
 }) {
   if (!target.windowStart || !target.windowEnd) return { rows: [], snapshot: [] };
   const useArrivalWindows = options.overlapAdvisory === true
@@ -197,6 +197,7 @@ async function probeMoveConflicts({
       serviceId: target.id,
       technicianId: target.technicianId || null,
       changes: target.changes,
+      ...(arrivalExcludeServiceIds ? { excludeServiceIds: arrivalExcludeServiceIds } : {}),
     } } : {}),
   });
   return { rows, snapshot: sortConflictSnapshot(rows.map((row) => conflictSnapshotItem(target, row))) };
@@ -3283,6 +3284,17 @@ class SmartRebooker {
       // whole move (all-or-none). A partner is never parked windowless: the
       // beyond-horizon placeholder carve-out is a series-cadence rule, and a
       // partner is another plan's row.
+      // The arrival-window route check must see a carried stop as ONE grouped
+      // stop (as the unit mover's): its members stay visible to that check
+      // even though the occupancy probe hides them, so the check declines to
+      // certify the partial group and the move raises its route-review
+      // warning. undefined (the shared list) for any row not carrying.
+      const arrivalExcludeFor = (row) => {
+        const entry = carry.byVisit.get(String(row.visit_id || ''));
+        if (!entry) return undefined;
+        const members = new Set([String(entry.occurrenceId), ...entry.partners.map((p) => String(p.id))]);
+        return probeExcludeIds.filter((id) => !members.has(String(id)));
+      };
       const probePartnerSlot = async (partner, pUpdate, keptTech, dateStr) => {
         const occEnd = occupancyProbeEnd(
           pUpdate.window_start,
@@ -3293,6 +3305,7 @@ class SmartRebooker {
           conn: trx,
           target: { id: partner.id, date: dateStr, windowStart: pUpdate.window_start, windowEnd: occEnd, technicianId: keptTech, changes: pUpdate },
           excludeServiceIds: probeExcludeIds,
+          arrivalExcludeServiceIds: arrivalExcludeFor(partner),
           options,
           travel: seriesTravel,
         })).rows;
@@ -3643,6 +3656,7 @@ class SmartRebooker {
               changes: updateData,
             },
             excludeServiceIds: probeExcludeIds,
+            arrivalExcludeServiceIds: arrivalExcludeFor(sib),
             options,
             travel: seriesTravel,
           })).rows;
@@ -3731,6 +3745,7 @@ class SmartRebooker {
               changes: updateData,
             },
             excludeServiceIds: probeExcludeIds,
+            arrivalExcludeServiceIds: arrivalExcludeFor(sib),
             options,
             travel: seriesTravel,
           })).rows;

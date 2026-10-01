@@ -451,6 +451,24 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     }
   });
 
+  test('arrival windows on: a carried stop is judged as ONE grouped stop, so the move raises route review', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    try {
+      const f = await build();
+      await db('customers').where({ id: f.customerId }).update({ latitude: 27.4989, longitude: -82.5748 });
+      const anchor = f.lawn[0];
+      const result = await rebooker.rescheduleSeries(anchor.id, addDays(dateOnly(anchor.scheduled_date), 1), '09:00-10:00', 'admin', 'admin', {
+        allowLive: true, adminWindowRules: true, sourceSurface: 'dispatch_board', notifyRequested: false, overlapAdvisory: true,
+      });
+      const firstDay = addDays(dateOnly(anchor.scheduled_date), 1);
+      expect(result.arrivalWindowDates || []).toContain(firstDay);
+      expect((result.warnings || []).join(' ')).toContain('Review the route before driving it');
+    } finally {
+      delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    }
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
