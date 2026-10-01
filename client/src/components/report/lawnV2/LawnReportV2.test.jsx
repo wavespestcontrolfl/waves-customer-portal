@@ -6,7 +6,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LawnTrends, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
+import { LawnTrends, LawnWateringBanner, PrintContext, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
 import LawnReportV2Section from './LawnReportV2Section';
 import { ScoreRing as TreeShrubScoreRing } from '../treeShrubV2/TreeShrubReportV2';
 import { MeterSvg, TrendChip } from '../GaugePrimitives';
@@ -360,15 +360,19 @@ const BANNERS = {
 };
 const SNAPSHOT = { overallScore: 80, statusHeadline: 'Looking good' };
 
-describe('LawnReportV2Section watering banner', () => {
-  it.each(Object.keys(BANNERS))('%s: first child, eyebrow, line 1 as the heading, the rest as body text', (state) => {
-    const { container } = render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: BANNERS[state] }} />);
+describe('LawnWateringBanner', () => {
+  // Mounted by ReportViewPage under the visit status card (P3), with the same
+  // print context the lawn section provides.
+  const renderBanner = (banner, { print = false } = {}) => render(
+    <PrintContext.Provider value={print}><LawnWateringBanner banner={banner} /></PrintContext.Provider>,
+  );
+
+  it.each(Object.keys(BANNERS))('%s: a glass card with the eyebrow, line 1 as the heading, the rest as body text', (state) => {
+    const { container } = renderBanner(BANNERS[state]);
     const banner = screen.getByTestId('lawn-watering-banner');
     expect(banner).toHaveAttribute('data-state', state);
-    // First child of the embed, ahead of the hero.
-    const embed = container.querySelector('.report-v2-embed');
-    expect(embed.firstElementChild).toContainElement(banner);
-    expect(embed.firstElementChild).toHaveAttribute('data-glass', 'card');
+    expect(container.firstElementChild).toHaveAttribute('data-glass', 'card');
+    expect(container.firstElementChild).toContainElement(banner);
     expect(banner).toHaveTextContent('Watering after today’s visit');
     const heading = screen.getByTestId('lawn-watering-banner-heading');
     expect(heading.tagName).toBe('H2');
@@ -380,10 +384,15 @@ describe('LawnReportV2Section watering banner', () => {
     expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
   });
 
+  it('the lawn section no longer renders it (the page mounts it once, under the status card)', () => {
+    render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: BANNERS.hold }} />);
+    expect(screen.queryByTestId('lawn-watering-banner')).toBeNull();
+  });
+
   it('hold states carry the warm tint; water-in does not', () => {
     const tinted = (state) => {
-      const { container, unmount } = render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: BANNERS[state] }} />);
-      const style = container.querySelector('.report-v2-embed').firstElementChild.style.background;
+      const { container, unmount } = renderBanner(BANNERS[state]);
+      const style = container.firstElementChild.style.background;
       unmount();
       return style;
     };
@@ -392,7 +401,7 @@ describe('LawnReportV2Section watering banner', () => {
   });
 
   it('past expiresAt (live view): the ended fine-print replaces the lines', () => {
-    render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: { ...BANNERS.hold, expiresAt: PAST } }} />);
+    renderBanner({ ...BANNERS.hold, expiresAt: PAST });
     expect(screen.getByTestId('lawn-watering-banner-ended')).toHaveTextContent('This watering note was for the day of your visit.');
     expect(screen.queryByTestId('lawn-watering-banner-heading')).toBeNull();
     expect(screen.queryByText(/Skip your turf watering/)).toBeNull();
@@ -402,7 +411,7 @@ describe('LawnReportV2Section watering banner', () => {
     vi.useFakeTimers();
     try {
       const expiresAt = new Date(Date.now() + 60 * 1000).toISOString();
-      render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: { ...BANNERS.hold, expiresAt } }} />);
+      renderBanner({ ...BANNERS.hold, expiresAt });
       expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
       act(() => { vi.advanceTimersByTime(62 * 1000); });
       expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
@@ -412,19 +421,19 @@ describe('LawnReportV2Section watering banner', () => {
   });
 
   it('print / PDF keeps the lines even past expiry, in the same block', () => {
-    render(<LawnReportV2Section print data={{ snapshot: SNAPSHOT, banner: { ...BANNERS.hold, expiresAt: PAST } }} />);
+    renderBanner({ ...BANNERS.hold, expiresAt: PAST }, { print: true });
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.hold.lines[0]);
     expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
   });
 
-  it('a banner with no expiry (none state, until-dry before completion) never ends', () => {
-    render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: { state: 'none', lines: ['No watering change from today’s treatment.'], expiresAt: null } }} />);
+  it('a banner with no expiry (none state, until-dry hold) never ends', () => {
+    renderBanner({ state: 'none', lines: ['No watering change from today’s treatment.'], expiresAt: null });
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('No watering change');
   });
 
-  it('null or empty banner renders nothing extra', () => {
+  it('null or empty banner renders nothing', () => {
     for (const banner of [null, undefined, { state: 'hold', lines: [] }]) {
-      const { unmount } = render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner }} />);
+      const { unmount } = renderBanner(banner);
       expect(screen.queryByTestId('lawn-watering-banner')).toBeNull();
       unmount();
     }

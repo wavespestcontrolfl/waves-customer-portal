@@ -2505,6 +2505,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
       lawnAssessmentId = null,
       lawnProtocolCompletion = null,
+      propertyServiceArea = null,
       treeShrubCompletion = null,
       completionPhotos = [],
       manualHeightIn = null,        // turf height-of-cut gauge reading (lawn) — OPTIONAL
@@ -5772,7 +5773,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               catalogServiceId: (lockedSvcRow || svc).service_id || null,
               serviceType: (lockedSvcRow || svc).service_type || null,
             });
+          const propertyAreaSnapshot = await require('./property-service-areas')
+            .snapshotVisitArea(propertyServiceArea, lockedSvcRow || svc, completionInput.actor, trx, {
+              // An incomplete visit with no products applied did not treat
+              // the reviewed default area; only an explicit override counts.
+              treatmentEvidence: !isIncompleteVisit
+                || (Array.isArray(products) && products.some((product) => product && product.productId)),
+            });
           const structuredNotes = {
+            ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -11124,6 +11133,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // flip, or coverage stamp racing this window consumes nothing.
             requireExtendedCompletionAnchor: true,
           } : {}),
+          // An active collections dispute hold (collection_hold, B10) stops
+          // automatic credit on EVERY completion lane, not just the extended
+          // one. Hold ONLY: a stopped follow-up sequence keeps its existing
+          // lane-scoped semantics (refuseWhenDunningStopped, extended lane).
+          refuseWhenCollectionHold: true,
         });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
@@ -11266,6 +11280,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // crash/block anywhere before the combined text delivers leaves
           // the job to send the classic receipt when it comes due.
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {
+            // The charge primitive refuses an active collections dispute hold
+            // BY DEFAULT on EVERY completion lane (B10); the stopped-sequence
+            // check stays extended-lane-only below. Refusal throws
+            // COLLECTION_HOLD_ACTIVE / _CHECK_FAILED (no decline facts, so no
+            // payment-failed text) and the pay-link fallback is unchanged.
             // Atomic re-enforcement of the SAME ceiling the preflight above
             // validated (Codex #3153 r7 P0): the charge service re-checks it
             // against the LOCKED invoice, so an invoice edit racing this
@@ -11450,7 +11469,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
         }
         try {
-          await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+          // A collections dispute hold refusal (B10) is a SKIP, not a failed
+          // charge: distinct autopay_log event, no decline bookkeeping.
+          await require('../services/autopay-log').logAutopay(svc.customer_id, require('../services/collections/collection-hold').isCollectionHoldRefusal(chargeErr) ? 'skipped_collection_hold' : 'charge_failed', {
             details: { source: completionChargeSource, invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }

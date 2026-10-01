@@ -25,7 +25,9 @@ let reentryDefaultsFromEvidence;
 let completionActions;
 let actionsGate;
 let failActions;
+let propertyAreas;
 beforeEach(async () => {
+  propertyAreas = null;
   reentryDefaultsFromEvidence = false;
   delayFlags = false;
   flagResolvers = [];
@@ -54,6 +56,7 @@ beforeEach(async () => {
       if (delayFlags) await new Promise((resolve) => { flagResolvers.push(resolve); });
       data = { flags: { 'lawn-completion-improvements': improvementsEnabled } };
     }
+    if (url.includes('property-areas')) data = propertyAreas || { enabled: false };
     if (url.includes('turf-profile')) data = { profile: { lawn_sqft: 5000 } };
     if (url.includes('lawn-assessment/service')) data = { assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
     if (url.includes('lawn-assessment/history')) data = { history };
@@ -1931,4 +1934,58 @@ it('changing visits after a partial-zone edit gives the next visit its own full 
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].products.map(row => row.applicationArea)).toEqual(['Front yard, Back yard, Side yards', 'Front yard, Back yard, Side yards']);
+});
+
+
+it('shared reviewed area drives lawn defaults while a partial visit and manual total stay separate', async () => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, beds: null, mosquito: null,
+  } };
+  mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12.6', '8.4']));
+  expect(screen.queryByLabelText('Area for this visit (sq ft)')).toBeNull();
+  fireEvent.change(totals()[0], { target: { value: '8' } });
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['8', '4']));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 2000, explicitVisitArea: true });
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion.treatedSqft).toBe(2000);
+  expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts.method === 'PUT')).toBe(false);
+});
+
+it('a palm feed added by hand never takes or follows the shared lawn area under lawn defaults', async () => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, beds: null, mosquito: null,
+  } };
+  const palm = { id: 'palm-feed', name: 'Fixture 8-0-12 Palm', category: 'fertilizer', application_method: 'granular_broadcast', rate_unit: 'lb', default_rate_per_1000: 1.3 };
+  render(<CompletionPanel service={service} products={[...catalog, palm]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: palm.name } });
+  fireEvent.click(screen.getByText(palm.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('2000'));
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
+});
+
+it.each([null, { sqft: 4200, source: 'imagery', reviewedAt: null }, { sqft: 0, source: 'field', reviewedAt: '2026-09-27' }])('a missing, unreviewed or zero shared lawn area clears planner quantities without an invalid request: %j', async lawn => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn, beds: null, mosquito: null,
+  } };
+  mount();
+  await screen.findByRole('button', { name: 'Review areas' });
+  // The real planner accepts null and rejects 0; server route tests pin that
+  // contract. Do not let the permissive UI fixture hide invalid serialization.
+  await waitFor(() => {
+    const requests = fetch.mock.calls.filter(([url, options]) => url.includes('treatment-plans') && options?.body);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(JSON.parse(requests.at(-1)[1].body).lawnSqft).toBeNull();
+  });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  expect(screen.getByLabelText('Area treated today (sq ft)').value).toBe(lawn?.reviewedAt ? String(lawn.sqft) : '');
 });

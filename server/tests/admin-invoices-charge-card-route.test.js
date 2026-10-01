@@ -75,7 +75,14 @@ describe('POST /:id/charge-card uncertain outcomes', () => {
       expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(
         'inv-1',
         'pm-1',
-        { expectedTotal: 257.25 },
+        // staff-ordered: exempt from the default collections dispute-hold guard;
+        // the override itself is recorded at the charge boundary (stripe.js)
+        // from this trail - the route no longer pre-checks the hold.
+        {
+          expectedTotal: 257.25,
+          operatorOverride: true,
+          overrideTrail: expect.objectContaining({ route: 'admin_invoice_charge_card', invoiceId: 'inv-1' }),
+        },
       );
     });
   });

@@ -280,6 +280,21 @@ export function defaultApplicationMethodForLine(
   return "perimeter_spray";
 }
 
+/**
+ * The label ceiling a prefilled rate is reviewed against, in that rate's own
+ * unit: a per-basis band's upper bound, or the verified per-1,000 catalog
+ * max. Neither applies to the 4-oz pest house default, whose "oz" is an
+ * amount in the tank, not the label's basis: 4 oz is never "over" a 0.8 fl
+ * oz per gallon label.
+ */
+export function prefillRateCeiling(resolved, product = {}) {
+  if (resolved.usePestSprayDefault) return null;
+  const raw = resolved.perBasisUnit
+    ? resolved.labelMaxRate
+    : parseFloat(String(product?.max_label_rate_per_1000 ?? ""));
+  return Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
 // The rate-prefill decision. Returns everything the caller needs to build
 // its selected-product state: the prefill rate, the rate unit, the amount
 // unit (per-basis rates record the amount in the base unit before the "/"

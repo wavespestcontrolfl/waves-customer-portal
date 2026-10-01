@@ -411,6 +411,20 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByRole('button', { name: 'High' })).toBeTruthy();
   });
 
+  test('the 4-oz house default at perimeter spray is never flagged over the label', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
+    // The house default is 4 oz in the tank, not Taurus's 0.2-0.8 fl oz per
+    // gallon label, so there is no label maximum to be over.
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('4');
+    expect(screen.queryByText(/label max/)).toBeNull();
+  });
+
   test('an edited rate above the label maximum shows the recap editor\'s warning', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);

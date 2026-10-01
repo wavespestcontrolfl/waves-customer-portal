@@ -4350,6 +4350,20 @@ function initScheduledJobs() {
               claimMeta.pay_link_stripped_reason = recheck.reason || null;
               logger.info(`[scheduled-sms] deferred completion ${msg.id} pay link stripped at delivery (${recheck.reason || 'invoice-not-collectible'})`);
             }
+            // A recheck that names a replacement body (the queued visit summary whose invoice
+            // link is no longer right to send: the plain summary goes instead) and the metadata
+            // keys that go with the old body. Persisted under the same claimed-row guard.
+            if (recheck && typeof recheck.replaceBody === 'string' && recheck.replaceBody) {
+              const dropKeys = Array.isArray(recheck.dropMeta) ? recheck.dropMeta : [];
+              const swapped = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                message_body: recheck.replaceBody,
+                metadata: dropKeys.reduce((expr, key) => db.raw('(?) - ?::text', [expr, key]), db.raw("COALESCE(metadata, '{}'::jsonb)")),
+                updated_at: new Date(),
+              });
+              if (!swapped) throw new Error('Scheduled message claim lost before replacing its body');
+              msg.message_body = recheck.replaceBody;
+              for (const key of dropKeys) delete claimMeta[key];
+            }
           }
           // replay_purpose: an enqueue whose message_type has no useful
           // purpose mapping (the Stripe billing-notice templates —

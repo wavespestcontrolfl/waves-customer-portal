@@ -946,6 +946,66 @@ suppression writes are best effort: the abandoned-booking recovery worker
 re-checks at send time (SMS and email) and skips, marking suppressed, any intent
 whose draft is so linked — a lookup error skips that tick — so a failed
 suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
+`/book` "Can't find a time?" request (owner 2026-09-29, dark behind
+`GATE_BOOK_PREFERRED_TIME`, strict opt-in read at call time via
+`bookPreferredTimeLive()`; `GET /api/booking/config` reports it as
+`preferred_time`): `POST /api/booking/preferred-time` is guarded by a pre-router
+mount in `server/index.js` (above the global cors(), the global `/api/` limiter
+and the body parsers): while the gate is off EVERY method answers the generic
+unknown-route 404, and every response (404, 400, 429, success) carries
+`Cache-Control: no-store`, `X-Robots-Tag: noindex` and `Referrer-Policy:
+no-referrer`. Its two limiters key by the /64-collapsed client IP. On: the same IP-bound funnel token
+`/availability` mints for capture-intent is required (`400 session_expired`
+otherwise), a hidden honeypot field answers success and stores nothing, and
+two per-IP limiters apply (5/min, 15/hour). A valid request files ONE internal
+lead (`lead_type = 'book_preferred_time'`, status `new`, the preferred days /
+time of day / note as plain English in `transcript_summary` and structured in
+`extracted_data`) that the office answers by hand and rings one `new_lead`
+admin bell (the /book first-touch attribution — click ids, UTMs, referrer — is
+resolved through `resolveLeadSource` onto the lead like every other funnel's);
+lookup and write run under a per-phone advisory lock, so a repeat or overlapping
+submit from the same phone inside 24h refreshes that still-open lead (no second
+row or bell). Recency is `extracted_data.last_requested_at`, written only by a
+submit — office edits (status, notes, assignment) never extend the dedupe
+window or the suppression. Filing a lead also stamps its
+`ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
+public lead. A booking NEVER closes a preferred-time request (owner ruling
+2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
+on both the first commit and the `txResult.existing` replay; a free re-service
+callback visit is skipped) never marks the lead won and never touches its funnel
+row — the booking's own attribution runs exactly as for any other booking.
+Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
+booked customer's open preferred-time leads (phone match) whose
+`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
+booked <service> for <date> (visit <id>) on /book — close this request if
+nothing else is needed" — deduped per (lead, visit) through
+`lead_activities.metadata`, so a replay never stacks notes; a newer request is
+new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+is `booking`, so the shared customer-originated-contact allowlist
+(`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
+booking that committed while a submit was still in flight (its note ran before
+the lead was visible) is reconciled by the submit after its commit: the lead gets
+the same note and NO `new_lead` bell rings; with no live booking since the
+request began the bell rings as usual. A repeat submit inside 24h merges only that
+request's own fields into `extracted_data`; the lead's first-touch UTM /
+referrer / landing URL are written once at creation and kept. The service line
+`address_line2` (apartment unit) is kept inline with the street line and in
+`extracted_data.address_line2`. It sends NOTHING to the customer — no SMS, no email — and
+retires every open abandoned-booking intent for the same phone or session, and
+capture-intent skips a phone that filed a request in the last day, and the
+recovery worker itself re-checks for a request filed since the intent was
+captured (fail closed on a lookup error) immediately before every text and
+email. The fence with the worker is the `booking_intents` ROW lock, not the
+per-phone advisory lock: the submit's suppression UPDATE and the worker's final
+check + dispatch (`withLockedRecoveryIntent`, which runs `SELECT ... FOR UPDATE`
+on the intent row and holds it through the send) contend on the same row, so
+exactly one goes first — the worker never takes the advisory lock, which only
+de-duplicates concurrent SUBMITS from one phone. A submit that waited out a
+send commits after it; a worker that arrives after the submit's commit reads the
+row as suppressed and its re-check sees the request. Neither a failed
+suppression write nor a racing capture nor a racing submit can lead to a message
+after the visitor's confirmation. Success is a constant
+`{"ok": true}`.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -2002,7 +2062,22 @@ buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
 token format gate, generic 404, isEstimateCustomerViewable gate identical
 to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
 draft can never produce a customer-facing document), serviceKey must be
-BOTH a known guide key and a recurring service actually on this estimate,
+BOTH a known guide key and a recurring service actually on this estimate —
+one exception: `lawn_care` is also served when the estimate's only lawn work
+is a one-time lawn row (`one_time_lawn`, `plugging`, `dethatching`,
+`top_dressing`), read from the same replayed pricing bundle `/data` sends
+(`pricingBundle.oneTimeBreakdown`, stored breakdown as fallback; malformed
+data fails closed), and that estimate gets the ONE-TIME variant of the guide
+(no visit count, re-service, or recurring-program content). An estimate with
+BOTH a recurring lawn line and a one-time lawn row serves the recurring guide
+unless the request carries the one-time card's hint (`?scope=one_time` on the
+GET, `scope: 'one_time'` in the send body; the texted link keeps it) — the
+hint only picks the variant when a one-time lawn row is present and never
+widens membership; no other guide
+widens for one-time rows, and the Bermuda-removal sections render only when
+the estimate carries the bermudaSuppression add-on with
+GATE_BERMUDA_SUPPRESSION on. The same membership rule gates
+`POST /api/estimates/:token/service-details/send`;
 60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
 service guide plus PUBLIC product-registry fields only — active
 ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
@@ -2065,11 +2140,15 @@ when the SPA is built against a separate API origin via VITE_API_URL).
 Admin-only surfaces keep their direct URLs).
 `/api/estimates/:token/service-details/send` (write; emails or texts that
 same packet to the contact info ALREADY ON the estimate — the destination
-is NEVER caller-supplied (body carries only `service` + `channel`), so
+is NEVER caller-supplied (body carries only `service` + `channel`, plus
+the optional one-time lawn hint `scope: 'one_time'`, which only picks the
+lawn guide's one-time variant as described on the GET above), so
 the token cannot be used to spray documents at arbitrary addresses; same
 gate-404 + token format gate + customer-viewable + service-on-estimate
 checks as the GET, 6 req/hour limit, email sends idempotent per
-estimate+service+day, suppression-blocked addresses return 409 with no
+estimate+service+day (the lawn guide's one-time variant is its own packet:
+its idempotency key and SMS dedup claim carry a `:one_time` suffix and its
+texted link keeps `?scope=one_time`; every other guide keeps one key), suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
@@ -2090,8 +2169,8 @@ hit, and the email per-day idempotency dedup all funnel through it, so a
 changed or never-delivered annual offer can never surface through a
 shortcut that skips the check — mapping a blocked verdict to the same
 generic 404, with the SMS dedup claim stamped/released exactly like the
-customer-viewable/call-side-hold case; no new request shape, no new
-payload).
+customer-viewable/call-side-hold case; the only request-shape addition
+is the optional `scope` hint above).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes

@@ -24536,7 +24536,7 @@ function normalizeBreakdownItemLabel(item = {}) {
 // result.lineItems / engineResult.lineItems don't read as an empty mix here
 // (which would strip a setup fee the converter is going to invoice).
 function estimateDataRecurringServices(estData = {}) {
-  // Fall back to estData ITSELF like estimateRecurringKeysForDetails and the
+  // Fall back to estData ITSELF like estimateServiceDetailsScope and the
   // accept/read paths — some estimates store `recurring.services` at the
   // top level of estimate_data rather than under result/engineResult.
   const result = estData?.result && typeof estData.result === 'object'
@@ -26553,13 +26553,53 @@ const serviceDetailsSendLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 });
 
-// The packet only exists for services actually ON this estimate.
-function estimateRecurringKeysForDetails(estimate) {
+// One-time lawn specialty lines (engine keys — estimate-one-time-copy.json)
+// carry the lawn prep & service guide too, so an estimate whose only lawn work
+// is one of these rows can fetch/send the 'lawn_care' packet — in its
+// one-time variant (no visit count, re-service, or program promises). Keep in
+// step with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
+const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+// Mechanical/material lawn work that applies no product (prep-guide-sender.js).
+const MECHANICAL_LAWN_GUIDE_SERVICES = new Set(['plugging', 'dethatching', 'top_dressing']);
+
+// The packet only exists for services actually ON this estimate: the
+// recurring lines, plus 'lawn_care' when the estimate carries a one-time lawn
+// line. Nothing else widens — a one-time pest/rodent/termite row never unlocks
+// its (recurring-program) packet. One-time rows are read from the SAME
+// replayed pricing bundle /data sends the page (pricingBundle.oneTimeBreakdown,
+// stored breakdown as the fallback), so an engine-inputs-only estimate whose
+// page shows the guide row can also fetch it.
+// `preferOneTime` (the one-time card's `scope=one_time` hint): an estimate
+// that carries BOTH a recurring lawn line and a one-time lawn row (lawn
+// toggle estimate, one-time mode) serves the one-time variant. The hint only
+// picks the variant when a one-time lawn row is actually present — it never
+// widens `keys`, and recurring stays the default.
+// Returns { keys, lawnScope, mechanicalOnly } — lawnScope is 'recurring',
+// 'one_time', or null; mechanicalOnly = every one-time lawn row applies no
+// product (the guide then omits the product sections).
+async function estimateServiceDetailsScope(estimate, { preferOneTime = false } = {}) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
-  return new Set(
+  const keys = new Set(
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
+  const recurringLawn = keys.has('lawn_care');
+  if (recurringLawn && !preferOneTime) return { keys, lawnScope: 'recurring', mechanicalOnly: false };
+  let lawnRows = [];
+  try {
+    let breakdown = null;
+    try {
+      breakdown = (await buildPricingBundle(estimate))?.oneTimeBreakdown || null;
+    } catch { /* replay failed: fall back to the stored breakdown */ }
+    if (!breakdown) breakdown = normalizeOneTimeBreakdown(estData);
+    const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+    lawnRows = items.filter((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service));
+  } catch { /* malformed one-time data: no widening (fail closed) */ }
+  if (lawnRows.length) {
+    keys.add('lawn_care');
+    return { keys, lawnScope: 'one_time', mechanicalOnly: lawnRows.every((item) => MECHANICAL_LAWN_GUIDE_SERVICES.has(item.service)) };
+  }
+  return { keys, lawnScope: recurringLawn ? 'recurring' : null, mechanicalOnly: false };
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -26584,10 +26624,13 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     }
     const serviceKey = String(req.params.serviceKey || '');
     const { serviceDetailsAvailable, buildServiceDetailsContent } = require('../services/estimate-service-details');
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.query?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const content = await buildServiceDetailsContent(serviceKey, estimate);
+    const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
     const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
     const buffer = await renderServiceDetailsPdf(content);
     res.set('Content-Type', 'application/pdf');
@@ -26689,7 +26732,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Generic 404, matching the GET route and the public-route contract — a
     // distinct error here would make the send endpoint a service-membership
     // oracle for bearer-token links.
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.body?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
 
@@ -26713,11 +26759,15 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
-    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
+    // A one-time guide keeps its variant through the texted link.
+    // Only the lawn guide has a one-time variant; every other guide keeps one
+    // URL and one idempotency key regardless of the estimate's lawn scope.
+    const oneTimeLawnGuide = serviceKey === 'lawn_care' && detailsScope.lawnScope === 'one_time';
+    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf${oneTimeLawnGuide ? '?scope=one_time' : ''}`;
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
-      const content = await buildServiceDetailsContent(serviceKey, estimate);
+      const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
       if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
@@ -26737,7 +26787,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
           // One send per estimate+service+day — the button is customer-initiated
           // but a retap shouldn't stack identical emails.
-          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
+          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${etDateString()}`,
           categories: ['estimate_service_details'],
           // Codex round 1 on #4608 (P1): content derivation would catch the
           // estimate_url in the payload anyway, but the explicit id is
@@ -26790,7 +26840,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // per estimate+service, underscore-safe; never a different packet)
     // covers restarts, best-effort: its failure never blocks the send.
     const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
-    const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    // The lawn guide's one-time variant is a different packet (its own link):
+    // it gets its own claim so neither variant dedups the other.
+    const dedupKey = `${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${tenDigits}`;
     const claimKey = dedupKey;
     // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably so
     // a concurrent loser's poll can read the SAME refusal — best-effort,
@@ -26849,18 +26901,26 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // form. The bare URL is a substring of the scheme-ful one, so matching on
     // it also still finds rows logged before this send moved onto the chokepoint.
     const pdfUrlBare = stripSmsUrlScheme(pdfUrl);
-    const recentPacketSend = async () => db('sms_log')
-      .where({ direction: 'outbound', message_type: 'estimate_service_details' })
-      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
-      // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
-      // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
-      // so a row matches on the raw URL OR on a code minted for that exact URL.
-      .where(function packetLinkInBody() {
-        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
-          .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
-      })
-      .whereRaw("created_at >= NOW() - interval '10 minutes'")
-      .first();
+    const recentPacketSend = async () => {
+      let q = db('sms_log')
+        .where({ direction: 'outbound', message_type: 'estimate_service_details' })
+        .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
+        // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
+        // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
+        // so a row matches on the raw URL OR on a code minted for that exact URL.
+        .where(function packetLinkInBody() {
+          this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
+            .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
+        })
+        .whereRaw("created_at >= NOW() - interval '10 minutes'");
+      // The recurring lawn URL is a prefix of the one-time one, so a one-time
+      // text must not dedup a recurring request. (A wrapped body carries only
+      // /l/<code>, never the raw URL, so this never excludes a short-link row.)
+      if (serviceKey === 'lawn_care' && !oneTimeLawnGuide) {
+        q = q.whereRaw('strpos(COALESCE(message_body, \'\'), ?) = 0', [`${pdfUrlBare}?scope=one_time`]);
+      }
+      return q.first();
+    };
     const sendPromise = (async () => {
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure
@@ -28717,6 +28777,7 @@ module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
+module.exports.estimateServiceDetailsScope = estimateServiceDetailsScope;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;
