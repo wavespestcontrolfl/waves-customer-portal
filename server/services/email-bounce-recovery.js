@@ -132,7 +132,8 @@ function jsonbMerge(extra) {
 }
 
 // Durable pre-provider phase marker (Codex #5424 r15 P2). dispatchRecoveryMessage stamps
-// metadata.dispatch_started_at on the ledger row right BEFORE sendgrid.sendOne is called. A stale
+// metadata.dispatch_started_at on the ledger row at sendgrid.sendOne's provider boundary (after its
+// guards and the caller's authority passed, immediately before the fetch). A stale
 // 'resent' row without it never reached the provider call, so the sweep may safely re-drive it; a row
 // WITH it but no provider_message_id is ambiguous (the provider may have accepted the email before the
 // worker died), so it is settled as uncertain and the office is told - it is never re-sent. A flow that
@@ -544,6 +545,18 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // Set when a collections dispute hold refuses the recovery re-send (up front, or at
     // sendOne's FINAL boundary check): a WAIT, never a settled block - see attemptRecovery.
     let heldRecovery = null;
+    // The pre-provider phase marker is stamped at the ACTUAL provider boundary (Codex #5459 r3 P2): sendOne
+    // runs its annual-offer guard, then this check, then builds the payload and calls fetch. A crash while
+    // the guards run happened before any provider request and must stay retryable, so no marker is written
+    // until the caller's own authority has passed. The write is durable before this resolves (sendOne's
+    // fetch follows synchronously); a failed write throws, so the request never goes out unmarked.
+    const stampDispatchAtProviderBoundary = (callerCheck) => async (args) => {
+      const verdict = callerCheck ? await callerCheck(args) : undefined;
+      if (verdict && verdict.ok === false) return verdict; // refused: no provider request follows, no marker
+      await db('email_bounce_recoveries').where({ recovery_message_id: message.id })
+        .update({ updated_at: new Date(), metadata: jsonbMerge({ [DISPATCH_STARTED_KEY]: new Date().toISOString() }) });
+      return verdict === undefined ? { ok: true } : verdict;
+    };
     const dispatchToProvider = async (database, providerBoundaryCheck) => {
       // Bounce recovery re-sends the SAME stored html/text to a CORRECTED
       // address, straight through sendgrid.sendOne — its own content
@@ -560,10 +573,6 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // the link in the stored body), so an unparseable trigger can never
       // send a garbage value into the estimates query and loop as transient.
       const sourceEstimateId = guardEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
-      // The phase marker is durable BEFORE the provider is contacted; a failed write must not let the
-      // send proceed unmarked (the throw lands in this function's catch: a failed, alerted recovery).
-      await db('email_bounce_recoveries').where({ recovery_message_id: message.id })
-        .update({ updated_at: new Date(), metadata: jsonbMerge({ [DISPATCH_STARTED_KEY]: new Date().toISOString() }) });
       try {
         result = Object.assign({
           html: bouncedMessage.html_snapshot,
@@ -592,7 +601,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           templateKey: bouncedMessage.template_key,
           suppressErrorLog: true,
           database,
-          providerBoundaryCheck,
+          providerBoundaryCheck: stampDispatchAtProviderBoundary(providerBoundaryCheck),
         }));
       } catch (err) {
         if (err && err.annualOfferWithheld) {

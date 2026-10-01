@@ -664,7 +664,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
         return { rec, local, c };
       }
 
-      test('the marker is durable BEFORE sendOne is called, and a flow that parks again clears it', async () => {
+      test('the marker is durable at the PROVIDER BOUNDARY (after the guards, before the fetch); a crash inside the guards leaves no marker and the row is reclaimed (Codex #5459 r3 P2)', async () => {
         const sendgrid = require('../services/sendgrid-mail');
         const Recovery = require('../services/email-bounce-recovery');
         const local = randomUUID();
@@ -672,15 +672,52 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
         const c = await newCustomer();
         await db('customers').where({ id: c }).update({ email: typo });
         const bounced = await bouncedPair(c, typo);
-        let markerSeenBySendOne = null;
-        sendgrid.sendOne.mockImplementationOnce(async () => {
-          const row = await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first();
-          markerSeenBySendOne = row.metadata.dispatch_started_at || null;
+        const marker = async () => (await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first()).metadata.dispatch_started_at || null;
+        const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+        let before = 'unset';
+        let atBoundary = 'unset';
+        sendgrid.sendOne.mockImplementationOnce(async (args) => {
+          // sendOne's own preparation (applyAnnualOfferGuard) runs first: still no marker ...
+          before = await marker();
+          await args.providerBoundaryCheck({});
+          // ... and the marker is durable once the boundary passed, immediately before the fetch
+          atBoundary = await marker();
           return { messageId: 'sg-synthetic-marker' };
         });
         expect(await Recovery.attemptRecovery(bounced, {})).toMatchObject({ resent: true });
-        expect(markerSeenBySendOne).toBeTruthy();
-        expect(new Date(markerSeenBySendOne).getTime()).toBeLessThanOrEqual(Date.now());
+        expect(before).toBeNull();
+        expect(atBoundary).toBeTruthy();
+        expect(new Date(atBoundary).getTime()).toBeLessThanOrEqual(Date.now());
+
+        // A worker lost inside sendOne's guards (before the boundary): the flow leaves no marker, so the stale
+        // 'resent' row is reclaimed and re-sent - never settled as uncertain.
+        const local2 = randomUUID();
+        const typo2 = `${local2}@gmial.com`;
+        const c2 = await newCustomer();
+        await db('customers').where({ id: c2 }).update({ email: typo2 });
+        const bounced2 = await bouncedPair(c2, typo2);
+        const holdId = await placeHold(c2);
+        await Recovery.attemptRecovery(bounced2, {});
+        const rec2 = await db('email_bounce_recoveries').where({ original_message_id: bounced2.id }).first();
+        await release(holdId);
+        sendgrid.sendOne.mockClear();
+        sendgrid.sendOne.mockImplementationOnce(async () => { throw new Error('worker lost inside the guards (synthetic)'); });
+        await db('email_bounce_recoveries').where({ id: rec2.id }).update({
+          status: 'pending', metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ hold_claimed_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() })]),
+        });
+        await Recovery.retryHeldRecoveries(); // the attempt dies in the guards
+        expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+        const died = await db('email_bounce_recoveries').where({ id: rec2.id }).first();
+        expect(died.metadata.dispatch_started_at).toBeUndefined();
+        // what the dead worker leaves: 'resent', stale claim, recovery message still queued, no marker
+        await db('email_bounce_recoveries').where({ id: rec2.id }).update({
+          status: 'resent', metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ hold_claimed_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() })]),
+        });
+        await db('email_messages').where({ id: rec2.recovery_message_id }).update({ status: 'queued', provider_message_id: null, error_message: null });
+        expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 1, uncertain: 0 });
+        expect(sendgrid.sendOne).toHaveBeenCalledTimes(2);
+        expect((await db('email_bounce_recoveries').where({ id: rec2.id }).first()).status).toBe('resent');
+        notify.mockRestore();
       });
 
       test('marker ABSENT (never reached the provider call): reclaimed once stale and re-sent - the pre-r15 behavior is kept', async () => {

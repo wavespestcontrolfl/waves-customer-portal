@@ -1028,9 +1028,14 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
       .resolves.toMatchObject({ resent: true, corrected: 'jane@gmail.com' });
 
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
-      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck, suppressErrorLog: true,
+      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck: expect.any(Function), suppressErrorLog: true,
       customArgs: { email_message_id: messageRow.id, send_attempt_token: messageRow.send_attempt_token },
     }));
+    // The boundary check sendOne receives wraps the authority's own (it still runs, and its verdict is kept):
+    // the phase marker is stamped by the wrapper once that check passes.
+    const passed = sendgrid.sendOne.mock.calls[0][0].providerBoundaryCheck;
+    expect(await passed({ database: heldDatabase })).toEqual({ ok: true });
+    expect(providerBoundaryCheck).toHaveBeenCalledWith({ database: heldDatabase });
   });
 
   // #4843 gate checklist: a billing row whose producer stored no replay

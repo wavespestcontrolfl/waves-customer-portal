@@ -3644,6 +3644,16 @@ function strandedHoldClaimCandidate(q) {
     .whereRaw("COALESCE(scheduled_send_error, '') LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
     .orWhere((held) => held.whereNull("payer_id").whereExists(function activeHold() {
       require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
+    }))
+    // A hold released since the refusal (Codex #5459 r3 P2): when the restore, the marker write and the alert all
+    // failed in one outage and the hold ended before the claim went stale, the released flag row is the only
+    // durable evidence left. The ordinary stale park raises no office alert of its own, so recently released
+    // counts too.
+    .orWhere((released) => released.whereNull("payer_id").whereExists(function recentlyReleasedHold() {
+      this.select(1).from("collections_flags as f")
+        .whereRaw("f.customer_id = invoices.customer_id")
+        .where("f.flag", "collection_hold")
+        .whereRaw("f.released_at >= NOW() - INTERVAL '24 hours'");
     })));
 }
 function standingStrandedAlert() {

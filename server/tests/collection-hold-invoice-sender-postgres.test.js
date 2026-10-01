@@ -619,6 +619,33 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
             }
           });
 
+          // Codex #5459 r3 P2: the ordinary stale park raises no office alert, so a stranded claim whose restore,
+          // marker write and alert all failed, and whose hold was RELEASED before the claim went stale, must still be
+          // recognised: the released flag row is the durable evidence left.
+          test('a stale self-pay claim whose hold was released recently (no marker, no active hold) is still alerted; one released long ago, or never held, parks as before', async () => {
+            const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+            try {
+              const c = await newCustomer();
+              const holdId = await placeHold(c);
+              await db('collections_flags').where({ id: holdId }).update({ released_at: new Date(Date.now() - 3600 * 1000) });
+              const recent = await newInvoice(c, { status: 'sending', send_claim_token: randomUUID() });
+              await makeStale(recent);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(1);
+              expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: dedupeKey(recent) }));
+              expect((await invoice(recent)).status).toBe('scheduled');
+
+              const c2 = await newCustomer();
+              const oldHold = await placeHold(c2);
+              await db('collections_flags').where({ id: oldHold }).update({ released_at: new Date(Date.now() - 3 * 24 * 3600 * 1000) });
+              const longAgo = await newInvoice(c2, { status: 'sending', send_claim_token: randomUUID() });
+              await makeStale(longAgo);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(1);
+              expect((await invoice(longAgo)).status).toBe('scheduled');
+            } finally { notify.mockRestore(); }
+          });
+
           test('an alert that already LANDED (the standing notification for the key) is not raised again by the sweep', async () => {
             const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
             try {
