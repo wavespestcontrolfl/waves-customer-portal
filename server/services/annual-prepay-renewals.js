@@ -1941,6 +1941,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // transactions have committed since: a visit this call has not seen that
   // fills the sold count, or sits within the slot tolerance of this date
   // (exactly on the date for the promised slot), means the slot is taken.
+  const consumedConcurrentIds = new Set();
   const seedStillNeeded = async (t, scheduledDate) => {
     // The canonical coverage selection itself, re-read under the lock: only a
     // row THIS term would count (same service family, renewal property
@@ -1959,12 +1960,19 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     // fresh is the canonical set (capped at the sold count, known rows
     // included), so a full set means every slot is taken.
     if (fresh.length >= coverageVisitCount) return false;
-    return !concurrent.some((row) => {
+    // Each concurrent visit fills ONE slot: once it has suppressed a seed it
+    // can't suppress a neighbouring one too (a visit halfway between two
+    // slots on a short cadence sits within tolerance of both).
+    const filler = concurrent.find((row) => {
+      if (consumedConcurrentIds.has(String(row.id))) return false;
       const existingDate = dateOnly(row.scheduled_date);
       if (scheduledDate === promisedTarget) return existingDate === scheduledDate;
       const diff = daysUntil(existingDate, scheduledDate);
       return diff != null && Math.abs(diff) <= slotToleranceDays;
     });
+    if (!filler) return true;
+    consumedConcurrentIds.add(String(filler.id));
+    return false;
   };
   const skipConcurrentSeed = (scheduledDate) => {
     logger.info(`[annual-prepay] term ${term.id}: ${scheduledDate} was filled by a concurrent refresh under the lock — not seeding a duplicate`);

@@ -8188,6 +8188,25 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       expect(result.createdCount).toBe(0);
     });
 
+    test('one concurrent visit halfway between two monthly slots fills only ONE of them', async () => {
+      const MONTHLY = {
+        ...SEED_TERM, term_start: '2026-06-15', term_end: '2027-06-14',
+        coverage_service_type: 'Monthly Pest Control', coverage_visit_count: 12,
+      };
+      const halfway = { ...other('mid', '2026-06-30'), service_type: 'Monthly Pest Control' };
+      const inserts = Array.from({ length: 12 }, (_, i) => inserted(`svc-${i}`, null));
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts],
+        'scheduled_services as seed_recheck': Array.from({ length: 12 }, () => query({ rows: [halfway] })),
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...MONTHLY }, undefined, { today: '2026-01-01' });
+
+      // 06-30 is within the half-cadence tolerance of both 06-15 and 07-15;
+      // it may stand in for one of them, never both.
+      expect(result.createdCount).toBe(11);
+    });
+
     test('a concurrent visit of ANOTHER service (a lawn visit) never suppresses a sold seed', async () => {
       const lawn = (id, scheduled_date) => ({ ...other(id, scheduled_date), service_type: 'Lawn Care', annual_prepay_term_id: null });
       const inserts = [inserted('s1', '2026-06-15'), inserted('s2', '2026-09-15'), inserted('s3', '2026-12-15'), inserted('s4', '2027-03-15')];
