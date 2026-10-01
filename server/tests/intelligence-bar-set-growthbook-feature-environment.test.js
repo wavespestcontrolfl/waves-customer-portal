@@ -175,7 +175,7 @@ describe('set_growthbook_feature_environment', () => {
           defaultValue: longDefault,
           rules: [
             { type: 'force', value: 'true', condition: '{"email":{"$regex":"@wavespestcontrol.com$"}}', description: 'staff only' },
-            { type: 'rollout', value: 'true', coverage: 0.25 },
+            { type: 'rollout', value: 'true', coverage: 0.25, hashAttribute: 'id', seed: 'pricing-seed', namespace: ['ns-1', 0, 0.5] },
             { type: 'experiment', variations: [{ value: 'false' }, { value: 'true' }], weights: [0.5, 0.5], enabled: false },
           ],
         },
@@ -184,9 +184,10 @@ describe('set_growthbook_feature_environment', () => {
     const result = await propose({});
     expect(result.default_value).toBe(longDefault);
     expect(Object.keys(result.rules)).toEqual(['rule_1', 'rule_2', 'rule_3']);
-    expect(result.rules.rule_1).toMatch(/force · "staff only" · serves "?true"? · when .*wavespestcontrol/);
-    expect(result.rules.rule_2).toMatch(/rollout · serves "?true"? · to 25% of matching traffic/);
-    expect(result.rules.rule_3).toMatch(/experiment \(this rule is turned off\) · variations .* · weights \[0\.5,0\.5\]/);
+    // Codex r2: each rule COMPLETE — every field, allocation included.
+    expect(result.rules.rule_1).toBe('force "staff only" · {"value":"true","condition":"{\\"email\\":{\\"$regex\\":\\"@wavespestcontrol.com$\\"}}"}');
+    expect(result.rules.rule_2).toBe('rollout · {"value":"true","coverage":0.25,"hashAttribute":"id","seed":"pricing-seed","namespace":["ns-1",0,0.5]}');
+    expect(result.rules.rule_3).toBe('experiment (this rule is turned off) · {"variations":[{"value":"false"},{"value":"true"}],"weights":[0.5,0.5]}');
     expect(result.effect_note).toMatch(/ALL 3 targeting rule\(s\) listed on this card/);
   });
 

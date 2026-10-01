@@ -309,28 +309,19 @@ function fullValue(v) {
   return typeof v === 'string' ? v : JSON.stringify(v);
 }
 
-// Every targeting rule in the environment, one plain line each — what it
-// serves, to whom (condition, saved groups, prerequisites), how much traffic
-// and when. Enabling the environment puts ALL of these live at once (Codex
-// r1 on #5514, P1), so the card lists them in full rather than a count.
-// Keyed rule_1, rule_2, … so the card renders one line per rule.
+// Every targeting rule in the environment, one line each. Enabling the
+// environment puts ALL of these live at once (Codex r1 on #5514, P1), so the
+// card shows each rule COMPLETE — every field GrowthBook returns, including
+// allocation (hashAttribute, namespace, ranges, seed, bucketing) — never a
+// chosen subset (r2). Its type, on/off and description lead; the rest
+// follows as the rule's own JSON. Keyed rule_1, rule_2, … so the card
+// renders one line per rule.
 function describeRules(rules) {
   if (!Array.isArray(rules) || !rules.length) return null;
-  const json = (v) => (v === undefined || v === null ? null : fullValue(v));
   return Object.fromEntries(rules.map((r, i) => {
-    const parts = [
-      `${r.type || 'rule'}${r.enabled === false ? ' (this rule is turned off)' : ''}`,
-      r.description ? `"${r.description}"` : null,
-      r.value !== undefined ? `serves ${json(r.value)}` : null,
-      r.variations ? `variations ${json(r.variations)}` : null,
-      r.weights ? `weights ${json(r.weights)}` : null,
-      r.coverage !== undefined && r.coverage !== null ? `to ${Math.round(Number(r.coverage) * 1000) / 10}% of matching traffic` : null,
-      r.condition ? `when ${json(r.condition)}` : null,
-      r.savedGroupTargeting ? `saved groups ${json(r.savedGroupTargeting)}` : null,
-      r.prerequisites ? `prerequisites ${json(r.prerequisites)}` : null,
-      r.scheduleRules ? `schedule ${json(r.scheduleRules)}` : null,
-    ].filter(Boolean);
-    return [`rule_${i + 1}`, parts.join(' · ')];
+    const { type, enabled, description, ...rest } = r && typeof r === 'object' ? r : { value: r };
+    const head = `${type || 'rule'}${enabled === false ? ' (this rule is turned off)' : ''}${description ? ` "${description}"` : ''}`;
+    return [`rule_${i + 1}`, Object.keys(rest).length ? `${head} · ${JSON.stringify(rest)}` : head];
   }));
 }
 

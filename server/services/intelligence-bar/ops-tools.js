@@ -125,7 +125,7 @@ Use for: "restart the server", "bounce the portal service", "it's hung, restart 
   },
   {
     name: 'set_railway_gate',
-    description: `Propose setting ONE known feature gate (a GATE_* variable) to the literal value 'true' or 'false' on the portal's production service in Railway. Owner login only, through a confirmation card showing the current value, the new value, what the gate controls and what the new value means. Railway redeploys the portal when a variable changes (a brief restart). Only gates the portal already knows are accepted — a made-up name is refused.
+    description: `Propose setting ONE known feature gate (a GATE_* variable) to the literal value 'true' or 'false' on the portal's production service in Railway. Owner login only, through a confirmation card showing the current value, the new value, what the gate controls and what the new value means. Railway redeploys the portal when a variable changes (a brief restart). Only gates the portal already knows AND has a description for are accepted — a made-up name, a mode gate or an undocumented gate is refused (those change in the Railway dashboard).
 The value is the RAW variable value, not "on/off". Some gates are inverted: a name ending in _OFF, _DISABLE, _DISABLED or _KILL_SWITCH means 'true' turns the named thing OFF (GATE_LATE_PAYMENT_CHECKER_OFF=true disables the late-payment checker). Map what the operator wants to HAPPEN through the gate's meaning; if it is unclear which value they want, ask before proposing.
 Use for: "set GATE_X to true", "turn the Y feature on" (after mapping it to the right value), "flip the gate for Z"`,
     input_schema: {
@@ -610,6 +610,29 @@ function knownGateOrRefusal(rawName) {
   };
 }
 
+// Which known gates the bar may flip, checked at preview AND at confirm:
+// only a plain on/off gate (a mode gate — shadow / auto / a timestamp — or one
+// whose reading cannot be verified is changed in the Railway dashboard), and
+// only one with a description on file, so the card can say what it does
+// (Codex r2 on #5514: no approving a money or messaging gate blind).
+function gateNotFlippable(entry) {
+  if (!entry.boolean) {
+    return {
+      error: entry.kind === 'mode'
+        ? `${entry.name} takes a mode or timestamp, not just on/off — change it in the Railway dashboard.`
+        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so it cannot be flipped from here — change it in the Railway dashboard.`,
+      code: 'not_a_boolean_gate',
+    };
+  }
+  if (!entry.description) {
+    return {
+      error: `${entry.name} has no description in the portal's gate list, so the bar cannot show what it does and will not flip it — change it in the Railway dashboard (or add its line to the header of server/config/feature-gates.js).`,
+      code: 'no_gate_description',
+    };
+  }
+  return null;
+}
+
 async function setRailwayGate(input) {
   if (input.confirmed === true) return commitRailwayGate(input);
   const known = knownGateOrRefusal(input.gate_name);
@@ -618,17 +641,8 @@ async function setRailwayGate(input) {
   if (input.value !== 'true' && input.value !== 'false') {
     return { error: "value must be exactly 'true' or 'false'.", code: 'invalid_value' };
   }
-  if (!entry.boolean) {
-    // Only a gate the portal's own source shows to be a plain on/off switch
-    // can be flipped here; a mode gate (shadow / auto / a timestamp) or one
-    // whose reading cannot be verified is changed in the Railway dashboard.
-    return {
-      error: entry.kind === 'mode'
-        ? `${entry.name} takes a mode or timestamp, not just on/off — change it in the Railway dashboard.`
-        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so it cannot be flipped from here — change it in the Railway dashboard.`,
-      code: 'not_a_boolean_gate',
-    };
-  }
+  const refusal = gateNotFlippable(entry);
+  if (refusal) return refusal;
 
   const target = await resolvePortalProductionTarget();
   const raw = await readOneVariable(target, entry.name);
@@ -655,7 +669,7 @@ async function setRailwayGate(input) {
     preview: true,
     tool: 'set_railway_gate',
     gate: entry.name,
-    controls: entry.description || 'No description on file for this gate — only its name.',
+    controls: entry.description,
     current_value: currentLabel,
     new_value: input.value,
     change: `${entry.name}: ${currentLabel} → ${input.value}`,
@@ -695,11 +709,11 @@ async function commitRailwayGate(input) {
       code: 'missing_verified_pin',
     };
   }
-  // The gate must still be a known plain on/off gate (a later deploy could
-  // have retired it or shown it takes a mode).
-  if (!require('../../config/feature-gates').knownGateCatalog().get(name)?.boolean) {
-    return { error: `${name} is no longer a plain on/off gate this portal knows, so nothing was written.`, code: 'not_a_boolean_gate' };
-  }
+  // The gate must still be a known, described, plain on/off gate (a later
+  // deploy could have retired it, shown it takes a mode, or dropped its doc).
+  const entry = require('../../config/feature-gates').knownGateCatalog().get(name);
+  const refusal = entry ? gateNotFlippable(entry) : { error: `${name} is no longer a gate this portal knows, so nothing was written.`, code: 'unknown_gate' };
+  if (refusal) return refusal;
   const target = await resolvePortalProductionTarget();
   // Compare-and-swap (best effort): the same service + environment, and the
   // live prior state exactly as the card pinned it.

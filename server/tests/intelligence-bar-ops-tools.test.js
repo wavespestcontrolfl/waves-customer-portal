@@ -562,15 +562,15 @@ describe('intelligence bar set_railway_gate', () => {
 
   // Codex r1 on #5489: an inverted (…_OFF) gate's 'true' DISABLES the named
   // thing — the card must say so instead of presenting 'true' as "on".
-  test('an inverted _OFF gate: the card cautions that true may turn something OFF', async () => {
+  // Codex r2 on #5514: a gate with no description on file is never offered
+  // (no card, no network call) — the card could not say what it does.
+  test.each(['GATE_AUTO_APPLY_ACCOUNT_CREDIT', 'GATE_LATE_PAYMENT_CHECKER_OFF'])('%s has no description on file: refused before any network call', async (name) => {
     configure();
-    global.fetch
-      .mockResolvedValueOnce(ENVIRONMENT())
-      .mockResolvedValueOnce(variables({ GATE_LATE_PAYMENT_CHECKER_OFF: 'false' }));
-    const result = await propose({ gate_name: 'GATE_LATE_PAYMENT_CHECKER_OFF', value: 'true' });
-    expect(result.preview).toBe(true);
-    expect(result.inverted).toBe(true);
-    expect(result.meaning).toMatch(/The name suggests 'true' turns something OFF/);
+    const result = await propose({ gate_name: name, value: 'true' });
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('no_gate_description');
+    expect(result.error).toMatch(/no description/);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   // Codex r3 on #5489: no synthesized ON/OFF claim — only the literal change.
@@ -868,10 +868,14 @@ describe('intelligence bar set_railway_gate', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
-  test('a pinned gate that is no longer a plain on/off gate refuses with no network call', async () => {
+  test.each([
+    ['no longer a plain on/off gate', 'GATE_REVIEW_AUTO_REPLY', 'not_a_boolean_gate'],
+    ['without a description on file', 'GATE_AUTO_APPLY_ACCOUNT_CREDIT', 'no_gate_description'],
+    ['no longer known at all', 'GATE_RETIRED_SINCE_THE_CARD', 'unknown_gate'],
+  ])('a pinned gate %s refuses at confirm with no network call', async (_label, name, code) => {
     configure();
-    const result = await commit({ _verified_railway_gate_name: 'GATE_REVIEW_AUTO_REPLY' });
-    expect(result.code).toBe('not_a_boolean_gate');
+    const result = await commit({ _verified_railway_gate_name: name });
+    expect(result.code).toBe(code);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
