@@ -60,6 +60,35 @@ describe('Resend webhook subscriber writes after a subscriber merge', () => {
     expect(u.ops.find((o) => o[0] === 'update')[1]).toHaveProperty('last_bounced_at');
   });
 
+  test('a Gmail bounce matches by mailbox identity across every row on the inbox, not by id', async () => {
+    mockDelivery = { id: 'd1', send_id: 's1', subscriber_id: 7, email: 'John.Doe+home@googlemail.com', bounced_at: null };
+    await post('email.bounced');
+    const [u] = subscriberUpdates();
+    expect(u.ops.some((o) => o[0] === 'where')).toBe(false);
+    const [, sql, bind] = u.ops.find((o) => o[0] === 'whereRaw');
+    expect(sql).toMatch(/IN \('gmail\.com', 'googlemail\.com'\)/);
+    expect(sql).toMatch(/TRIM\(email\)/);
+    expect(bind[0]).toBe('johndoe');
+    expect(u.ops.find((o) => o[0] === 'update')[1]).toHaveProperty('last_bounced_at');
+  });
+
+  test('a delivery whose subscriber id a merge cleared still bounce-counts a Gmail mailbox (codex #5413 r3)', async () => {
+    mockDelivery = { id: 'd1', send_id: 's1', subscriber_id: null, email: 'john.doe@gmail.com', bounced_at: null };
+    await post('email.bounced');
+    const [u] = subscriberUpdates();
+    expect(u).toBeTruthy();
+    expect(u.ops.find((o) => o[0] === 'whereRaw')[2][0]).toBe('johndoe');
+  });
+
+  test('a cleared subscriber id on a non-Gmail (or malformed) address writes no subscriber row', async () => {
+    for (const email of ['old@example.test', 'john@gmail.com@invalid.test', '.john@gmail.com']) {
+      mockLog.length = 0;
+      mockDelivery = { id: 'd1', send_id: 's1', subscriber_id: null, email, bounced_at: null };
+      await post('email.bounced');
+      expect(subscriberUpdates()).toEqual([]);
+    }
+  });
+
   test('a delivery with no recorded address keeps the plain id match', async () => {
     mockDelivery = { id: 'd1', send_id: 's1', subscriber_id: 7, email: null, bounced_at: null };
     await post('email.bounced');

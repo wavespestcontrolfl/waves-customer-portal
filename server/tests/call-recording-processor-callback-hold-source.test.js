@@ -323,7 +323,7 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
     // Nothing awaited between the decision and the write.
     expect(block.slice(0, block.indexOf(ARM)).match(/await /g)).toBeNull();
     const armAt = decide + block.indexOf(ARM);
-    expect(armAt).toBeLessThan(src.indexOf("await db('route_decisions').insert(routeDecision)", decide));
+    expect(armAt).toBeLessThan(src.indexOf('await upsertRouteDecision(db, routeDecision', decide));
     expect(armAt).toBeLessThan(src.indexOf("db('triage_items')", decide));
   });
 

@@ -16,8 +16,8 @@ const addressparser = require('nodemailer/lib/addressparser');
 //       every INBOUND row) — the normal case, since both real send paths
 //       (admin Email tab, the Intelligence Bar's approved sendEmailReply)
 //       reply into the SAME Gmail thread as the customer's own message; or
-//   (b) its to_address equals — case/trim-insensitive — exactly one active
-//       customer's own email (customers.email is UNIQUE, so this can only
+//   (b) its recipients (To + Cc + Bcc) equal — case/trim-insensitive —
+//       exactly one active customer's own email (customers.email is UNIQUE, so this can only
 //       be ambiguous if a thread mixes customers, never from the email
 //       column itself).
 // Either branch returning more than one distinct customer is ambiguous and
@@ -56,30 +56,42 @@ function extractEmailAddresses(raw) {
   return [...new Set(addresses)];
 }
 
+// Every recipient of a send: To, Cc AND Bcc, parsed the same way. A staff
+// send with customer A in To and customer B in Cc/Bcc reached both, so every
+// linkage check below runs against this full set (Codex, 2026-09-30).
+function recipientAddresses(row) {
+  return [...new Set([row.to_address, row.cc_address, row.bcc_address].flatMap(extractEmailAddresses))];
+}
+
 // A send in the customer's thread counts as reaching THAT customer only
-// when its own recipients prove it: some to_address is the customer's email
-// or an address the customer wrote to us from in this thread, and none is
-// another active customer's email. Forwarding the thread internally, or
-// replying to someone else on it, never closes the customer's ask
-// (pre-push audit, 2026-09-30).
+// when its own recipients prove it: some recipient (To/Cc/Bcc) is the
+// customer's email or an address the customer wrote to us from in this
+// thread, and none is another active customer's email. Forwarding the
+// thread internally, or replying to someone else on it, never closes the
+// customer's ask (pre-push audit, 2026-09-30).
 async function threadSendReachesCustomer(conn, row, customerId) {
-  const toAddresses = extractEmailAddresses(row.to_address);
-  if (!toAddresses.length) return false;
+  const recipients = recipientAddresses(row);
+  if (!recipients.length) return false;
   const customer = await conn('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
   if (!customer) return false;
   const inboundFrom = await conn('emails')
     .where({ gmail_thread_id: row.gmail_thread_id, customer_id: customerId })
     .whereNotNull('from_address').pluck('from_address');
   const customerAddresses = new Set([customer.email, ...inboundFrom].flatMap(extractEmailAddresses));
-  if (!toAddresses.some((a) => customerAddresses.has(a))) return false;
+  if (!recipients.some((a) => customerAddresses.has(a))) return false;
   const others = await conn('customers').whereNull('deleted_at').whereNotNull('email')
     .whereNot('id', customerId)
-    .whereIn(conn.raw('LOWER(TRIM(email))'), toAddresses).first('id');
+    .whereIn(conn.raw('LOWER(TRIM(email))'), recipients).first('id');
   return !others;
 }
 
 async function resolveEmailCustomerLink(conn, row) {
-  if (!row?.gmail_thread_id && !row?.to_address) return null;
+  // A send may name its customer only in Cc or Bcc (an empty To).
+  if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return null;
+  // Cc/Bcc never captured (a row synced before capture existed, or a caller
+  // that did not select them): who else the send reached is unknown, so it
+  // never links to a customer. A captured "no Cc/Bcc" is '', not NULL.
+  if (row.cc_address == null || row.bcc_address == null) return null;
   if (row.gmail_thread_id) {
     const threadCustomers = await conn('emails')
       .where({ gmail_thread_id: row.gmail_thread_id })
@@ -91,13 +103,13 @@ async function resolveEmailCustomerLink(conn, row) {
       return (await threadSendReachesCustomer(conn, row, threadCustomers[0])) ? threadCustomers[0] : null;
     }
   }
-  const toAddresses = extractEmailAddresses(row.to_address);
-  if (!toAddresses.length) return null;
+  const recipients = recipientAddresses(row);
+  if (!recipients.length) return null;
   // Multiple recipients: resolve only when the addresses collectively name
   // exactly one distinct active customer — never "the first one," and
   // never guess between two different customers on the same send.
   const matches = await conn('customers').whereNull('deleted_at').whereNotNull('email')
-    .whereIn(conn.raw('LOWER(TRIM(email))'), toAddresses).pluck('id');
+    .whereIn(conn.raw('LOWER(TRIM(email))'), recipients).pluck('id');
   const distinct = [...new Set(matches)];
   return distinct.length === 1 ? distinct[0] : null;
 }

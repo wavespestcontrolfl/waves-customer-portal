@@ -107,6 +107,7 @@ const getGithubClient = lazy('github-client', '../content-astro/github-client');
 // (PAGE_EDIT_OWNERSHIP_LOST); GitHub calls inside the locked section stop at
 // HOLD so a hung request cannot keep every page-edit producer waiting. A
 // write cut off at HOLD is reconciled by the publisher before any retry.
+const CITABILITY_BACKFILL_BUCKET = 'citability_backfill';
 const PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
 const PAGE_EDIT_LOCK_POLL_MS = 250;
 const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 5 * 60_000;
@@ -233,7 +234,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -251,7 +252,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}) });
+      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}) });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -1806,6 +1807,27 @@ class AutonomousRunner {
     }
   }
 
+  // How many of the daily batch's slots go to citability backfill rows:
+  // the configured reservation, capped below the batch size and by what is
+  // claimable now. Any read failure reserves nothing (the batch runs as before).
+  async _claimableBackfillSlots(batchLimit) {
+    const wanted = Math.min(envInt('AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS', 2) ?? 0, Math.max(0, batchLimit - 1));
+    if (wanted <= 0) return 0;
+    try {
+      const queue = getQueue();
+      // A crashed batch can leave a backfill row stale-claimed, which peek
+      // cannot see; recover first, fail-soft, as the catch-up probe does.
+      await queue?.recoverStaleClaims?.().catch((err) => {
+        logger.warn(`[autonomous-runner] backfill slot stale-claim recovery failed (${err.message}); sizing from pending rows only`);
+      });
+      const rows = await queue?.peek?.({ bucket: CITABILITY_BACKFILL_BUCKET, limit: wanted, minScore: DEFAULT_MIN_SCORE });
+      return Math.min(wanted, Array.isArray(rows) ? rows.length : 0);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] backfill slot peek failed (${err.message}); no slots reserved`);
+      return 0;
+    }
+  }
+
   async _runDailyInner({ limit = null, actionType = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
@@ -1855,11 +1877,31 @@ class AutonomousRunner {
     // bounded — the fallback fires once per batch — and the downstream
     // per-day/week publish caps still hold.
     let slotBudget = batchLimit;
+    // Reserved citability backfill slots (owner ruling 2026-09-30). Backfill
+    // rows sit on the claim floor so they never outrank mined work, which on
+    // the first live day meant mined blogs took every slot and no backfill
+    // ran. The unscoped batch spends up to AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS
+    // (default 2, never the whole batch) on backfill rows first, sized by a
+    // read-only peek so an empty lane reserves nothing; the rest of the batch
+    // claims by score as before. Kill: AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS=0.
+    let reservedLeft = actionType ? 0 : await this._claimableBackfillSlots(batchLimit);
     for (let i = 0; i < slotBudget; i += 1) {
+      const reserve = reservedLeft > 0 && !scopedActionType;
+      if (reserve) reservedLeft -= 1;
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
       // batch's claim args stay byte-identical.
-      const run = await this.runNext({ excludeIds: [...failedOppIds], ...(scopedActionType ? { actionType: scopedActionType } : {}) });
+      const run = await this.runNext({
+        excludeIds: [...failedOppIds],
+        ...(scopedActionType ? { actionType: scopedActionType } : {}),
+        ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),
+      });
+      if (reserve && run.outcome === 'skipped_no_opportunity') {
+        // Claimed away since the peek: the slot returns to the general pool.
+        reservedLeft = 0;
+        i -= 1;
+        continue;
+      }
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;

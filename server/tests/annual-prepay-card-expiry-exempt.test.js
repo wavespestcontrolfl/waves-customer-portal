@@ -52,7 +52,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], estimates = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], collectionFlags = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], estimates = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [], cardHolds: [] };
   // the payment-pending hold query (getPaymentPendingCustomerIds) is the
   // only annual_prepay_terms query that JOINs invoices — route it to its
@@ -73,6 +73,8 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'payment_methods') return chain(paymentMethods, []);
     if (table === 'appointment_card_requests') return chain(apptCardRequests, []);
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
+    // B10: collections_flags collection_hold (extended-lane preflight)
+    if (table === 'collections_flags') return chain(collectionFlags, []);
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
     // the cap verdict reads the linked estimate's frozen setup fee
     if (table === 'estimates') return chain(estimates, []);
@@ -415,6 +417,48 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       dunningSequences: [{ status: 'stopped' }],
     });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('B10: an active collections dispute hold means the extended lane will not charge → stays exempt', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }],
+      collectionFlags: [{ id: 'f1', flag: 'collection_hold' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('B10 (codex #5394): the hold exemption is customer-level - per-application, pending-mint and estimate-card-hold charges are exempt too', async () => {
+    const holdFlag = [{ id: 'f1', flag: 'collection_hold' }];
+    const scenarios = [
+      // per-application (reused open invoice)
+      { visits: [baseVisit({ billing_mode: 'per_application', per_application_fee: '120.00' })], invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }] },
+      // pending-mint (no invoice yet)
+      { visits: [baseVisit({})], invoices: [] },
+      // estimate card hold rail
+      { visits: [baseVisit({ is_recurring: false, customer_autopay_paused_until: HORIZON })], invoices: [], cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00' }] },
+    ];
+    for (const sc of scenarios) {
+      // control: with no hold the warning stays
+      route({ terms: coveredAlways(['c-prepaid']), ...sc });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+      route({ terms: coveredAlways(['c-prepaid']), ...sc, collectionFlags: holdFlag });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    }
+  });
+
+  test('B10: a hold-lookup FAILURE never rejects the exemption pass - the warning stays (not exempt)', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }],
+      throwOn: 'collections_flags',
+    });
+    await expect(getCardExpiryExemptCustomerIds(HORIZON)).resolves.toBeDefined();
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // handled AT the hold check (per visit), not by the pass-wide catch
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('collection-hold lookup failed'));
   });
 
   test("a dying or missing Auto Pay method never proves its own warning unnecessary — the visit stays chargeable", async () => {

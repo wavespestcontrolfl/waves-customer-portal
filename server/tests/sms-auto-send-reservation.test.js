@@ -16,6 +16,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 1),
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
+  reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend
   // call — see sms-auto-send-open-times.test.js's identical mock comment.

@@ -648,3 +648,14 @@ describe('payment failure settlement recheck', () => {
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
   });
 });
+
+describe('sms_reply keeps the whole text for the bell', () => {
+  test('a text over 140 characters carries the full message as detail; a short one carries none', () => {
+    const long = `Could you come back out this week? ${'The ants are back by the patio door. '.repeat(5)}Thanks.`;
+    const built = TRIGGER_REGISTRY.sms_reply.build({ fromName: 'Dana Example', message: long, threadId: 'customer-123' });
+    expect(built.body).toHaveLength(140);
+    expect(built.detail).toBe(long);
+    const short = TRIGGER_REGISTRY.sms_reply.build({ fromName: 'Dana Example', message: 'See you at 4.', threadId: 'customer-123' });
+    expect(short.detail).toBeUndefined();
+  });
+});

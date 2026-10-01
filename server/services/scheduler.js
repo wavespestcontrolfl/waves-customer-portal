@@ -1155,6 +1155,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at
+  // one stop that qualify for a visit group but were never grouped (written
+  // before the gates, while autopay customers were excluded, or by a writer
+  // that never calls maybeGroupRow: moves, series extension) are folded into
+  // one visit through the canonical maybeGroupRow / createOrJoinVisit path.
+  // Only loose pairs more than 76h out (no reminder due or in flight), so a
+  // tech's near days never change under them.
+  // Inert unless GATE_VISIT_GROUPS is on (checked inside the sweep). Grouping
+  // writes no customer message. runExclusive: read-then-act; a deploy overlap
+  // must not run two sweeps over the same rows.
+  // =========================================================================
+  cron.schedule('25 2 * * *', async () => {
+    if (!isEnabled('visitGroups')) return;
+    try {
+      const res = await runExclusive('visit-regroup-same-stop', () =>
+        require('./visit-regroup').regroupUngroupedSameStopRows({ dryRun: false }));
+      if (res && !res.skipped && (res.groups.length || res.left.length)) {
+        logger.info(`[visit-regroup] grouped ${res.groups.length} stop(s); left ${res.left.length} row(s) alone (${res.candidates} candidates)`);
+      }
+    } catch (err) {
+      logger.error(`[visit-regroup] nightly same-stop regroup failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY MON 4:05AM ET — Manatee permit sync (public ACA CSV reports →
   // pool_permit_records + construction_permit_records). Pool report =
   // closed-permit backstop for the pool-facts lookup (the live GIS layer
@@ -4262,6 +4287,20 @@ function initScheduledJobs() {
               claimMeta.pay_link_stripped_reason = recheck.reason || null;
               logger.info(`[scheduled-sms] deferred completion ${msg.id} pay link stripped at delivery (${recheck.reason || 'invoice-not-collectible'})`);
             }
+            // A recheck that names a replacement body (the queued visit summary whose invoice
+            // link is no longer right to send: the plain summary goes instead) and the metadata
+            // keys that go with the old body. Persisted under the same claimed-row guard.
+            if (recheck && typeof recheck.replaceBody === 'string' && recheck.replaceBody) {
+              const dropKeys = Array.isArray(recheck.dropMeta) ? recheck.dropMeta : [];
+              const swapped = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                message_body: recheck.replaceBody,
+                metadata: dropKeys.reduce((expr, key) => db.raw('(?) - ?::text', [expr, key]), db.raw("COALESCE(metadata, '{}'::jsonb)")),
+                updated_at: new Date(),
+              });
+              if (!swapped) throw new Error('Scheduled message claim lost before replacing its body');
+              msg.message_body = recheck.replaceBody;
+              for (const key of dropKeys) delete claimMeta[key];
+            }
           }
           // replay_purpose: an enqueue whose message_type has no useful
           // purpose mapping (the Stripe billing-notice templates —
@@ -4406,6 +4445,10 @@ function initScheduledJobs() {
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
                       ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
                       ...(openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: openTimesSnapshot.lookup.scheduledServiceId } : {}),
+                      // Which picker minted the offer, and what it needs to be asked again
+                      // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+                      ...(openTimesSnapshot.lookup?.source ? { source: openTimesSnapshot.lookup.source } : {}),
+                      ...(openTimesSnapshot.lookup?.serviceKey ? { serviceKey: openTimesSnapshot.lookup.serviceKey } : {}),
                       quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {
@@ -4448,6 +4491,29 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
+            // Re-service promise revalidation (Codex round-3 P2): the same
+            // "reviewed wording can go stale before it fires" gap as the
+            // checks above, for a free re-service promise — the customer's
+            // eligibility (their plan, an already-used re-service) can
+            // change between review/scheduling and this fire. Reuses the
+            // SAME live lane check + promised-lane snapshot the immediate
+            // send path's agentDecisionSendBlockReason runs
+            // (reservicePromiseStillEligible, sms-shadow-drafter.js) — no
+            // separate mechanism. Fail-closed on any lookup error.
+            let reserviceStale = false;
+            let reserviceReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              // Shared with the immediate send path (agent-decision-send-checks): a plain
+              // non-promise message is never blocked by this recheck's own plumbing.
+              const { scheduledReserviceBlockReason } = require('./agent-decision-send-checks');
+              const reason = await scheduledReserviceBlockReason({
+                agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, fallbackCustomerId: msg.customer_id || null, dbh: db,
+              });
+              if (reason) {
+                reserviceStale = true;
+                reserviceReason = reason;
+              }
+            }
             // LIVE ETA revalidation (independent review + Codex round-1
             // finding, PR #5334): a minutes-away/ETA claim is a draft-time
             // GPS snapshot — this scheduled reply can fire long after the
@@ -4456,7 +4522,7 @@ function initScheduledJobs() {
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale;
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4475,7 +4541,9 @@ function initScheduledJobs() {
                     ? 'stale_open_times_agent_decision'
                     : slaStale
                       ? 'stale_sla_agent_decision'
-                      : 'stale_eta_agent_decision';
+                      : reserviceStale
+                        ? 'stale_reservice_agent_decision'
+                        : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4507,7 +4575,9 @@ function initScheduledJobs() {
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
-                          : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                          : reserviceStale
+                            ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
+                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });

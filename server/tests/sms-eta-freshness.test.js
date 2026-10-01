@@ -2205,7 +2205,7 @@ describe('no-snapshot strictness follows the persisted prompt version', () => {
     if (gate) process.env.GATE_SMS_REAL_ANSWERS = 'true'; else delete process.env.GATE_SMS_REAL_ANSWERS;
     return etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, promptVersion, now: NOW, dbh: fakeDb([]) });
   };
-  test.each(['house_voice_v12_real_answers_cf_eta', 'house_voice_v12_real_answers', 'house_voice_v12_real_answers_cf_eta+bclm'])('v12 identity %p stays strict with the gate ROLLED BACK (off)', async (version) => {
+  test.each(['house_voice_v12_real_answers3_cf', 'house_voice_v12_real_answers', 'house_voice_v12_real_answers3_cf+bclm'])('v12 identity %p stays strict with the gate ROLLED BACK (off)', async (version) => {
     expect(await run(version, false)).toBe('eta_claim_no_snapshot');
     expect(await run(version, true)).toBe('eta_claim_no_snapshot');
   });

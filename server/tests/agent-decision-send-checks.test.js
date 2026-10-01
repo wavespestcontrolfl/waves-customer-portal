@@ -7,6 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/sms-shadow-drafter', () => ({
   planOpenTimesRecheck: jest.fn(),
   openTimesStillOffered: jest.fn(),
+  reservicePromiseStillEligible: jest.fn(),
 }));
 // slaDraftedAt is kept REAL (only followupPromiseBlockReason is mocked) so
 // this suite proves the actual facts_generated_at → created_at fallback the
@@ -37,6 +38,7 @@ beforeEach(() => {
   drafter.openTimesStillOffered.mockReset().mockResolvedValue({ ok: true });
   followupPromiseBlockReason.mockReset().mockReturnValue(null);
   outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
+  drafter.reservicePromiseStillEligible.mockReset().mockResolvedValue(null);
   etaClaimBlockReason.mockReset().mockResolvedValue(null);
 });
 
@@ -61,6 +63,19 @@ test('a scheduler-minted snapshot forwards its scheduledServiceId to the recheck
   drafter.openTimesStillOffered.mockClear();
   await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' });
   expect(drafter.openTimesStillOffered.mock.calls[0][0]).not.toHaveProperty('scheduledServiceId');
+});
+
+test('a /book or estimate snapshot forwards its source (+ serviceKey) to the recheck; a legacy snapshot carries neither', async () => {
+  const withLookup = (extra) => JSON.stringify({ open_times_snapshot: { ...SNAP.open_times_snapshot, lookup: { ...SNAP.open_times_snapshot.lookup, ...extra } } });
+  await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: withLookup({ source: 'book', serviceKey: 'lawn_care' }) }), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ source: 'book', serviceKey: 'lawn_care' }));
+  drafter.openTimesStillOffered.mockClear();
+  await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: withLookup({ estimateId: 'est-1', source: 'estimate' }) }), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ source: 'estimate', estimateId: 'est-1' }));
+  drafter.openTimesStillOffered.mockClear();
+  await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' });
+  expect(drafter.openTimesStillOffered.mock.calls[0][0]).not.toHaveProperty('source');
+  expect(drafter.openTimesStillOffered.mock.calls[0][0]).not.toHaveProperty('serviceKey');
 });
 
 test('an unverifiable edit refuses before any availability call', async () => {
@@ -116,6 +131,71 @@ test('no snapshot → no availability call; an older-prompt decision skips the a
   await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
+});
+
+// Codex round-3 P2: a reviewed card can promise a free re-service and then
+// sit long enough for the customer's eligibility to change before it fires
+// — reservicePromiseStillEligible revalidates against LIVE eligibility,
+// keyed on the lane(s) recorded at draft time.
+describe('re-service promise revalidation (Codex round-3 P2)', () => {
+  const reserviceSnapshot = { reservice_lanes_snapshot: ['pest'] };
+
+  test('a reservice-eligible send passes the recorded lane(s) + customer through to the live check', async () => {
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, ...reserviceSnapshot }) }),
+      outgoingBody: "Good news — we'll send your free re-service link now.",
+    })).resolves.toBeNull();
+    expect(drafter.reservicePromiseStillEligible).toHaveBeenCalledWith({
+      outgoingBody: "Good news — we'll send your free re-service link now.",
+      customerId: 'c1',
+      promisedLanes: ['pest'],
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
+    });
+  });
+
+  test('no longer eligible → refuses with the reason', async () => {
+    drafter.reservicePromiseStillEligible.mockResolvedValue('no longer eligible for a free pest re-service');
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, ...reserviceSnapshot }) }),
+      outgoingBody: "Good news — we'll send your free re-service link now.",
+    })).resolves.toBe('re-service promise unsendable (no longer eligible for a free pest re-service)');
+  });
+
+  test('runs only after open-times/follow-up/amounts already passed (fail-fast ordering)', async () => {
+    drafter.openTimesStillOffered.mockResolvedValue({ ok: false, reason: 'open_times_no_longer_offered' });
+    drafter.reservicePromiseStillEligible.mockResolvedValue('no longer eligible for a free pest re-service');
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, ...reserviceSnapshot }) }),
+      outgoingBody: 'x',
+    })).resolves.toBe('open-times stale (open_times_no_longer_offered)');
+    expect(drafter.reservicePromiseStillEligible).not.toHaveBeenCalled();
+  });
+
+  test('an ordinary body with no re-service promise and no snapshot still resolves the live check (no-op) with promisedLanes null', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
+    expect(drafter.reservicePromiseStillEligible).toHaveBeenCalledWith({
+      outgoingBody: 'You owe $5.',
+      customerId: 'c1',
+      promisedLanes: null,
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
+    });
+  });
+});
+
+// Re-service runs BEFORE the ETA recheck (main's order, ETA appended): a failing re-service
+// recheck short-circuits, and both checks run on a clean pass.
+describe('re-service + LIVE ETA ordering on the same send path', () => {
+  test('a re-service refusal short-circuits before the ETA recheck', async () => {
+    drafter.reservicePromiseStillEligible.mockResolvedValue('no longer eligible for a free pest re-service');
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' })).resolves.toBe('re-service promise unsendable (no longer eligible for a free pest re-service)');
+    expect(etaClaimBlockReason).not.toHaveBeenCalled();
+  });
+
+  test('a clean re-service recheck still reaches the ETA recheck', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' })).resolves.toBe('live ETA unsendable (eta_claim_no_longer_en_route)');
+    expect(drafter.reservicePromiseStillEligible).toHaveBeenCalled();
+  });
 });
 
 // LIVE ETA (independent review + Codex round-1 finding, PR #5334): checked

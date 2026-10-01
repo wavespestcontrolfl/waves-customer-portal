@@ -1182,6 +1182,12 @@ function AutomationsPanel({
                       <div className="flex gap-2 flex-wrap">
                         <Badge tone="neutral">{activeVersionLabel}</Badge>
                         <Badge tone="neutral">{row.send_count_30d || 0} sent / 30d</Badge>
+                        {(row.would_send_30d > 0 || row.would_block_30d > 0) && (
+                          <>
+                            <Badge tone="neutral">{row.would_send_30d || 0} would send / 30d</Badge>
+                            <Badge tone="neutral">{row.would_block_30d || 0} would block / 30d</Badge>
+                          </>
+                        )}
                       </div>
                     </div>
 

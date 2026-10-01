@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
@@ -1031,7 +1032,10 @@ class ContextAggregator {
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
       // five future autopay rows empty the history.
-      db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming').orderBy('payment_date', 'desc').limit(5),
+      // A never-attempted dispute-hold deferral is not a payment the customer
+      // made: out of the recent-payments sample (SQL, so it cannot use up one
+      // of the 5 rows), consistent with failedStandalone below.
+      excludeNeverAttemptedHoldDeferrals(db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming'), 'payments').orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -1134,7 +1138,7 @@ class ContextAggregator {
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     const failedStandalone = ownPayments
-      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
+      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(p))
       // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
       // the invoice lifecycle owns that money — EXCEPT when the linked
       // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible
