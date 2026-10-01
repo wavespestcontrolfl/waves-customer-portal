@@ -106,6 +106,12 @@ const OPERATOR_ENTRY_POINTS = new Set([
 // (owner-confirmed 2026-08-29: the friend gets it immediately, not at
 // 8 AM). Same fail-closed posture as OPERATOR_ENTRY_POINTS: new
 // customer-action surfaces must opt in here. Deliberately ABSENT:
+//   - dropped_call_sms — serves BOTH inbound drops and eligible OUTBOUND
+//     return / lead-auto-bridge calls (owner ruling 2026-09-26). The
+//     inbound leg is the caller reaching us and passes at night under the
+//     2026-09-30 ruling via the customerInitiated marker the sender sets
+//     for inbound calls only; the outbound leg is our contact and stays
+//     fenced (pre-push codex P1).
 //   - stripe_webhook and invoice_receipt_sms — those entry points serve
 //     BOTH the customer's own payments AND machine-initiated off-session
 //     charges (autopay debits, completion/balance-sweep card-on-file
@@ -121,12 +127,6 @@ const OPERATOR_ENTRY_POINTS = new Set([
 //     to stop; unfencing them is a new owner ruling, not a PR nit.
 const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'customer_service_request',
-  // Owner ruling 2026-09-30 (generalizing 2026-09-28 below): ANY text that
-  // answers the customer's own inbound contact — a call, a text, an email —
-  // goes out at once, at any hour. A dropped call is the caller reaching
-  // us; the address-request speed play is our reply to it. dropped-call-sms.js
-  // drops its own pre-claim window check (this exemption is what lets it).
-  'dropped_call_sms',
   'estimate_accept_annual_prepay',
   'estimate_accept_onetime_booking',
   'estimate_accept_onetime_confirmed',

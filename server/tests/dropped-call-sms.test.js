@@ -478,14 +478,26 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(sent.metadata.fromNumber).not.toBe('+19415993489');
   });
 
-  it('evening drop still texts — no module-level quiet-hours fence (owner ruling 2026-09-30: a reply to the caller\'s own contact goes out at any hour)', async () => {
+  it('evening INBOUND drop still texts, marked customerInitiated (owner ruling 2026-09-30: a reply to the caller\'s own contact goes out at any hour)', async () => {
     jest.setSystemTime(OUT_OF_WINDOW);
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res.sent).toBe(true);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    // The send-window exemption is by ENTRY POINT in the shared validator —
-    // the module itself carries no clock check any more.
-    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ entryPoint: 'dropped_call_sms' }));
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ entryPoint: 'dropped_call_sms', customerInitiated: true }));
+  });
+
+  it('evening OUTBOUND-leg drop — quiet hours skip BEFORE any claim, one-shot not consumed (our contact, not theirs)', async () => {
+    jest.setSystemTime(OUT_OF_WINDOW);
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, direction: 'outbound-api', from_phone: '+19412166229', to_phone: PHONE } });
+    expect(res).toEqual({ sent: false, skipped: 'quiet_hours' });
+    expect(state.inserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('daytime OUTBOUND-leg drop sends WITHOUT the customerInitiated marker', async () => {
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, direction: 'outbound-api', from_phone: '+19412166229', to_phone: PHONE } });
+    expect(res.sent).toBe(true);
+    expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('customerInitiated');
   });
 
   it('sms_log dedupe read failure — fails closed', async () => {

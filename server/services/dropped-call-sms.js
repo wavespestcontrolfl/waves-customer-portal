@@ -16,10 +16,12 @@
  *   send side (this module), in order:
  *   1. GATE_DROPPED_CALL_SMS — customer-facing auto-send, fails CLOSED in
  *      every environment until the owner enables it.
- *   2. (Retired 2026-09-30.) The 8am–8pm quiet-hours fence no longer
- *      applies: the caller just dialed us, and the owner's ruling is that a
- *      reply to the customer's own inbound contact goes out at any hour —
- *      the send-window validator exempts entry point 'dropped_call_sms'.
+ *   2. Quiet hours — INBOUND drops text at any hour (owner ruling
+ *      2026-09-30: a reply to the customer's own contact is never held to
+ *      8 AM; the send carries customerInitiated). OUTBOUND return /
+ *      auto-bridge legs are our contact and keep the 8am–8pm fence; outside
+ *      the window the one-shot is NOT consumed (the triage card still tells
+ *      the office to call back).
  *   3. One text per phone number EVER — DB-atomic claim on
  *      dropped_call_sms_claims (phone PRIMARY KEY, INSERT ... ON CONFLICT
  *      DO NOTHING), belt-and-suspenders sms_log history check, plus an
@@ -40,6 +42,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isWithinSendWindowET } = require('./messaging/send-window');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 // sent:true is necessary but not sufficient — upstream suppressions (gate
@@ -217,6 +220,10 @@ function callbackClause(dialedLine) {
 // malformed/unregistered/toll-free candidate (or an inbound call, where
 // this is never called) returns null: the caller then omits the clause /
 // skips the fromNumber override rather than expose or invent a number.
+function isOutboundLeg(call = {}) {
+  return String(call?.direction || '').toLowerCase().startsWith('outbound');
+}
+
 function outboundWavesCallerId(call = {}) {
   let metadata = call?.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
@@ -329,6 +336,16 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
   if (!Number.isFinite(callAgeMs) || callAgeMs > MAX_CALL_AGE_MS) {
     logger.info(`[dropped-call-sms] Call too old for a drop text (lead ${leadId}) — skipped`);
     return { sent: false, skipped: 'call_too_old' };
+  }
+
+  // Quiet hours for OUTBOUND legs only, BEFORE any claim: an evening
+  // outbound drop still gets its triage card ("call them back") and the
+  // one-shot stays available. Inbound drops are the caller reaching us
+  // (owner ruling 2026-09-30) and go straight through — sendClaimed marks
+  // them customerInitiated so the shared validator lets them out at night.
+  if (isOutboundLeg(call) && !isWithinSendWindowET()) {
+    logger.info(`[dropped-call-sms] Outbound-leg drop outside 8am-8pm ET window — text skipped for lead ${leadId}`);
+    return { sent: false, skipped: 'quiet_hours' };
   }
 
   // "No texts" said on an earlier call with this number (or on this one,
@@ -473,7 +490,7 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
   // bridge dialed first) — outboundWavesCallerId resolves the real managed
   // line instead. Inbound is unaffected (call.to_phone is the dialed office
   // line, exactly as before).
-  const isOutbound = String(call?.direction || '').toLowerCase().startsWith('outbound');
+  const isOutbound = isOutboundLeg(call);
   const wavesCallerId = isOutbound ? outboundWavesCallerId(call) : call.to_phone;
 
   const body = await renderSmsTemplate(MESSAGE_TYPE, {
@@ -518,6 +535,10 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     identityTrustLevel: 'phone_provided_unverified',
     consentBasis: { status: 'transactional_allowed', source: 'dropped_call_text_back' },
     entryPoint: 'dropped_call_sms',
+    // Inbound only (owner ruling 2026-09-30): the caller just dialed us, so
+    // the reply is theirs to receive at any hour. Outbound legs never carry
+    // it — the pre-claim fence above already held them at night.
+    ...(isOutbound ? {} : { customerInitiated: true }),
     metadata: {
       original_message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,

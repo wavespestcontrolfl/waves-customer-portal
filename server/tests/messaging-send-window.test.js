@@ -193,9 +193,10 @@ describe('checkSendWindow validator', () => {
     }
     // Purely schedule-driven sends reusing the conversational policy stay
     // fenced too — a machine, not a person, picks their moment.
-    // (dropped_call_sms left this list under the 2026-09-30 ruling: any
-    // reply to the caller's own inbound contact goes out at any hour.)
-    for (const entryPoint of ['booking_abandon_recovery_cron']) {
+    // dropped_call_sms serves outbound legs too, so it is NOT a blanket
+    // customer action: the sender marks inbound drops customerInitiated
+    // (owner ruling 2026-09-30) and the bare entry point stays fenced.
+    for (const entryPoint of ['booking_abandon_recovery_cron', 'dropped_call_sms']) {
       const res = checkSendWindow({ ...SMS, purpose: 'conversational', entryPoint }, null, null, EVENING_ET);
       expect(res.ok).toBe(false);
       expect(res.code).toBe('QUIET_HOURS_HOLD');
@@ -227,8 +228,8 @@ describe('checkSendWindow validator', () => {
     }
   });
 
-  test('missed-call, voicemail and dropped-call text-backs pass at night too (owner rulings 2026-09-28 / 2026-09-30: a caller reaching out is a customer action)', () => {
-    for (const entryPoint of ['missed_call_text_back', 'voicemail_lead_sms', 'dropped_call_sms']) {
+  test('missed-call and voicemail text-backs pass at night too (owner ruling 2026-09-28: a caller reaching out is a customer action)', () => {
+    for (const entryPoint of ['missed_call_text_back', 'voicemail_lead_sms']) {
       expect(checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET)).toEqual({ ok: true });
       // Also exempt under the conversational-policy shape these two lanes
       // actually send with (purpose stays 'missed_call_followup', but the
@@ -244,7 +245,7 @@ describe('checkSendWindow validator', () => {
     // marked customerInitiated pass at night; unmarked ones — the
     // machine-charge notices and receipts — hold and ride their retry
     // rails to the window open.
-    for (const entryPoint of ['stripe_webhook', 'invoice_receipt_sms']) {
+    for (const entryPoint of ['stripe_webhook', 'invoice_receipt_sms', 'dropped_call_sms']) {
       expect(checkSendWindow({ ...SMS, entryPoint, customerInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
       const machine = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);
       expect(machine.ok).toBe(false);
