@@ -10764,10 +10764,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // …and the consent text version that checkbox rendered (codex #5434
         // r1 P1): the prepay authorization snapshot recorded post-commit is
         // the server's current text, so a tab attesting another version (or
-        // none) is refused before any mutation with the reloadable 409. A
-        // per-capture attestation (#5481) is judged by the accept
-        // transaction's own verification instead.
-        if (!perCaptureConsentAttested(req.body) && !paymentConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+        // none) is refused before any mutation with the reloadable 409. No
+        // per-capture waiver here: annual-prepay accepts are excluded from
+        // the transaction's collection-promise verification, so the bundle
+        // attestation is the only check this lane gets (pre-push Codex on
+        // the merge).
+        if (!paymentConsentVersionIsCurrent(req.body?.consentTextVersion)) {
           return res.status(409).json(paymentConsentVersionStaleResponse());
         }
         prepayChargePlan = { method: prepayChargeMethod, quote: chargeInfo, projectedOfferAmount: prepayQuoteOfferContribution };
