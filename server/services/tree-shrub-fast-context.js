@@ -32,7 +32,7 @@ const HISTORY_RECORD_LIMIT = 12;
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete']);
 
 // Classifier inputs the shared catalog list does not carry.
-const CLASSIFIER_COLUMNS = ['irac_group', 'frac_group', 'hrac_group', 'analysis_n', 'analysis_p'];
+const CLASSIFIER_COLUMNS = ['irac_group', 'frac_group', 'hrac_group', 'hrac_group_secondary', 'analysis_n', 'analysis_p'];
 
 const dayNumber = (day) => {
   const [y, m, d] = String(day).split('-').map(Number);
@@ -91,13 +91,16 @@ const positiveOrNull = (value) => {
  * property link and is not counted.
  */
 async function loadTreeShrubHistory(svc, knex) {
+  // An unresolved property proves nothing about which address a past visit
+  // was at (a multi-property account), so it pre-fills nothing.
+  if (!svc.property_id) return [];
   const records = await knex('service_records as sr')
     .join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .where('sr.customer_id', svc.customer_id)
     .where('sr.status', 'completed')
     .where('sr.service_line', 'tree_shrub')
     .whereNot('sr.scheduled_service_id', svc.id)
-    .whereRaw('ss.property_id IS NOT DISTINCT FROM ?::uuid', [svc.property_id ?? null])
+    .where('ss.property_id', svc.property_id)
     .orderBy('sr.service_date', 'desc')
     .orderBy('sr.created_at', 'desc')
     .orderBy('sr.id', 'desc')
@@ -162,7 +165,9 @@ function moaFamily(category) {
 // rotation conflict is ANY shared group, so each is its own entry. The
 // explicit IRAC/FRAC/HRAC columns win over the generic moa_group.
 function resistanceGroups(row) {
-  const explicit = [['irac', row.irac_group], ['frac', row.frac_group], ['hrac', row.hrac_group]]
+  // Combination herbicides keep their second mode in hrac_group_secondary
+  // (Celsius 2+4, Dismiss 14+2).
+  const explicit = [['irac', row.irac_group], ['frac', row.frac_group], ['hrac', row.hrac_group], ['hrac', row.hrac_group_secondary]]
     .filter(([, raw]) => String(raw || '').trim());
   const sources = explicit.length ? explicit : [[moaFamily(row.category), row.moa_group]];
   const groups = [];
@@ -257,8 +262,11 @@ async function loadRecentApplications(svc, visitDate, knex) {
   if (svc.property_id) query.where((q) => q.whereNull('ss.property_id').orWhere('ss.property_id', svc.property_id));
   return query.select(
     'pah.application_date', 'pah.product_id', 'pah.moa_group as history_moa_group',
-    'pc.name as product_name', 'pc.category', 'pc.active_ingredient',
-    'pc.irac_group', 'pc.frac_group', 'pc.moa_group', 'pc.analysis_n', 'pc.analysis_p',
+    'pc.name as product_name', 'pc.active_ingredient',
+    // A ledger row with no catalog link keeps its own recorded category, so
+    // its moa_group still resolves to the right family.
+    knex.raw('COALESCE(pc.category, pah.category) as category'),
+    'pc.irac_group', 'pc.frac_group', 'pc.hrac_group', 'pc.hrac_group_secondary', 'pc.moa_group', 'pc.analysis_n', 'pc.analysis_p',
   );
 }
 
@@ -279,6 +287,10 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   // (the visit row plus the customer's city).
   const zone = inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city });
   const catalog = await loadRecapCatalogProducts(knex, { extraColumns: CLASSIFIER_COLUMNS });
+  // The shared loader turns a failed read into []. An empty catalog here would
+  // let the sheet record a real application as "Inspection only" with none of
+  // the product checks, so it sends the visit to the full form instead.
+  if (!catalog.length) return { ok: true, eligible: false, reason: 'catalog_unavailable', service };
   const products = catalog.map((row) => ({ ...row, tsFlags: treeShrubProductFlags(row, { serviceDate: visitDate, zone }) }));
 
   let history = [];

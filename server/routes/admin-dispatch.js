@@ -4116,11 +4116,15 @@ router.post('/slot-check', async (req, res, next) => {
 // identity (echoed back as `expectedVisit` on /complete), the catalog with
 // per-product compliance flags, the protocol month's suggested products, the
 // last visit's values and the rotation / palm-spacing warnings. Read-only;
-// dark behind GATE_TS_FAST_COMPLETE (the per-tech flag rides the schedule
-// payload). See services/tree-shrub-fast-context.js.
+// dark behind GATE_TS_FAST_COMPLETE AND the caller's ts_fast_complete user
+// flag, rechecked here (not only on the schedule payload) so a revoked or
+// unflagged tech can't reach the sheet. See services/tree-shrub-fast-context.js.
 router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
   try {
     if (!tsFastCompleteLive()) return res.status(404).json({ enabled: false });
+    const flagged = await require('../services/feature-flags')
+      .isUserFeatureEnabled(req.technicianId, 'ts_fast_complete').catch(() => false);
+    if (!flagged) return res.status(404).json({ enabled: false });
     if (!(await assertRecapOwnership(req, res))) return;
     const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });

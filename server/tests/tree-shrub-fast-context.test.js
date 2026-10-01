@@ -189,6 +189,19 @@ describe('buildTreeShrubWarnings', () => {
       .toEqual([expect.objectContaining({ productId: 'pil', group: 'FRAC 11, FRAC 3' })]);
   });
 
+  test('a combination herbicide shares its secondary HRAC group', () => {
+    const celsius = cat('cel', 'Celsius WG', { category: 'herbicide', hrac_group: '2', hrac_group_secondary: '4' });
+    const speedzone = cat('spz', 'SpeedZone Southern', { category: 'herbicide', hrac_group: '4' });
+    expect(buildTreeShrubWarnings({ catalogRows: [speedzone], applications: [app(6, celsius, { hrac_group: '2', hrac_group_secondary: '4' })], visitDate }))
+      .toEqual([expect.objectContaining({ productId: 'spz', group: 'HRAC 4' })]);
+  });
+
+  test('an unlinked ledger row keeps its own category, so its moa_group keeps its family', () => {
+    const snapshot = cat('snap', 'Snapshot 2.5TG', { category: 'herbicide', moa_group: 'Group 3 + 29' });
+    const fungicideRow = { product_id: null, product_name: null, category: 'fungicide', moa_group: null, history_moa_group: 'Group 3' };
+    expect(buildTreeShrubWarnings({ catalogRows: [snapshot], applications: [app(5, cat('x', 'x'), fungicideRow)], visitDate })).toEqual([]);
+  });
+
   test('an IRAC code never matches a FRAC code of the same text', () => {
     const fungicide = cat('fung', 'Some Fungicide', { frac_group: '23' });
     expect(buildTreeShrubWarnings({ catalogRows: [fungicide], applications: [app(5, kontos)], visitDate })).toEqual([]);
@@ -317,6 +330,22 @@ describe('buildTreeShrubFastContext', () => {
       'service_records as sr': new Error('boom'), 'property_application_history as pah': new Error('boom'),
     }));
     expect(ctx).toMatchObject({ ok: true, eligible: true, lastVisit: null, warnings: [], warningsUnavailable: true });
+    expect(ctx.monthProducts.every((m) => m.lastAmount === undefined)).toBe(true);
+  });
+
+  test('a catalog that fails to load (the shared loader answers []) sends the visit to the full form', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: new Error('db down') }));
+    expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'catalog_unavailable', service: { id: 'visit-1' } });
+    expect(ctx.products).toBeUndefined();
+  });
+
+  test('an unresolved property pre-fills nothing from history', async () => {
+    const records = [{ id: 'rec-9', service_date: '2026-09-02', typed_values: { plant_groups: 'Palms' } }];
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit({ property_id: null }), products_catalog: catalog, 'service_records as sr': records,
+      service_products: [{ service_record_id: 'rec-9', product_id: 'kphite', total_amount: '2', amount_unit: 'qt' }],
+    }));
+    expect(ctx).toMatchObject({ ok: true, eligible: true, lastVisit: null });
     expect(ctx.monthProducts.every((m) => m.lastAmount === undefined)).toBe(true);
   });
 
