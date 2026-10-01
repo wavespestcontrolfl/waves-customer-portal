@@ -965,7 +965,7 @@ booking has its own funnel row, the closed request's row is removed
 touch keeps the credit (owner ruling 2026-10-01): when the request's row came
 in on a paid click and the booking's own row has no paid click, the booking's
 row first takes the request's touch (source, detail, lead date, click ids,
-UTM campaign/term, `is_paid`; the earliest paid request wins; a booking row with any paid click id of its own keeps it, whatever its `is_paid`), so the booking
+UTM campaign/term, `is_paid`; the earliest paid request wins; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
 is credited, and reported, to that ad. Every other lead surface
 treats `handled` as closed: it is out of the open set, out of every prospect
 denominator (conversion, win and lost rates), and never re-attached by a later
