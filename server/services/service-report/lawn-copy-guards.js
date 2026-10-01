@@ -275,6 +275,13 @@ function startsMidQuantity(src, start) {
     const p = before.match(/([a-z0-9./]+)\s+and[\s-]*$/);
     return Boolean(p && (/^\d/.test(p[1]) || NUMBER_WORDS.has(p[1])));
   }
+  // "three quarters of a week", "a quarter of a day", "half of a day", "part
+  // of a week", "most of a day": the "a week" tail is not the quantity
+  // (codex pre-push P1).
+  if (w === 'of') {
+    const p = before.match(/([a-z0-9./]+)\s+of[\s-]*$/);
+    return Boolean(p && (/^\d/.test(p[1]) || NUMBER_WORDS.has(p[1]) || /^(?:quarters?|halves|half|thirds?|fifths?|eighths?|parts?|portions?|fractions?|most|much|some|all|bulk|rest|remainder|majority|share)$/.test(p[1])));
+  }
   return false;
 }
 

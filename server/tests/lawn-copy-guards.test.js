@@ -802,3 +802,19 @@ describe('sub-day durations never appear in model copy', () => {
     expect(checkSubDayDuration('Weeds yellow in about 3–7 days and brown over 2–3 weeks.')).toEqual([]);
   });
 });
+
+describe('fraction-of phrases are never read as their trailing article', () => {
+  const { checkLawnModelCopy } = require('../services/service-report/lawn-copy-guards');
+  test.each([
+    ['Expect a change in three quarters of a week.', '1 week'],
+    ['Expect a change in a quarter of a day.', '1 day'],
+    ['Expect a change in half of a day.', '1 day'],
+    ['Expect a change in most of a week.', '1 week'],
+  ])('%s is not licensed by %s', (line, allowed) => {
+    const out = checkLawnModelCopy(line, { allowedText: [allowed] });
+    expect(out.ok).toBe(false);
+  });
+  test('a plain "a week" still matches "1 week"', () => {
+    expect(checkLawnModelCopy('Expect a change in a week.', { allowedText: ['1 week'] }).ok).toBe(true);
+  });
+});
