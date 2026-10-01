@@ -20,6 +20,7 @@ const {
   checkReentryPattern,
   checkBannedCopy,
   checkOverpromise,
+  checkSafetyClaim,
   checkBannerCopy,
   KEEP_OFF_REJECT,
   BANNER_COPY_ACCEPT,
@@ -617,6 +618,137 @@ describe('shared banned list and lawn overpromise list (G1, G6)', () => {
 
   test('"secure" is not "cure"', () => {
     expect(checkOverpromise('The edge looks secure.')).toEqual([]);
+  });
+});
+
+describe('decimal and fraction forms (pre-push audit)', () => {
+  test.each([
+    ['.5 days', '.5 days'],
+    ['0.5 days', '.5 days'],
+    ['\u00bd day', '0.5 day'],
+    ['1/2 day', '\u00bd day'],
+    ['1.5 days', '1\u00bd days'],
+    ['1 1/2 days', '1.5 days'],
+    ['\u00bc inch', '.25 inch'],
+    ['\u00be inch', '3/4 inch'],
+    ['\uff11\uff14 days', '14 days'],
+    ['2 wks', '2 weeks'],
+    ['3 mos', '3 months'],
+  ])('"%s" is a figure that needs a row, and equals "%s"', (used, licensed) => {
+    rejects(`Expect a change in ${used}.`, 'numeric', {});
+    accepts(`Expect a change in ${used}.`, { allowedText: [`Color can return in ${licensed}.`] });
+  });
+
+  test('a leading-dot decimal is never skipped (the audit case)', () => {
+    const result = checkLawnModelCopy('Expect a change in .5 days.', {});
+    expect(result.ok).toBe(false);
+    expect(result.reasons[0]).toMatchObject({ rule: 'numeric', match: '.5 days' });
+  });
+
+  test('different decimals are different keys', () => {
+    rejects('Expect a change in .5 days.', 'numeric', { allowedText: ['Change in 5 days.'] });
+    rejects('Expect a change in 1.5 days.', 'numeric', { allowedText: ['Change in 1 day.'] });
+    rejects('Expect a change in \u00bd day.', 'numeric', { allowedText: ['Change in 1 day.'] });
+  });
+
+  test('bare decimals and fractions need allowedNumbers', () => {
+    rejects('Thatch measures .5 here.', 'numeric', {});
+    accepts('Thatch measures .5 here.', { allowedNumbers: [0.5] });
+    accepts('Thatch measures 0.5 here.', { allowedNumbers: ['.5'] });
+  });
+
+  test('re-entry figure reads decimals, fractions and seconds-free units', () => {
+    ['.5 hours', '0.5 hours', '\u00bd hour', '1/2 hour', '1.5 hours', '1\u00bd hours', '\uff13 hours'].forEach((figure) => {
+      expect(checkReentryPattern(`Stay off the turf for ${figure}.`).length).toBe(1);
+    });
+  });
+});
+
+describe('pesticide safety claims (AGENTS.md compliance language)', () => {
+  test.each([
+    'This treatment is pet-safe.',
+    'This pesticide is safe for children.',
+    'The product is safe for pets and kids.',
+    'It is safe for family, wildlife and bees.',
+    'A safer option for your yard.',
+    'The application is safe.',
+    'Applied safely around the beds.',
+    'The chemical is harmless.',
+    'A non-toxic treatment.',
+    'A nontoxic product.',
+    'Child-safe formula.',
+    'A kid-friendly product.',
+    'A pet-friendly application.',
+    'An eco-friendly pesticide.',
+    'This treatment is environmentally friendly.',
+    'A natural treatment for the edge weeds.',
+    'An organic fertilizer was applied.',
+    'The product is all-natural.',
+    'The spray is gentle on pets.',
+    'There is no risk to pets.',
+    'It will not harm your pets.',
+    'The product is not harmful.',
+    'The treatment is toxic to bees.',
+    'Unsafe for kids until later.',
+  ])('rejects: %s', (text) => {
+    expect(checkSafetyClaim(text).length).toBe(1);
+    rejects(text, 'safety_claim', { droughtFlagged: true });
+  });
+
+  test('"safe for ... once dry" is still a claim; only the bare idiom is allowed', () => {
+    expect(checkSafetyClaim('Safe for pets once dry.').length).toBe(1);
+    expect(checkSafetyClaim('The treatment is safe for kids once it dries.').length).toBe(1);
+    expect(checkSafetyClaim('Treated areas are safe once dry.')).toEqual([]);
+    expect(checkSafetyClaim('Treated areas are safe once it dries.')).toEqual([]);
+    expect(checkSafetyClaim('Treated areas are safe once it is dry.')).toEqual([]);
+    expect(checkSafetyClaim('Areas are safe once dry, and your technician confirms timing.')).toEqual([]);
+  });
+
+  test('the idiom still meets the other rules: dry is a water word for model copy, and a figure re-enters', () => {
+    rejects('Treated areas are safe once dry.', 'water_mow', {});
+    accepts('Treated areas are safe once dry.', { droughtFlagged: true });
+    rejects('Treated areas are safe once dry in 30 minutes.', 'reentry_figure', { droughtFlagged: true });
+  });
+
+  test('"once it dries" without any safety word is not a safety claim', () => {
+    expect(checkSafetyClaim('Walk on the area once it dries.')).toEqual([]);
+  });
+
+  test('agronomic uses of natural and organic pass', () => {
+    accepts('Organic matter is building in the thatch layer.', {});
+    accepts('The turf has a natural, even color along the front.', {});
+    accepts('The back looks natural and even.', {});
+  });
+
+  test('no allowlist or approved sentence waives a safety claim', () => {
+    const sentence = 'This treatment is pet-safe.';
+    rejects(sentence, 'safety_claim', { approvedSentences: [sentence], allowedText: [sentence] });
+  });
+});
+
+describe('efficacy guarantees', () => {
+  test.each([
+    'The weeds will never come back.',
+    'They will not return.',
+    'Chinch bugs never return after this.',
+    'This kills all weeds.',
+    'It kills everything in the bed.',
+    'No more weeds along the edge.',
+    'Fixed for good.',
+    'The weeds are gone forever.',
+    'Solved once and for all.',
+    'The problem is completely gone.',
+    'The weeds are totally controlled.',
+    'It is 100 percent effective.',
+    'A foolproof plan.',
+    'It is guaranteed to work.',
+  ])('rejects: %s', (text) => {
+    rejects(text, 'overpromise', {});
+  });
+
+  test('ordinary talk about shade and growth passes', () => {
+    accepts('The turf cannot grow in deep shade, so the thin patch near the oak is expected.', {});
+    accepts('We will treat the edge weeds again if they show up.', {});
   });
 });
 

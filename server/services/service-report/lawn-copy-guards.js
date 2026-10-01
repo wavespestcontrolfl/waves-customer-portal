@@ -33,6 +33,9 @@
  *                      sentence as an hours or minutes figure.
  *   banned_copy        G1/G6: the shared findBannedCustomerCopy list (cleared,
  *                      resolved, gone, guarantee, fixed re-entry figures ...).
+ *   safety_claim       AGENTS.md: no pesticide is "safe" (pet-safe, safe for kids,
+ *                      non-toxic, kid-friendly, natural, organic ...). Only the
+ *                      "safe once dry" re-entry idiom is allowed.
  *   overpromise        G1: lawn-only list the shared list lacks (eliminate,
  *                      cure, permanent, ordinance, blackout, county ...).
  *
@@ -68,7 +71,11 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // ---------------------------------------------------------------------------
 // Normalization
 
-const VULGAR_FRACTIONS = { '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': 0.125, '⅜': 0.375, '⅝': 0.625, '⅞': 0.875 };
+const VULGAR_FRACTIONS = {
+  '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅕': 0.2, '⅖': 0.4, '⅗': 0.6, '⅘': 0.8,
+  '⅙': 1 / 6, '⅚': 5 / 6, '⅐': 1 / 7, '⅛': 0.125, '⅜': 0.375, '⅝': 0.625, '⅞': 0.875, '⅑': 1 / 9, '⅒': 0.1,
+};
+const VULGAR_CLASS = Object.keys(VULGAR_FRACTIONS).join('');
 
 function normalizeCopy(text) {
   let t = String(text == null ? '' : text);
@@ -81,8 +88,12 @@ function normalizeCopy(text) {
     .replace(/′/g, "'")
     .replace(/″/g, '"');
   // "1½" / "1 ½" -> 1.5 ; "½" -> 0.5
-  t = t.replace(/(\d)\s*([½¼¾⅓⅔⅛⅜⅝⅞])/g, (_, whole, f) => ` ${Number(whole) + VULGAR_FRACTIONS[f]}`);
-  t = t.replace(/[½¼¾⅓⅔⅛⅜⅝⅞]/g, (f) => ` ${VULGAR_FRACTIONS[f]}`);
+  // fullwidth and Arabic-Indic digits read as ASCII digits
+  t = t.replace(/[\uff10-\uff19]/g, (d) => String(d.charCodeAt(0) - 0xff10))
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
+  t = t.replace(new RegExp(`(\\d)\\s*([${VULGAR_CLASS}])`, 'g'), (_, whole, f) => ` ${round(Number(whole) + VULGAR_FRACTIONS[f])}`);
+  t = t.replace(new RegExp(`[${VULGAR_CLASS}]`, 'g'), (f) => ` ${round(VULGAR_FRACTIONS[f])}`);
   // 1,000 -> 1000
   t = t.replace(/(\d),(?=\d{3}\b)/g, '$1');
   // a.m. / p.m. -> am / pm so the period does not split a sentence
@@ -124,7 +135,9 @@ const NUMBER_WORDS = new Set([
 ]);
 
 const NUMWORD_SRC = `(?:${[...NUMBER_WORDS].sort((a, b) => b.length - a.length).join('|')})`;
-const DIGIT_SRC = '(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?)';
+// integers, decimals with or without a leading digit (".5", "0.5", "1.5"),
+// fractions ("1/2") and mixed numbers ("1 1/2")
+const DIGIT_SRC = '(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d*\\.\\d+|\\d+)';
 // One whole number phrase: digits, or a run of number words joined by space,
 // hyphen or "and" ("twenty-one", "two hundred and five"). Greedy, so the phrase
 // is never cut at its tail.
@@ -136,23 +149,24 @@ const VAGUE_SRC = '(?:a\\s+few|a\\s+couple(?:\\s+of)?|couple(?:\\s+of)?|several|
 const QTY_SRC = `(?:${VAGUE_SRC}(?:[-\\s]+${NUMRUN_SRC})?|(?:an?[-\\s]+)?${NUMRUN_SRC}|an?(?![a-z]))`;
 const CADENCE_SRC = '(?:every\\s+other|every|each\\s+other|each|per)';
 const RANGE_SEP_SRC = '(?:\\s*-\\s*|\\s+to\\s+|\\s+or\\s+|\\s+through\\s+|\\s+thru\\s+)';
-const UNIT_SRC = '(days?|weeks?|hours?|hrs?|minutes?|mins?|months?|years?|inch(?:es)?|in\\.|"|%|percent|per\\s?cent|degrees?|°|feet|foot|ft)';
+const UNIT_SRC = '(days?|weeks?|wks?|hours?|hrs?|minutes?|mins?|seconds?|secs?|months?|mos?|years?|yrs?|inch(?:es)?|in\\.|"|%|percent|per\\s?cent|degrees?|°|feet|foot|ft)';
 
 function unitKey(raw) {
   const u = raw.toLowerCase().replace(/\s+/g, '');
   if (/^days?$/.test(u)) return 'day';
-  if (/^weeks?$/.test(u)) return 'week';
+  if (/^(?:weeks?|wks?)$/.test(u)) return 'week';
   if (/^(?:hours?|hrs?)$/.test(u)) return 'hour';
   if (/^(?:minutes?|mins?)$/.test(u)) return 'minute';
-  if (/^months?$/.test(u)) return 'month';
-  if (/^years?$/.test(u)) return 'year';
+  if (/^(?:seconds?|secs?)$/.test(u)) return 'second';
+  if (/^(?:months?|mos?)$/.test(u)) return 'month';
+  if (/^(?:years?|yrs?)$/.test(u)) return 'year';
   if (/^(?:inch(?:es)?|in\.|")$/.test(u)) return 'inch';
   if (/^(?:%|percent)$/.test(u)) return 'percent';
   if (/^(?:degrees?|°)$/.test(u)) return 'degree';
   if (/^(?:feet|foot|ft)$/.test(u)) return 'foot';
   return u;
 }
-const TIME_UNITS = new Set(['day', 'week', 'hour', 'minute', 'month', 'year']);
+const TIME_UNITS = new Set(['day', 'week', 'hour', 'minute', 'second', 'month', 'year']);
 
 // Whole-phrase parse of spelled numbers. Returns NaN for any phrase that is not
 // a complete, well-formed number ("one two", "twenty twenty", "twenty hundred",
@@ -221,7 +235,7 @@ function atomValue(raw) {
   if (m) return Number(m[1]) + Number(m[2]) / Number(m[3]);
   m = a.match(/^(\d+)\/(\d+)$/);
   if (m) return Number(m[1]) / Number(m[2]);
-  if (/^\d/.test(a)) return Number(a);
+  if (/^\d*\.?\d+$/.test(a)) return Number(a);
   return parseNumberWords(a);
 }
 
@@ -507,9 +521,58 @@ function checkBannedCopy(text) {
 // The shared list lacks these; it is not edited (pest, rodent and T&S blast radius).
 const LAWN_EXTRA_BANNED_RE = /\b(?:eliminat\w*|eradicat\w*|cure[sd]?|curing|guarantee\w*|permanent\w*|weed[- ]free|pest[- ]free|ordinance|blackout|county|counties)\b|\b100\s*%/i;
 
+// Efficacy guarantees beyond the words above: "100 percent", "kills all weeds",
+// "never come back", "forever", "for good", "once and for all", "no more
+// weeds", "completely gone / controlled", "totally effective".
+const EFFICACY_CLAIM_RE = new RegExp([
+  '\\b100\\s*(?:percent|per\\s?cent)',
+  '\\bkill(?:s|ed|ing)?\\s+(?:all|every|everything|100)\\b',
+  "\\b(?:never|won'?t|will\\s+not|can'?t|cannot)\\s+(?:ever\\s+)?(?:(?:come|coming|grow|growing|appear)\\s+(?:back|again)|return|returning|reappear)\\b",
+  '\\bnever\\s+(?:return|returns|returned|again)\\b',
+  '\\bforever\\b',
+  '\\bfor\\s+good\\b',
+  '\\bonce\\s+and\\s+for\\s+all\\b',
+  '\\bno\\s+more\\s+(?:weeds?|pests?|bugs?|insects?|grubs?|chinch(?:\\s+bugs?)?|disease|fungus)\\b',
+  '\\b(?:completely|totally|fully|entirely)\\s+(?:gone|removed|controlled|cleared|stopped|protected|effective|cured)\\b',
+  '\\b(?:fix(?:es|ed)?|solve[sd]?)\\s+(?:the|your)\\s+(?:problem|issue|lawn)\\s+(?:for\\s+good|completely|permanently)\\b',
+  '\\bfool-?proof\\b',
+  '\\bfail-?safe\\b',
+].join('|'), 'i');
+
 function checkOverpromise(text) {
-  const m = normalizeCopy(text).match(LAWN_EXTRA_BANNED_RE);
+  const t = normalizeCopy(text);
+  const m = t.match(LAWN_EXTRA_BANNED_RE) || t.match(EFFICACY_CLAIM_RE);
   return m ? [{ rule: 'overpromise', match: m[0] }] : [];
+}
+
+// ---------------------------------------------------------------------------
+// Pesticide safety claims (AGENTS.md compliance language). No treatment,
+// product, pesticide, application or chemical is ever "safe", "safer",
+// "harmless", "non-toxic", "pet-safe", "kid-friendly", "eco-friendly",
+// "natural" or "organic"; and nothing is "safe for" pets, kids, people, family,
+// wildlife or bees. The ONLY allowed idiom is the shared re-entry wording
+// "safe once dry" / "once it dries" (activity-indicators.js comment, AGENTS.md:
+// "the idiom is 'safe once dry' with the technician confirming timing"). The
+// idiom carries no figure, and "dry" is still a water word for model copy (the
+// banner owns re-entry), so model copy can only use it under a drought flag.
+const SAFE_ONCE_DRY_RE = /\bsafe\s+once\s+(?:it\s+(?:is\s+|has\s+)?)?(?:dry|dried)\b|\bsafe\s+once\s+it\s+dries\b/gi;
+const SAFETY_CLAIM_RE = new RegExp([
+  '\\b(?:safe|safer|safest|safely|unsafe)\\b',
+  '\\b(?:harmless|non-?\\s?toxic|toxic|poison\\w*|dangerous|hazardous|harmful|deadly)\\b',
+  '\\b(?:kid|child|children|pet|family|people|human|eco|environment(?:ally)?|bee|wildlife|planet|earth)[-\\s]?friendly\\b',
+  '\\bgentle\\s+(?:on|for|to)\\s+(?:pets?|kids?|children|people|family|bees|wildlife)\\b',
+  '\\b(?:no|zero|without|free\\s+of)\\s+(?:risk|harm|danger|hazard)s?\\b',
+  "\\b(?:(?:will|would|can|could)\\s+(?:not|never)|won'?t|wouldn'?t|does(?:n'?t|\\s+not)|do(?:n'?t|\\s+not)|can'?t|cannot)\\s+(?:ever\\s+)?(?:harm|hurt|injure|endanger|poison)\\b",
+  '\\bnot\\s+(?:harmful|dangerous|hazardous|toxic|poisonous)\\b',
+].join('|'), 'i');
+// natural / organic as a claim about the treatment ("a natural treatment",
+// "organic fertilizer"), not the agronomic sense ("organic matter in the thatch").
+const NATURAL_CLAIM_RE = /\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b(?:[^.!?]{0,40}\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b)|\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b[^.!?]{0,40}\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b/i;
+
+function checkSafetyClaim(text) {
+  const t = normalizeCopy(text).replace(SAFE_ONCE_DRY_RE, ' ');
+  const m = t.match(SAFETY_CLAIM_RE) || t.match(NATURAL_CLAIM_RE);
+  return m ? [{ rule: 'safety_claim', match: m[0] }] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +600,7 @@ function checkLawnModelCopy(text, facts = {}) {
     ...checkReentryPattern(text),
     ...checkBannedCopy(text),
     ...checkOverpromise(text),
+    ...checkSafetyClaim(text),
   ];
   return { ok: reasons.length === 0, reasons };
 }
@@ -550,6 +614,7 @@ module.exports = {
   checkReentryPattern,
   checkBannedCopy,
   checkOverpromise,
+  checkSafetyClaim,
   checkBannerCopy,
   extractNumericTokens,
   normalizeCopy,
