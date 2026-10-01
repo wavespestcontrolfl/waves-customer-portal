@@ -35,16 +35,16 @@ describe('GET /.well-known/security.txt', () => {
     expect(lines.filter((l) => l.startsWith('Expires: '))).toHaveLength(1);
   });
 
-  test('Expires is an ISO timestamp roughly one year ahead', async () => {
+  test('Expires is an ISO timestamp 180 days ahead, under the RFC 9116 one-year limit', async () => {
     const body = await (await fetch(`${base}/.well-known/security.txt`)).text();
     const expires = new Date(body.match(/^Expires: (.+)$/m)[1]);
     const days = (expires.getTime() - Date.now()) / 86400000;
-    expect(days).toBeGreaterThan(363);
-    expect(days).toBeLessThan(367);
+    expect(days).toBeGreaterThan(179);
+    expect(days).toBeLessThan(181);
   });
 
   test('securityTxt(now) is deterministic for a given clock', () => {
     const txt = wellKnown.securityTxt(new Date('2026-09-30T12:00:00.000Z'));
-    expect(txt).toContain('Expires: 2027-09-30T12:00:00.000Z');
+    expect(txt).toContain('Expires: 2027-03-29T12:00:00.000Z');
   });
 });

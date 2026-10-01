@@ -3427,8 +3427,8 @@ also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
 API/PDF responses must never be claimed by the app).
 `/.well-known/security.txt` (RFC 9116 vulnerability-disclosure contact — static
-plain text, no auth, no PII, not gated; `Expires` is computed per request one
-year ahead so it never goes stale; cached 1 day).
+plain text, no auth, no PII, not gated; `Expires` is computed per request 180
+days ahead so it never goes stale; cached 1 day).
 `/api/public/track/:token` (read-only live service tracker; the
 `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
 rate limit. In ANY state it returns the customer property block — first name,

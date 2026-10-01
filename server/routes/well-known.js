@@ -36,11 +36,13 @@ const router = express.Router();
 const SECURITY_CONTACT = 'mailto:contact@wavespestcontrol.com';
 const SECURITY_CANONICAL = 'https://portal.wavespestcontrol.com/.well-known/security.txt';
 
-// RFC 9116 requires an Expires field no more than a year out. Computed per
-// request (a year ahead of now) so the file can never go stale.
+// RFC 9116 requires an Expires field and recommends it stay under a year out.
+// Computed per request (180 days ahead of now, well inside that limit even
+// with the 1-day cache) so the file can never go stale.
+const SECURITY_TXT_TTL_DAYS = 180;
+
 function securityTxt(now = new Date()) {
-  const expires = new Date(now.getTime());
-  expires.setUTCFullYear(expires.getUTCFullYear() + 1);
+  const expires = new Date(now.getTime() + SECURITY_TXT_TTL_DAYS * 86400000);
   return [
     `Contact: ${SECURITY_CONTACT}`,
     `Expires: ${expires.toISOString()}`,
