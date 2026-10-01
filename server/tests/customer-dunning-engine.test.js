@@ -636,7 +636,8 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
       Schedule.markTold.mockClear();
       expect((await run()).outcome).toBe('told');
       expect(mockNotify).toHaveBeenCalledTimes(1);
-      expect(mockNotify.mock.calls[0][1]).toBe('Customer reminder half-delivered');
+      expect(mockNotify.mock.calls[0][1]).toBe('Billing — check contact details for Pat');
+      expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ area: 'Billing', severity: 'needs-you', doneWhen: 'contact_details_checked', who: 'person', subject: { type: 'customer', id: CUSTOMER_ID } });
       expect(mockNotify.mock.calls[0][3].dedupeKey).toBe(`customer-dunning-told:${SCHEDULE_ID}:1:d60_reminder`);
     });
   });
@@ -2178,10 +2179,14 @@ describe('the engine never applies account credit (owner ruling 2026-09-30)', ()
     expect(await run()).toMatchObject({ outcome: 'held', reason: 'account_credit_available' });
     expect(row).toMatchObject({ status: 'held', held_reason: 'account_credit_available' });
     expect(mockNotify).toHaveBeenCalledTimes(1);
-    expect(mockNotify).toHaveBeenCalledWith('alert', 'Apply customer account credit', expect.stringMatching(/unused account credit.*Apply the credit/), expect.objectContaining({
+    expect(mockNotify).toHaveBeenCalledWith('alert', 'Billing — apply account credit for Pat', 'Unused account credit is holding their overdue reminders until it is applied.', expect.objectContaining({
       // one alert per HOLD: the hold's start is part of the key
       dedupeKey: `customer-dunning-held:${SCHEDULE_ID}:1:account_credit_available:${NOW.getTime()}`,
-      metadata: { customer_id: CUSTOMER_ID },
+      link: `/admin/customers?customerId=${CUSTOMER_ID}`,
+      metadata: expect.objectContaining({
+        customer_id: CUSTOMER_ID, area: 'Billing', severity: 'needs-you', doneWhen: 'credit_applied', who: 'person',
+        subject: { type: 'customer', id: CUSTOMER_ID },
+      }),
     }));
     expect(row.hold_alerted_at).toEqual(NOW);
 
@@ -2896,5 +2901,77 @@ describe('R11-4: operator send-now stays on the stored stage', () => {
     setup({ stepIndex: 3, sentDaysAgo: 65 });
     await run();
     expect(Schedule.writeStage).toHaveBeenCalledWith(expect.anything(), 4, expect.anything());
+  });
+});
+
+describe('every admin alert the engine raises passes the real composeAdminAlert (docs/admin-notifications.md)', () => {
+  const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compose');
+  const actual = jest.requireActual('../services/customer-dunning/schedule');
+  const REASONS = ['member_paused', 'member_autopay_hold', 'account_credit_available', 'delivered_evidence_unreadable', 'over_cap',
+    'COLLECTIONS_POLICY', 'REMINDER_OUTCOME_UNCONFIRMED', 'progress_unreadable', 'NO_EMAIL_RECIPIENT'];
+  const PAUSES = ['no_reachable_channel', 'all_channels_terminal', 'customer_deleted', 'TEMPLATE_UNAVAILABLE'];
+
+  function harness(name) {
+    const row = { ...schedule, step_index: 4, status: 'active', held_since: null, hold_alerted_at: null };
+    const store = jest.fn(() => {
+      const q = { where() { return q; }, whereIn() { return q; }, update: async () => 1 };
+      return q;
+    });
+    store.fn = { now: () => 'now' };
+    const db = require('../models/db');
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'customers' ? { where() { return this; }, first: async () => name } : impl(table)));
+    return { row, store };
+  }
+
+  const NAMES = [
+    { first_name: 'Pat', last_name: 'Synthetic' },
+    { first_name: 'Maximilian-Alexander', last_name: 'Featherstonehaugh-Montgomery' }, // too long for the headline: first name or generic
+    { first_name: 'J. R.', last_name: 'Test' }, // a stop-and-capital in a name must not break the headline
+    null, // name unreadable: the generic headline
+  ];
+
+  test.each(NAMES.map((n) => [JSON.stringify(n), n]))('held / long-held / told / paused / past-final / missing-customer alerts compose for %s', async (_label, name) => {
+    const { row, store } = harness(name);
+    for (const reason of REASONS) {
+      mockNotify.mockClear();
+      await actual.markHeld({ ...row, status: 'held', held_reason: reason, held_since: ago(9) }, reason, { claimStamp: NOW, now: NOW, database: store });
+      expect(mockNotify).toHaveBeenCalledTimes(1); // office reasons at once, the rest after 7+ days
+      for (const call of mockNotify.mock.calls) {
+        const [category, headline, why, opts] = call;
+        expect(category).toBe('alert');
+        expect(() => composeAdminAlert({ area: 'Billing', action: headline.replace(/^Billing — /, ''), why, ...opts.metadata, link: opts.link })).not.toThrow();
+        expect(opts.metadata).toMatchObject({ area: 'Billing', severity: 'needs-you', who: 'person', subject: { type: 'customer', id: CUSTOMER_ID } });
+        expect(`${headline} ${why}`).not.toMatch(/@|\+\d{6}|[a-z]+_[a-z]+|[A-Z]+_[A-Z]+/);
+      }
+    }
+    for (const reason of PAUSES) {
+      for (const stepIndex of [2, 5]) {
+        mockNotify.mockClear();
+        await actual.markPaused({ ...row, step_index: stepIndex }, reason, { claimStamp: NOW, now: NOW, database: store });
+        expect(mockNotify).toHaveBeenCalledTimes(1);
+        const [, headline, why, opts] = mockNotify.mock.calls[0];
+        expect(headline.length).toBeLessThanOrEqual(60);
+        expect(opts.metadata.doneWhen).toBe(stepIndex === 5 ? 'final_notice_followed_up' : 'schedule_resumed');
+        expect(() => composeAdminAlert({ area: 'Billing', action: headline.replace(/^Billing — /, ''), why, ...opts.metadata, link: opts.link })).not.toThrow();
+      }
+    }
+    mockNotify.mockClear();
+    await actual.alertTold(row, { deliveredAt: ago(8), now: NOW });
+    await actual.alertStaff({ verb: 'follow up on an overdue invoice', generic: 'follow up on an overdue invoice', why: 'An invoice came off the reminder schedule already past its last step; it was paused, not completed.', doneWhen: 'invoice_followed_up', dedupeKey: 'x', customerId: CUSTOMER_ID });
+    await actual.alertStaff({ verb: 'review a stopped reminder schedule', generic: 'review a stopped reminder schedule', why: 'A reminder schedule pointed at a customer record that no longer exists, so it was closed.', doneWhen: 'schedule_reviewed', dedupeKey: 'y', customerId: null, subject: { type: 'check', id: 's1' } });
+    expect(mockNotify).toHaveBeenCalledTimes(3);
+    for (const [, headline, why, opts] of mockNotify.mock.calls) {
+      expect(() => composeAdminAlert({ area: 'Billing', action: headline.replace(/^Billing — /, ''), why, ...opts.metadata, link: opts.link })).not.toThrow();
+    }
+  });
+
+  test('the missing-customer alert is a check about the schedule, linked to the invoices page', async () => {
+    const { row, store } = harness(null);
+    expect(store).toBeDefined();
+    mockNotify.mockClear();
+    await actual.alertStaff({ verb: 'review a stopped reminder schedule', generic: 'review a stopped reminder schedule', why: 'A reminder schedule pointed at a customer record that no longer exists, so it was closed.', doneWhen: 'schedule_reviewed', dedupeKey: 'y', customerId: null, subject: { type: 'check', id: row.id } });
+    expect(mockNotify.mock.calls[0][1]).toBe('Billing — review a stopped reminder schedule');
+    expect(mockNotify.mock.calls[0][3]).toMatchObject({ link: '/admin/invoices', metadata: { subject: { type: 'check', id: row.id } } });
   });
 });

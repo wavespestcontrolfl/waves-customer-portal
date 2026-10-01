@@ -42,16 +42,57 @@ const HOUR_MS = 60 * 60 * 1000;
 const isFinalIndex = (index) => Number(index) >= FINAL_INDEX;
 
 // ── staff alerts (best effort; never throws) ─────────────────────────────
-async function alertStaff({ title, body, dedupeKey, customerId }) {
+// Raised through raiseAdminAlert (docs/admin-notifications.md). Every alert is needs-you: a person
+// acts (applies credit, resumes a schedule, contacts the customer); none is an engine failure Claude
+// could fix on its own (a delivery the engine cannot read is still a records decision for the office).
+
+// What a person reads for a reason code: the code itself (snake_case, upper-case) never reaches the copy.
+const REASON_TEXT = Object.freeze({
+  member_paused: 'an invoice on their balance is paused',
+  member_autopay_hold: 'an invoice on their balance is on autopay hold',
+  account_credit_available: 'unused account credit',
+  delivered_evidence_unreadable: 'a delivered notice cannot be read back',
+  over_cap: 'the reminder cap was reached',
+  no_reachable_channel: 'there is no way to reach them',
+  all_channels_terminal: 'every channel was refused',
+  customer_deleted: 'the customer was archived',
+});
+const reasonText = (reason) => REASON_TEXT[reason] || 'a delivery problem';
+
+async function customerName(customerId) {
+  if (!customerId) return null;
   try {
-    await require('../notification-service').notifyAdmin('alert', title, body, {
-      link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/invoices',
-      dedupeKey,
-      metadata: { customer_id: customerId || null },
+    const row = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
+    const first = String(row?.first_name || '').trim();
+    const last = String(row?.last_name || '').trim();
+    return first ? { full: `${first} ${last}`.trim(), first } : null;
+  } catch {
+    return null; // the alert still rings, with a generic headline
+  }
+}
+
+/**
+ * `verb` completes "<verb> for <Customer Name>" (the headline names the customer when it fits the 60
+ * characters the rule allows, then the first name, then falls back to `generic`).
+ */
+async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId, subject = null, metadata = {} }) {
+  try {
+    const { composeAdminAlert, raiseAdminAlert } = require('../admin-alert-compose');
+    const name = await customerName(customerId);
+    const subj = customerId ? { type: 'customer', id: String(customerId) } : subject;
+    const spec = (action) => ({
+      area: 'Billing', action, why, severity: 'needs-you', who: 'person', doneWhen, subject: subj,
+      link: customerId ? `/admin/customers?customerId=${encodeURIComponent(customerId)}` : '/admin/invoices',
     });
+    const candidates = name ? [`${verb} for ${name.full}`, `${verb} for ${name.first}`, generic] : [generic];
+    const action = candidates.find((candidate) => {
+      try { composeAdminAlert(spec(candidate)); return true; } catch { return false; }
+    }) || generic;
+    await raiseAdminAlert('alert', spec(action), { dedupeKey, metadata: { customer_id: customerId || null, ...metadata } });
     return true;
   } catch (err) {
     logger.warn(`[customer-dunning] staff alert failed (${dedupeKey}): ${redactContact(err.message)}`);
+    if (process.env.NODE_ENV === 'test' && err.code === 'ADMIN_ALERT_RULE') throw err; // the emitter's own tests catch a copy violation
     return false;
   }
 }
@@ -349,10 +390,13 @@ const terminalStatusFor = (reason) => (RELEASED_REASONS.has(reason) ? 'released'
 async function alertPastFinal(schedule, landed) {
   for (const l of landed.filter((x) => x.pausedPastFinal)) {
     await alertStaff({
-      title: 'Overdue invoice past its last reminder',
-      body: `Invoice ${l.invoiceId} came off a customer reminder schedule already past its final reminder step. It was paused, not completed; the office should follow up by hand.`,
+      verb: 'follow up on an overdue invoice',
+      generic: 'follow up on an overdue invoice',
+      why: 'An invoice came off the reminder schedule already past its last step; it was paused, not completed.',
+      doneWhen: 'invoice_followed_up',
       dedupeKey: `customer-dunning-past-final:${schedule.id}:${l.invoiceId}`,
       customerId: schedule.customer_id,
+      metadata: { invoice_id: l.invoiceId },
     });
   }
 }
@@ -533,10 +577,13 @@ async function alertTold(schedule, { deliveredAt, now = new Date() }) {
   if (!deliveredAt || now.getTime() - new Date(deliveredAt).getTime() < HELD_ALERT_DAYS * 24 * HOUR_MS) return false;
   const stepId = STEPS[schedule.step_index]?.id || `step${schedule.step_index}`;
   return alertStaff({
-    title: 'Customer reminder half-delivered',
-    body: `A customer's overdue reminder (${stepId}) reached them on one channel ${HELD_ALERT_DAYS}+ days ago but another channel keeps failing and retrying daily. The office should check the customer's contact details.`,
+    verb: 'check contact details',
+    generic: 'check a customer\'s contact details',
+    why: `A reminder reached them one way ${HELD_ALERT_DAYS}+ days ago; the other way keeps failing and retrying daily.`,
+    doneWhen: 'contact_details_checked',
     dedupeKey: `customer-dunning-told:${schedule.id}:${schedule.episode}:${stepId}`,
     customerId: schedule.customer_id,
+    metadata: { step_id: stepId },
   });
 }
 
@@ -550,9 +597,24 @@ async function markTold(schedule, { claimStamp, deliveredAt, now = new Date(), d
 }
 
 // The engine never applies account credit (owner ruling 2026-09-30): the office does.
-const officeHoldBody = (reason, stepId) => (reason === 'account_credit_available'
-  ? `The customer has unused account credit, so their overdue reminders are held until it is applied. Apply the credit to their open invoices; the reminders then resume on their own. Step ${stepId}.`
-  : `The customer's overdue reminders are held (${reason}); the office should resume or release the schedule. Step ${stepId}.`);
+function heldAlertCopy(reason, office) {
+  if (reason === 'account_credit_available') {
+    return {
+      verb: 'apply account credit', generic: 'apply a customer\'s account credit',
+      why: 'Unused account credit is holding their overdue reminders until it is applied.',
+    };
+  }
+  if (office) {
+    return {
+      verb: 'review held reminders', generic: 'review a customer\'s held reminders',
+      why: `Their overdue reminders are held: ${reasonText(reason)}.`,
+    };
+  }
+  return {
+    verb: 'check stuck reminders', generic: 'check a customer\'s stuck reminders',
+    why: `Their overdue reminder has been held ${HELD_ALERT_DAYS}+ days (${reasonText(reason)}) and keeps retrying daily.`,
+  };
+}
 
 async function alertHeld(schedule, reason, now, database) {
   const stepId = STEPS[schedule.step_index]?.id || `step${schedule.step_index}`;
@@ -563,12 +625,11 @@ async function alertHeld(schedule, reason, now, database) {
   // held_since is part of the key: one alert per HOLD, so a hold that comes
   // back after a release or resume rings again (notifyAdmin dedupes a key for good).
   const sent = await alertStaff({
-    title: office ? (reason === 'account_credit_available' ? 'Apply customer account credit' : 'Customer reminders on hold') : 'Customer reminder stuck',
-    body: office
-      ? officeHoldBody(reason, stepId)
-      : `A customer's overdue reminder (${stepId}) has been held ${HELD_ALERT_DAYS}+ days (${reason}) and keeps retrying daily.`,
+    ...heldAlertCopy(reason, office),
+    doneWhen: reason === 'account_credit_available' ? 'credit_applied' : 'hold_released',
     dedupeKey: `customer-dunning-held:${schedule.id}:${schedule.episode}:${office ? reason : stepId}:${since.getTime()}`,
     customerId: schedule.customer_id,
+    metadata: { step_id: stepId, reason: String(reason).slice(0, 80) },
   });
   if (sent) {
     // Stamp ONLY this held episode. notifyAdmin ran between markHeld and here; if staff resumed or released
@@ -612,12 +673,18 @@ async function markPaused(schedule, reason, { claimStamp, now = new Date(), data
     });
   if (Number(changed) !== 1) return false;
   const stepId = STEPS[schedule.step_index]?.id || `step${schedule.step_index}`;
+  const final = isFinalIndex(schedule.step_index);
   await alertStaff({
-    title: isFinalIndex(schedule.step_index) ? 'Final notice not delivered' : 'Customer reminders paused',
-    body: `${isFinalIndex(schedule.step_index) ? 'The final notice was not delivered. ' : ''}The customer's overdue reminders (${stepId}) were paused: ${reason}. The office should contact the customer or resume the schedule.`,
+    verb: final ? 'follow up on the final notice' : 'resume paused reminders',
+    generic: final ? 'follow up on an undelivered final notice' : 'resume a customer\'s paused reminders',
+    why: final
+      ? `Their final overdue notice was not delivered: ${reasonText(reason)}.`
+      : `Their overdue reminders were paused: ${reasonText(reason)}.`,
+    doneWhen: final ? 'final_notice_followed_up' : 'schedule_resumed',
     // one alert per pause EVENT (a resumed schedule that pauses again rings again)
     dedupeKey: `customer-dunning-paused:${schedule.id}:${schedule.episode}:${stepId}:${reason}:${now.getTime()}`,
     customerId: schedule.customer_id,
+    metadata: { step_id: stepId, reason: String(reason).slice(0, 80) },
   });
   return true;
 }

@@ -74,7 +74,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     await admin.schema.createSchema(schema);
     app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 6 } });
     mockDatabase = app;
-    await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); t.timestamp('deleted_at'); });
+    await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); t.timestamp('deleted_at'); t.text('first_name'); t.text('last_name'); });
     await app.schema.createTable('notification_prefs', (t) => { t.uuid('customer_id'); });
     await app.schema.createTable('invoices', (t) => {
       t.uuid('id').primary();
@@ -122,7 +122,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
   // ── fixtures ───────────────────────────────────────────────────────────
   async function customer() {
     const id = randomUUID();
-    await app('customers').insert({ id });
+    await app('customers').insert({ id, first_name: 'Pat', last_name: 'Synthetic' });
     return id;
   }
   // sentDaysAgo anchors the cadence (sequenceAnchor = invoice sent_at).
@@ -496,7 +496,9 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       });
       const row = await seqRow(stale.seq.id);
       expect(row).toMatchObject({ status: 'paused', paused_reason: 'released_past_final_step' });
-      expect(mockNotify).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining(stale.invoiceId), expect.objectContaining({ dedupeKey: expect.stringContaining('past-final') }));
+      expect(mockNotify).toHaveBeenCalledWith('alert', 'Billing — follow up on an overdue invoice for Pat Synthetic', expect.stringContaining('past its last step'), expect.objectContaining({
+        dedupeKey: expect.stringContaining('past-final'), metadata: expect.objectContaining({ invoice_id: stale.invoiceId, doneWhen: 'invoice_followed_up' }),
+      }));
     });
 
     test('completeFinal is guarded on our claim (a lost race completes nothing)', async () => {
@@ -598,7 +600,8 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       const { s, claim } = await claimed();
       await Schedule.markHeld(claim.schedule, 'account_credit_available', { claimStamp: claim.claimStamp, now: NOW, database: app });
       expect(mockNotify).toHaveBeenCalledTimes(1);
-      expect(mockNotify.mock.calls[0][1]).toBe('Apply customer account credit');
+      expect(mockNotify.mock.calls[0][1]).toBe('Billing — apply account credit for Pat Synthetic');
+      expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ doneWhen: 'credit_applied', subject: { type: 'customer' } });
       expect((await fresh(s.id)).hold_alerted_at).not.toBeNull();
       await Schedule.releaseClaim(claim, { database: app });
       const again = await Schedule.claim(s.id, new Date(NOW.getTime() + DAY), { database: app });
@@ -610,7 +613,8 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       const { s, claim } = await claimed({ step_index: 5 });
       await Schedule.markPaused(claim.schedule, 'no_reachable_channel', { claimStamp: claim.claimStamp, now: NOW, database: app });
       expect(await fresh(s.id)).toMatchObject({ status: 'paused', paused_reason: 'no_reachable_channel', next_touch_at: null });
-      expect(mockNotify.mock.calls[0][1]).toBe('Final notice not delivered');
+      expect(mockNotify.mock.calls[0][1]).toBe('Billing — follow up on the final notice for Pat Synthetic');
+      expect(mockNotify.mock.calls[0][2]).toBe('Their final overdue notice was not delivered: there is no way to reach them.');
     });
 
     test('told: last_touch_at stamped, floor retime, step unchanged, held state cleared', async () => {
@@ -984,7 +988,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       const third = await claimAt(s.id, new Date(NOW.getTime() + DAY));
       await Schedule.markHeld(third.schedule, 'account_credit_available', { claimStamp: third.claimStamp, now: new Date(NOW.getTime() + DAY), database: app });
       expect(mockNotify).toHaveBeenCalledTimes(2);
-      expect(mockNotify.mock.calls[1][1]).toBe('Apply customer account credit');
+      expect(mockNotify.mock.calls[1][1]).toBe('Billing — apply account credit for Pat Synthetic');
       const row = await fresh(s.id);
       expect(row.held_reason).toBe('account_credit_available');
       expect(new Date(row.held_since).getTime()).toBe(NOW.getTime() + DAY);

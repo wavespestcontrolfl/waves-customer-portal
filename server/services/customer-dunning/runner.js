@@ -372,10 +372,13 @@ async function applyDecision(run, d) {
       if (closed && closed.closed === false) return outcome('stale');
       if (d.alertMissingCustomer) {
         await Schedule.alertStaff({
-          title: 'Customer reminders stopped',
-          body: 'A customer reminder schedule points at a customer record that no longer exists; it was closed.',
+          verb: 'review a stopped reminder schedule',
+          generic: 'review a stopped reminder schedule',
+          why: 'A reminder schedule pointed at a customer record that no longer exists, so it was closed.',
+          doneWhen: 'schedule_reviewed',
           dedupeKey: `customer-dunning-customer-missing:${run.schedule.id}`,
           customerId: null,
+          subject: { type: 'check', id: String(run.schedule.id) },
         });
       }
       return outcome('closed', { reason: d.reason });
