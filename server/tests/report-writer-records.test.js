@@ -91,7 +91,7 @@ describe('next visit on the same line', () => {
     await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
       .resolves.toEqual({ state: 'scheduled', serviceType: 'Quarterly Pest Control' });
     expect(knex.calls).toEqual(expect.arrayContaining([
-      ['where', 'scheduled_date', '>', '2026-09-30'],
+      ['where', 'scheduled_date', '>=', '2026-09-30'],
       ['whereIn', 'status', ['pending', 'confirmed', 'en_route', 'on_site']],
       ['whereNot', { id: 's1' }],
     ]));
@@ -138,5 +138,47 @@ describe('writer records', () => {
     });
     expect(sections.join('\n')).not.toContain('NEXT VISIT');
     expect(sections.join('\n')).toContain('REACH-OUT DATE: Wednesday, October 14');
+  });
+});
+
+describe('next visit on a rodent report (shared catalog rule)', () => {
+  const ORIGINAL = process.env.GATE_RODENT_REPORT_REFRESH;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.GATE_RODENT_REPORT_REFRESH;
+    else process.env.GATE_RODENT_REPORT_REFRESH = ORIGINAL;
+  });
+
+  // scheduled_services and the services catalog answer from their own rows.
+  function knexByTable(tables) {
+    return (table) => {
+      const rows = tables[table] || [];
+      const builder = new Proxy({}, {
+        get(_, prop) {
+          if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+          return (...args) => { if (prop === 'modify') args[0](builder); return builder; };
+        },
+      });
+      return builder;
+    };
+  }
+
+  test('an exclusion visit linked to a rodent catalog service counts, as on the report', async () => {
+    process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+    const knex = knexByTable({
+      scheduled_services: [{ service_type: 'Exclusion Service', service_id: 'svc-excl' }],
+      services: [{ id: 'svc-excl', name: 'Rodent Exclusion', category: 'rodent' }],
+    });
+    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', serviceYmd: '2026-09-30', line: 'rodent' }))
+      .resolves.toEqual({ state: 'scheduled', serviceType: 'Exclusion Service' });
+  });
+
+  test('without the refresh gate the strict line match stands', async () => {
+    delete process.env.GATE_RODENT_REPORT_REFRESH;
+    const knex = knexByTable({
+      scheduled_services: [{ service_type: 'Exclusion Service', service_id: 'svc-excl' }],
+      services: [{ id: 'svc-excl', name: 'Rodent Exclusion', category: 'rodent' }],
+    });
+    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', serviceYmd: '2026-09-30', line: 'rodent' }))
+      .resolves.toEqual({ state: 'none' });
   });
 });

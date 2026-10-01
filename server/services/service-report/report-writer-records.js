@@ -9,7 +9,7 @@
 const logger = require('../logger');
 const { buildWhatToExpect, toExpectationProduct, whatToExpectClasses } = require('./pest-report-expectations');
 const { findReportProductCopyEntry } = require('../../config/report-product-copy');
-const { detectServiceLine } = require('./service-line-configs');
+const { rodentReportRefreshFor, loadRodentCatalogIndex, isSameLineVisit } = require('./same-line-visit');
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
 
@@ -111,9 +111,10 @@ function howItWorksLines(applications) {
   });
 }
 
-// The first booked visit after this one on the same service line. Fails
-// soft to 'unknown', which the writer is never told about: a lookup error
-// must not read as "nothing is booked".
+// The first booked visit after this one on the same service line, by the
+// report's own rule (same-line-visit.js: the rodent program matches by
+// catalog category). Fails soft to 'unknown', which the writer is never
+// told about: a lookup error must not read as "nothing is booked".
 async function loadNextSameLineVisit({ knex, customerId, scheduledServiceId = null, serviceYmd, line }) {
   if (!knex || !customerId || !line || !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceYmd || ''))) {
     return { state: 'unknown' };
@@ -121,13 +122,20 @@ async function loadNextSameLineVisit({ knex, customerId, scheduledServiceId = nu
   try {
     const rows = await knex('scheduled_services')
       .where({ customer_id: customerId })
-      .where('scheduled_date', '>', serviceYmd)
+      .where('scheduled_date', '>=', serviceYmd)
       .whereIn('status', NEXT_VISIT_STATUSES)
       .modify((query) => { if (scheduledServiceId) query.whereNot({ id: scheduledServiceId }); })
       .orderBy('scheduled_date', 'asc')
-      .limit(50)
-      .select('service_type');
-    const match = (Array.isArray(rows) ? rows : []).find((row) => detectServiceLine(row?.service_type) === line);
+      .orderBy('window_start', 'asc')
+      .limit(200)
+      .select('service_type', 'service_id');
+    const rodentReportRefresh = rodentReportRefreshFor(line);
+    const catalog = rodentReportRefresh
+      ? await loadRodentCatalogIndex(knex)
+      : { serviceCategoryById: null, rodentCatalogNames: null };
+    const match = (Array.isArray(rows) ? rows : []).find((row) => isSameLineVisit(row, {
+      serviceLine: line, rodentReportRefresh, ...catalog,
+    }));
     return match ? { state: 'scheduled', serviceType: cleanText(match.service_type) } : { state: 'none' };
   } catch (err) {
     logger.warn(`[report-writer-records] next-visit lookup failed: ${err.message}`);
