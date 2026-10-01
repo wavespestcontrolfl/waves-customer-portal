@@ -484,6 +484,48 @@ async function notifyRequestClosed({ lead, customerName, service, day, visitId }
 }
 
 /**
+ * The close FYI is best-effort and written AFTER the status commit, so a failure
+ * (or a crash) there would lose it for good: a replay finds the lead already
+ * handled and the audit row already written. Every closer therefore re-sends it
+ * for every request THIS booking closed, found from the persisted close audit
+ * rows (the lookup the funnel cleanup uses). The send is deduped by its
+ * persistent key (preferred-time-auto-close:<lead>:<visit>, an advisory-locked
+ * lookup on notifications.metadata->>'dedupeKey'), so a retry never rings twice.
+ * `skipIds`: the leads this very call just closed and already notified.
+ * Best-effort; never throws into the booking.
+ */
+async function resendCloseNotices(db, { booking, skipIds = [] }) {
+  try {
+    const audits = (await db('lead_activities as a')
+      .join('leads as l', 'l.id', 'a.lead_id')
+      .where('a.activity_type', 'status_change')
+      .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
+      .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
+      .where('l.status', CLOSED_STATUS)
+      .select('a.lead_id', 'a.metadata', 'l.first_name', 'l.last_name')) || [];
+    const skip = new Set(skipIds.map(String));
+    for (const row of audits) {
+      if (skip.has(String(row.lead_id))) continue;
+      let meta = row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      const visitId = meta && meta.visit_id;
+      if (!visitId) continue;
+      const visit = await db('scheduled_services').where({ id: visitId }).first('service_type', 'scheduled_date');
+      if (!visit) continue;
+      const service = clean(visit.service_type, 120) || 'a service';
+      const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
+      await notifyRequestClosed({
+        lead: { id: row.lead_id },
+        customerName: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        service, day, visitId,
+      });
+    }
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] close notice retry failed for booking=${booking.id}: ${err.message}`);
+  }
+}
+
+/**
  * A customer who books on /book after asking for a preferred time no longer
  * needs the office to chase that request, so it closes itself (owner ruling
  * 2026-10-01, superseding the 2026-09-30 note-only rule): each open
@@ -530,6 +572,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
     const service = clean(visit.service_type, 120) || 'a service';
     const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
     let closed = 0;
+    const closedNow = [];
     for (const lead of open) {
       // Per-(lead, visit) advisory lock: the booking's own post-commit path and
       // the submit's reconcile can both arrive for the same visit.
@@ -582,8 +625,12 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
       });
       if (!result) continue;
       closed += 1;
+      closedNow.push(lead.id);
       await notifyRequestClosed({ lead, customerName: result.name, service, day, visitId: visit.id });
     }
+    // Requests THIS booking closed on an earlier run (or whose FYI failed): the
+    // deduped FYI is retried here, so the normal, replay and reconcile closers all heal it.
+    await resendCloseNotices(db, { booking, skipIds: closedNow });
     return { live: true, closed };
   } catch (err) {
     logger.warn(`[booking:preferred-time] booking close failed for customer=${customerId}: ${err.message}`);

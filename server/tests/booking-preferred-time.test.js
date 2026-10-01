@@ -24,6 +24,7 @@ const mockRaws = [];            // whereRaw calls (query-shape asserts)
 let mockOpenLeadsNewerOnly = false; // every open preferred lead was requested AFTER the booking (the <= cutoff excludes them)
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
+let mockAuditRows = [];         // persisted close audit rows a retry finds for this booking (join lead_activities x leads)
 let mockStatusRead = null;      // overrides the submitted request's own status read (null = derived from this run's writes)
 let mockLockedLead = null;     // what the note transaction's leads ... FOR UPDATE re-read returns
 
@@ -44,11 +45,13 @@ function builder(table) {
     whereRaw: (sql, vals) => { mockRaws.push({ table, op: 'whereRaw', arg: sql, vals }); if (/<= \?/.test(String(sql))) b._requestedBy = vals && vals[0]; return b; },
     orWhereRaw: () => b,
     leftJoin: () => b,
+    join: () => b,
     orderBy: () => b,
     limit: () => b,
     select: () => b,
     then: (resolve, reject) => Promise.resolve(
       table === 'leads' ? (b._requestedBy && mockOpenLeadsNewerOnly ? [] : mockOpenLeads)
+        : table === 'lead_activities as a' ? mockAuditRows
         : table === 'self_booked_appointments as sba' ? (mockBookedList || (mockBookedSince ? [mockBookedSince] : []))
           : [],
     ).then(resolve, reject),
@@ -196,6 +199,7 @@ beforeEach(() => {
   mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null, first_name: 'Pat', last_name: 'Sample', email: null, requested_in_time: true };
   mockLeadUpdateRows = 1;
   mockStatusRead = null;
+  mockAuditRows = [];
   mockRetireError = null;
   mockBookedSince = null;
   mockOpenLeadsNewerOnly = false;
@@ -888,6 +892,21 @@ describe('a completed booking closes the customer\'s open preferred-time request
     mockOps.length = 0;
     await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
     expect(JSON.parse(activities()[0].arg.metadata)).not.toHaveProperty('converted_lead_ids');
+  });
+
+  test('the close FYI is retried from the persisted audit rows (codex #5477 r4 P2): a request closed on an earlier run, with nothing open now, still gets its deduped FYI', async () => {
+    mockOpenLeads = [];
+    mockAuditRows = [{ lead_id: 'lead-1', metadata: { visit_id: 'visit-7', booking_id: 'sba-1' }, first_name: 'Pat', last_name: 'Sample' }];
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 0 });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ dedupeKey: 'preferred-time-auto-close:lead-1:visit-7', link: '/admin/leads?lead=lead-1' });
+    expect(mockNotifyAdmin.mock.calls[0][2]).toBe('Pat Sample booked Lawn Care for Thu, Oct 8; the time request closed on its own.');
+  });
+
+  test('a request this very call closed is notified once, not again by the retry', async () => {
+    mockAuditRows = [{ lead_id: 'lead-1', metadata: { visit_id: 'visit-7' }, first_name: 'Pat', last_name: 'Sample' }];
+    await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('the ONLY notification is one admin FYI (Leads area, 60/110 limits, link to the lead, already_done), deduped per (lead, visit)', async () => {

@@ -543,6 +543,51 @@ jest.setTimeout(60000);
       });
     });
 
+    describe('the close FYI is retryable from the persisted audit rows (codex #5477 r4 P2)', () => {
+      // The admin alert helper dedupes on a persistent key; emulate that here (one delivered row per key).
+      let delivered;
+      let failNext;
+      beforeEach(() => {
+        delivered = new Set();
+        failNext = false;
+        mockNotifyAdmin.mockImplementation(async (_c, _t, _w, opts) => {
+          if (delivered.has(opts.dedupeKey)) return { deduped: true };
+          if (failNext) { failNext = false; throw new Error('bell down'); }
+          delivered.add(opts.dedupeKey);
+          return { id: 'n' };
+        });
+      });
+      afterEach(() => { mockNotifyAdmin.mockImplementation(async () => ({ id: 'n-1' })); });
+
+      test('the FYI fails after the status commit, then the replay finds the lead already handled and still delivers it: exactly one FYI', async () => {
+        const { cust, booking } = await setupRequestAndBooking();
+        failNext = true;
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(1);
+        expect(delivered.size).toBe(0);
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(0); // replay: nothing left to close
+        expect(delivered.size).toBe(1);
+        const keys = new Set(mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey));
+        expect(keys.size).toBe(1);
+      });
+
+      test('a normal double run (and a reconcile) never rings twice', async () => {
+        const { cust, booking } = await setupRequestAndBooking();
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        await reconcileBookingSince(database, { phone: '9415550100', since: new Date(Date.now() - 60000) });
+        expect(delivered.size).toBe(1);
+      });
+
+      test('a request staff reopened is not announced again by a retry', async () => {
+        const { cust, req, booking } = await setupRequestAndBooking();
+        failNext = true;
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        await database('leads').where({ id: req.leadId }).update({ status: 'new' });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        expect(delivered.size).toBe(0);
+      });
+    });
+
     test('the close itself never touches the request\'s funnel row (the reconcile path, which has no attributeSelfBooking, leaves it)', async () => {
       const cust = randomUUID();
       await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
@@ -564,7 +609,8 @@ jest.setTimeout(60000);
     await database('scheduled_services').insert({ self_booking_id: sba[0].id });
     const runs = await Promise.all([1, 2, 3].map(() => closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })));
     expect(runs.reduce((n, r) => n + r.closed, 0)).toBe(1);
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // one FYI identity: retries re-send the SAME deduped key (the alert helper dedupes it persistently), never a second one
+    expect(new Set(mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).size).toBe(1);
     expect(await database('leads').where({ id: first.leadId }).first()).toMatchObject({ status: 'handled', converted_at: null });
     expect(await closeRows()).toHaveLength(1);
     expect((await closeRows())[0].lead_id).toBe(first.leadId);
