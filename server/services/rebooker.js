@@ -763,6 +763,12 @@ function partnerExceptionPatch(partner, dateStr, initiatedBy) {
   return dateExceptionStamp(partner, initiatedBy);
 }
 
+// Whether the planner shifted a carried partner's window to a new slot.
+function partnerWindowChanges(partner, target) {
+  if (!target || !target.shifted) return false;
+  return hhmm(target.start) !== hhmm(partner.window_start) || hhmm(target.end) !== hhmm(partner.window_end);
+}
+
 // The write a carried partner gets, or null when it already sits where the
 // stop lands. `target` is planMemberTargets' row for it (window shifted by the
 // anchor's start delta, else kept); `techOverride` is undefined unless the
@@ -772,9 +778,7 @@ function planPartnerUpdate({ partner, target, date, dateStr, techOverride, initi
   const partnerDateChanges = dateOnly(partner.scheduled_date) !== dateStr;
   const techChanges = techOverride !== undefined && (techOverride || null) !== (partner.technician_id || null);
   const shifted = !!target && target.shifted;
-  const windowChanges = shifted
-    && (hhmm(target.start) !== hhmm(partner.window_start) || hhmm(target.end) !== hhmm(partner.window_end));
-  if (!partnerDateChanges && !windowChanges && !techChanges) return null;
+  if (!partnerDateChanges && !partnerWindowChanges(partner, target) && !techChanges) return null;
   const liveStatus = LIVE_OVERRIDE_STATUSES.has(partner.status);
   const partnerRewound = liveStatus || (partnerDateChanges && needsLifecycleRewind(partner));
   const pUpdate = {

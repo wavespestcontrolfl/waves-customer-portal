@@ -1625,8 +1625,8 @@ describe('caller wiring (source)', () => {
     // gate it refuses a sweep that would carry any grouped stop, up front.
     const sched = read('../routes/admin-schedule.js');
     const planner = sched.slice(sched.indexOf('async function planCollectiveEditDateMove'), sched.indexOf("router.put('/:id/update-details'"));
-    expect(planner).toContain("if (require('../config/feature-gates').seriesMoveCarriesVisitLive()) {");
-    expect(planner.indexOf('seriesMoveCarriesVisitLive()')).toBeGreaterThan(planner.indexOf('ackedIds = preview.occurrenceIds.map(String);'));
+    expect(planner.indexOf('await refuseCarriedStopInEditMove(ackedIds);')).toBeGreaterThan(planner.indexOf('ackedIds = preview.occurrenceIds.map(String);'));
+    expect(sched).toContain("if (!require('../config/feature-gates').seriesMoveCarriesVisitLive()) return;");
     // Partners are not follow-ups (synced notify-off, never closed).
     expect(read('../services/rebooker.js')).not.toMatch(/\.\.\.carriedMembers\.map\(/);
   });
