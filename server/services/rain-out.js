@@ -2230,6 +2230,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   const coveredIds = new Set();
   const partialStragglers = new Set();
   const coveredVisitOf = new Map();
+  // Carried partners' own landed slots (a series carry lands each partner
+  // with its occurrence, not on target.date): reported in their covered
+  // result so the sheet and boards show where they actually went.
+  const coveredSlotOf = new Map();
+  const coveredResult = (id, visitId) => {
+    const slot = coveredSlotOf.get(String(id));
+    return {
+      id, ok: true, coveredByVisit: visitId, newDate: slot ? slot.date : target.date,
+      ...(slot && slot.window.start ? { newWindow: slot.window } : {}),
+      smsSent: false, smsReason: 'covered_by_visit',
+    };
+  };
   const coverMoved = (r, job) => {
     const vid = String((r && r.visitMove && r.visitMove.visitId) || (job && job.visit_id) || '') || null;
     for (const id of coveredIdsFrom(r)) { coveredIds.add(id); if (vid) coveredVisitOf.set(id, vid); }
@@ -2239,6 +2251,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     for (const k of (r && Array.isArray(r.carriedVisitMembers) ? r.carriedVisitMembers : [])) {
       coveredIds.add(String(k.id));
       if (k.visitId) coveredVisitOf.set(String(k.id), String(k.visitId));
+      coveredSlotOf.set(String(k.id), { date: String(k.date instanceof Date ? k.date.toISOString() : k.date).split('T')[0], window: { start: k.windowStart || null, end: k.windowEnd || null } });
     }
   };
   for (const job of orderedJobs) {
@@ -2247,7 +2260,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // anchor's needsAttention names it for staff repair (codex r27 P1).
     if (partialStragglers.has(String(job.id))) continue;
     if (coveredIds.has(String(job.id))) {
-      results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
+      results.push(coveredResult(job.id, String(job.visit_id)));
       continue;
     }
     let newWindow;
@@ -2645,7 +2658,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   const recorded = new Set(results.map((r) => String(r.id)));
   for (const id of coveredIds) {
     if (recorded.has(id)) continue;
-    results.push({ id, ok: true, coveredByVisit: coveredVisitOf.get(id) || 'visit', newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
+    results.push(coveredResult(id, coveredVisitOf.get(id) || 'visit'));
   }
 
   // Handed to the caller's own qualityDates set so ONE flush after its

@@ -301,6 +301,17 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
   });
 
+  test('a partner that is its own plan\'s root row is refused (its plan dates derive from it)', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    // Make the first pest occurrence the pest plan's live root.
+    await db('scheduled_services').where({ id: f.pest[0].id }).update({ recurring_parent_id: null });
+    const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
+    await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', memberId: f.pest[0].id });
+    const after = await rowsOf([...before.keys()]);
+    for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

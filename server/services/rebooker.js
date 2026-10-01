@@ -821,6 +821,13 @@ function assertPartnersCanRide({ sweptInVisit, partners, allowLive, vg }) {
     throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
   }
   const occ = sweptInVisit[0];
+  // A partner that is its own plan's ROOT row: the seeder derives that plan's
+  // future dates from the root's scheduled_date, so a carried one-off date
+  // would shift the whole partner plan at the next top-up. Refused.
+  const root = partners.find((partner) => partner.is_recurring === true && !partner.recurring_parent_id);
+  if (root) {
+    throw Object.assign(new Error('Cannot move this stop with the plan: a grouped service is the first visit of its own plan — move that stop from the schedule, or separate the services first'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', memberId: root.id, isOperational: true });
+  }
   const notMovable = partners.find((partner) => !vg.UNIT_MOVE_STATUSES.has(String(partner.status))
     && !(allowLive && vg.UNIT_MOVE_LIVE_STATUSES.has(String(partner.status))));
   if (notMovable) {

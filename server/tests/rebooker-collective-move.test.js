@@ -1623,6 +1623,12 @@ describe('caller wiring (source)', () => {
     // passed today", like the anchor's, before its write.
     const fence = reb.slice(reb.indexOf('const fencePartner = async'), reb.indexOf('const recordCarriedPartner = async'));
     expect(fence).toContain('sameDayWindowElapsed(dateStr, pUpdate.window_end || pUpdate.window_start)');
+    // The tech rain-out route skips reminder re-sync for covered (carried)
+    // members, like admin-dispatch's: their mover synced their own slot.
+    const track = read('../routes/tech-track.js');
+    const loop = track.slice(track.indexOf('for (const moved of result.results || []) {'));
+    expect(loop.indexOf('if (moved.coveredByVisit) continue;')).toBeGreaterThan(-1);
+    expect(loop.indexOf('if (moved.coveredByVisit) continue;')).toBeLessThan(loop.indexOf('AppointmentReminders.handleReschedule('));
     // Staff allowlist: automatic/customer initiators never carry.
     expect(reb).toContain("const SERIES_CARRY_STAFF_INITIATORS = new Set(['admin', 'tech']);");
     // The edit modal commits field edits before the series move: under the

@@ -711,6 +711,11 @@ router.post('/:id/rain-out', async (req, res, next) => {
     const AppointmentReminders = require('../services/appointment-reminders');
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
+      // A member carried with its visit (coveredByVisit) had its reminder
+      // synced by the mover with its OWN landed slot; re-syncing here would
+      // fall back to 08:00 on the anchor's day (same skip as admin-dispatch's
+      // rain-out route).
+      if (moved.coveredByVisit) continue;
       try {
         const startHHMM = (moved.newWindow && moved.newWindow.start) || '08:00';
         await AppointmentReminders.handleReschedule(

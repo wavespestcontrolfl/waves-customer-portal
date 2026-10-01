@@ -1055,7 +1055,11 @@ describe('rain-out service', () => {
       expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
       expect(result.results).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: 'pest-1', ok: true, coveredByVisit: 'v1', smsReason: 'covered_by_visit' }),
+        expect.objectContaining({
+          id: 'pest-1', ok: true, coveredByVisit: 'v1', smsReason: 'covered_by_visit',
+          // Its own landed slot, not the anchor's day with no window.
+          newDate: '2026-06-12', newWindow: { start: '13:00', end: '14:00' },
+        }),
       ]));
     });
 
