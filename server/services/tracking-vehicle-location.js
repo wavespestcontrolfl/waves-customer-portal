@@ -26,8 +26,8 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
 // is accepted only if it was reported AND received by the server STRICTLY AFTER the mapping's last change
 // (technicians.bouncie_imei_changed_at; NULL = never remapped = no cutoff). A caller-passed
 // `cachedNotBefore` is honored only as an EXTRA floor (it can tighten, never loosen).
-async function readMappingAndCache(techId) {
-  return db('technicians as t')
+async function readMappingAndCache(techId, dbh = db) {
+  return dbh('technicians as t')
     .leftJoin('tech_status as ts', 'ts.tech_id', 't.id')
     .where('t.id', techId)
     .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at', 'ts.location_received_at');
@@ -70,6 +70,8 @@ async function resolveBouncieFallback({
   bouncieService,
   timeoutMs,
   logPrefix,
+  dbh = db,
+  cachedNotBefore = null,
 }) {
   try {
     const svc = bouncieService || require('./bouncie');
@@ -102,6 +104,7 @@ async function resolveBouncieFallback({
         speed_mph: loc.speed ?? loc.speed_mph,
         reported_at: lastReportedAt,
         requireBouncieImei: imei,
+        ...(dbh !== db ? { dbh } : {}),
       }), timeoutMs, UNVERIFIED);
     } catch (err) {
       logger.warn(`[${logPrefix}] tech_status fallback write failed: ${err.message}`);
@@ -114,6 +117,15 @@ async function resolveBouncieFallback({
     if (!written) {
       logger.info(`[${logPrefix}] tech ${techId} was remapped while its old device was being read; discarding the fetched location`);
       return null;
+    }
+
+    // Codex #5334 P2: pingTechLocation's compare-and-write keeps a NEWER cached fix (a webhook ping that landed after our
+    // cache read) and still RETURNS that row, so a returned row is not proof OUR point is the committed one. When the
+    // committed fix is newer than the fetched one, serve the committed cache point (re-read through the same mapping /
+    // remap-cutoff acceptance as any cached fix) — never the older fetched coordinates.
+    const committedMs = new Date(written.location_updated_at).getTime();
+    if (Number.isFinite(committedMs) && committedMs > new Date(lastReportedAt).getTime()) {
+      return cachedPositionFrom(await readMappingAndCache(techId, dbh), cachedNotBefore);
     }
 
     return {
@@ -139,12 +151,14 @@ async function resolveFreshTechPosition({
   timeoutMs = BOUNCIE_LOCATION_FALLBACK_TIMEOUT_MS,
   logPrefix = 'tracking-vehicle-location',
   cachedNotBefore = null,
+  // Optional caller connection (a provider handoff's held transaction, Codex #5334 P1); default = the root pool.
+  dbh = db,
 } = {}) {
   if (!techId) return null;
 
   let row;
   try {
-    row = await readMappingAndCache(techId);
+    row = await readMappingAndCache(techId, dbh);
   } catch (err) {
     logger.warn(`[${logPrefix}] tracker mapping / tech_status lookup failed: ${err.message}`);
     return null; // cannot prove which vehicle this is -> no position
@@ -157,7 +171,7 @@ async function resolveFreshTechPosition({
   if (!allowBouncieFallback) return null;
   const imei = String(row.bouncie_imei || '').trim();
   if (!imei) return null;
-  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix });
+  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix, dbh, cachedNotBefore });
 }
 
 module.exports = {

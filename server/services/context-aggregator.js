@@ -670,7 +670,7 @@ function pruneLiveEtaMemo(now) {
   }
 }
 
-async function resolveLiveEtaMinutesUncached(row, dest) {
+async function resolveLiveEtaMinutesUncached(row, dest, { dbh } = {}) {
   try {
     const { lat: destLat, lng: destLng } = dest;
 
@@ -683,6 +683,8 @@ async function resolveLiveEtaMinutesUncached(row, dest) {
       // for the configured device's own position. Shared with the public tracker.
       cachedNotBefore: techMappingCutoff(row.tech_mapping_changed_at),
       logPrefix: 'sms-shadow-live-eta',
+      // Send-time recompute inside a provider handoff: stay on the handoff's connection (Codex #5334 P1).
+      ...(dbh ? { dbh } : {}),
     });
     if (!position) return null;
 
@@ -934,7 +936,9 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
     // Round-22 P2: the tracker device (Bouncie IMEI) the ETA was read from.
     // Send time refuses when an admin re-pointed the technician at another vehicle.
     ...(deviceImei ? { deviceImei } : {}),
-    ...(mappingMember ? { mappingChangedAt: mappingGeneration(mappingMember.tech_mapping_changed_at) } : {}),
+    // Codex #5334 P2: no technician on the row = no mapping to re-check; carrying a (null) generation would make send time query
+    // technicians with an undefined id and refuse a plain "your technician is on the way" status.
+    ...(mappingMember && technicianId != null ? { mappingChangedAt: mappingGeneration(mappingMember.tech_mapping_changed_at) } : {}),
     ...(technicianNames.length ? { technicianNames } : {}),
     // Round-20 P2: WHERE the ETA/status was about — each member's property id +
     // the coordinates/address stamp the destination came from. Send time

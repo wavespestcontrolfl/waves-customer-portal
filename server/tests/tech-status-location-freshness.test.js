@@ -222,6 +222,16 @@ describe('tech_status GPS freshness writes', () => {
     require('../sockets').getIo.mockReturnValue(null);
   });
 
+  test('a caller connection (a provider handoff, Codex #5334 P1) carries the write; the root pool opens no transaction', async () => {
+    const raw = jest.fn().mockResolvedValue({ rows: [{ tech_id: 'tech-1', status: 'idle', lat: 1, lng: 2, current_job_id: null, updated_at: 'x', location_updated_at: 'y' }] });
+    db.transaction = jest.fn(async () => { throw new Error('root pool must not open a transaction'); });
+    const handoff = { transaction: jest.fn(async (cb) => cb({ raw })) };
+    await techStatus.pingTechLocation({ tech_id: 'tech-1', lat: 27.1, lng: -82.2, dbh: handoff });
+    expect(handoff.transaction).toHaveBeenCalledTimes(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(raw).toHaveBeenCalledTimes(1);
+  });
+
   test('an unguarded ping is exactly the plain upsert (5 values, VALUES clause)', async () => {
     const raw = jest.fn().mockResolvedValue({ rows: [{ tech_id: 'tech-1', status: 'idle', lat: 1, lng: 2, current_job_id: null, updated_at: 'x', location_updated_at: 'y' }] });
     db.transaction = jest.fn(async (cb) => cb({ raw }));

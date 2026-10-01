@@ -560,6 +560,8 @@ async function recomputedLiveEtaMinutes(entry, dbh) {
     const fact = await require('./context-aggregator').resolveLiveEtaMinutesUncached(
       { technician_id: entry.technicianId, tech_bouncie_imei: tech.bouncie_imei, tech_mapping_changed_at: tech.bouncie_imei_changed_at },
       { lat: Number(dest.lat), lng: Number(dest.lng) },
+      // The recompute's tracker reads/writes ride the caller's connection too (Codex #5334 P1).
+      { dbh },
     );
     return fact && Number.isFinite(fact.minutes) ? { minutes: fact.minutes } : { unavailable: true };
   } catch (err) {
@@ -570,6 +572,9 @@ async function recomputedLiveEtaMinutes(entry, dbh) {
 // Technician + tracker device + mapping GENERATION identity (checkPerson only). Pure extraction of
 // the first half of the former entryIdentityReason; same checks, same order, same reasons.
 async function entryDeviceReason(entry, dbh) {
+  // No technician recorded (a valid en-route row can have none): nothing to look up — an undefined id would read as "device changed"
+  // or throw (Codex #5334 P2). Persisted decisions that already carry a null generation but no technician land here too.
+  if (entry.technicianId == null) return null;
   const hasGeneration = 'mappingChangedAt' in entry;
   if (!entry.deviceImei && !hasGeneration) return null;
   const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at');

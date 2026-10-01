@@ -1669,7 +1669,14 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
         expect(resolveLiveEtaMinutesUncached).toHaveBeenCalledWith(
           expect.objectContaining({ technician_id: 'tech-1', tech_bouncie_imei: '356938035643809', tech_mapping_changed_at: TECH.bouncie_imei_changed_at }),
           { lat: 27.4, lng: -82.5 },
+          expect.objectContaining({ dbh: expect.any(Function) }),
         );
+      });
+      test('the recompute rides the caller connection (Codex #5334 P1): the very dbh handed to etaClaimBlockReason', async () => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9, fixAtMs: FIX + 30e3 });
+        const handoff = dbWithStatus([row()], { location_updated_at: new Date(FIX + 30e3) });
+        await etaClaimBlockReason({ liveEtaSnapshot: fSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: handoff });
+        expect(resolveLiveEtaMinutesUncached.mock.calls[0][2].dbh).toBe(handoff);
       });
       test('a newer ping + different recomputed minutes: blocked', async () => {
         resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 14, fixAtMs: FIX + 30e3 });
@@ -2089,6 +2096,16 @@ describe('tracker-mapping generation at send time (A->B->A)', () => {
   test('a generation recorded but later cleared to NULL also blocks; an entry that recorded no generation keeps the device-only check', async () => {
     expect(await run(entry({ mappingChangedAt: '2026-09-30T16:00:00.000Z' }), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: null })).toBe('eta_claim_device_changed');
     expect(await run(entry({}), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: d('2026-09-30T16:05:00.000Z') })).toBeNull();
+  });
+  test('an entry with NO technician (generic status, Codex #5334 P2) never looks up a technician: a null generation is not a device change', async () => {
+    const lookups = jest.fn();
+    const dbNoTech = (table) => (table === 'technicians'
+      ? { where: (cond) => { lookups(cond); return { first: async () => null }; } }
+      : { whereIn: () => ({ select: async () => dated([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, technician_id: null }]) }) });
+    const e = entry({ technicianId: undefined, deviceImei: undefined, mappingChangedAt: null });
+    const out = await etaClaimBlockReason({ liveEtaSnapshot: { entries: [e] }, factsGeneratedAt: FRESH, outgoingBody: 'Your technician is on the way.', now: NOW, dbh: dbNoTech });
+    expect(out).toBeNull();
+    expect(lookups).not.toHaveBeenCalled();
   });
   test('an entry with only a generation (no device fingerprint) is still checked; a missing technician row blocks', async () => {
     expect(await run(entry({ deviceImei: undefined, mappingChangedAt: null }), { bouncie_imei: null, bouncie_imei_changed_at: d('2026-09-30T16:05:00.000Z') })).toBe('eta_claim_device_changed');

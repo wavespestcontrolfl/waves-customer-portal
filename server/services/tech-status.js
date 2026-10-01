@@ -223,7 +223,7 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
  * @param {number|null}  [args.speed_mph] optional, used for status derivation
  * @param {string|Date|null} [args.reported_at] GPS sample timestamp from provider
  */
-async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at, requireBouncieImei = null }) {
+async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at, requireBouncieImei = null, dbh = null }) {
   if (!tech_id || lat == null || lng == null) {
     throw new Error('pingTechLocation: tech_id, lat, lng are required');
   }
@@ -233,8 +233,11 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
   const derivedStatus = moving ? 'driving' : 'idle';
   const locationUpdatedAt = normalizeProviderTimestamp(reported_at);
 
+  // `dbh`: a caller already inside a provider handoff passes ITS connection (Codex #5334 P1) so this write never waits on a
+  // second pool connection while the handoff holds one; on a held transaction knex nests this as a savepoint.
+  const conn = dbh || db;
   let row;
-  await db.transaction(async (trx) => {
+  await conn.transaction(async (trx) => {
     // Single-statement upsert. Status uses CASE WHEN to preserve
     // semantic states when the row already exists with one set —
     // see header comment for why.
@@ -323,12 +326,12 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
   if (row && row.current_job_id && (row.status === 'en_route' || row.status === 'driving')) {
     try {
       const { stampedDivergesSql } = require('./stamped-address');
-      const job = await db('scheduled_services as s')
+      const job = await conn('scheduled_services as s')
         .leftJoin('customers as c', 's.customer_id', 'c.id')
         .where('s.id', row.current_job_id)
         .first(
-          db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) AS lat`),
-          db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng`)
+          conn.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) AS lat`),
+          conn.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng`)
         );
       if (job && job.lat != null && job.lng != null) {
         eta_minutes = haversineEtaMinutes(

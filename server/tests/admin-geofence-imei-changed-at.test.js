@@ -35,7 +35,7 @@ function installDb() {
   });
 }
 
-const CASE_SQL = 'CASE WHEN technicians.bouncie_imei IS DISTINCT FROM ?::varchar THEN NOW() ELSE technicians.bouncie_imei_changed_at END';
+const CASE_SQL = 'CASE WHEN technicians.bouncie_imei IS DISTINCT FROM ?::varchar THEN clock_timestamp() ELSE technicians.bouncie_imei_changed_at END';
 
 async function put(body) {
   const app = express();
@@ -61,6 +61,14 @@ test('an IMEI save is ONE atomic UPDATE: the stamp is a CASE on the row\'s curre
   expect(updates[0].bouncie_imei).toBe('222222222222222');
   expect(updates[0].bouncie_imei_changed_at).toEqual({ __raw: CASE_SQL, bindings: ['222222222222222'] });
   expect(mockDb.raw).toHaveBeenCalledTimes(1);
+});
+
+test('the remap stamp is clock_timestamp(), NOT NOW() (Codex #5334 P2): NOW() is the transaction start and can precede an old-device ping the UPDATE waited behind', async () => {
+  installDb();
+  await put({ bouncie_imei: '333333333333333' });
+  const sql = updates[0].bouncie_imei_changed_at.__raw;
+  expect(sql).toContain('clock_timestamp()');
+  expect(sql).not.toMatch(/\bNOW\(\)/i);
 });
 
 test('clearing the IMEI compares against NULL in the same statement', async () => {

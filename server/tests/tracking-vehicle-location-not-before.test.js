@@ -92,6 +92,46 @@ describe('one statement: current mapping + cache', () => {
     expect(out.source).toBe('bouncie_api');
     expect(svc.getLocationByImei).toHaveBeenCalledWith('DEV-B'); // the CURRENT mapped imei (the function takes no caller IMEI)
   });
+  test('the lookup and the fallback write ride a caller connection when one is passed (Codex #5334 P1), never the root pool', async () => {
+    const handoff = jest.fn((table) => {
+      if (table !== 'technicians as t') throw new Error(`unexpected table ${table}`);
+      return { leftJoin: () => ({ where: () => ({ first: async () => ({ bouncie_imei: 'DEV-A', bouncie_imei_changed_at: null, lat: null, lng: null, location_updated_at: null, location_received_at: null }) }) }) };
+    });
+    db.mockImplementation(() => { throw new Error('root pool must not be touched'); });
+    const loc = freshLoc();
+    pingTechLocation.mockResolvedValue({ tech_id: 't1', location_updated_at: loc.updatedAt });
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(loc), dbh: handoff });
+    expect(out.source).toBe('bouncie_api');
+    expect(handoff).toHaveBeenCalledWith('technicians as t');
+    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ dbh: handoff }));
+    expect(db).not.toHaveBeenCalled();
+  });
+  test('fallback write rejected for a NEWER cached fix (Codex #5334 P2): the committed cache point is served, never the older fetched coordinates', async () => {
+    install({ imei: 'DEV-A', changedAt: null, ts: null }); // first read: no usable cache -> fallback
+    const fetched = { lat: 28.0, lng: -81.0, updatedAt: minutesAgo(1).toISOString() };
+    // a webhook ping lands between the cache read and the guarded write: the upsert keeps the newer row and returns it
+    pingTechLocation.mockImplementation(async () => {
+      world.ts = { lat: '27.5', lng: '-82.5', location_updated_at: minutesAgo(0.2), location_received_at: minutesAgo(0.2) };
+      return { tech_id: 't1', lat: '27.5', lng: '-82.5', location_updated_at: minutesAgo(0.2) };
+    });
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(fetched) });
+    expect(out).toMatchObject({ lat: 27.5, lng: -82.5, source: 'tech_status' });
+  });
+  test('the newer committed fix still has to pass the remap acceptance (an old-device row postdating nothing is not served)', async () => {
+    install({ imei: 'DEV-B', changedAt: new Date(Date.now() - 30e3), ts: null });
+    pingTechLocation.mockImplementation(async () => {
+      world.ts = { lat: '27.5', lng: '-82.5', location_updated_at: minutesAgo(0.2), location_received_at: minutesAgo(2) }; // received BEFORE the remap
+      return { tech_id: 't1', location_updated_at: minutesAgo(0.2) };
+    });
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie({ lat: 28, lng: -81, updatedAt: minutesAgo(1).toISOString() }) })).toBeNull();
+  });
+  test('a committed row at (or before) the fetched fix is OUR point: served as before, with heading/ignition from the device', async () => {
+    install({ imei: 'DEV-A', changedAt: null, ts: null });
+    const at = minutesAgo(0.1).toISOString();
+    pingTechLocation.mockResolvedValue({ tech_id: 't1', location_updated_at: at });
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie({ lat: 28.0, lng: -81.0, updatedAt: at, heading: 90, isRunning: true }) });
+    expect(out).toMatchObject({ lat: 28.0, lng: -81.0, heading: 90, isRunning: true, source: 'bouncie_api' });
+  });
   test('cache-only callers (allowBouncieFallback false) get null rather than a stale point', async () => {
     install({ changedAt: minutesAgo(1), ts: fixRow(3) });
     expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false })).toBeNull();

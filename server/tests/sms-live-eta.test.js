@@ -322,6 +322,16 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     expect(floor).toBeInstanceOf(Date);
     expect(floor.getTime()).toBeGreaterThanOrEqual(before);
   });
+  test('resolveLiveEtaMinutesUncached forwards a caller connection to the position lookup (Codex #5334 P1) and omits it otherwise', async () => {
+    const { resolveLiveEtaMinutesUncached } = require('../services/context-aggregator');
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6 });
+    const handoff = jest.fn();
+    await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 }, { dbh: handoff });
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].dbh).toBe(handoff);
+    await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 });
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0]).not.toHaveProperty('dbh');
+  });
   test('resolveLiveEtaMinutesUncached (used by the send-time recompute) reads the configured device and its own edit floor, google results only', async () => {
     const { resolveLiveEtaMinutesUncached } = require('../services/context-aggregator');
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
@@ -2015,6 +2025,11 @@ describe('round 47 P2: "made it" completed arrivals', () => {
     expect(bodyClaimsCompletedArrival('Sam made it there.')).toBe(false);
     expect(bodyClaimsCompletedArrival('Sam made it there.', { techNames: ['Dana'] })).toBe(false);
   });
+  // Codex #5334 P2: the visit-status vocabulary needs the SAME technician-type subject as "got there" — customer-focused "made it" / "reached" is not visit status
+  test.each(['Glad you made it!', 'Thanks, you made it through the form.', 'I hope you made it home safe.', 'Congrats, you reached the final step.', 'Your payment reached us.', 'The package reached your house.'])(
+    '%p (no technician subject) is not visit status', (t) => {
+      expect(bodyMentionsVisitStatus(t)).toBe(false);
+    });
   test.each([
     "The technician hasn't made it yet.", 'The tech has not made it there.', 'Did the tech make it there?', 'Has he made it?', 'Is Sam making it?',
     'Once the tech made it there I will text you.', 'The tech made it there tomorrow.', 'The tech will make it there soon.',
@@ -2105,6 +2120,10 @@ describe('round 41 P2: mapping generation (bouncie_imei_changed_at) in the memo 
     expect(withGen.mappingChangedAt).toBe('2026-09-30T16:00:00.000Z');
     expect(build({ ...base, tech_mapping_changed_at: null }).mappingChangedAt).toBeNull();
     expect('mappingChangedAt' in build(base)).toBe(false);
+    // Codex #5334 P2: a row with NO technician carries no mapping identity at all (nothing to re-check at send time)
+    const noTech = build({ ...base, technician_id: null, tech_mapping_changed_at: null });
+    expect('mappingChangedAt' in noTech).toBe(false);
+    expect('technicianId' in noTech).toBe(false);
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [withGen] }).entries[0].mappingChangedAt).toBe('2026-09-30T16:00:00.000Z');
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [build({ ...base, tech_mapping_changed_at: null })] }).entries[0].mappingChangedAt).toBeNull();
   });

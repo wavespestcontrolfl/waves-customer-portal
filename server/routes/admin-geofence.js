@@ -103,9 +103,10 @@ router.put('/vehicles/:technicianId', async (req, res, next) => {
       // expressions against the pre-update row, under the row lock), so concurrent
       // saves can never restore an old IMEI without a stamp. An unchanged re-save keeps
       // the existing stamp. technicians.updated_at is restamped by every ordinary edit
-      // and cannot say this.
+      // and cannot say this. clock_timestamp(), NOT NOW() (Codex #5334 P2): NOW() is the transaction START time, so an
+      // UPDATE that waited on the row lock behind an old-device ping would stamp a remap EARLIER than that ping's receipt.
       updates.bouncie_imei_changed_at = db.raw(
-        'CASE WHEN technicians.bouncie_imei IS DISTINCT FROM ?::varchar THEN NOW() ELSE technicians.bouncie_imei_changed_at END',
+        'CASE WHEN technicians.bouncie_imei IS DISTINCT FROM ?::varchar THEN clock_timestamp() ELSE technicians.bouncie_imei_changed_at END',
         [nextImei],
       );
     }

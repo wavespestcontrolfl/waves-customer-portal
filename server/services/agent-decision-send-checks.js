@@ -92,7 +92,7 @@ function blockReasonIsEtaInfrastructure(blockReason) {
   return Boolean(m) && isEtaInfrastructureFailure(m[1]);
 }
 
-async function etaBlockReason({ decision, outgoingBody }) {
+async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
   const { etaClaimBlockReason } = require('./sms-eta-freshness');
   return etaClaimBlockReason({
@@ -105,6 +105,8 @@ async function etaBlockReason({ decision, outgoingBody }) {
     // v12 decision stays strict across a gate rollback (round-45 P2).
     promptVersion: decision.prompt_version ?? null,
     outgoingBody,
+    // The provider-boundary predicates pass the handoff's own connection (Codex #5334 P1); undefined = the root pool.
+    dbh,
   });
 }
 
@@ -117,12 +119,12 @@ async function etaBlock({ decision, outgoingBody }) {
 // check the immediate send runs, reading the claimed decision row itself so
 // scheduler.js carries one flat call instead of a nested parse block. Fails
 // CLOSED on any read/parse/recheck error — 'eta_recheck_failed'.
-async function scheduledEtaBlockReason({ decisionId, outgoingBody, skip = false }) {
+async function scheduledEtaBlockReason({ decisionId, outgoingBody, skip = false, dbh }) {
   if (skip) return null; // an earlier revalidation already blocked this send
   try {
-    const db = require('../models/db');
-    const decision = await db('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version');
-    return await etaBlockReason({ decision: decision || {}, outgoingBody });
+    const conn = dbh || require('../models/db');
+    const decision = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version');
+    return await etaBlockReason({ decision: decision || {}, outgoingBody, dbh });
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] LIVE ETA revalidation failed for decision ${decisionId}: ${err.message}; blocking send`);
     return 'eta_recheck_failed';
@@ -137,10 +139,15 @@ async function scheduledEtaBlockReason({ decisionId, outgoingBody, skip = false 
 // the decision with a customer-safe note); this closes the remaining window.
 // Refusal is terminal (the visit is provably stale) except an unreadable recheck,
 // which rides the bounded retry rail — never sent unverified.
+//
+// CONNECTION (Codex #5334 P1): twilio.js passes the handoff's own connection as `dbi` (the held
+// transaction when a `withSmsHandoff` is in play). Every read here goes through it — a read through
+// the root pool while the handoff holds a pool connection can wait on a connection that never frees
+// (two concurrent sends with DB_POOL_MAX=2) and sees a different snapshot than the handoff.
 function etaProviderPreSendCheck({ decisionId, getBody }) {
-  const check = async () => {
+  const check = async ({ dbi } = {}) => {
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
-    const reason = await scheduledEtaBlockReason({ decisionId, outgoingBody });
+    const reason = await scheduledEtaBlockReason({ decisionId, outgoingBody, dbh: dbi });
     if (reason == null) return { ok: true };
     const retryable = isEtaInfrastructureFailure(reason);
     return {
@@ -157,12 +164,12 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
 // snapshot in memory (the auto-send executor's claim): same check, same verdicts, no
 // extra row read.
 function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, techNames = [], promptVersion = null, getBody }) {
-  const check = async () => {
+  const check = async ({ dbi } = {}) => {
     const { etaClaimBlockReason } = require('./sms-eta-freshness');
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     let reason;
     try {
-      reason = await etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion, outgoingBody });
+      reason = await etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion, outgoingBody, dbh: dbi });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LIVE ETA boundary recheck failed: ${err.message}; blocking send`);
       reason = 'eta_recheck_failed';

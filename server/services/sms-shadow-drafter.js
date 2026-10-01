@@ -2826,7 +2826,8 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
   + `|${SUBJ}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
   // Completed-arrival "got there/here" (round-36 P2): part of the same default-deny
   // vocabulary as the completed-arrival classifier.
-  + `|${PREFIX}(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address))`
+  // Codex round-48 P2: "made it" / "reached" take the SAME technician-subject prefix as "got there" ("Glad you made it!" is not visit status).
+  + `|${PREFIX}(?:(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address)))`
   // Movement forms (left for / pulled up / showed up) also need a technician-type
   // subject (round-26 P2): "I pulled up your invoice" is not an arrival.
   + `|${SUBJ}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');

@@ -390,3 +390,38 @@ describe('infrastructure failures are retryable at every wrapper, never permanen
     expect(src).toContain('blockReasonIsEtaInfrastructure(blockReason)');
   });
 });
+
+// Codex #5334 P1 (round after b8809beece): the boundary ETA predicates read through the HANDOFF's own connection (`dbi`).
+describe('provider-boundary ETA predicates use the handoff connection (dbi)', () => {
+  const trxFor = (row) => {
+    const trx = jest.fn(() => ({ where: () => ({ first: async () => row }) }));
+    return trx;
+  };
+  test('etaProviderPreSendCheck reads the decision row AND the freshness recheck through dbi, never the root pool', async () => {
+    db.mockReset().mockImplementation(() => { throw new Error('root pool must not be touched'); });
+    const trx = trxFor({ input_snapshot: { facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    await expect(etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })({ channel: 'sms', dbi: trx })).resolves.toEqual({ ok: true });
+    expect(trx).toHaveBeenCalledWith('agent_decisions');
+    expect(db).not.toHaveBeenCalled();
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+  });
+  test('etaSnapshotProviderPreSendCheck hands dbi to the shared freshness check as dbh', async () => {
+    const trx = jest.fn();
+    await etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })({ dbi: trx });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+  });
+  test('the repeatable afterMarker re-run also gets the connection', async () => {
+    const trx = jest.fn();
+    const check = etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' });
+    await check.afterMarker({ dbi: trx });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+  });
+  test('composed: the context reaches every component', async () => {
+    const trx = jest.fn();
+    const lane = jest.fn(async () => ({ ok: true }));
+    const composed = composeProviderPreSendChecks(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' }), lane);
+    await composed({ dbi: trx });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+    expect(lane).toHaveBeenCalledWith({ dbi: trx });
+  });
+});
