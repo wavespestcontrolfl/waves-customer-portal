@@ -879,34 +879,29 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
         'is_callback', 'estimated_price');
     if (!row || !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) || row.customer_confirmed) {
       return false;
-    }    // A street-level address hold is released ONLY by the office's explicit confirm: no writer
-    // that merely moves the visit (SmartRebooker, admin-schedule update-details, the bulk
-    // paths, the sweep) may activate it. Status 'confirmed' is NOT proof of that approval
-    // (SmartRebooker writes it on a move); the proof is the recorded pending -> confirmed
-    // transition BY A USER (job_status_history.transitioned_by set; SmartRebooker's own row
-    // has it NULL), which a hold only gets from the office confirm route (tech taps on a
-    // hold are refused). A hold the office confirmed whose hook then
-    // failed before the stamp stays on the retry rail. Fails closed.
+    }
+    // A street-level address hold is released ONLY by the office's explicit confirm: no writer that
+    // merely moves the visit (SmartRebooker, update-details, the bulk paths, the sweep) may activate it.
+    // Status 'confirmed' is NOT proof (SmartRebooker writes it on a move); the proof is a recorded
+    // pending -> confirmed transition BY A USER (SmartRebooker's own row has transitioned_by NULL).
+    // A hold the office confirmed whose hook then failed stays on the retry rail, and a COMPLETED hold
+    // (completion is field confirmation; only the completion engine completes one) may retry too —
+    // without the card funnel, exactly as the completion release itself runs. Fails closed.
+    let holdOpts = {};
     if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db)) {
-      // A hold the office confirmed (recorded transition) OR one that was COMPLETED (completion is
-      // field confirmation — only the completion engine completes a hold; the status routes refuse
-      // it) may retry its activation; a merely moved hold may not.
       const approved = row.status === 'completed'
         || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId));
       if (!approved) {
         logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
         return false;
       }
+      holdOpts = { skipCardRequest: row.status === 'completed' };
     }
-    // Rejected rows are not activated — a cancelled/skipped legacy review
-    // booking was the office declining it. Completed/no_show rows DO
-    // activate: transitionJobStatus defers its own activation to this
-    // helper post-commit, so by the time it runs the row already carries
-    // the terminal status — and the lead conversion / card resolution /
-    // credit evidence are exactly what a worked visit still owes.
-    if (['cancelled', 'skipped'].includes(String(row.status || ''))) {
-      return false;
-    }
+    // Rejected rows are not activated (a cancelled/skipped booking was the office declining it);
+    // completed/no_show rows DO — the lead conversion / card resolution / credit evidence are what a
+    // worked visit still owes. The fresh re-read below is the rejection check (the first read may be
+    // arbitrarily stale by the time a sweep batch reaches this row; a just-committed cancel/skip wins,
+    // Codex #3361 r8 P1).
     // Fresh rejection re-check immediately before the side effects: the
     // first read above may be arbitrarily stale by the time a sweep batch
     // reaches this row, and a just-committed cancel/skip must win
@@ -931,6 +926,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // guarded UPDATE below still keeps the stamp itself at-most-once.
     const coreLegsOk = await runOutboundReviewConfirmHook(db, row, routeTag, {
       suppressCardAskWithoutClearance: true,
+      ...holdOpts,
       // The completion instant a failed in-trx evidence write froze — the
       // belt marker retry must carry it, not a fresh now() (Codex #3361
       // r16 P1).

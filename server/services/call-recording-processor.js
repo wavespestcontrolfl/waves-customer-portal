@@ -1732,40 +1732,26 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
 // the very ZIP and state on file, and that ZIP is one we serve. The form's own
 // ZIP is never the only witness.
 function streetLevelMatch(knownCaller, verdict) {
-  if (!verdict || verdict.status !== 'missing_component' || verdict.granularity !== 'ROUTE') return null;
-  if (verdict.inServiceArea === false) return null;
-  if (String(knownCaller.addressLine2 || '').trim()) return null;   // a unit cannot be verified to the street
-  const line1 = String(knownCaller.addressLine1 || '').trim();
+  // Route-level, in a service county Google ITSELF reports (owner ruling 2026-09-30: a ZIP is never
+  // promoted to a county), and a clean verdict: Google replaced and could not confirm nothing
+  // (deriveStatus labels such a result missing_component before looking at those flags).
+  const v = verdict || {};
+  if (v.status !== 'missing_component' || v.granularity !== 'ROUTE' || v.inServiceArea !== true
+    || v.hasReplaced !== false || v.hasUnconfirmed !== false) return null;
+  const line1 = knownCaller.addressLine1;
   const house = houseNumberOf(line1);
-  if (!house) return null;                           // no house number: nothing to read back
   const zip = zip5Of(knownCaller.addressZip);
-  // Owner ruling 2026-09-30: Google's OWN county, on the canonical call-routing
-  // allowlist (inServiceArea === true, DeSoto included), is the only area proof.
-  // A ZIP is never promoted to a county: with no county the call holds for
-  // review as before.
-  if (verdict.inServiceArea !== true) return null;
-  if (!zip) return null;
-  const n = verdict.normalized || {};
-  const formName = streetNameKey(line1);
-  if (!formName || formName !== streetNameKey(n.street_line_1)) return null;
-  const googleHouse = houseNumberOf(n.street_line_1);
-  if (googleHouse && googleHouse !== house) return null;   // Google rewrote the house number
-  // Google's own ZIP must match the on-file ZIP. With no ZIP from Google the
-  // route must still be bound to the submitted locality: Google's city must
-  // equal the on-file city (a common street name in another served city must
-  // not vouch for this address).
-  if (n.postal_code) {
-    if (zip5Of(n.postal_code) !== zip) return null;
-  } else if (!alnum(n.city) || alnum(n.city) !== alnum(knownCaller.addressCity)) {
-    return null;
-  }
-  if (normalizeState(n.state) !== SERVICE_STATE) return null;
-  return {
-    granularity: 'ROUTE',
-    route: String(n.street_line_1 || '').trim() || null,
-    zip,
-    areaBasis: 'google_county',
-  };
+  // No unit (a street-level match cannot verify one), a house number to read back, a ZIP on file.
+  if (String(knownCaller.addressLine2 || '').trim() || !house || !zip) return null;
+  const n = v.normalized || {};
+  const street = streetNameKey(line1);
+  // The same (non-empty) street, and Google did not rewrite the house number.
+  if (!street || street !== streetNameKey(n.street_line_1) || !['', house].includes(houseNumberOf(n.street_line_1))) return null;
+  // Google's own ZIP must match; with none, Google's city must equal the on-file city (a common street
+  // name in another served city must not vouch for this address).
+  const localityOk = n.postal_code ? zip5Of(n.postal_code) === zip : !!alnum(n.city) && alnum(n.city) === alnum(knownCaller.addressCity);
+  if (!localityOk || normalizeState(n.state) !== SERVICE_STATE) return null;
+  return { granularity: 'ROUTE', route: String(n.street_line_1).trim(), zip, areaBasis: 'google_county' };
 }
 function applyStreetLevelFormVerdict(knownCaller, verdict) {
   // Re-checked here so an offline replay of a persisted verdict honors the
@@ -1872,6 +1858,47 @@ function streetLevelProofAddressChanged(snapshot, row) {
     || norm(snapshot.city) !== norm(row.city)
     || zip5Of(snapshot.zip) !== zip5Of(row.zip)
     || stateOf(snapshot.state) !== stateOf(row.state);
+}
+// A reused PENDING voice-agent booking (ConversationRelay inserted it) that THIS pass now finds to be
+// a street-level web-form address: promote its review card (or file one) to the durable street-level
+// hold BEFORE lead conversion and the reuse activation, so every hold predicate applies. Same card
+// shape the fresh insert writes. No-op unless the row is an unconfirmed pending voice_agent visit that
+// is not already a hold. Runs on the booking transaction.
+async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, leadId, keepOpenForQuote, followUpPlan, extraction }) {
+  if (!hold || row?.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || row.customer_confirmed || row.status !== 'pending') return false;
+  const callId = row.source_call_log_id || callLogId;
+  if (await findStreetLevelHoldCard(trx, { callLogId: callId, visitId: row.id })) return false;
+  const fields = {
+    street_level_address: true,
+    address_on_file: hold.address_on_file || null,
+    visit_when: streetLevelVisitWhen(row.scheduled_date, row.window_start) || null,
+    visit_link: streetLevelVisitLink(row.id, dateOnlyISO(row.scheduled_date)),
+    ...(followUpPlan ? { follow_up_plan: { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null } } : {}),
+  };
+  await lockTriageCall(trx, callId);
+  const card = await trx('triage_items')
+    .where({ call_log_id: callId, reason_code: 'outbound_booking_review' })
+    .whereIn('status', ['open', 'in_progress'])
+    .first('id', 'payload');
+  if (card) {
+    const cur = (card.payload && typeof card.payload === 'object') ? card.payload : (() => { try { return JSON.parse(card.payload) || {}; } catch { return {}; } })();
+    await trx('triage_items').where({ id: card.id }).update({
+      payload: JSON.stringify({ ...cur, scheduled_service_id: cur.scheduled_service_id || row.id, lead_id: cur.lead_id || leadId || null, ...fields }),
+      updated_at: new Date(),
+    });
+  } else {
+    await trx('triage_items')
+      .insert(buildTriageItem({
+        callLogId: callId,
+        flag: 'outbound_booking_review',
+        extraction,
+        severity: 'advisory',
+        extraPayload: { origin: 'voice_agent', scheduled_service_id: row.id, lead_id: leadId || null, keep_open_for_quote: !!keepOpenForQuote, ...fields },
+      }))
+      .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+  }
+  await syncCallReviewStatus(trx, callId);
+  return true;
 }
 // Rings the one "confirm the address" admin bell for a held visit. Reads the visit
 // LIVE right before ringing: staff may have confirmed (or cancelled) it since the
@@ -17245,8 +17272,20 @@ const CallRecordingProcessor = {
                   serviceType,
                   trx,
                 });
+                // The street-level proof binds only while it was computed against THIS customer.
+                const holdBinds = !!v2StreetLevelHold && resolveOnFileAddressAuthority({
+                  usesOnFileAddress: v2UsesOnFileAddress,
+                  proofCustomerId: v2OnFileAddressProofCustomerId,
+                  proofAddress: v2OnFileAddressProofSnapshot,
+                  canonicalCustomerId: customerId,
+                }).useOnFileAddress;
+                const reuseHold = holdBinds ? v2StreetLevelHold : null;
+                const promoteArgs = { hold: reuseHold, callLogId: call.id, leadId, keepOpenForQuote: callQuotePromised, followUpPlan: callFollowUpPlan, extraction: v2ApprovedExtraction || extracted };
                 if (existing) {
                   reusedExistingSchedule = true;
+                  // A pending voice booking the relay inserted that this pass found to be a street-level
+                  // address: it becomes the durable hold before anything converts or activates it.
+                  await promoteReusedRowToStreetLevelHold(trx, existing, promoteArgs);
                   // An ATTACHED human booking resurfacing through the linked
                   // (source_call_log_id) lookup keeps its attach semantics on
                   // reprocess (Codex #2771 r5): no AI follow-up child on a
@@ -18120,6 +18159,7 @@ const CallRecordingProcessor = {
                 }
                 if (existingByKey) {
                   reusedExistingSchedule = true;
+                  await promoteReusedRowToStreetLevelHold(trx, existingByKey, promoteArgs);
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
                   // the lead must still convert (idempotent, ownership-guarded) —
@@ -21967,6 +22007,7 @@ CallRecordingProcessor._test = {
   streetLevelVisitLink,
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
+  promoteReusedRowToStreetLevelHold,
   streetLevelProofAddressChanged,
   ringStreetLevelHoldBell,
   summarizePriorCall,

@@ -87,7 +87,7 @@ function isUnreviewedDispatchOwned(svc) {
 }
 
 // SQL twin for the customer list reads (see routes/schedule.js): the rows a customer may NOT see.
-const UNREVIEWED_VOICE_MOVED_SQL = "(scheduled_services.source_action = 'voice_agent' AND COALESCE(scheduled_services.customer_confirmed, false) = false)";
+const UNREVIEWED_VOICE_MOVED_SQL = "(scheduled_services.source_action = 'voice_agent' AND scheduled_services.status = 'confirmed' AND COALESCE(scheduled_services.customer_confirmed, false) = false)";
 
 module.exports = {
   isUnreviewedDispatchOwned,

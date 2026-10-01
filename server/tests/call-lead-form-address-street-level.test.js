@@ -32,6 +32,7 @@ const lead = (extra = {}) => summarizeKnownCaller({
 // service county Google itself reports (owner ruling 2026-09-30: the only area proof).
 const routeLevel = (extra = {}) => ({
   status: 'missing_component', granularity: 'ROUTE', inServiceArea: true, county: 'Manatee County',
+  hasReplaced: false, hasUnconfirmed: false,
   normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34219' },
   ...extra,
 });
@@ -758,5 +759,97 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(await onFileAddressIsFromWebForm(known, conn({ ...full, city: 'Sarasota' }))).toBe(false);
     expect(await onFileAddressIsFromWebForm(known, conn({ ...full, zip: '34203' }))).toBe(false);
     expect(await onFileAddressIsFromWebForm(known, conn({ ...full, state: 'GA' }))).toBe(false);
+  });
+
+  test('r21: a corrected or unconfirmed route verdict is never trusted (deriveStatus labels it missing_component before those flags)', () => {
+    gateOn();
+    expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_county' });
+    // Google corrected the submitted city but kept the ZIP and the normalized street.
+    expect(streetLevelMatch(lead(), routeLevel({ hasReplaced: true, normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Bradenton', state: 'FL', postal_code: '34219' } }))).toBeNull();
+    expect(streetLevelMatch(lead(), routeLevel({ hasReplaced: true }))).toBeNull();
+    expect(streetLevelMatch(lead(), routeLevel({ hasUnconfirmed: true }))).toBeNull();
+    // A verdict that does not carry the flags at all is not clean either.
+    const { hasReplaced, hasUnconfirmed, ...bare } = routeLevel();
+    void hasReplaced; void hasUnconfirmed;
+    expect(streetLevelMatch(lead(), bare)).toBeNull();
+  });
+});
+
+describe('r21: a reused pending voice booking this pass finds to be a street-level address is promoted to the durable hold', () => {
+  const fs = require('fs');
+  const { promoteReusedRowToStreetLevelHold, isStreetLevelHoldRow } = CallRecordingProcessor._test;
+  const hold = { address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', google_street: 'Sample Newbuild Trail', customer_name: 'Form' };
+  const row = (extra = {}) => ({ id: 'v1', source_call_log_id: 'call-1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false, scheduled_date: '2026-10-05', window_start: '13:00:00', ...extra });
+  const args = (extra = {}) => ({ hold, callLogId: 'call-1', leadId: 'lead-1', keepOpenForQuote: false, followUpPlan: { scheduledDate: '2026-10-19', windowStart: '09:00' }, extraction: {}, ...extra });
+  // A stateful fake: the relay's card (no street_level_address) and the writes made to it.
+  const world = ({ card = { id: 't1', payload: { origin: 'voice_agent', scheduled_service_id: 'v1', lead_id: null } }, existingHoldCard = null } = {}) => {
+    const w = { updates: [], inserts: [], locked: 0 };
+    const trx = (table) => {
+      const q = {
+        _statuses: null,
+        where() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, count() { q._count = true; return q; },
+        whereIn(c, v) { q._statuses = v; return q; },
+        first: async () => {
+          if (q._count) return { n: 1 };
+          if (table === 'triage_items' && q._statuses === undefined) return existingHoldCard;
+          return table === 'triage_items' && q._statuses ? card : existingHoldCard;
+        },
+        update: async (u) => { w.updates.push({ table, u }); return 1; },
+        insert(r) { w.inserts.push(r); return q; }, onConflict() { return q; }, ignore: async () => [],
+      };
+      return q;
+    };
+    trx.raw = async () => { w.locked += 1; return { rows: [{}] }; };
+    return { w, trx };
+  };
+
+  test('the relay\'s card is stamped with the hold fields (and the plan, lead id, link) in place', async () => {
+    const { w, trx } = world();
+    expect(await promoteReusedRowToStreetLevelHold(trx, row(), args())).toBe(true);
+    const card = w.updates.find((u) => u.table === 'triage_items');
+    const payload = JSON.parse(card.u.payload);
+    expect(payload).toMatchObject({
+      origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'v1', lead_id: 'lead-1',
+      address_on_file: hold.address_on_file, visit_when: '2026-10-05 13:00',
+      visit_link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=v1',
+      follow_up_plan: { scheduled_date: '2026-10-19', window_start: '09:00' },
+    });
+    expect(w.locked).toBeGreaterThan(0);
+  });
+
+  test('no card at all: one is filed in the same shape', async () => {
+    const { w, trx } = world({ card: null });
+    expect(await promoteReusedRowToStreetLevelHold(trx, row(), args())).toBe(true);
+    expect(w.inserts[0].reason_code).toBe('outbound_booking_review');
+    expect(JSON.stringify(w.inserts[0].payload)).toContain('street_level_address');
+  });
+
+  test('no-ops: not a hold this pass, already a hold, not voice_agent, confirmed, or not pending', async () => {
+    const cases = [
+      [row(), args({ hold: null }), null],
+      [row(), args(), { id: 'old', status: 'open', payload: { street_level_address: true, scheduled_service_id: 'v1' } }],
+      [row({ source_action: 'ai_call_pipeline' }), args(), null],
+      [row({ customer_confirmed: true }), args(), null],
+      [row({ status: 'confirmed' }), args(), null],
+    ];
+    for (const [r, a, existingHoldCard] of cases) {
+      const { w, trx } = world({ existingHoldCard: existingHoldCard && { ...existingHoldCard, payload: JSON.stringify(existingHoldCard.payload) } });
+      expect(await promoteReusedRowToStreetLevelHold(trx, r, a)).toBe(false);
+      expect(w.updates).toHaveLength(0);
+    }
+  });
+
+  test('wired on BOTH reuse paths, before the lead converts and before the reuse activation', () => {
+    const s = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    const a = s.indexOf('await promoteReusedRowToStreetLevelHold(trx, existing, promoteArgs);');
+    const b = s.indexOf('await promoteReusedRowToStreetLevelHold(trx, existingByKey, promoteArgs);');
+    expect(a).toBeGreaterThan(0);
+    expect(b).toBeGreaterThan(a);
+    expect(s.indexOf('deferConversion: await isStreetLevelHoldRow(trx, primaryRow)', a)).toBeGreaterThan(a);
+    expect(s.indexOf('deferConversion: await isStreetLevelHoldRow(trx, existingByKey)', b)).toBeGreaterThan(b);
+    expect(s.indexOf('!(await isStreetLevelHoldRow(db, svc))', b)).toBeGreaterThan(b);
+    // The proof must bind to THIS customer.
+    expect(s.slice(s.indexOf('const holdBinds'), s.indexOf('const holdBinds') + 400)).toContain('canonicalCustomerId: customerId');
+    expect(typeof isStreetLevelHoldRow).toBe('function');
   });
 });
