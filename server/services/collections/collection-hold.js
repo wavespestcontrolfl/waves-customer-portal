@@ -323,6 +323,7 @@ const HOLD_GATED_EMAIL_TEMPLATES = new Set([
 // test fails until it is classified).
 const HOLD_GATED_DUNNING_ENTRY_POINTS = new Set([
   'invoice_followup_sequence',
+  'invoice_followup_customer', // the customer-level combined schedule (customer-dunning/send.js)
   'late_payment_checker',
   'late_payment_checker_microdeposit',
   'balance_reminder_workflow',
