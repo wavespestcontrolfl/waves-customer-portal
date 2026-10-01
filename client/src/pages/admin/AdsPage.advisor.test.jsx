@@ -33,12 +33,13 @@ const REPORT_DATA = {
   scaling_opportunities: [], capacity_warnings: [], insights: [],
 };
 
-function stubFetch({ report, onApply, onGenerate } = {}) {
+function stubFetch({ report, onApply, onGenerate, loadFails } = {}) {
   const fetchMock = vi.fn(async (url, options = {}) => {
     const json = (body, ok = true, status = 200) => ({ ok, status, json: async () => body });
     if (url === "/api/admin/ads/campaigns") return json({ campaigns: [CAMPAIGN] });
     if (url === "/api/admin/ads/funnel?period=30d" || url === "/api/admin/ads/revenue-attribution?period=month") return json(null);
     if (url === "/api/admin/ads/sync-status") return json({ syncs: [] });
+    if (url === "/api/admin/ads/advisor" && loadFails) return json({ error: "boom" }, false, 500);
     if (url === "/api/admin/ads/advisor") return json({ report: report === undefined ? { date: "2026-10-01", grade: "B", report_data: REPORT_DATA } : report });
     if (url === "/api/admin/ads/advisor/history") return json({ reports: [] });
     if (url === "/api/admin/ads/advisor/apply") return onApply ? onApply(options) : json({ applied: true, result: {} });
@@ -146,5 +147,12 @@ describe("Ads page Advisor tab", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Regenerate" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/Couldn't regenerate the report: advice dispatch failed/);
     expect(screen.getByRole("button", { name: "Regenerate" })).not.toBeDisabled();
+  });
+  it("a successful Regenerate clears a failed initial load's alert", async () => {
+    stubFetch({ loadFails: true });
+    await openAdvisor();
+    expect(await screen.findByText(/Couldn't load the advisor report/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Regenerate" }));
+    await waitFor(() => expect(screen.queryByText(/Couldn't load the advisor report/)).not.toBeInTheDocument());
   });
 });

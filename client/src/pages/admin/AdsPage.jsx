@@ -958,6 +958,8 @@ export function AdvisorTab() {
         date: etDateString(),
         grade: r.report?.grade,
       });
+      // A fresh report supersedes a failed initial load's alert.
+      setLoadError(null);
     } catch (err) {
       setGenerateError(
         `Couldn't regenerate the report: ${err?.message || "request failed"}`,

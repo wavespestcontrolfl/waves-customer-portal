@@ -74,8 +74,13 @@ const ADS_LIST_FIELDS = {
 };
 // apply_action / manual_action feed `.replace()` on the page's manual-action
 // hint, so a non-string one crashed the view (Codex r20 on #4884).
+// Owner ruling 2026-10-01: every recommendation must rest on the numbers
+// given, so `reasoning` is required text carrying at least one figure — an
+// unsupported rec (which may carry a one-click budget Apply) fails the leg.
+const hasNumericEvidence = (v) => isText(v) && /\d/.test(v);
 function isUsableRecommendation(rec) {
   return isText(rec.action) && ADS_PRIORITIES.has(canonicalPriority(rec.priority))
+    && hasNumericEvidence(rec.reasoning)
     && ['campaign', 'reasoning', 'estimated_impact', 'apply_value', 'campaign_id'].every((k) => isRenderable(rec[k]))
     && ['apply_action', 'manual_action'].every((k) => rec[k] == null || typeof rec[k] === 'string');
 }
@@ -88,7 +93,9 @@ function isUsableAdsReport(advice) {
   if (advice.insights != null && !(Array.isArray(advice.insights) && advice.insights.every(isText))) return false;
   const listsOk = ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
   if (!listsOk) return false;
-  if (advice.recommendations != null && !advice.recommendations.every(isUsableRecommendation)) return false;
+  // Required (may be empty): an omitted list is an off-contract answer, not a
+  // deliberate "nothing to change" — it must not be texted as one.
+  if (!Array.isArray(advice.recommendations) || !advice.recommendations.every(isUsableRecommendation)) return false;
   return Object.entries(ADS_LIST_FIELDS).every(([key, [label, ...fields]]) => advice[key] == null
     || advice[key].every((item) => isText(item[label]) && fields.every((f) => isRenderable(item[f]))));
 }
@@ -290,7 +297,10 @@ TARGETS: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}
 
 RECENT BUDGET CHANGES:
 ${JSON.stringify(budgetLog.slice(0, 10).map(b => ({
-  campaign: b.campaign_name, from: b.previous_mode, to: b.new_mode, reason: b.reason,
+  campaign: b.campaign_name, at: b.created_at, from: b.previous_mode, to: b.new_mode,
+  budget_from: b.previous_budget == null ? null : Number(b.previous_budget),
+  budget_to: b.new_budget == null ? null : Number(b.new_budget),
+  trigger: b.trigger, reason: b.reason,
 })))}
 ${gscSummary ? `
 GOOGLE SEARCH CONSOLE (organic search, last 28 days):
@@ -336,7 +346,9 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
       advice.date = etDateString(now);
       // Which model actually wrote this report (primary or backup leg) — the
       // PPC page shows it. Stored inside report_data, so no migration.
-      if (res.model) advice.model = res.model;
+      // servedModel is what the provider reports it actually ran; the route
+      // model is only what was requested (an alias can resolve differently).
+      if (res.servedModel || res.model) advice.model = res.servedModel || res.model;
       if (res.provider) advice.provider = res.provider;
       this.normalizeRecommendations(advice, campaigns);
       await this.storeReport(advice);

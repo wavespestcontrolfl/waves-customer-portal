@@ -36,6 +36,11 @@ jest.mock('../models/db', () => jest.fn((table) => {
   const rowsFor = {
     ad_campaigns: [CAMPAIGN],
     ad_search_terms: SEARCH_TERMS,
+    ad_budget_log: [{
+      campaign_name: 'Synthetic Search', previous_mode: 'base', new_mode: 'base',
+      previous_budget: '5.00', new_budget: '8.00', trigger: 'advisor', reason: 'synthetic raise',
+      created_at: '2026-09-30T12:00:00Z',
+    }],
   };
   const b = {
     where: () => b, orderBy: () => b, limit: () => b, select: () => b,
@@ -112,6 +117,22 @@ describe('prompt rules', () => {
   });
 });
 
+describe('provenance and recent-change context (Codex r1 on #5486)', () => {
+  test('stamps the provider-reported servedModel over the requested route model', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'claude-fable-5-1', servedModel: 'claude-fable-5-1-20260901' });
+    const out = await advisor.generateDailyAdvice();
+    expect(out.model).toBe('claude-fable-5-1-20260901');
+  });
+
+  test('recent budget changes carry the dollar amounts, so a same-mode budget change is visible', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    const { text } = mockDispatch.mock.calls[0][1];
+    expect(text).toContain('"budget_from":5');
+    expect(text).toContain('"budget_to":8');
+  });
+});
+
 describe('empty recommendations', () => {
   test('are accepted by the leg validator, stored with a zero count, stamped with the writing model, and texted as nothing-to-do', async () => {
     mockDispatch.mockImplementation(async (_policy, _payload, opts) => {
@@ -136,10 +157,10 @@ describe('empty recommendations', () => {
     expect(body).not.toContain('Top actions');
   });
 
-  test('isUsableAdsReport / normalize accept an empty list; a missing list is fine too', () => {
+  test('isUsableAdsReport / normalize accept an empty list; an omitted list is rejected', () => {
     expect(advisor.isUsableAdsReport({ ...EMPTY_REPORT })).toBe(true);
-    const { recommendations, ...noList } = EMPTY_REPORT;
-    expect(advisor.isUsableAdsReport(noList)).toBe(true);
+    const { recommendations: _omitted, ...noList } = EMPTY_REPORT;
+    expect(advisor.isUsableAdsReport(noList)).toBe(false);
     expect(advisor.normalizeAdsReport({ ...EMPTY_REPORT }).recommendations).toEqual([]);
   });
 
