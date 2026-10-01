@@ -665,6 +665,15 @@ describe('open-loop commitments recheck', () => {
       await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
     });
 
+    test('a null signature (section rendered, nothing time-sensitive) is still rechecked: a delay that appeared refuses', async () => {
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature: null } }) });
+      nowFacts(loops());
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
+      spy.mockRestore();
+      nowFacts(drafted);
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
+    });
+
     test('a real read failure during the rebuild is a retryable recheck failure, not "changed"', async () => {
       await expect(openLoopsBlockReason({ decision: withStatus(), dbh: () => { throw new Error('dispatch_alerts down'); } }))
         .resolves.toBe('open_loops_recheck_failed');

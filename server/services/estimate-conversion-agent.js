@@ -590,7 +590,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // generateGroundedDraft below) — one of the two SMS drafting paths that
     // actually surfaces the LIVE ETA fact — so it opts in explicitly rather
     // than relying on getContextForCustomer's default (no LIVE ETA lookup).
-    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS'), includeVisitLoops: true });
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });

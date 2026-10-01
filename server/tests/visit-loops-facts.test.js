@@ -169,6 +169,15 @@ describe('lateAlert', () => {
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { evidence: 'missing_tracking', promised_window: { start_at: '2026-10-01T13:00:00.000Z' } } })).lateAlert).toMatchObject({ missingTracking: true });
   });
 
+  test('an arrived, finished, cancelled or skipped visit never carries a delay, even with a lagging status', async () => {
+    const stamped = { type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { scheduled_date: '2026-10-01', window_start: '09:00:00' } };
+    const at = (row) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: (ops) => (hasOp(ops, 'leftJoin') ? [todayRow(row)] : []), dispatch_alerts: () => [stamped] }) });
+    for (const row of [{ status: 'confirmed', track_state: 'on_property' }, { status: 'confirmed', track_state: 'complete' }, { status: 'on_site' }, { status: 'confirmed', track_state: 'cancelled' }]) {
+      expect((await at(row)).lateAlert).toBeNull();
+    }
+    expect((await at({ status: 'confirmed', track_state: 'en_route' })).lateAlert).toMatchObject({ visitId: 'visit-1' });
+  });
+
   test('a stamped alert with no minutes still reads; an unstamped one or none: null', async () => {
     expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: { scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert).not.toHaveProperty('minutesLate');
     // an unstamped alert (null or empty payload) cannot be shown to be about this occurrence

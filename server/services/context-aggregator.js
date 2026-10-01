@@ -1065,7 +1065,7 @@ class ContextAggregator {
   // generateLlmReviewDraft) opt in explicitly with { includeLiveEta: true }.
   // false leaves upcomingServices[].liveEta and liveEtaGroups at their
   // empty/null defaults; every other field is unaffected.
-  async getContextForCustomer(customer, { includeLiveEta = false } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false } = {}) {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
@@ -1491,7 +1491,9 @@ class ContextAggregator {
     // Read only while GATE_SMS_REAL_ANSWERS is on: the SMS drafter is the one
     // renderer, and a dark feature must not add queries to every context build.
     let visitLoops = emptyVisitLoops();
-    if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+    // ...and only for the SMS drafting call sites that opt in (includeVisitLoops):
+    // email replies, briefs and assistant snapshots never read it.
+    if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
       try {
         visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row) });
       } catch (err) {

@@ -432,13 +432,15 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
   const refs = [...new Set([].concat(snapshot.visit_loop_commitment_ids || []))]
     .filter((ref) => typeof ref === 'string' && ref)
     .map((ref) => { const [id, rev = null] = ref.split(':'); return { id, rev }; });
-  const signature = objectOrNull(snapshot.visit_loop_status)?.signature || null;
+  // a persisted status is checked even when its signature is null: the section was
+  // rendered with nothing time-sensitive, and a fact that appeared since refuses
+  const status = objectOrNull(snapshot.visit_loop_status);
   if (refs.length && commitmentDayChanged(snapshot, now)) return 'commitment_day_changed';
-  if (!refs.length && !signature) return null;
+  if (!refs.length && !status) return null;
   try {
     const conn = dbh || require('../models/db');
     if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
-    if (signature && await visitStatusChanged(conn, signature, customerId)) return 'visit_status_changed';
+    if (status && await visitStatusChanged(conn, status.signature || null, customerId)) return 'visit_status_changed';
     return null;
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);

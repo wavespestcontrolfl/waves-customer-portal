@@ -4592,10 +4592,12 @@ function validateOpenLoopAnswer({ reply, factsBlock }) {
 // visitStatusSignature. The send boundary rebuilds the facts and refuses if the
 // signature changed.
 // null when the section showed none of these, or gate-off.
+// The section was rendered, so the snapshot is persisted even when nothing
+// time-sensitive showed ({ signature: null }): a delay, passed window or missed
+// visit that appears while the card waits changes the live signature and refuses.
 function visitLoopStatus(context, factsBlock) {
   if (!factsCarryVisitLoops(factsBlock)) return null;
-  const signature = require('./visit-loops-facts').visitStatusSignature(context && context.visitLoops);
-  return signature ? { signature } : null;
+  return { signature: require('./visit-loops-facts').visitStatusSignature(context && context.visitLoops) };
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
@@ -5769,8 +5771,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // changes the upcoming list, so the opt-in also requires the release gate.
     const includeLiveEta = gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
     const context = customer
-      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta })
-      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });
+      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta, includeVisitLoops: true })
+      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta, includeVisitLoops: true });
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a missed visit, a promise we owe, an ask they are waiting on) is not a
     // pure thank-you — the gate-on rules require the reply to address it, which the

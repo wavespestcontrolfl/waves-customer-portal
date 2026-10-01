@@ -176,7 +176,14 @@ function alertMatchesOccurrence(payload, visit) {
   return true;
 }
 
-async function loadLateAlert(todayRows, { conn, deriveWindow }) {
+// A delay is only news before arrival: a visit the tracker (or status) shows
+// arrived, finished, cancelled or skipped never carries one, even while its other
+// column lags.
+const PRE_ARRIVAL_STATUSES = ['pending', 'confirmed', 'en_route'];
+const PRE_ARRIVAL_TRACK_STATES = ['scheduled', 'en_route'];
+const preArrival = (r) => PRE_ARRIVAL_STATUSES.includes(r.status) && (r.track_state == null || PRE_ARRIVAL_TRACK_STATES.includes(r.track_state));
+async function loadLateAlert(allTodayRows, { conn, deriveWindow }) {
+  const todayRows = allTodayRows.filter(preArrival);
   const ids = todayRows.map((r) => r.id);
   if (!ids.length) return null;
   const alerts = await conn('dispatch_alerts')
