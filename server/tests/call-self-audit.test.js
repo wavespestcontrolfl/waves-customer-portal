@@ -216,6 +216,17 @@ describe('Jev shadow', () => {
     expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0 });
   });
 
+  test('a failed deep audit still asks Jev, recorded against production only', async () => {
+    typedDecisionsLive.mockReturnValue(true);
+    mockDb({ calls: [SAMPLE({ ai_extraction: JSON.stringify({ is_lead: true }) })] });
+    const res = await runSelfAudit({ createMessage: async () => { throw new Error('deep judge down'); } });
+    expect(askPackage).toHaveBeenCalledTimes(1);
+    const args = recordDecisions.mock.calls[0][0];
+    expect(args.baselines.is_lead).toEqual({ production: true, deep_judge: undefined });
+    expect(args.baselines.complaint).toEqual({ deep_judge: undefined });
+    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0 });
+  });
+
   test('an outbound call gets the outbound direction line and a missing duration is null', async () => {
     typedDecisionsLive.mockReturnValue(true);
     mockDb({ calls: [SAMPLE({ direction: 'outbound-dial', duration_seconds: undefined })] });

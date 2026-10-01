@@ -134,6 +134,20 @@ function buildRows({ capability, pkg, subjectType, subjectId, result, baselines,
   return rows;
 }
 
+// The upsert's SET list: each merge column from the new row, except
+// outcome_evidence, which keeps a SETTLED (non-null value) reading when the
+// new one is missing or unknown: a later night whose evidence read failed must
+// not erase what the daily refresh already established.
+function mergeSet(conn) {
+  const set = Object.fromEntries(MERGE_COLUMNS.map((c) => [c, conn.raw('??', [`excluded.${c}`])]));
+  set.outcome_evidence = conn.raw(
+    `CASE WHEN excluded.outcome_evidence IS NULL
+       OR (excluded.outcome_evidence->>'value' IS NULL AND ${TABLE}.outcome_evidence->>'value' IS NOT NULL)
+     THEN ${TABLE}.outcome_evidence ELSE excluded.outcome_evidence END`,
+  );
+  return set;
+}
+
 /**
  * @returns {Promise<{recorded:number, skipped?:string, sampled?:object}>}
  * Gate off, a failed answer or a bad subject returns early with no write.
@@ -149,7 +163,7 @@ async function recordDecisions({ capability, pkg, subjectType, subjectId, result
   await conn(TABLE)
     .insert(rows)
     .onConflict(CONFLICT_KEY)
-    .merge(MERGE_COLUMNS)
+    .merge(mergeSet(conn))
     .where(`${TABLE}.label_status`, 'unreviewed')
     // A held-out row is a frozen measurement: never re-answered.
     .whereRaw(`${TABLE}.sampled_for IS DISTINCT FROM 'heldout'`);

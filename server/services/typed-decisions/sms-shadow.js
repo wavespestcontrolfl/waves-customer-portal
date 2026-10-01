@@ -82,7 +82,7 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
   }
   const state = { previous_waves_text: previous || null, customer_text: text.slice(0, MAX_TEXT_CHARS) };
 
-  const evidence = await smsEvidence({ id: smsLogId, customer_id: customerId, created_at: receivedAt || new Date() }, { conn }).catch(() => ({}));
+  const evidence = await smsEvidence({ id: smsLogId, customer_id: customerId, created_at: receivedAt || new Date(), from_phone: fromPhone, to_phone: toPhone }, { conn }).catch(() => ({}));
 
   await Promise.all(QUESTIONS.map(async ({ packageId, question, rule }) => {
     out.asked += 1;

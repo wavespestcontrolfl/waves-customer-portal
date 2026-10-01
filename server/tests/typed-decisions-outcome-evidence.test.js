@@ -194,6 +194,14 @@ describe('smsEvidence', () => {
     }
   });
 
+  test('courtesy: scoped to the text\'s own phone pair (another Waves line is another thread)', async () => {
+    const conn = fakeConn();
+    await smsEvidence(sms({ created_at: ago(30), from_phone: '+15550000001', to_phone: '+15550000002' }), { now: NOW, conn });
+    const [outbound, inbound] = conn.log.filter((q) => q.table === 'sms_log');
+    expect(outbound.calls[0]).toEqual(['where', [{ customer_id: 'cust-1', direction: 'outbound', to_phone: '+15550000001', from_phone: '+15550000002' }]]);
+    expect(inbound.calls[0]).toEqual(['where', [{ customer_id: 'cust-1', direction: 'inbound', from_phone: '+15550000001', to_phone: '+15550000002' }]]);
+  });
+
   test('courtesy: an outbound row counts only once it went out (queued/sent/delivered)', async () => {
     const conn = fakeConn();
     await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn });

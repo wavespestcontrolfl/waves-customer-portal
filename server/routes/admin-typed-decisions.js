@@ -151,6 +151,14 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     const verdict = String(body.verdict || '').trim();
     if (!VERDICT_STATUS[verdict]) return res.status(400).json({ error: 'verdict must be jev_right, jev_wrong, or unclear' });
 
+    // The Jev answer the reviewer was shown. The label is written only while
+    // the row still holds exactly that answer: a nightly re-record may replace
+    // an unreviewed row's answer, and a verdict must never attach to an answer
+    // nobody saw.
+    const seen = body.seen_answer;
+    if (!seen || typeof seen !== 'object' || Array.isArray(seen)) {
+      return res.status(400).json({ error: 'seen_answer (the Jev answer shown) is required' });
+    }
     // jev_wrong must say what the right answer was, in the question's own
     // domain (a boolean for a yes/no question): a label without one can never
     // be scored, so it is refused here rather than silently dropped at export.
@@ -163,15 +171,13 @@ router.post('/reviews/:id/label', async (req, res, next) => {
       if (!answerInDomain(question, body.correct_value)) {
         return res.status(400).json({ error: 'jev_wrong needs correct_value: the right answer for this question (true or false for a yes/no question)' });
       }
+      // "Jev was wrong, the answer is what Jev said" contradicts itself and
+      // would export as a case Jev scores correct on.
+      const shown = typeof seen.yes === 'boolean' ? seen.yes : (seen.choice ?? seen.score);
+      if (shown !== undefined && body.correct_value === shown) {
+        return res.status(400).json({ error: 'jev_wrong needs a correct_value different from Jev\'s answer' });
+      }
       correctValue = body.correct_value;
-    }
-    // The Jev answer the reviewer was shown. The label is written only while
-    // the row still holds exactly that answer: a nightly re-record may replace
-    // an unreviewed row's answer, and a verdict must never attach to an answer
-    // nobody saw.
-    const seen = body.seen_answer;
-    if (!seen || typeof seen !== 'object' || Array.isArray(seen)) {
-      return res.status(400).json({ error: 'seen_answer (the Jev answer shown) is required' });
     }
     const note = body.note === undefined || body.note === null ? null : String(body.note).trim().slice(0, MAX_NOTE_CHARS) || null;
     const force = body.force === true;

@@ -202,8 +202,18 @@ async function courtesyEvidence(conn, sms, at, now) {
   // The source text itself is never "a later contact": `at` may come back to
   // JS at millisecond precision while the row keeps microseconds, so the time
   // bound alone can let it through.
+  // Scoped to the text's own thread (its phone pair), the same scope Jev and
+  // the reviewer were given: traffic on another Waves line is a different
+  // conversation. A row without phones falls back to the customer.
+  const pair = sms.from_phone && sms.to_phone;
+  const thread = (direction) => {
+    if (!pair) return {};
+    return direction === 'outbound'
+      ? { to_phone: sms.from_phone, from_phone: sms.to_phone }
+      : { from_phone: sms.from_phone, to_phone: sms.to_phone };
+  };
   const texts = (direction) => {
-    const q = conn('sms_log').where({ customer_id: sms.customer_id, direction })
+    const q = conn('sms_log').where({ customer_id: sms.customer_id, direction, ...thread(direction) })
       .where('created_at', '>', at).where('created_at', '<=', until)
       .whereRaw("COALESCE(message_type, '') <> 'internal_alert'");
     // An outbound row counts only once it actually went out ('scheduled' and
@@ -225,7 +235,8 @@ async function courtesyEvidence(conn, sms, at, now) {
  * Evidence for the text questions: wants_visit_change (the customer's visit
  * was moved, cancelled or skipped within 7d) and is_courtesy_only (no Waves
  * outbound and no further inbound within 24h: the conversation simply ended).
- * `smsRow` needs id, customer_id and created_at.
+ * `smsRow` needs id, customer_id and created_at; from_phone / to_phone scope
+ * the courtesy reading to that thread.
  */
 async function smsEvidence(smsRow, { now = new Date(), conn = db } = {}) {
   const at = smsRow?.created_at ? new Date(smsRow.created_at) : null;
@@ -240,7 +251,7 @@ async function smsEvidence(smsRow, { now = new Date(), conn = db } = {}) {
 
 const CALL_COLUMNS = ['id', 'customer_id', 'direction', 'from_phone', 'to_phone', 'twilio_call_sid', 'created_at',
   'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'metadata'];
-const SMS_COLUMNS = ['id', 'customer_id', 'created_at'];
+const SMS_COLUMNS = ['id', 'customer_id', 'created_at', 'from_phone', 'to_phone'];
 
 /**
  * Re-reads evidence for review rows whose evidence value is still null (or was

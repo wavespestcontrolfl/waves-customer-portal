@@ -77,6 +77,18 @@ async function shadowJevJudge(call, prod, verdict, tally) {
   if (outcome === 'recorded') tally.recorded++; else tally.failed++;
 }
 
+// What the production extraction recorded for the call_judge fields.
+function productionAnswers(call) {
+  const ex = safeParse(call.ai_extraction);
+  return {
+    is_lead: ex.is_lead === true,
+    is_spam: call.processing_status === 'spam' || ex.is_spam === true,
+    is_voicemail: call.processing_status === 'voicemail' || ex.is_voicemail === true,
+    appointment_agreed: ex.appointment_confirmed === true,
+    quote_promised: ex.quote_promised === true,
+  };
+}
+
 async function askAndRecord(call, prod, verdict) {
   try {
     const { askPackage } = require('./typed-decisions/jev');
@@ -167,17 +179,13 @@ async function runSelfAudit(depsIn = {}) {
       verdict = JSON.parse((text.match(/\{[\s\S]*\}/) || ['{}'])[0]);
     } catch (err) {
       logger.warn(`[self-audit] audit call failed for ${call.id}: ${err.message}`);
+      // Jev is still asked, against production alone: dropping every call the
+      // deep judge fails on would bias the shadow sample toward easy calls.
+      await shadowJevJudge(call, productionAnswers(call), {}, jev);
       continue;
     }
     audited++;
-    const ex = safeParse(call.ai_extraction);
-    const prod = {
-      is_lead: ex.is_lead === true,
-      is_spam: call.processing_status === 'spam' || ex.is_spam === true,
-      is_voicemail: call.processing_status === 'voicemail' || ex.is_voicemail === true,
-      appointment_agreed: ex.appointment_confirmed === true,
-      quote_promised: ex.quote_promised === true,
-    };
+    const prod = productionAnswers(call);
     const diffs = [];
     for (const f of Object.keys(prod)) {
       checkedFields++;

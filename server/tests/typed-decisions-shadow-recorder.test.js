@@ -26,6 +26,7 @@ function stubConn() {
     whereRaw(sql) { calls.whereRaw = sql; return Promise.resolve([]); },
   };
   const conn = (table) => { calls.table = table; return builder; };
+  conn.raw = (sql, bindings) => ({ sql, bindings });
   return { conn, calls };
 }
 
@@ -99,9 +100,12 @@ describe('recordDecisions', () => {
     await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
     expect(calls.conflict).toEqual(['capability', 'package_id', 'subject_type', 'subject_id', 'question_id']);
     expect(CONFLICT_KEY).toEqual(calls.conflict);
-    expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'outcome_evidence', 'served_model', 'package_hash', 'sampled_for']);
-    expect(MERGE_COLUMNS).toEqual(calls.merge);
-    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at']) expect(calls.merge).not.toContain(forbidden);
+    expect(Object.keys(calls.merge)).toEqual(['jev_answer', 'baseline_answers', 'outcome_evidence', 'served_model', 'package_hash', 'sampled_for']);
+    expect(MERGE_COLUMNS).toEqual(Object.keys(calls.merge));
+    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at']) expect(calls.merge).not.toHaveProperty(forbidden);
+    expect(calls.merge.jev_answer).toEqual({ sql: '??', bindings: ['excluded.jev_answer'] });
+    // a settled reading survives a later unknown or missing one
+    expect(calls.merge.outcome_evidence.sql).toMatch(/excluded\.outcome_evidence IS NULL\s+OR \(excluded\.outcome_evidence->>'value' IS NULL AND decision_reviews\.outcome_evidence->>'value' IS NOT NULL\)\s+THEN decision_reviews\.outcome_evidence ELSE excluded\.outcome_evidence/);
     expect(calls.whereRaw).toMatch(/sampled_for IS DISTINCT FROM 'heldout'/);
     expect(calls.where).toEqual(['decision_reviews.label_status', 'unreviewed']);
   });

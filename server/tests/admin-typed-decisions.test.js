@@ -206,6 +206,7 @@ describe('POST /reviews/:id/label', () => {
     ['a non-object seen_answer', { verdict: 'unclear', seen_answer: 'yes' }],
     ['jev_wrong with a string for a yes/no question', { verdict: 'jev_wrong', correct_value: 'no' }],
     ['jev_wrong with free text', { verdict: 'jev_wrong', correct_value: 'x'.repeat(3000) }],
+    ['jev_wrong whose correct_value repeats Jev\'s answer', { verdict: 'jev_wrong', correct_value: true, seen_answer: SEEN }],
   ])('%s is 400 and writes nothing', async (_name, payload) => {
     const log = installDb({ decision_reviews: { first: [baseRow()] } });
     expect((await post(`/reviews/${ID}/label`, payload)).status).toBe(400);
@@ -222,7 +223,7 @@ describe('POST /reviews/:id/label', () => {
 
   test('jev_wrong on a missing review is 404 before any write', async () => {
     const log = installDb({ decision_reviews: { first: [undefined] } });
-    expect((await post(`/reviews/${ID}/label`, { verdict: 'jev_wrong', correct_value: true })).status).toBe(404);
+    expect((await post(`/reviews/${ID}/label`, { verdict: 'jev_wrong', correct_value: false, seen_answer: SEEN })).status).toBe(404);
     expect(called(log, 'decision_reviews', 'update')).toEqual([]);
   });
 
