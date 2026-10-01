@@ -18,7 +18,11 @@
  *     for the same (product, visit).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({})),
+  // The real doneColumns' keepExisting shape is proven in notification-mark-read-admin; here only what the caller asked for is recorded.
+  _private: { openToCloser: (q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)')), doneColumns: ({ by, resolution, keepExisting, conn }) => ({ done_by: by, resolution, keepExisting: keepExisting === true, conn }) },
+}));
 
 const { consumeCompletionSupplies, settleOwedCompletionSupplies, completionSuppliesOwed, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
@@ -28,7 +32,8 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   const inserts = [];
   const trx = (table) => {
     const q = {};
-    q.where = () => q;
+    q.where = (w) => { if (typeof w === 'function') w(q); return q; };
+    q.orWhereRaw = () => q;
     q._sql = '';
     q.whereRaw = (sql) => { q._sql += sql; return q; };
     q.forUpdate = () => q;
@@ -38,8 +43,8 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
       if (table === 'notifications') return handedOff === 'auto' ? (q._sql.includes('autoRetired') ? null : { id: 'bell-auto' }) : handedOff ? { id: 'bell-1' } : null;
       return products[0];
     };
-    q.update = async (row) => { updates.push({ table, row }); return 1; };
-    q.whereNull = () => q;
+    q.update = async (row) => { updates.push({ table, row, nulls: q._nulls }); return 1; };
+    q.whereNull = (col) => { (q._nulls ||= []).push(col); return q; };
     q.insert = (row) => ({
       onConflict: () => ({
         ignore: () => ({
@@ -56,12 +61,15 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   trx.raw = (s) => s;
   const db = (table) => {
     const q = {};
-    for (const m of ['whereNotNull', 'where', 'whereNull']) q[m] = () => q;
+    q.whereNotNull = () => q;
+    q.where = (w) => { if (typeof w === 'function') w(q); return q; };
+    q.orWhereRaw = () => q;
+    q.whereNull = (col) => { (q._nulls ||= []).push(col); return q; };
     q.whereRaw = (sql, bindings) => { if (table === 'notifications' && bindings) q._key = bindings[0]; return q; };
     q.select = async () => products;
-    q.update = async (row) => { updates.push({ table, row, ...(q._key ? { key: q._key } : {}) }); return 1; };
+    q.update = async (row) => { updates.push({ table, row, nulls: q._nulls, ...(q._key ? { key: q._key } : {}) }); return 1; };
     q.first = async () => {
-      if (table === 'notifications') return openLookupBell && q._key === 'supplies-consumption-failed:lookup:svc-1' ? { id: 'bell-lookup' } : null; // retireLookupBellIfSettled's open-bell probe
+      if (table === 'notifications') return openLookupBell && (q._nulls || []).includes('done_at') && !(q._nulls || []).includes('read_at') && q._key === 'supplies-consumption-failed:lookup:svc-1' ? { id: 'bell-lookup' } : null; // retireLookupBellIfSettled's open-bell probe
       return table === 'product_inventory_movements' && (settledAfterBell || openLookupBell) ? { id: 'mv-race' } : null; // the post-bell settled re-check / lookupSettled
     };
     return q;
@@ -237,7 +245,10 @@ test('a failure bell that lands after a concurrent retry already deducted the ki
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
   const retired = updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(1);
-  expect(retired[0].row.read_at).toBeInstanceOf(Date);
+  // Selected by done_at (never read_at: a row someone only opened is still open work) and closed keepExisting.
+  expect(retired[0].nulls).toEqual(['done_at']);
+  expect(retired[0].row).toMatchObject({ done_by: 'supplies', keepExisting: true });
+  expect(retired[0].row.read_at).toBeUndefined();
 });
 
 test('duplicate (index ignored the insert) → no decrement', async () => {
@@ -341,7 +352,7 @@ test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14
   notifyAdmin.mockClear();
   const db = (table) => {
     if (table === 'products_catalog') throw new Error('relation lost');
-    const q = {}; for (const m of ['where', 'whereRaw', 'whereNull']) q[m] = () => q; q.first = async () => null; q.update = async () => 1; return q; // the post-bell settled re-check finds nothing
+    const q = {}; for (const m of ['where', 'whereRaw', 'whereNull', 'orWhereRaw']) q[m] = () => q; q.first = async () => null; q.update = async () => 1; return q; // the post-bell settled re-check finds nothing
   };
   db.transaction = async () => { throw new Error('unreachable'); };
   const res = await consumeCompletionSupplies(db, args);
@@ -364,10 +375,12 @@ function lookupBellDb({ retryProducts, movements }) {
       const q = {}; for (const m of ['where', 'whereNotNull']) q[m] = () => q; q.select = async () => retryProducts; return q;
     }
     const q = {}; let productId = null;
-    q.where = (w) => { if (w && w.product_id) productId = w.product_id; return q; };
-    for (const m of ['whereRaw', 'whereNull']) q[m] = () => q;
+    q.where = (w) => { if (typeof w === 'function') w(q); else if (w && w.product_id) productId = w.product_id; return q; };
+    q.orWhereRaw = () => q;
+    q.whereRaw = () => q;
+    q.whereNull = (col) => { (q._nulls ||= []).push(col); return q; };
     q.first = async () => (table === 'product_inventory_movements' && movements.includes(productId) ? { id: `mv-${productId}` } : null);
-    q.update = async (row) => { updates.push({ table, row }); return 1; };
+    q.update = async (row) => { updates.push({ table, row, nulls: q._nulls }); return 1; };
     return q;
   };
   db.raw = (sql) => sql;
@@ -382,7 +395,7 @@ test('a lookup bell is retired when the re-run lookup shows EVERY applicable kit
   const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' }); // lawnOnly does not apply to a pest visit
   expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
-  expect(updates).toEqual([{ table: 'notifications', row: expect.objectContaining({ read_at: expect.any(Date) }) }]);
+  expect(updates).toEqual([{ table: 'notifications', nulls: ['done_at'], row: expect.objectContaining({ done_by: 'supplies', keepExisting: true }) }]);
 });
 
 test('a lookup bell STAYS when one applicable kit product has no movement yet — one movement is not visit-wide settlement (Codex r27 P1)', async () => {
@@ -408,7 +421,8 @@ test('a successful deduction retires the failure bell an earlier attempt rang fo
   const retired = updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(1);
   expect(retired[0].key).toBe('supplies-consumption-failed:prod-sign:svc-1'); // never the lookup key from a product clear
-  expect(retired[0].row.read_at).toBeInstanceOf(Date);
+  expect(retired[0].nulls).toEqual(['done_at']);
+  expect(retired[0].row).toMatchObject({ done_by: 'supplies', keepExisting: true });
   expect(String(retired[0].row.metadata)).toContain('autoRetired'); // stamped so it never reads as a staff hand-off (Codex r26 P1)
 });
 

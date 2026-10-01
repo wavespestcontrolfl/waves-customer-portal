@@ -316,6 +316,79 @@ async function insertNewSubscriber({ lc, firstName, lastName, source, requireCon
   };
 }
 
+// ---------------------------------------------------------------------------
+// Out-of-area waitlist location tags. The astro websites' out-of-area card
+// posts source 'out_of_area_waitlist' with tags ['out_of_area_waitlist',
+// 'zip:34205', 'city:ruskin'] (newer sites also send top-level zip/city, which
+// win) so the office can see where waitlisters live.
+// Only that source's two location tags are persisted, into the existing
+// newsletter_subscribers.tags jsonb array; anything else in the posted tags is
+// dropped. Values are PII-adjacent: validated here, never logged.
+const WAITLIST_SOURCE = 'out_of_area_waitlist';
+const WAITLIST_CITY_MAX = 40;
+
+function waitlistCitySlug(value) {
+  if (typeof value !== 'string') return null;
+  const slug = value.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, WAITLIST_CITY_MAX)
+    .replace(/-+$/g, '');
+  return slug || null;
+}
+
+// `fields` = the body's top-level { zip, city } (newer sites), which win over
+// the zip:/city: entries in `rawTags` (older deployed sites send only tags).
+function sanitizeWaitlistTags(rawTags, fields = {}) {
+  const out = [WAITLIST_SOURCE];
+  let zip = typeof fields?.zip === 'string' && /^\d{5}$/.test(fields.zip.trim()) ? fields.zip.trim() : null;
+  let city = waitlistCitySlug(fields?.city);
+  if (Array.isArray(rawTags)) {
+    for (const raw of rawTags.slice(0, 20)) {
+      if (typeof raw !== 'string') continue;
+      const tag = raw.trim();
+      if (zip === null) {
+        const m = /^zip:(\d{5})$/i.exec(tag);
+        if (m) { zip = m[1]; continue; }
+      }
+      if (city === null && /^city:/i.test(tag)) city = waitlistCitySlug(tag.slice(5));
+    }
+  }
+  if (zip) out.push(`zip:${zip}`);
+  if (city) out.push(`city:${city}`);
+  return out;
+}
+
+// Writes the sanitized waitlist tags onto the signup's own mid-DOI row,
+// replacing any zip:/city: tag from an earlier attempt. Only a 'pending' row is
+// touched (this signup just created or re-armed it), so an anonymous post can't
+// rewrite tags on an already-confirmed subscriber. Returns the update count.
+async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
+  if (!subscriber || !subscriber.id) return 0;
+  const conn = dbh || db;
+  const fresh = sanitizeWaitlistTags(rawTags, fields);
+  // One atomic SQL update against the CURRENT tags (Codex #5454 r1): drop any
+  // earlier zip:/city:/waitlist tags and append the fresh ones, keeping every
+  // other tag in order — a concurrent writer (e.g. recordQuizResponse's atomic
+  // append) is never clobbered by a stale in-memory snapshot. Legacy/null/
+  // non-array tags coerce to []. The new tags bind as one JSON string.
+  const result = await conn.raw(
+    `UPDATE newsletter_subscribers
+        SET tags = (
+          SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb)
+            FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END
+            ) WITH ORDINALITY AS t(e, ord)
+           WHERE jsonb_typeof(e) <> 'string'
+              OR NOT ((e #>> '{}') ~* '^(zip|city):' OR (e #>> '{}') = ?)
+        ) || ?::jsonb,
+            updated_at = NOW()
+      WHERE id = ? AND status = 'pending'`,
+    [WAITLIST_SOURCE, JSON.stringify(fresh), subscriber.id],
+  );
+  return result?.rowCount ?? 0;
+}
+
 /**
  * Read-only token lookup. Used by the GET confirm-page render path —
  * scanners and link previews would trip a state change if GET were
@@ -631,4 +704,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };

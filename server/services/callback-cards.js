@@ -185,13 +185,20 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
       // during a lock wait would post-date.
       metadata: { snoozed_until: until?.toISOString() || null, ...editEvent,
         ...(['edit', 'reopen'].includes(action) ? { renewed_at: new Date().toISOString() } : {}) }, critical: true, trx });
-    // Every action retires the reminder for the version staff just acted
-    // on. The reminder identity is versioned by owner, deadline, snooze and
+    // Every action closes (done, read kept) the reminder for the version
+    // staff just acted on. The reminder identity is versioned by owner, deadline, snooze and
     // review (call-commitments-watchdog), so a callback left open re-arms
     // the same bell unread at its next due sweep.
     await trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'commitment_id' = ?", [id])
-      .whereNull('read_at').update({ read_at: now });
+      // openToCloser: a reminder a person already marked Done is taken over
+      // too, so the settled callback's reminder can't be reopened.
+      .modify((q) => require('./notification-service')._private.openToCloser(q, `callback:${actorId ?? 'staff'}`))
+      .update(require('./notification-service')._private.doneColumns({
+        // `callback:<staff id>`, not a bare person id: the action settled the
+        // callback itself, so this Done is not one Reopen may undo.
+        by: `callback:${actorId ?? 'staff'}`, resolution: `Callback ${action} by staff`, at: now, keepExisting: true, conn: trx,
+      }));
     return require('./call-commitments').normalizeRow(await trx('call_commitments').where({ id }).first());
   });
 }

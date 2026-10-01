@@ -1032,6 +1032,13 @@ async function completeProjectBackedService({
     };
   });
 
+  // A performed project closeout of a street-level hold's visit confirms its address (the shared
+  // transition stamped it); release the hold now. A no-op for every other visit; best-effort.
+  if (postCommitTrackServiceId) {
+    const holdReleased = await require('./outbound-review-confirm').releaseStreetLevelHoldForPerformedCompletion(postCommitTrackServiceId, { technicianId: actorId || null }, 'project-completion');
+    if (holdReleased === false) logger.warn(`[project-completion] street-level hold for ${postCommitTrackServiceId} was not released`);
+  }
+
   if (postCommitTrackServiceId) {
     try {
       const trackTransitions = require('./track-transitions');

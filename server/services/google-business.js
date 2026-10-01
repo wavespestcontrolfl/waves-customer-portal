@@ -206,7 +206,7 @@ async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary,
     title: next.title,
     body: next.body,
     detail: next.detail,
-    ...(shouldRing ? { read_at: null } : {}),
+    ...(shouldRing ? { read_at: null, done_at: null, done_by: null, resolution: null } : {}),
     metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
       subject, observedAt, kind: fields.kind, audience: fields.audience,
       alertClass: alertClassFor('gbp-sync-health', null), count: findings.length,

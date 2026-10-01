@@ -17,6 +17,7 @@ const { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE } = require('./lawn-repo
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
+const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
   LEGACY_WATER_IN_COPY,
   aftercareCustomerTask,
@@ -672,9 +673,13 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
     .map((p) => ({ url: p.url, label: photoZoneLabel(p.zone) }));
-  const photoSummary = String(
+  // The stock "No additional observations from the photo review." placeholder
+  // is not a summary: it would print as a visible sentence under the photos
+  // (web strip and PDF), so it collapses to null like an empty summary.
+  const photoSummaryText = String(
     lawnAssessment.observations || lawnAssessment.aiSummary || lawnAssessment.customerSummary || '',
-  ).trim() || null;
+  ).trim();
+  const photoSummary = photoSummaryText && photoSummaryText !== NO_OBSERVATIONS ? photoSummaryText : null;
   const heroPhoto = photoList[0] || null;
 
   const overallScore = num(scores.overallScore);
@@ -737,7 +742,6 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     // 2026-07-21 — the summary must say what was applied, not just tags).
     treatmentSummary: buildTreatmentSummary(treatment),
     watching: issues.slice(0, 3).map((i) => i.headline), // "main things we're watching"
-    mainWatch: topIssue ? (topIssue.whatWeSaw || topIssue.headline) : null,
     wavesNext,
     customerAction: realCustomerAction,
     // An older assessment's missing moisture cause is not an all-clear.
@@ -803,7 +807,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   return {
     snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
-    beforeAfter, progression, progressionNote, aftercare, seasonalNote, smsSummary, trends,
+    beforeAfter, progression, progressionNote, aftercare, smsSummary, trends,
   };
 }
 

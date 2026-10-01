@@ -1,7 +1,7 @@
 // resolveOpsDigest (fall-off rule, owner 2026-09-11): retires the admin
 // ops_digest rows carrying the key (and source when given) that are not
 // yet resolved — keyed off the resolved marker, not read_at, so a bell the
-// owner already opened still clears. read_at is stamped only if null;
+// owner already opened still clears. read_at and done_at are stamped only if null;
 // metadata merged with resolved/resolvedAt/resolvedBy; nothing deleted. A
 // In-process DB failures read as 0 so those senders retry next clean run;
 // machine /resolve opts into throws so its HTTP response is retryable 503.
@@ -46,8 +46,12 @@ test('retires not-yet-resolved rows (read or unread) by opsKey + source and stam
   expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'opsKey' = ?", ['e22-schedule-integrity:overlaps']);
   expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'source' = ?", ['ops-crons']);
   const patch = q.update.mock.calls[0][0];
-  // read_at only stamped when still null — an owner's earlier read stands.
-  expect(patch.read_at).toEqual({ sql: 'COALESCE(read_at, NOW())', bindings: undefined });
+  // keepExisting: read_at / done_at / done_by / resolution are COALESCEd, so an owner's earlier read or done stands
+  // and an unread row is read at the done instant. Selected by the resolved marker, never read_at or done_at.
+  expect(patch.read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');
+  expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
+  expect(patch.done_by).toBe('ops-crons:3-clean-runs'); // the latest closer: a person-done digest the check resolved is no longer reopenable
+  expect(patch.read_at.bindings).toEqual(patch.done_at.bindings);
   // dedupeKey is removed so a recurrence inside the rolling window rings again.
   expect(patch.metadata.sql).toBe("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb");
   const merged = JSON.parse(patch.metadata.bindings[0]);
@@ -118,7 +122,8 @@ test('alsoRetire: digest and opened/unread companion bells retire atomically wit
   expect(companion.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'resolved', '') <> 'true'");
   expect(companion.whereRaw).toHaveBeenCalledWith('metadata->>? = ?', ['evalKey', 'call-extraction-eval']);
   expect(companion.update).toHaveBeenCalledTimes(1);
-  expect(companion.update.mock.calls[0][0].read_at.sql).toBe('COALESCE(read_at, NOW())');
+  expect(companion.update.mock.calls[0][0].read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');
+  expect(companion.update.mock.calls[0][0].done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
   expect(companion.update.mock.calls[0][0].metadata.sql).toContain("- 'dedupeKey'");
 });
 
