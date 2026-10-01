@@ -205,6 +205,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow, strict }) 
     visitId: String(visit.id),
     techId: String(visit.technician_id),
     windowStart: visit.window_start || null,
+    scheduledDate: calendarDay(visit.scheduled_date),
     visitType: visit.service_type || null,
     windowDisplay: windowLabel(visit, deriveWindow),
   };
@@ -248,7 +249,7 @@ async function loadLateAlert(todayRows, { conn, deriveWindow }) {
     return visit && alertMatchesOccurrence(payload, visit);
   });
   if (!alert) return null;
-  const where = { visitId: String(visit.id), windowStart: visit.window_start || null, visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
+  const where = { visitId: String(visit.id), windowStart: visit.window_start || null, scheduledDate: calendarDay(visit.scheduled_date), visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
   // no-show-detector raises the same two types on missing tracking alone (stage 1
   // is 45 min into an open window): that is a tracking gap, not confirmed lateness.
   if (payload?.evidence === 'missing_tracking') {
@@ -276,7 +277,7 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
     if (done.has(String(row.id))) continue;
     const endMin = customerWindowEndMinutes(row);
     if (endMin == null || endMin >= nowMin) continue;
-    return { visitId: String(row.id), windowStart: row.window_start || null, type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
+    return { visitId: String(row.id), windowStart: row.window_start || null, scheduledDate: calendarDay(row.scheduled_date), type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
   }
   return null;
 }
@@ -543,15 +544,17 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 function visitStatusSignature(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
+  // the occurrence: visit + date + window start (a same-hour move to another day changes it)
+  const at = (f) => `${f.visitId}@${f.scheduledDate ?? ''}T${f.windowStart ?? ''}`;
   const tp = v.techPosition;
   const parts = [
     // a stale position still renders a line about this occurrence: its identity is
     // durable (no location TTL), so a completion / cancel / move invalidates it too
     tp && (tp.status === 'stale'
-      ? `stalepos:${key(`${tp.visitId}@${tp.windowStart ?? ''}`, tp.visitType, tp.techId)}`
-      : `pos:${key(`${tp.visitId}@${tp.windowStart ?? ''}`, tp.visitType, tp.techId, tp.status, tp.atThisVisit === true, tp.stopsAhead)}`),
-    v.lateAlert && `late:${key(`${v.lateAlert.visitId}@${v.lateAlert.windowStart ?? ''}`, v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
-    v.pastWindow && `past:${key(`${v.pastWindow.visitId}@${v.pastWindow.windowStart ?? ''}`, v.pastWindow.type)}`,
+      ? `stalepos:${key(at(tp), tp.visitType, tp.techId)}`
+      : `pos:${key(at(tp), tp.visitType, tp.techId, tp.status, tp.atThisVisit === true, tp.stopsAhead)}`),
+    v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
+    v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}`,
     v.missedVisit && `missed:${key(v.missedVisit.type, `${v.missedVisit.date}@${v.missedVisit.windowStart ?? ''}`, v.missedVisit.reason)}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;

@@ -97,6 +97,10 @@ describe('loadVisitLoops basics', () => {
     const base = visitStatusSignature({ techPosition: tp });
     expect(visitStatusSignature({ techPosition: { ...tp, techId: 't2' } })).not.toBe(base);
     expect(visitStatusSignature({ techPosition: { ...tp, windowStart: '13:00:00' } })).not.toBe(base);
+    // the same row and hour moved to another day is a different occurrence
+    expect(visitStatusSignature({ techPosition: { ...tp, scheduledDate: '2026-10-02' } })).not.toBe(visitStatusSignature({ techPosition: { ...tp, scheduledDate: '2026-10-01' } }));
+    expect(visitStatusSignature({ lateAlert: { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-02', type: 'tech_late' } }))
+      .not.toBe(visitStatusSignature({ lateAlert: { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'tech_late' } }));
     expect(visitStatusSignature({ techPosition: { ...tp, windowDisplay: '9:00 AM–11:00 AM' } })).toBe(base);
     // a staff correction of the service the line names
     expect(visitStatusSignature({ techPosition: { ...tp, visitType: 'Lawn Care' } })).not.toBe(visitStatusSignature({ techPosition: { ...tp, visitType: 'Pest Control' } }));
@@ -126,7 +130,7 @@ describe('techPosition', () => {
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn, deriveWindow });
     expect(out.techPosition).toEqual({
       techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
-      visitId: 'visit-1', techId: 'tech-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
+      visitId: 'visit-1', techId: 'tech-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
     });
     expect(computeStopsAhead).toHaveBeenCalledWith(conn, 'visit-1', { readOnly: true, today: '2026-10-01', throwOnError: false });
   });
@@ -224,7 +228,7 @@ describe('lateAlert', () => {
   });
 
   test('an open alert carries type, severity and minutes from the payload (string or object)', async () => {
-    const which = { visitId: 'visit-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
+    const which = { visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: JSON.stringify({ delay_minutes: 35, scheduled_date: '2026-10-01', window_start: '09:00:00' }) })).lateAlert)
       .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35, missingTracking: false, ...which });
     expect((await run({ type: 'unassigned_overdue', severity: 'critical', job_id: 'visit-1', payload: { delay_minutes: '12', scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert)
@@ -234,7 +238,7 @@ describe('lateAlert', () => {
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
     const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload })).lateAlert)
-      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitId: 'visit-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
+      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
   });
 
   test('with two visits today the alert names the visit it was raised on', async () => {
@@ -291,7 +295,7 @@ describe('pastWindow', () => {
   test('a pending visit past its customer-facing window (start + 2h, not the internal block) reads passed', async () => {
     // window_start 09:00, internal window_end 10:00, customer window 9-11; it is 12:00.
     const out = await run({ status: 'pending' });
-    expect(out.pastWindow).toEqual({ visitId: 'visit-1', windowStart: '09:00:00', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60 });
+    expect(out.pastWindow).toEqual({ visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60 });
   });
 
   test('inside the customer-facing window (even past the internal window_end) is not passed', async () => {
