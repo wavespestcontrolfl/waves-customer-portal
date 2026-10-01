@@ -248,6 +248,26 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.problems[0].detail).toBe('lawn $50.00 vs $100.00; pest $200.00 vs $150.00');
   });
 
+  test('an unpriced child under a PRICED parent is reported here (the unpriced-series alert reads it as inheriting)', () => {
+    const lawn = lawnRows({ invoiceId: null, parentOverrides: { estimated_price: 100 }, childOverrides: { estimated_price: null } });
+    const verdict = run([PEST, LAWN], [...pestRows({ invoiceId: null, parentOverrides: { estimated_price: 150 } }), ...lawn]);
+    expect(codes(verdict)).toEqual(['child_unpriced']);
+    expect(verdict.problems[0].text).toBe('5 lawn visits have no price while their series is priced');
+  });
+
+  test('a seasonal mosquito series rolled past the first day is unslotted on purpose; same-day rows still need time/tech', () => {
+    const MOSQ = { service: 'mosquito', name: 'Mosquito Control', visitsPerYear: 9, frequency: 'every_6_weeks', annual: 540, mo: 45 };
+    const later = '2027-02-01';
+    const mosq = series({ key: 'mosquito_seasonal', type: 'Mosquito Control', visits: 3, price: 60, spacing: 42, invoiceId: null,
+      parentOverrides: { scheduled_date: later, estimated_price: 60, window_start: null, technician_id: null },
+      childOverrides: { window_start: null, technician_id: null } }).map((row) => (row.recurring_parent_id ? { ...row, scheduled_date: later } : row));
+    const pest = pestRows({ invoiceId: null, parentOverrides: { estimated_price: 150 } });
+    expect(check.acceptedPrograms(estimate([PEST, MOSQ])).programs.has('mosquito')).toBe(true);
+    expect(codes(run([PEST, MOSQ], [...pest, ...mosq]))).not.toContain('missing_time_tech');
+    const sameDay = mosq.map((row) => ({ ...row, scheduled_date: DAY0 }));
+    expect(codes(run([PEST, MOSQ], [...pest, ...sameDay]))).toContain('missing_time_tech');
+  });
+
   test('a primary_line_price with no estimated_price is not a price (completion bills nothing from it), so it is never compared', () => {
     const lawn = lawnRows({ childOverrides: { estimated_price: null, primary_line_price: 150 } });
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual([]);

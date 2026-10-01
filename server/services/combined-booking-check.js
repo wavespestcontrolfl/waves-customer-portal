@@ -290,26 +290,40 @@ function bump(map, families) {
   for (const family of families) map.set(family, (map.get(family) || 0) + 1);
 }
 
-// 1. time + technician on every live row.
-function checkTimeAndTech(dated, programs) {
+// 1. time + technician on every live row, except a SEASONAL mosquito series
+// whose first visit rolled past the booking's first day: the converter books
+// it unslotted on purpose until the office routes that season
+// (estimate-converter.js, the seasonalMosquito promotion).
+function checkTimeAndTech(dated, programs, { firstDay, byId }) {
   const untimed = new Map();
+  const seasonalUnslotted = (row) => programRowFamilies(row, programs).every((family) => family === 'mosquito')
+    && dateOnly((byId.get(String(row.recurring_parent_id)) || row).scheduled_date) > firstDay;
   for (const row of dated) {
-    if (!(row.window_start && row.technician_id)) bump(untimed, programRowFamilies(row, programs));
+    if (!(row.window_start && row.technician_id) && !seasonalUnslotted(row)) bump(untimed, programRowFamilies(row, programs));
   }
   return untimed.size ? [{ code: 'missing_time_tech', text: `${listFamilies(untimed, programs)} visits missing time/tech` }] : [];
 }
 
 // 2. price on every priced series child (whatever its date: with the first
 // visits cancelled, a child can be the earliest live row) and every priced
-// top-level row after the first day. An UNPRICED visit is not this check's:
-// the schedule-integrity watchdog's unpriced-series alert owns it, and a
-// second bell for the same $0 defect would only conflict with that one.
-function checkLaterPrices(dated, programs, firstDay) {
+// top-level row after the first day. An UNPRICED visit is the watchdog's
+// unpriced-series alert's, with one exception that alert cannot see: it treats
+// a recurring child under a PRICED parent as inheriting the parent's price,
+// but a child copies that price only when the series is seeded and bills its
+// own estimated_price at completion, so such a child bills $0. That shape is
+// reported here (child_unpriced), never both places.
+function checkLaterPrices(dated, programs, { firstDay, byId }) {
   const off = new Map();
   const offDetail = [];
+  const bare = new Map();
   for (const row of dated.filter((r) => r.recurring_parent_id || r.day > firstDay)) {
     const price = rowPrice(row);
-    if (!(price > 0) || isPrepaid(row) || duesOnly(row, programs)) continue;
+    if (isPrepaid(row) || duesOnly(row, programs)) continue;
+    if (!(price > 0)) {
+      const parent = row.is_recurring !== false && byId.get(String(row.recurring_parent_id));
+      if (parent && rowPrice(parent) > 0) bump(bare, programRowFamilies(row, programs));
+      continue;
+    }
     // A parent stamped into a combined first-application invoice is covered
     // by it (the converter leaves such companions unpriced on purpose).
     if (row.first_application_invoice_id && !row.recurring_parent_id) continue;
@@ -320,11 +334,14 @@ function checkLaterPrices(dated, programs, firstDay) {
       offDetail.push(`${lowerLabel(families[0])} ${money(price)} vs ${money(expected)}`);
     }
   }
-  return off.size ? [{
-    code: 'price_mismatch',
-    text: off.size === 1 ? `${offDetail[0]} on ${[...off.values()][0]} visits` : `visit prices off the quote: ${listFamilies(off, programs)}`,
-    detail: offDetail.slice(0, 6).join('; '),
-  }] : [];
+  return [
+    ...(bare.size ? [{ code: 'child_unpriced', text: `${listFamilies(bare, programs)} visits have no price while their series is priced` }] : []),
+    ...(off.size ? [{
+      code: 'price_mismatch',
+      text: off.size === 1 ? `${offDetail[0]} on ${[...off.values()][0]} visits` : `visit prices off the quote: ${listFamilies(off, programs)}`,
+      detail: offDetail.slice(0, 6).join('; '),
+    }] : []),
+  ];
 }
 
 // 3a. first-day rows stamped into a combined first-application invoice.
@@ -463,9 +480,10 @@ function evaluateCombinedBooking(ctx) {
   // (`stamped`, above).
   const unstamped = dated.filter((row) => row.day === firstDay && !row.recurring_parent_id
     && !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row) && !duesOnly(row, priced));
+  const byId = new Map(allRows.map((row) => [String(row.id), row]));
   const problems = [
-    ...checkTimeAndTech(dated, programs),
-    ...checkLaterPrices(dated, priced, firstDay),
+    ...checkTimeAndTech(dated, programs, { firstDay, byId }),
+    ...checkLaterPrices(dated, priced, { firstDay, byId }),
     ...(stamped.length ? checkStampedFirstDay(stamped, priced, invoices) : []),
     ...(unstamped.length ? checkUnstampedFirstDay(unstamped, priced) : []),
     ...checkSplitInvoices(split, priced),
