@@ -2687,6 +2687,12 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
+    // Appointment-text intent and on-site presence come ONLY from V1 (V2 has
+    // no such fields — it fails closed). The identity-conflict check above
+    // already returned V1 unmerged for a different person, so a V2 partner
+    // can never inherit them.
+    wants_appointment_texts: v1.wants_appointment_texts === true,
+    on_site: v1.on_site === true,
     // Billing flag: V1's own flag always stands. A V2 flag is only inherited
     // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
     // full name. The identity-conflict check above can't see this gap: if V1
@@ -3237,14 +3243,19 @@ const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 
 const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'tenant', 'family_member']);
 // Owner ruling 2026-09-30 "on-site person is the contact point": when the
 // caller books for someone who will be at the property, gives their phone, and
-// agrees they should get the appointment texts (wants_notifications), that
-// person IS the appointment contact even though the caller never said the
-// words "you can text me" (V2 consent.sms_consent_given stays false). Without
-// this the slot was written unstamped and every text went to the out-of-state
-// caller. Pure: callers decide what to stamp; the recipient opt-in confirmation
-// ask still runs for the phone.
+// agrees they should get the appointment texts, that person IS the appointment
+// contact even though the caller never said the words "you can text me" (V2
+// consent.sms_consent_given stays false). Without this the slot was written
+// unstamped and every text went to the out-of-state caller.
+// wants_notifications is channel-neutral (it is also set for "email him the
+// report/invoice") and a relationship does not prove presence, so the rule
+// needs BOTH grounded fields from the V1 extraction: wants_appointment_texts
+// (the caller agreed to appointment TEXTS) and on_site (the call says they
+// will be at the property). V2 contacts carry neither and fail closed. Pure:
+// callers decide what to stamp; the recipient opt-in confirmation ask still
+// runs for the phone.
 function onSiteNotifyConsent(contact) {
-  if (!contact || contact.wants_notifications !== true) return false;
+  if (!contact || contact.wants_appointment_texts !== true || contact.on_site !== true) return false;
   if (!String(contact.phone || '').trim()) return false;
   return ON_SITE_NOTIFY_ROLES.has(String(contact.role || '').trim().toLowerCase());
 }
@@ -7424,7 +7435,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "occupancy": "one of: owner_occupied, rental_investment, commercial, seasonal, vacant, unknown — or null when unstated", "is_primary_residence": true/false/null, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
   "service_address_occupancy": "occupancy of the MAIN address_line1 property, same enum as above — or null when unstated",
   "service_address_is_primary_residence": true/false/null,
-  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, lender, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
+  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, lender, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "wants_appointment_texts": true/false (true ONLY when the caller agreed THIS person should receive the appointment TEXTS — reminders, the 'on the way' route-tracking link, the arrival text; false for 'email him the report/invoice' or any non-text request), "on_site": true/false (true ONLY when the call says THIS person will be AT the property for the visit — lives there, 'he'll be there', meeting the technician; false when unstated), "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
@@ -7461,6 +7472,8 @@ IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
 - first_name/last_name are the caller's OWN name. A name used to greet or address the OTHER party ("Hey Tom", "Hi Mary, it's Adam") belongs to that other party: on an inbound call the person who answered is Waves staff, so the caller's "Hey Tom" names staff, never the caller; on an outbound call Waves staff placed, the person our staff greets by name IS the customer. Take who-is-staff from CALL DIRECTION, not from speaker labels, which can be swapped. When the caller's own name is never stated, leave first_name/last_name null.
 - role describes the secondary person's relationship to the transaction (the BUYER a realtor is booking for is home_buyer, not real_estate_agent; a loan officer named as a party is lender).
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — gets wants_notifications false.
+- wants_appointment_texts: true ONLY when the caller agreed this person should receive the appointment TEXT messages — visit reminders, the "on the way" tracking link, the arrival text ("we could put his cell on the account so he'll get the reminders" — "yeah"; "text my tenant when you're on the way"). Wanting the REPORT or INVOICE sent to someone ("email him the report") is NOT appointment-text intent: false. Default false; do not invent.
+- on_site: true ONLY when the call says this person will be AT the property for the visit — they live there, "he'll be there", "she'll meet your technician". A relationship alone (spouse, buyer) does not prove presence: if the call does not say they will be there, false. Default false; do not invent.
 - When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
 - Apply the same spelled-out-input, correction, and do-not-invent rules as the caller's own contact fields. A person mentioned with no name AND no contact info: secondary_contact is null.
 

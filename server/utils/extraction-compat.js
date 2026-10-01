@@ -205,6 +205,11 @@ function mapSecondaryContactToLegacy(contact) {
     email: contact.email || null,
     role: contact.role || 'unknown',
     wants_notifications: contact.wants_notifications === true,
+    // V2 contacts carry neither field (strict schema), so they map to false and
+    // never qualify for the on-site consent rule; passed through so a contact
+    // that does carry them keeps them.
+    wants_appointment_texts: contact.wants_appointment_texts === true,
+    on_site: contact.on_site === true,
     is_billing_party: contact.is_billing_party === true,
     notes: contact.notes || null,
   };

@@ -63,6 +63,8 @@ describe('normalizeCallExtraction — secondary_contact', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      wants_appointment_texts: false,
+      on_site: false,
       is_billing_party: false,
       notes: 'relocating from out of area',
     });
@@ -136,6 +138,8 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      wants_appointment_texts: false,
+      on_site: false,
       is_billing_party: false,
       notes: null,
     });
@@ -172,6 +176,8 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      wants_appointment_texts: false,
+      on_site: false,
       is_billing_party: false,
       notes: null,
     });
@@ -687,22 +693,35 @@ describe('on-site contact is the appointment contact point', () => {
   const spouse = {
     first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123',
     email: 'sample@example.com', role: 'spouse_partner',
-    wants_notifications: true, notes: null,
+    wants_notifications: true, wants_appointment_texts: true, on_site: true, notes: null,
   };
 
   describe('onSiteNotifyConsent', () => {
-    test.each(['spouse_partner', 'home_buyer', 'tenant', 'family_member'])('%s with intent + phone qualifies', (role) => {
+    test.each(['spouse_partner', 'home_buyer', 'tenant', 'family_member'])('%s with appointment-text intent + on-site + phone qualifies', (role) => {
       expect(onSiteNotifyConsent({ ...spouse, role })).toBe(true);
     });
     test.each(['home_seller', 'landlord', 'lender', 'real_estate_agent', 'property_manager', 'other', 'unknown', null])('%s never qualifies', (role) => {
       expect(onSiteNotifyConsent({ ...spouse, role })).toBe(false);
     });
-    test('requires wants_notifications === true and a phone', () => {
-      expect(onSiteNotifyConsent({ ...spouse, wants_notifications: false })).toBe(false);
-      expect(onSiteNotifyConsent({ ...spouse, wants_notifications: undefined })).toBe(false);
+    test('requires wants_appointment_texts === true, on_site === true and a phone', () => {
+      expect(onSiteNotifyConsent({ ...spouse, wants_appointment_texts: false })).toBe(false);
+      expect(onSiteNotifyConsent({ ...spouse, wants_appointment_texts: undefined })).toBe(false);
+      expect(onSiteNotifyConsent({ ...spouse, on_site: false })).toBe(false);
+      expect(onSiteNotifyConsent({ ...spouse, on_site: undefined })).toBe(false);
       expect(onSiteNotifyConsent({ ...spouse, phone: null })).toBe(false);
       expect(onSiteNotifyConsent({ ...spouse, phone: '  ' })).toBe(false);
       expect(onSiteNotifyConsent(null)).toBe(false);
+    });
+    test('email/report-only intent never qualifies: wants_notifications is channel-neutral (codex P1)', () => {
+      // "Email him the report" sets wants_notifications true but NOT
+      // wants_appointment_texts, even with a phone on file and an on-site role.
+      const reportOnly = { ...spouse, wants_notifications: true, wants_appointment_texts: false };
+      expect(onSiteNotifyConsent(reportOnly)).toBe(false);
+      // wants_notifications alone (no V1 grounding fields — e.g. a V2 contact) fails closed.
+      const { wants_appointment_texts, on_site, ...v2Shaped } = spouse;
+      expect(onSiteNotifyConsent(v2Shaped)).toBe(false);
+      // The rule no longer depends on wants_notifications itself.
+      expect(onSiteNotifyConsent({ ...spouse, wants_notifications: false })).toBe(true);
     });
     test('role match is case-insensitive', () => {
       expect(onSiteNotifyConsent({ ...spouse, role: ' Spouse_Partner ' })).toBe(true);
@@ -759,7 +778,7 @@ describe('on-site contact is the appointment contact point', () => {
     return persistCallSecondaryContact('cust-1', contact, { smsConsentExplicit, smsConsentSource });
   }
 
-  test('(a) spouse + intent + phone stamps source call_pipeline_onsite_contact even with V2 consent false', async () => {
+  test('(a) spouse + appointment-text intent + on-site + phone stamps source call_pipeline_onsite_contact even with V2 consent false', async () => {
     const updates = stubDb(bare);
     expect(await persistLikeLoop(spouse, false)).toBe('written');
     expect(updates).toHaveLength(1);
@@ -771,11 +790,24 @@ describe('on-site contact is the appointment contact point', () => {
     });
   });
 
-  test.each(['lender', 'real_estate_agent'])('(b) role %s with intent and V2 consent false writes NO stamp', async (role) => {
+  test.each(['lender', 'real_estate_agent'])('(b) role %s with every grounded field and V2 consent false writes NO stamp', async (role) => {
     const updates = stubDb(bare);
     expect(await persistLikeLoop({ ...spouse, role }, false)).toBe('written');
     expect(updates[0]).not.toHaveProperty('service_contacts_consent_at');
     expect(updates[0]).not.toHaveProperty('service_contacts_consent_source');
+  });
+
+  test('(c2) report-only intent (wants_notifications true, no appointment-text intent) slots the contact but writes NO stamp', async () => {
+    const updates = stubDb(bare);
+    expect(await persistLikeLoop({ ...spouse, wants_appointment_texts: false }, false)).toBe('written');
+    expect(updates[0]).not.toHaveProperty('service_contacts_consent_at');
+    expect(updates[0]).not.toHaveProperty('service_contacts_consent_source');
+  });
+
+  test('(c3) appointment-text intent but NOT on site -> slotted, NO stamp', async () => {
+    const updates = stubDb(bare);
+    expect(await persistLikeLoop({ ...spouse, on_site: false }, false)).toBe('written');
+    expect(updates[0]).not.toHaveProperty('service_contacts_consent_at');
   });
 
   test('(c) spouse WITHOUT notification intent is not slotted and not stamped', async () => {
@@ -797,5 +829,48 @@ describe('on-site contact is the appointment contact point', () => {
     const updates = stubDb(bare);
     await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: true });
     expect(updates[0].service_contacts_consent_source).toBe('call_pipeline_request');
+  });
+});
+
+describe('secondary-contact grounding fields through the compat mappers', () => {
+  const { normalizeSecondaryContact: normalizeV1 } = require('../utils/intake-normalize');
+  const v2Base = {
+    name_full: 'Sample Spouse', first_name: 'Sample', last_name: 'Spouse',
+    phone_e164: '+15550100123', email: null, role: 'spouse_partner',
+    wants_notifications: true, notes: null,
+  };
+
+  test('mapSecondaryContactToLegacy defaults both fields to false when absent (V2 fails closed)', () => {
+    const mapped = mapSecondaryContactToLegacy(v2Base);
+    expect(mapped.wants_appointment_texts).toBe(false);
+    expect(mapped.on_site).toBe(false);
+    expect(onSiteNotifyConsent(mapped)).toBe(false);
+  });
+
+  test('mapSecondaryContactToLegacy passes both fields through when present', () => {
+    const mapped = mapSecondaryContactToLegacy({ ...v2Base, wants_appointment_texts: true, on_site: true });
+    expect(mapped.wants_appointment_texts).toBe(true);
+    expect(mapped.on_site).toBe(true);
+    // Only a strict true counts.
+    expect(mapSecondaryContactToLegacy({ ...v2Base, on_site: 'yes' }).on_site).toBe(false);
+  });
+
+  test('V1 normalizer keeps strict booleans and defaults absent fields to false', () => {
+    const base = { first_name: 'Sample', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true };
+    const absent = normalizeV1(base);
+    expect(absent.wants_appointment_texts).toBe(false);
+    expect(absent.on_site).toBe(false);
+    const present = normalizeV1({ ...base, wants_appointment_texts: true, on_site: true });
+    expect(present.wants_appointment_texts).toBe(true);
+    expect(present.on_site).toBe(true);
+  });
+
+  test('resolveCallSecondaryContact keeps V1 grounding fields, and a V2-only partner never gets them', () => {
+    const v1 = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true });
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1 }, { secondary_contact: v2Base });
+    expect(merged.wants_appointment_texts).toBe(true);
+    expect(merged.on_site).toBe(true);
+    const v2Only = resolveCallSecondaryContact({}, { secondary_contact: v2Base });
+    expect(onSiteNotifyConsent(v2Only)).toBe(false);
   });
 });
