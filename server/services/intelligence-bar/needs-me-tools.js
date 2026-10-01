@@ -9,7 +9,7 @@
  */
 
 const logger = require('../logger');
-const { listNeedsMe } = require('../needs-me');
+const { listNeedsMe, decodeCursor } = require('../needs-me');
 const { AREAS, WHO, cutAtWord } = require('../admin-alert-compose');
 
 const MAX_ITEMS = 100;
@@ -28,6 +28,7 @@ Use for: "what needs me?", "what's open?", "what can Claude fix on its own?", "w
         who: { type: 'string', enum: WHO, description: 'Only items this actor may resolve. Exact: "claude" returns only what Claude may fix alone; "either" (Claude drafts, a person approves) is its own value.' },
         area: { type: 'string', enum: AREAS, description: 'Only items in this area.' },
         limit: { type: 'integer', minimum: 1, maximum: MAX_ITEMS, description: `How many items to return (default 25, most urgent first).` },
+        after: { type: 'string', description: 'The next_cursor from a previous call, to read the next page. Omit for the first page.' },
       },
     },
   },
@@ -59,7 +60,9 @@ function toBarItem(item) {
 async function needsMe(input = {}) {
   try {
     const limit = Number.isInteger(input.limit) ? Math.min(Math.max(input.limit, 1), MAX_ITEMS) : 25;
-    const result = await listNeedsMe({ who: input.who, area: input.area, limit });
+    const after = input.after ? decodeCursor(input.after) : null;
+    if (input.after && !after) return { error: 'after must be the next_cursor from a previous needs_me call' };
+    const result = await listNeedsMe({ who: input.who, area: input.area, limit, after });
     return {
       generated_at: result.generatedAt,
       total_open: result.total,
@@ -67,6 +70,7 @@ async function needsMe(input = {}) {
       counts: result.counts,
       items: result.items.map(toBarItem),
       warnings: result.warnings,
+      next_cursor: result.next,
       note: 'Never resolve a "person" item. A "claude" item may be fixed without asking, and the fix is reported afterward.',
     };
   } catch (err) {

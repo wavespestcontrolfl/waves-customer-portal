@@ -10,6 +10,7 @@
 //   railway run --service Postgres node ops/agents/needs-me.js --who claude --area System
 //   railway run --service Postgres node ops/agents/needs-me.js --detail
 //   railway run --service Postgres node ops/agents/needs-me.js --json
+//   railway run --service Postgres node ops/agents/needs-me.js --after <cursor>   (next page; printed under the list)
 //
 // --who is exact: `claude` is what a session may fix alone, `either` (Claude drafts, a person
 // approves) is listed only under `--who either`. --detail prints each alert's full finding
@@ -27,7 +28,7 @@ process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
-const { listNeedsMe } = require(path.join(__dirname, '..', '..', 'server', 'services', 'needs-me'));
+const { listNeedsMe, decodeCursor } = require(path.join(__dirname, '..', '..', 'server', 'services', 'needs-me'));
 const { AREAS, WHO } = require(path.join(__dirname, '..', '..', 'server', 'services', 'admin-alert-compose'));
 
 function arg(name) {
@@ -39,6 +40,9 @@ function arg(name) {
 const who = arg('who');
 const area = arg('area');
 const limit = arg('limit');
+const afterArg = arg('after');
+const after = afterArg === undefined ? null : decodeCursor(afterArg);
+if (afterArg !== undefined && !after) { console.error('--after must be the next cursor a previous run printed'); process.exit(2); }
 if (who !== undefined && !WHO.includes(who)) { console.error(`--who must be one of: ${WHO.join(', ')}`); process.exit(2); }
 if (area !== undefined && !AREAS.includes(area)) { console.error(`--area must be one of: ${AREAS.join(', ')}`); process.exit(2); }
 
@@ -48,7 +52,7 @@ const cell = (text, width) => {
 };
 
 (async () => {
-  const result = await listNeedsMe({ who, area, limit });
+  const result = await listNeedsMe({ who, area, limit, after });
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -61,6 +65,7 @@ const cell = (text, width) => {
     if (process.argv.includes('--detail') && item.detail) console.log(item.detail.split('\n').map((l) => `    ${l}`).join('\n'));
   }
   console.log(`\n${result.items.length} shown of ${result.total} open. * = inferred from an older alert.`);
+  if (result.next) console.log(`More: --after ${result.next}`);
   for (const w of result.warnings) console.error(`warning: ${w.source}${w.generator ? ` (${w.generator})` : ''} ${w.error}`);
 })().catch((err) => {
   console.error(`needs-me failed: ${err.message}`);

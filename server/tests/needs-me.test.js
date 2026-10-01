@@ -31,7 +31,7 @@ jest.mock('../models/db', () => () => {
 
 const NotificationService = require('../services/notification-service');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
-const { listNeedsMe, mapAlertRow } = require('../services/needs-me');
+const { listNeedsMe, mapAlertRow, decodeCursor } = require('../services/needs-me');
 const router = require('../routes/admin-needs-me');
 
 const UUID = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
@@ -166,6 +166,10 @@ test('a standing condition is a needs-you count that clears at zero, filed by th
 test('a row whose invalid subject raiseAdminAlert dropped keeps its other fields but stays derived', () => {
   const item = mapAlertRow(row({ metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent' } }));
   expect(item.derived).toBe(true);
+  // Each valid part stands on its own: only the subject was inferred.
+  expect(item).toMatchObject({ area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent' });
+  const claudeOnly = mapAlertRow(row({ metadata: { who: 'claude' } }));
+  expect(claudeOnly).toMatchObject({ who: 'claude', derived: true });
   const badType = mapAlertRow(row({ metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent', subject: { type: 'planet', id: 'x' } } }));
   expect(badType.derived).toBe(true);
 });
@@ -241,6 +245,30 @@ test('the router guards by role as well as authentication', () => {
   expect(handles).toEqual(expect.arrayContaining([adminAuthenticate, requireTechOrAdmin]));
 });
 
+test('an ops digest with no stamped area takes its work page\'s area from its link; an unknown link stays System', () => {
+  const digest = (link) => mapAlertRow(row({ category: 'ops_digest', link, metadata: { kind: 'ACT', audience: 'owner' } }));
+  expect(digest('/admin/estimates?tab=promised').area).toBe('Estimates');
+  expect(digest('/admin/communications').area).toBe('Comms');
+  expect(digest('/admin/agents?tab=activity').area).toBe('System');
+});
+
+test('a cursor pages past the response cap: every open item exactly once, in one stable order', async () => {
+  mockRows = Array.from({ length: 23 }, (_, i) => row({ id: `n${String(i).padStart(2, '0')}`, created_at: `2026-09-${String(10 + (i % 5)).padStart(2, '0')}T00:00:00Z` }));
+  const seen = [];
+  let after = null;
+  for (let pages = 0; pages < 10; pages += 1) {
+    const out = await listNeedsMe({ limit: 5, after });
+    expect(out.total).toBe(23);
+    seen.push(...out.items.map((i) => i.id));
+    if (!out.next) break;
+    after = decodeCursor(out.next);
+    expect(after).not.toBeNull();
+  }
+  expect(seen).toHaveLength(23);
+  expect(new Set(seen).size).toBe(23);
+  expect(decodeCursor('not-a-cursor')).toBeNull();
+});
+
 describe('GET /api/admin/needs-me', () => {
   const handler = router.stack.find((layer) => layer.route?.path === '/' && layer.route.methods.get).route.stack[0].handle;
   const call = async (query, techRole = 'admin') => {
@@ -256,6 +284,10 @@ describe('GET /api/admin/needs-me', () => {
     expect(body.items.map((i) => i.id)).toEqual(['fix']);
     expect(body).toEqual(expect.objectContaining({ generatedAt: expect.any(String), total: 1, warnings: [] }));
     expect(NotificationService.scopeAdminFeedToRole.mock.calls.map((c) => c[1])).toEqual(['technician']);
+  });
+
+  test('a malformed after cursor is a 400', async () => {
+    expect((await call({ after: 'garbage' })).status).toHaveBeenCalledWith(400);
   });
 
   test('refuses a who or area it does not know', async () => {

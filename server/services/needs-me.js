@@ -104,28 +104,47 @@ function digestLinks(row) {
   return { link: row.link, reportLink: focused };
 }
 
+// A row's area when it carries none: an ops digest names its work page in its
+// link (estimates, communications, ...), so that page's area wins over the
+// generic System its category maps to.
+function inferredArea(row) {
+  if (row.category === 'ops_digest' && row.link) {
+    const fromLink = areaFrom(AREA_BY_PATH, String(row.link).split('?')[0]);
+    if (fromLink !== 'System') return fromLink;
+  }
+  return areaFrom(AREA_BY_CATEGORY, row.category);
+}
+
 function mapAlertRow(row) {
   const meta = parseMeta(row.metadata);
   // Composed only with ALL its parts, a valid allowlisted subject included:
   // raiseAdminAlert keeps the other fields when it drops an invalid subject,
   // and such a row is still partly inferred (derived).
-  const composed = AREAS.includes(meta.area) && SEVERITIES.includes(meta.severity) && WHO.includes(meta.who)
-    && typeof meta.doneWhen === 'string' && !!validSubject(meta.subject) && SUBJECT_TYPES.includes(meta.subject.type);
+  // Each structured part stands on its own: raiseAdminAlert keeps the valid
+  // ones when it drops an invalid subject. Only a missing part is inferred,
+  // and the row is `derived` when ANY part was.
+  const has = {
+    area: AREAS.includes(meta.area),
+    severity: SEVERITIES.includes(meta.severity),
+    who: WHO.includes(meta.who),
+    doneWhen: typeof meta.doneWhen === 'string',
+    subject: !!validSubject(meta.subject) && SUBJECT_TYPES.includes(meta.subject.type),
+  };
   const detail = boundedDetail(row.detail);
   return {
     kind: 'alert',
     id: row.id,
     category: row.category,
-    area: composed ? meta.area : areaFrom(AREA_BY_CATEGORY, row.category),
+    area: has.area ? meta.area : inferredArea(row),
     headline: row.title,
     why: row.body || whyFromDetail(detail),
     detail,
-    severity: composed ? meta.severity : legacySeverity(row, meta),
+    severity: has.severity ? meta.severity : legacySeverity(row, meta),
     ...digestLinks(row),
-    subject: validSubject(meta.subject) ? { type: meta.subject.type, id: meta.subject.id } : legacySubject(row, meta),
-    doneWhen: composed ? meta.doneWhen : null,
-    who: composed ? meta.who : (row.category === 'ops_digest' && meta.audience === 'engineering' ? 'claude' : 'person'),
-    derived: !composed,
+    subject: has.subject ? { type: meta.subject.type, id: meta.subject.id } : legacySubject(row, meta),
+    doneWhen: has.doneWhen ? meta.doneWhen : null,
+    who: has.who ? meta.who : (row.category === 'ops_digest' && meta.audience === 'engineering' ? 'claude' : 'person'),
+    derived: !Object.values(has).every(Boolean),
     activityOnly: meta.feed === 'activity',
     createdAt: row.created_at,
     readAt: row.read_at || null,
@@ -181,7 +200,28 @@ async function openAlertRows(role) {
 // is its own filter and never rides along with `claude`.
 const whoMatches = (filter, who) => !filter || filter === who;
 
-async function listNeedsMe({ who, area, limit, role } = {}) {
+// One total order, the same on every call: severity (broken first), then
+// newest, then id. A standing condition has no time; it sorts first within its
+// severity at a fixed point, so a cursor never moves under it.
+const STANDING_TS = Number.MAX_SAFE_INTEGER;
+const sortKey = (item) => [SEVERITY_RANK[item.severity] ?? 1,
+  item.createdAt ? new Date(item.createdAt).getTime() : STANDING_TS, String(item.id)];
+function compareKeys(a, b) {
+  return (a[0] - b[0]) || (b[1] - a[1]) || (a[2] < b[2] ? 1 : a[2] > b[2] ? -1 : 0);
+}
+const compareItems = (a, b) => compareKeys(sortKey(a), sortKey(b));
+const encodeCursor = (key) => Buffer.from(JSON.stringify(key)).toString('base64url');
+// A cursor from `next`; anything else is null (the route answers 400).
+function decodeCursor(raw) {
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const key = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    const ok = Array.isArray(key) && key.length === 3 && Number.isFinite(key[0]) && Number.isFinite(key[1]) && typeof key[2] === 'string';
+    return ok ? key : null;
+  } catch { return null; }
+}
+
+async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
   const generatedAt = new Date();
   const warnings = [];
   let items = [];
@@ -212,19 +252,22 @@ async function listNeedsMe({ who, area, limit, role } = {}) {
     });
   }
 
-  const when = (item) => (item.createdAt ? new Date(item.createdAt).getTime() : generatedAt.getTime());
   const matching = items
     .filter((item) => item.severity !== 'fyi' && whoMatches(who, item.who) && (!area || item.area === area))
-    .sort((a, b) => ((SEVERITY_RANK[a.severity] ?? 1) - (SEVERITY_RANK[b.severity] ?? 1)) || (when(b) - when(a)));
+    .sort(compareItems);
   const tally = (key) => matching.reduce((acc, item) => ({ ...acc, [item[key]]: (acc[item[key]] || 0) + 1 }), {});
   const max = Math.min(Math.max(parseInt(limit, 10) || DEFAULT_LIMIT, 1), ROW_CAP);
+  // Keyset paging over the same total order: strictly after the cursor's item.
+  const remaining = after ? matching.filter((item) => compareKeys(sortKey(item), after) > 0) : matching;
+  const page = remaining.slice(0, max);
   return {
     generatedAt: generatedAt.toISOString(),
     total: matching.length,
     counts: { byArea: tally('area'), byWho: tally('who'), bySeverity: tally('severity') },
-    items: matching.slice(0, max),
+    items: page,
+    next: remaining.length > page.length ? encodeCursor(sortKey(page[page.length - 1])) : null,
     warnings,
   };
 }
 
-module.exports = { listNeedsMe, mapAlertRow, mapStanding };
+module.exports = { listNeedsMe, mapAlertRow, mapStanding, decodeCursor };
