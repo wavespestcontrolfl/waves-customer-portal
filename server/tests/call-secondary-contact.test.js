@@ -811,16 +811,18 @@ describe('on-site contact opt-in ask', () => {
 
   test('the booking site leaves per-phone markers (never the pref) once a booking lands; set for a fresh slot AND a contact already on record', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    // Eligibility: the recipient is the only texting slot phone — not tied to this pass having WRITTEN the slot.
-    expect(src).toContain('if (askedViaOnSite && !otherSlotPhone) {');
-    expect(src).toContain('deferPrimaryOptOutPhoneKeys.add(lastTen(secondaryEntry.phone));');
+    // Every asked recipient gets a marker (confirmation replay at YES); demote
+    // only when they are the only texting slot phone — not tied to this pass
+    // having WRITTEN the slot.
+    expect(src).toContain('if (askedViaOnSite) {');
+    expect(src).toContain('deferPrimaryOptOutPhoneKeys.set(lastTen(secondaryEntry.phone), !otherSlotPhone);');
     expect(src).not.toContain("result === 'written' && !hadSlotPhone");
     const landed = src.indexOf('scheduledServiceId = svc.id;');
     const marker = src.indexOf("jsonb_build_object(\\'demote_primary_on_optin\\'", landed);
     expect(marker).toBeGreaterThan(landed);
     const block = src.slice(landed, marker + 600);
     expect(block).toContain('if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size)');
-    expect(block).toContain('markers[phoneKey] = { scheduled_service_id: svc.id');
+    expect(block).toContain('markers[phoneKey] = { scheduled_service_id: svc.id, demote');
     // The booking site writes no pref at all any more.
     expect(src).not.toContain('appointment_notify_primary: false');
   });

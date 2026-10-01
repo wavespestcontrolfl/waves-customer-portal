@@ -60,7 +60,9 @@ const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
 const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show']);
 async function withSavepoint(dbh, fn) {
   try {
-    if (dbh && dbh.isTransaction && typeof dbh.transaction === 'function') return await dbh.transaction(fn);
+    // A root handle opens its own transaction (so the row lock holds and the
+    // steps commit together); a transaction handle nests a savepoint.
+    if (dbh && typeof dbh.transaction === 'function') return await dbh.transaction(fn);
     return await fn(dbh);
   } catch (err) {
     logger.warn(`[recipient-optin] demote marker step failed (${err.code || err.name || 'error'})`);
@@ -152,10 +154,14 @@ async function applyMarkerEntry(h, customer, phoneKey, marker, replays) {
     await clearEntry();
     return;
   }
-  await h('notification_prefs')
-    .insert({ customer_id: customerId, appointment_notify_primary: false })
-    .onConflict('customer_id')
-    .merge({ appointment_notify_primary: false });
+  // demote:false = another slot phone already gets the texts: replay only.
+  // An entry written before the field existed is a demote entry.
+  if (marker.demote !== false) {
+    await h('notification_prefs')
+      .insert({ customer_id: customerId, appointment_notify_primary: false })
+      .onConflict('customer_id')
+      .merge({ appointment_notify_primary: false });
+  }
   await clearEntry();
   replays.push({
     customerId,

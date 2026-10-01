@@ -226,6 +226,14 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(replays).toEqual([]);
   });
 
+  test('a demote:false entry (another slot phone already texted) replays the confirmation but keeps the caller', async () => {
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { demote_primary_on_optin: { [KEY]: { scheduled_service_id: 's1', demote: false } } } }), optinRows: confirmed() });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([]);
+    expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1']);
+    expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
+  });
+
   describe('reconcileDemoteMarker: the opt-in already settled when the booking wrote the marker', () => {
     test('already confirmed (earlier call, or the YES beat the booking): applies the marker now', async () => {
       const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed() });

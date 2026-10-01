@@ -13085,15 +13085,15 @@ const CallRecordingProcessor = {
     // fan-out must exclude them — no row means grandfathered, and a claim
     // failure must fail CLOSED for that phone, not text it (#2956 r13).
     const optinClaimFailedPhones = new Set();
-    // Recipients (last-10 phone keys) of on-site contacts that are now the
-    // account's only texting slot phone and were (or earlier were) sent the
-    // opt-in ask: once a booking lands on THIS call, a durable marker per phone
-    // is left so the caller's appointment texts switch off only when that
-    // recipient answers YES (written where scheduledServiceId lands). Filled for
-    // a fresh slot write AND for a contact already on record, so a retry of the
-    // call still leaves the marker.
+    // Recipients (last-10 phone key -> demote) of on-site contacts that were
+    // (or earlier were) sent the opt-in ask: once a booking lands on THIS call,
+    // a durable marker per phone is left so that recipient's YES replays this
+    // booking's confirmation to them; demote=true (they are the account's only
+    // texting slot phone) also switches the caller's appointment texts off at
+    // that YES. Filled for a fresh slot write AND for a contact already on
+    // record, so a retry of the call still leaves the marker.
     let deferPrimaryOptOutCustomerId = null;
-    const deferPrimaryOptOutPhoneKeys = new Set();
+    const deferPrimaryOptOutPhoneKeys = new Map();
     // The opt-in ask needs a LIVE rail (gate on + request template active);
     // dark = nobody can be asked. Read once per call, only when it can matter.
     const optinRailLive = callSecondaryContacts.some(onSiteOptinAskTrigger)
@@ -13173,12 +13173,13 @@ const CallRecordingProcessor = {
                   .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
                 if (askedViaOnSite) optinAskState = 'sent';
               }
-              // Only texting slot phone: the caller steps back once this recipient
-              // says YES (marker written at the booking site) — also on a retry
-              // where the contact was already filed and the ask already out.
-              if (askedViaOnSite && !otherSlotPhone) {
+              // Every asked recipient gets the booking's confirmation at their
+              // YES; only the account's sole texting slot phone also makes the
+              // caller step back (marker written at the booking site) — also on
+              // a retry where the contact was already filed and the ask out.
+              if (askedViaOnSite) {
                 deferPrimaryOptOutCustomerId = customerId;
-                deferPrimaryOptOutPhoneKeys.add(lastTen(secondaryEntry.phone));
+                deferPrimaryOptOutPhoneKeys.set(lastTen(secondaryEntry.phone), !otherSlotPhone);
               }
             }
           } catch (optErr) {
@@ -17916,8 +17917,8 @@ const CallRecordingProcessor = {
               if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size) {
                 try {
                   const markers = {};
-                  for (const phoneKey of deferPrimaryOptOutPhoneKeys) {
-                    markers[phoneKey] = { scheduled_service_id: svc.id, set_at: new Date().toISOString() };
+                  for (const [phoneKey, demote] of deferPrimaryOptOutPhoneKeys) {
+                    markers[phoneKey] = { scheduled_service_id: svc.id, demote, set_at: new Date().toISOString() };
                   }
                   await db('customers')
                     .where({ id: deferPrimaryOptOutCustomerId })
@@ -17927,7 +17928,7 @@ const CallRecordingProcessor = {
                   // The opt-in may already be settled (confirmed on an earlier
                   // call, or the reply beat the booking): apply / drop now.
                   const { reconcileDemoteMarker } = require('./recipient-optin');
-                  for (const phoneKey of deferPrimaryOptOutPhoneKeys) {
+                  for (const phoneKey of deferPrimaryOptOutPhoneKeys.keys()) {
                     await reconcileDemoteMarker(deferPrimaryOptOutCustomerId, phoneKey);
                   }
                 } catch (prefsErr) {
