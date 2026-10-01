@@ -29,14 +29,20 @@ const THRESHOLDS = { confident_low: 0.15, confident_high: 0.85 };
 const noul = (instructions, criteria) => (criteria ? { type: 'noul', instructions, criteria } : { type: 'noul', instructions });
 
 const CALL_JUDGE = {
-  id: 'call_judge.v1',
+  id: 'call_judge.v2',
   capability: 'call_judge',
-  version: 1,
+  version: 2,
   description: 'Six yes/no judgements over one phone call: lead, spam, voicemail, agreed appointment, promised quote, complaint.',
   stateShape: ['call_direction', 'duration_seconds', 'transcript'],
   thresholds: { ...THRESHOLDS },
   questions: {
-    is_lead: noul('Is the caller a NEW prospective customer (not an existing customer, vendor, spam or wrong number)?'),
+    // v2 (Codex #5476): the production extraction counts an existing customer
+    // asking about a NEW, different service as a lead; only coordinating an
+    // existing service, billing, complaints and re-service are excluded.
+    is_lead: noul('Is this call a sales lead: a new prospective customer, or an existing customer asking about a new or different service they do not already have?', {
+      true: 'A prospect, or an existing customer inquiring about an additional service (a cross-sell).',
+      false: 'An existing customer coordinating a visit they already have, billing, a complaint or a re-service; or a vendor, spam, robocall or wrong number.',
+    }),
     is_spam: noul('Is this call spam, a robocall, or a vendor solicitation?', {
       true: 'Robocall, solicitation, or junk.',
       false: 'A real customer, prospect, or legitimate business contact. A caller with a service request, address, or quoted price is never spam.',

@@ -9,7 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { TYPESAFE_SYSTEMONE_API } = require('./llm/call');
+const { TYPESAFE_SYSTEMONE_API, TYPESAFE_PINNED_MODEL_RE } = require('./llm/call');
 
 const GBP_LOCATION_KEYS = ['LWR', 'PARRISH', 'SARASOTA', 'VENICE'];
 
@@ -810,6 +810,13 @@ async function checkTypeSafe() {
 
   if (!key) {
     const result = { platform, status: 'not_configured', lastError: 'TYPESAFE_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+  // The adapter refuses an unpinned model before any request (jev-latest moves),
+  // so a green credential with an unusable pin would lie: same check here.
+  if (!TYPESAFE_PINNED_MODEL_RE.test(String(MODELS.TYPESAFE_JEV || ''))) {
+    const result = { platform, status: 'error', lastError: `MODEL_TYPESAFE_JEV must be a pinned version (jev-N.N.N), got ${MODELS.TYPESAFE_JEV}`, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'api_key', envVarName });
     return result;
   }

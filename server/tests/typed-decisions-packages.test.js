@@ -8,7 +8,7 @@ describe('typed-decision packages', () => {
   const ids = Object.keys(PACKAGES);
 
   test('ships the three foundation packages', () => {
-    expect(ids.sort()).toEqual(['call_judge.v1', 'sms_courtesy.v1', 'sms_reschedule.v1']);
+    expect(ids.sort()).toEqual(['call_judge.v2', 'sms_courtesy.v1', 'sms_reschedule.v1']);
   });
 
   test.each(ids)('%s: id is <capability>.v<version> and shape is complete', (id) => {
@@ -25,16 +25,16 @@ describe('typed-decision packages', () => {
     }
   });
 
-  test('call_judge.v1 asks the six agreed questions', () => {
-    const qs = PACKAGES['call_judge.v1'].questions;
+  test('call_judge.v2 asks the six agreed questions', () => {
+    const qs = PACKAGES['call_judge.v2'].questions;
     expect(Object.keys(qs)).toEqual(['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised', 'complaint']);
     expect(qs.is_spam.criteria.false).toMatch(/never spam/);
-    expect(PACKAGES['call_judge.v1'].stateShape).toEqual(['call_direction', 'duration_seconds', 'transcript']);
+    expect(PACKAGES['call_judge.v2'].stateShape).toEqual(['call_direction', 'duration_seconds', 'transcript']);
   });
 
   test('packages are deep-frozen: assignment throws in strict mode', () => {
     'use strict';
-    const pkg = PACKAGES['call_judge.v1'];
+    const pkg = PACKAGES['call_judge.v2'];
     expect(() => { pkg.version = 2; }).toThrow(TypeError);
     expect(() => { pkg.questions.is_lead.instructions = 'x'; }).toThrow(TypeError);
     expect(() => { pkg.thresholds.confident_low = 0; }).toThrow(TypeError);

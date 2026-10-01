@@ -30,6 +30,18 @@ describe('token-health: typesafe', () => {
     expect(init.headers.Authorization).toBe('Bearer k');
     expect(JSON.parse(init.body).model).toBe(MODELS.TYPESAFE_JEV);
   });
+  test('an unpinned MODEL_TYPESAFE_JEV is an error before any request (Codex #5476)', async () => {
+    jest.resetModules();
+    process.env.TYPESAFE_API_KEY = 'k';
+    process.env.MODEL_TYPESAFE_JEV = 'jev-latest';
+    const svc = require('../services/token-health');
+    const r = await svc.checkSingle('typesafe');
+    expect(r).toMatchObject({ platform: 'typesafe', status: 'error' });
+    expect(r.lastError).toMatch(/pinned/);
+    expect(global.fetch).not.toHaveBeenCalled();
+    delete process.env.MODEL_TYPESAFE_JEV;
+    jest.resetModules();
+  });
   test('401 reads as expired, 500 as error, 429 as healthy (key works, service busy)', async () => {
     process.env.TYPESAFE_API_KEY = 'k';
     global.fetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({ error: { message: 'bad key' } }) });

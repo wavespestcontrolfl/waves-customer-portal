@@ -31,71 +31,107 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 
 // One decision_reviews row -> one fixture case. Picks only the allowed fields,
 // so a column added to the table later can never leak into a fixture.
-// Fixture-safe scalar: booleans, finite numbers, or a short token (an enum
-// option such as 'confirmed' or 'single_family'), never free text. Anything
-// else is dropped before serialisation, so a reviewer pasting a sentence or a
-// name into correct_value cannot reach a committed fixture.
-const TOKEN_RE = /^[a-z0-9_.-]{1,48}$/i;
-function fixtureScalar(v) {
-  if (typeof v === 'boolean') return v;
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string' && TOKEN_RE.test(v)) return v;
+// Every exported value is checked against the REGISTERED PACKAGE's own question
+// (services/typed-decisions/packages.js), never against a token shape: a noul
+// answer is a boolean, a choice answer is one of that question's criteria keys,
+// a score is a finite number. Anything else (a name, an address, a sentence, an
+// option that is not in the package) is dropped, and a confirmed case that
+// cannot produce an in-domain expected answer is not exported at all.
+const { packageFor } = require('../services/typed-decisions/packages');
+
+function questionFor(row) {
+  const pkg = packageFor(row.package_id);
+  return pkg && pkg.questions ? pkg.questions[row.question_id] || null : null;
+}
+// The question's answer domain: true when `v` is a valid answer for it.
+function inDomain(question, v) {
+  if (!question) return false;
+  if (question.type === 'noul') return typeof v === 'boolean';
+  if (question.type === 'choice') return typeof v === 'string' && Object.prototype.hasOwnProperty.call(question.criteria || {}, v);
+  if (question.type === 'score') return typeof v === 'number' && Number.isFinite(v);
+  return false;
+}
+const isProb = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
+// The normalised Jev answer, reduced to its typed fields for this question.
+function fixtureAnswer(question, a) {
+  if (!question || !a || typeof a !== 'object') return null;
+  if (question.type === 'noul') {
+    return isProb(a.p) && typeof a.yes === 'boolean' ? { p: a.p, yes: a.yes, confident: a.confident === true } : null;
+  }
+  if (question.type === 'choice') {
+    if (!inDomain(question, a.choice)) return null;
+    const probabilities = {};
+    for (const k of Object.keys(question.criteria || {})) if (isProb((a.probabilities || {})[k])) probabilities[k] = a.probabilities[k];
+    return { choice: a.choice, confidence: isProb(a.confidence) ? a.confidence : null, confident: a.confident === true, probabilities };
+  }
+  if (question.type === 'score') {
+    return Number.isFinite(a.score) ? { score: a.score, confidence: isProb(a.confidence) ? a.confidence : null, confident: a.confident === true } : null;
+  }
   return null;
 }
-// Normalised Jev answers and baselines are maps of scalars (or a probabilities
-// map of numbers); anything deeper or textual is dropped key by key.
-function fixtureMap(obj, depth = 0) {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return fixtureScalar(obj);
+// Baselines are named sources (rules / production / deep_judge) each holding
+// an in-domain answer; other keys and out-of-domain values are dropped.
+const BASELINE_SOURCES = ['rules', 'production', 'deep_judge'];
+function fixtureBaselines(question, b) {
+  if (!b || typeof b !== 'object') return null;
   const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (!TOKEN_RE.test(k)) continue;
-    const clean = v && typeof v === 'object' && !Array.isArray(v) && depth < 1 ? fixtureMap(v, depth + 1) : fixtureScalar(v);
-    if (clean !== null && clean !== undefined) out[k] = clean;
-  }
+  for (const k of BASELINE_SOURCES) if (inDomain(question, b[k])) out[k] = b[k];
   return out;
 }
-const EVIDENCE_KEYS = ['source', 'window', 'value', 'observed_at'];
+// Outcome evidence is machine-written: a snake_case source name, a window
+// like 24h / 7d, a boolean-or-null value, an ISO timestamp. Nothing else.
+const SOURCE_RE = /^[a-z][a-z_]{0,39}$/;
+const WINDOW_RE = /^\d{1,3}[hd]$/;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
 function fixtureEvidence(ev) {
   if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return null;
   const out = {};
-  for (const k of EVIDENCE_KEYS) {
-    if (ev[k] === undefined) continue;
-    const clean = k === 'observed_at' && typeof ev[k] === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(ev[k]) ? ev[k] : fixtureScalar(ev[k]);
-    if (clean !== null) out[k] = clean;
-  }
+  if (typeof ev.source === 'string' && SOURCE_RE.test(ev.source)) out.source = ev.source;
+  if (typeof ev.window === 'string' && WINDOW_RE.test(ev.window)) out.window = ev.window;
+  if (typeof ev.value === 'boolean' || ev.value === null) out.value = ev.value;
+  if (typeof ev.observed_at === 'string' && ISO_RE.test(ev.observed_at)) out.observed_at = ev.observed_at;
   return out;
 }
-
+const VERDICTS = new Set(['jev_right', 'jev_wrong', 'unclear']);
 function structuredLabel(label) {
   if (!label || typeof label !== 'object') return null;
-  const out = { verdict: fixtureScalar(label.verdict) };
-  if (label.correct_value !== undefined) out.correct_value = fixtureScalar(label.correct_value);
-  return out;
+  return { verdict: VERDICTS.has(label.verdict) ? label.verdict : null };
 }
-
-function expectedFor(row) {
+// The human-confirmed answer, in the question's domain, or null when the label
+// cannot supply one (unclear; jev_wrong without a valid correct_value).
+function expectedFor(question, row) {
   const verdict = row.label && typeof row.label === 'object' ? row.label.verdict : null;
-  if (verdict === 'jev_right') return fixtureMap(row.jev_answer);
-  if (verdict === 'jev_wrong') return row.label.correct_value === undefined ? null : fixtureScalar(row.label.correct_value);
+  if (verdict === 'jev_right') {
+    const a = fixtureAnswer(question, row.jev_answer);
+    if (!a) return null;
+    if (question.type === 'noul') return a.yes;
+    if (question.type === 'choice') return a.choice;
+    return a.score;
+  }
+  if (verdict === 'jev_wrong') return inDomain(question, row.label.correct_value) ? row.label.correct_value : null;
   return null;
 }
+const CONFIRMED = new Set(['confirmed_error', 'confirmed_correct']);
 
 function rowToCase(row) {
+  const question = questionFor(row);
+  if (!question) return null; // unknown package or question: nothing to validate against
+  const expected = expectedFor(question, row);
+  if (CONFIRMED.has(row.label_status) && expected === null) return null; // not scorable
+  const label = structuredLabel(row.label);
+  if (label && row.label && row.label.verdict === 'jev_wrong' && inDomain(question, row.label.correct_value)) label.correct_value = row.label.correct_value;
   return {
     subject_type: row.subject_type,
     subject_id: row.subject_id,
     package_id: row.package_id,
     package_hash: row.package_hash,
     question_id: row.question_id,
-    jev_answer: fixtureMap(row.jev_answer),
-    // The human-confirmed answer, materialised: jev_right confirms jev_answer;
-    // jev_wrong supplies correct_value; unclear has none.
-    expected: expectedFor(row),
-    // Structured label fields only: the free-text `note` can carry a customer
-    // name or quoted text and must never reach a committed fixture (AGENTS.md).
-    label: structuredLabel(row.label),
+    question_type: question.type,
+    jev_answer: fixtureAnswer(question, row.jev_answer),
+    expected,
+    label,
     label_status: row.label_status,
-    baseline_answers: fixtureMap(row.baseline_answers),
+    baseline_answers: fixtureBaselines(question, row.baseline_answers),
     outcome_evidence: fixtureEvidence(row.outcome_evidence),
   };
 }
@@ -123,7 +159,7 @@ async function exportCases({ db, capability, statuses = DEFAULT_STATUSES, now = 
     .whereRaw(EVIDENCE_PREDICATE)
     .select(COLUMNS)
     .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }]);
-  return { capability, exported_at: now().toISOString(), cases: rows.map(rowToCase) };
+  return { capability, exported_at: now().toISOString(), cases: rows.map(rowToCase).filter(Boolean) };
 }
 
 async function main() {

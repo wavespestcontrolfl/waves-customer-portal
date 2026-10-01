@@ -33,7 +33,7 @@ describe('askPackage', () => {
 
   test('gate off -> gate_off, no dispatch', async () => {
     delete process.env.GATE_TYPED_DECISIONS;
-    expect(await askPackage('call_judge.v1', CALL_STATE)).toEqual({ ok: false, reason: 'gate_off' });
+    expect(await askPackage('call_judge.v2', CALL_STATE)).toEqual({ ok: false, reason: 'gate_off' });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
@@ -49,13 +49,13 @@ describe('askPackage', () => {
     ['array', []],
     ['null', null],
   ])('bad state (%s) -> bad_state, no dispatch', async (_label, state) => {
-    const result = await askPackage('call_judge.v1', state);
-    expect(result).toMatchObject({ ok: false, reason: 'bad_state', packageId: 'call_judge.v1', packageHash: packageHash(PACKAGES['call_judge.v1']) });
+    const result = await askPackage('call_judge.v2', state);
+    expect(result).toMatchObject({ ok: false, reason: 'bad_state', packageId: 'call_judge.v2', packageHash: packageHash(PACKAGES['call_judge.v2']) });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   test('dispatches the typedDecision route with the package questions and lane labels, then normalises noul answers', async () => {
-    const pkg = PACKAGES['call_judge.v1'];
+    const pkg = PACKAGES['call_judge.v2'];
     const answers = answersFor(pkg, 0.5);
     answers.is_lead = { type: 'noul', noul: 0.93 };
     answers.is_spam = { type: 'noul', noul: 0.04 };
@@ -63,12 +63,12 @@ describe('askPackage', () => {
     answers.quote_promised = { type: 'noul', noul: 0.85 };
     mockDispatch.mockResolvedValue({ ok: true, json: answers, servedModel: 'jev-1.13.0', usage: { input_tokens: 10, output_tokens: 2 } });
 
-    const result = await askPackage('call_judge.v1', CALL_STATE);
+    const result = await askPackage('call_judge.v2', CALL_STATE);
 
-    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecision, { state: CALL_STATE, questions: pkg.questions, laneId: 'typed_decisions', promptVersion: 'call_judge.v1' });
+    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecision, { state: CALL_STATE, questions: pkg.questions, laneId: 'typed_decisions', promptVersion: 'call_judge.v2' });
     expect(result.ok).toBe(true);
     expect(result.servedModel).toBe('jev-1.13.0');
-    expect(result.packageId).toBe('call_judge.v1');
+    expect(result.packageId).toBe('call_judge.v2');
     expect(result.packageHash).toBe(packageHash(pkg));
     expect(result.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
     expect(result.answers.is_lead).toEqual({ p: 0.93, yes: true, confident: true });
@@ -96,18 +96,18 @@ describe('askPackage', () => {
   });
 
   test('a missing or mistyped answer -> incomplete_answers', async () => {
-    const pkg = PACKAGES['call_judge.v1'];
+    const pkg = PACKAGES['call_judge.v2'];
     const missing = answersFor(pkg, 0.9);
     delete missing.complaint;
     const filed = { ok: true, json: missing };
     mockDispatch.mockResolvedValueOnce(filed);
-    expect(await askPackage('call_judge.v1', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
+    expect(await askPackage('call_judge.v2', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
     // The adapter filed the call as ok; the ledger row flips to invalid_output (Codex #5476 r1).
     expect(mockRejectCall).toHaveBeenCalledWith(filed, 'invalid_output');
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { ...answersFor(pkg, 0.9), is_lead: { type: 'choice', choice: 'x' } } });
-    expect(await askPackage('call_judge.v1', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
+    expect(await askPackage('call_judge.v2', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { ...answersFor(pkg, 0.9), is_lead: { type: 'noul', noul: 1.4 } } });
-    expect(await askPackage('call_judge.v1', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
+    expect(await askPackage('call_judge.v2', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
   });
 });
 

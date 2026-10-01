@@ -3,7 +3,7 @@ const { rowToCase, parseArgs, exportCases, COLUMNS } = require('../scripts/expor
 const ROW = {
   id: 'ignored-id',
   capability: 'call_judge',
-  package_id: 'call_judge.v1',
+  package_id: 'call_judge.v2',
   package_hash: 'h',
   served_model: 'jev-1.13.0',
   subject_type: 'call_log',
@@ -22,13 +22,15 @@ const ROW = {
 };
 
 describe('rowToCase', () => {
-  test('keeps only subject ids, labels, baselines and outcome evidence', () => {
-    expect(rowToCase(ROW)).toEqual({
+  test('keeps only ids, typed answers, labels, baselines and evidence; never text', () => {
+    const c = rowToCase(ROW);
+    expect(c).toEqual({
       subject_type: 'call_log',
       subject_id: '11111111-1111-4111-8111-111111111111',
-      package_id: 'call_judge.v1',
+      package_id: 'call_judge.v2',
       package_hash: 'h',
       question_id: 'is_lead',
+      question_type: 'noul',
       jev_answer: { p: 0.9, yes: true, confident: true },
       expected: false,
       label: { verdict: 'jev_wrong', correct_value: false },
@@ -36,47 +38,52 @@ describe('rowToCase', () => {
       baseline_answers: { rules: false, production: true },
       outcome_evidence: { source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
     });
-    const json = JSON.stringify(rowToCase(ROW));
-    expect(json).not.toMatch(/transcript|someone@example|labeled_by|Jane Doe|123 Main|note/);
-  });
-  test('absent label / evidence become null', () => {
-    expect(rowToCase({ ...ROW, label: undefined, baseline_answers: undefined, outcome_evidence: undefined })).toMatchObject({ label: null, baseline_answers: null, outcome_evidence: null });
+    expect(JSON.stringify(c)).not.toMatch(/transcript|someone@example|labeled_by|Jane Doe|123 Main|note/);
   });
   test('never selects a text column', () => {
     expect(COLUMNS).not.toEqual(expect.arrayContaining(['transcript', 'body', 'message']));
   });
-});
-
-describe('nested JSON is whitelisted, never copied', () => {
-  test('free text in correct_value, baselines or evidence is dropped; scalars and tokens survive', () => {
+  test('values are validated against the package question domain, not a token shape', () => {
     const c = rowToCase({ ...ROW,
-      label: { verdict: 'jev_wrong', correct_value: 'Jane Doe said she will call back on Tuesday' },
-      baseline_answers: { rules: false, deep_judge: true, excerpt: 'Caller: hi this is Jane at 123 Main' },
-      outcome_evidence: { source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z', transcript: 'must not leak' },
-      jev_answer: { p: 0.2, yes: false, confident: true, probabilities: { a: 0.2, b: 0.8 }, note: 'free text' } });
-    const json = JSON.stringify(c);
-    expect(json).not.toMatch(/Jane|Main|transcript|free text|Tuesday/);
-    expect(c.label).toEqual({ verdict: 'jev_wrong', correct_value: null });
-    expect(c.expected).toBeNull();
-    expect(c.baseline_answers).toEqual({ rules: false, deep_judge: true });
-    expect(c.outcome_evidence).toEqual({ source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' });
-    expect(c.jev_answer).toEqual({ p: 0.2, yes: false, confident: true, probabilities: { a: 0.2, b: 0.8 } });
-    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong', correct_value: 'single_family' } }).expected).toBe('single_family');
+      label: { verdict: 'jev_wrong', correct_value: 'Jane_Doe' },
+      baseline_answers: { rules: 'Jane', production: true, excerpt: 'Caller: hi this is Jane at 123 Main' },
+      outcome_evidence: { source: 'Jane_Doe', window: '7d', value: 'yes', observed_at: 'yesterday', transcript: 'leak' },
+      jev_answer: { p: 0.2, yes: false, confident: true, note: 'free text', probabilities: { x: 1 } } });
+    // jev_wrong with an out-of-domain correct_value is not scorable → excluded
+    expect(c).toBeNull();
+    const ok = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, label_status: 'confirmed_correct',
+      baseline_answers: { rules: 'Jane', production: true, excerpt: 'x' },
+      outcome_evidence: { source: 'Jane_Doe', window: '7d', value: 'yes', observed_at: 'yesterday', transcript: 'leak' },
+      jev_answer: { p: 0.2, yes: false, confident: true, note: 'free text' } });
+    expect(JSON.stringify(ok)).not.toMatch(/Jane|Main|transcript|free text|yesterday/);
+    expect(ok.baseline_answers).toEqual({ production: true });
+    expect(ok.outcome_evidence).toEqual({ window: '7d' });
+    expect(ok.jev_answer).toEqual({ p: 0.2, yes: false, confident: true });
+    expect(ok.expected).toBe(false);
+  });
+  test('choice questions accept only the question\'s own criteria keys', () => {
+    const pkgRow = { ...ROW, package_id: 'call_judge.v2', question_id: 'is_lead' };
+    // is_lead is a noul: a string correct_value is out of domain
+    expect(rowToCase({ ...pkgRow, label: { verdict: 'jev_wrong', correct_value: 'single_family' } })).toBeNull();
+    // unknown package or question → nothing to validate against → excluded
+    expect(rowToCase({ ...ROW, package_id: 'nope.v9' })).toBeNull();
+    expect(rowToCase({ ...ROW, question_id: 'not_a_question' })).toBeNull();
   });
 });
 
 describe('expected answer', () => {
-  test('jev_right preserves the confirmed jev_answer for both boolean outcomes', () => {
-    const yes = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, jev_answer: { p: 0.9, yes: true, confident: true } });
-    const no = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, jev_answer: { p: 0.1, yes: false, confident: true } });
-    expect(yes.expected).toEqual({ p: 0.9, yes: true, confident: true });
-    expect(no.expected).toEqual({ p: 0.1, yes: false, confident: true });
-    expect(JSON.stringify(yes)).not.toEqual(JSON.stringify(no));
+  test('jev_right preserves the confirmed answer for both boolean outcomes', () => {
+    const yes = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, label_status: 'confirmed_correct', jev_answer: { p: 0.9, yes: true, confident: true } });
+    const no = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, label_status: 'confirmed_correct', jev_answer: { p: 0.1, yes: false, confident: true } });
+    expect(yes.expected).toBe(true);
+    expect(no.expected).toBe(false);
   });
-  test('jev_wrong exports the reviewer\'s correct_value; unclear exports no expectation', () => {
-    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong', correct_value: false } }).expected).toBe(false);
-    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong' } }).expected).toBeNull();
-    expect(rowToCase({ ...ROW, label: { verdict: 'unclear' } }).expected).toBeNull();
+  test('non-scorable confirmed rows are excluded: unclear, jev_wrong with null/missing correct_value', () => {
+    expect(rowToCase({ ...ROW, label: { verdict: 'unclear' } })).toBeNull();
+    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong', correct_value: null } })).toBeNull();
+    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong' } })).toBeNull();
+    // an unreviewed row (dev set export) is kept, with expected null
+    expect(rowToCase({ ...ROW, label: null, label_status: 'unreviewed' })).toMatchObject({ expected: null, label: null });
   });
 });
 

@@ -34,7 +34,7 @@ describe('callTypeSafe', () => {
   });
 
   test('success returns the answers, records servedModel, and ledgers a typesafe call with tokens', async () => {
-    const result = await callTypeSafe({ model: 'jev-1.13.0', state: STATE, questions: QUESTIONS, laneId: 'typed_decisions', promptVersion: 'call_judge.v1' });
+    const result = await callTypeSafe({ model: 'jev-1.13.0', state: STATE, questions: QUESTIONS, laneId: 'typed_decisions', promptVersion: 'call_judge.v2' });
     expect(result).toEqual({
       ok: true,
       json: ANSWERS,
@@ -55,7 +55,7 @@ describe('callTypeSafe', () => {
       requestedModel: 'jev-1.13.0',
       servedModel: 'jev-1.13.0',
       laneId: 'typed_decisions',
-      promptVersion: 'call_judge.v1',
+      promptVersion: 'call_judge.v2',
       ok: true,
       usage: { input_tokens: 120, output_tokens: 7 },
     });

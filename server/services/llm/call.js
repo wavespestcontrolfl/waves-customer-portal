@@ -888,5 +888,6 @@ module.exports = {
   providerErrorReason,
   OPENAI_RESPONSES_API,
   TYPESAFE_SYSTEMONE_API,
+  TYPESAFE_PINNED_MODEL_RE,
   geminiUrl,
 };
