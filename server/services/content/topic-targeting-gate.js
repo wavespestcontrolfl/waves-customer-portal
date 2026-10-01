@@ -1110,7 +1110,8 @@ const RETIRED_POSTS = require('../../data/retired-blog-topics-v1.json').posts;
 // still reduces to the retired "paper wasp".
 const RETIRED_FILLER = new Set([
   'rid', 'getting', 'remove', 'removal', 'removing', 'kill', 'killing', 'control', 'treatment',
-  'eliminate', 'eliminating', 'elimination', 'eradicate', 'eradicating', 'deal', 'dealing',
+  'eliminate', 'eliminating', 'elimination', 'eliminated', 'eradicate', 'eradicating', 'eradicated',
+  'deal', 'dealing', 'treat', 'treating', 'treated', 'removed', 'killed', 'controlling', 'controlled',
   'service', 'company', 'best', 'guide', 'near', 'lawn',
 ]);
 

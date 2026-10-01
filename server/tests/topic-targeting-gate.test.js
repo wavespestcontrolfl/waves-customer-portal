@@ -1181,7 +1181,7 @@ describe('retired topics', () => {
   });
 
   test('"getting rid of" / "eliminating" phrasing is framing too, pre- and post-draft (local codex pass 2)', () => {
-    for (const query of ['getting rid of paper wasps', 'eliminating fire ants', 'dealing with earwigs']) {
+    for (const query of ['getting rid of paper wasps', 'eliminating fire ants', 'dealing with earwigs', 'how to treat paper wasps', 'paper wasps removed', 'eliminated paper wasps', 'killed fire ants']) {
       expect(codes(gate.evaluate(blog({ query }), { requireCorpus: false }))).toContain(gate.CODES.RETIRED_TOPIC);
     }
     const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'Getting Rid of Paper Wasps in Sarasota', slug: '/pest-control/getting-rid-of-paper-wasps-sarasota/', primary_keyword: 'getting rid of paper wasps' } }, { index: gate.indexCorpus(CORPUS) });

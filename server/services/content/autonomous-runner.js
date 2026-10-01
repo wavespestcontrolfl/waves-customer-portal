@@ -470,7 +470,7 @@ class AutonomousRunner {
         service: brief.service || opp.service || null,
         // Spoke-only publications are not judged against the hub's retired
         // topics (spoke seeds carry target_sites in signal_metadata).
-        targetSites: brief.target_sites || opp.signal_metadata?.target_sites || null,
+        targetSites: retiredTopicScope(brief, opp),
       };
       let topicResult;
       if (!topicGate) {
@@ -849,7 +849,7 @@ class AutonomousRunner {
             if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
             topicIndex = topicGate.indexCorpus(corpus);
           }
-          topicFraming = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, targetSites: brief.target_sites || opp.signal_metadata?.target_sites || null, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
+          topicFraming = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, targetSites: retiredTopicScope(brief, opp), service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
         } catch (err) {
           topicFraming = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_ERROR', message: err.message }] };
         }
@@ -3827,7 +3827,7 @@ class AutonomousRunner {
       try {
         const corpus = await this._loadBlogCorpus({ required: true });
         if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
-        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), targetSites: brief.target_sites || opp.signal_metadata?.target_sites || null, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
+        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), targetSites: retiredTopicScope(brief, opp), service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
       } catch (err) {
         const e = new Error(`Topic-targeting gate could not re-validate the stored draft (${err.message}) — retry once the live blog corpus is reachable`);
         e.statusCode = 409;
@@ -4671,7 +4671,16 @@ const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS, HUB_SITE_KEYS: FLEET_HUB_SITE_KE
 // resolution + kill switch + origin mapping) — shared module, not a mirror,
 // so repaired draft.url values and self-links can never point at a different
 // host than the publisher actually uses (Codex r10).
-const { resolvePublishOrigin } = require('../content-astro/spoke-routing');
+const { resolvePublishOrigin, resolveSpokeTarget } = require('../content-astro/spoke-routing');
+
+// Where this post will actually publish, for the topic gate's retired-topic
+// scope: the publisher's own routing decision (persisted
+// voice_constraints.related_posts_target_sites first, then the brief, then
+// the seed; the spoke kill switch sends it to the hub). Hub → null (checked).
+function retiredTopicScope(brief = {}, opp = {}) {
+  const spoke = resolveSpokeTarget({ ...brief, target_sites: brief?.target_sites ?? opp?.signal_metadata?.target_sites });
+  return spoke ? [spoke] : null;
+}
 
 /**
  * applyOperatorSlugRepair(brief, draft) — the operator-pinned slug is
