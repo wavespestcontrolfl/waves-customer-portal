@@ -49,7 +49,7 @@ const { parseETDateTime } = require('../../utils/datetime-et');
 // resets exhausted counts against this exact number, never a private copy.
 const { _internals: { maxClaimAttempts } } = require('./opportunity-queue');
 const interceptSeeder = require('./intercept-brief-seeder');
-const { resolveRetiredLinks, resolveRetiredText } = require('./retired-blog-links');
+const { resolveRetiredLinks, resolveRetiredText, resolveRetiredPayload } = require('./retired-blog-links');
 const { normalizeSpokeSites } = require('../content-astro/spoke-sites');
 const { spokeBlogNetworkEnabled } = require('./spoke-blog-network');
 
@@ -315,7 +315,7 @@ const SPOKE_DROP_STRUCTURAL_RE = /\bfaq\b|frequently asked|common questions|hub 
  */
 function buildSpokeOverlay({ opportunity, pageType, requiredSections = [], schemaTypes = [] }) {
   const meta = (opportunity && typeof opportunity.signal_metadata === 'object' && opportunity.signal_metadata) || {};
-  const payload = meta.spoke_brief;
+  const payload = resolveRetiredPayload(meta.spoke_brief);
   if (!payload) return null;
 
   const targetSite = normalizeTargetSite(payload.target_site || meta.spoke_target_site || meta.target_sites);

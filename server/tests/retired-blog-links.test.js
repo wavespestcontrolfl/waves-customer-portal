@@ -36,3 +36,21 @@ test('a category-seed row persisted with a retired link composes a brief that re
   expect(JSON.stringify(ob)).not.toContain('/pest-control/get-rid-of-fire-ants/');
   expect(JSON.stringify(ob)).toContain('/pest-control/fire-ant-treatment-bradenton-fl/');
 });
+
+test('intercept and spoke overlays: binding instructions name the merge target, never the retired URL (codex r12)', () => {
+  const intercept = require('../services/content/intercept-brief-seeder');
+  const spoke = require('../services/content/spoke-seed-seeder');
+  const iOverlay = intercept.buildOperatorOverlay;
+  const sOverlay = spoke.buildSpokeOverlay || spoke._internals?.buildSpokeOverlay;
+  const links = ['/pest-control/get-rid-of-paper-wasps/', '/pest-control-services/'];
+  if (iOverlay) {
+    const out = JSON.stringify(iOverlay({ opportunity: { signal_metadata: { intercept_brief: { id: 'A3', outline: ['x'], internal_links: links, verify_notes: ['Verify /pest-control/get-rid-of-paper-wasps/ resolves.'] } } }, pageType: 'supporting-blog' }));
+    expect(out).not.toContain('/pest-control/get-rid-of-paper-wasps/');
+    expect(out).toContain('/pest-control/get-rid-of-wasps/');
+  }
+  if (sOverlay) {
+    const out = JSON.stringify(sOverlay({ opportunity: { signal_metadata: { target_sites: ['sarasotaflpestcontrol.com'], spoke_target_site: 'sarasotaflpestcontrol.com', spoke_brief: { id: 'SAR9', outline: ['x'], internal_links: links, hub_link: '/pest-control/get-rid-of-paper-wasps/', target_site: 'sarasotaflpestcontrol.com' } } }, pageType: 'supporting-blog' }) || {});
+    expect(out).not.toContain('/pest-control/get-rid-of-paper-wasps/');
+  }
+  expect(Boolean(iOverlay && sOverlay)).toBe(true);
+});

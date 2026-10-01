@@ -41,4 +41,17 @@ function resolveRetiredText(text) {
   return out;
 }
 
-module.exports = { resolveRetiredLinks, resolveRetiredText };
+// A persisted seed payload with its links and writer notes resolved, so every
+// consumer (structured requirements AND the binding-instruction text the
+// writer follows) sees the same URLs.
+function resolveRetiredPayload(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  return {
+    ...payload,
+    ...(payload.hub_link ? { hub_link: resolveRetiredLinks([payload.hub_link])[0] || null } : {}),
+    ...(Array.isArray(payload.internal_links) ? { internal_links: resolveRetiredLinks(payload.internal_links) } : {}),
+    ...(Array.isArray(payload.verify_notes) ? { verify_notes: payload.verify_notes.map(resolveRetiredText) } : {}),
+  };
+}
+
+module.exports = { resolveRetiredLinks, resolveRetiredText, resolveRetiredPayload };

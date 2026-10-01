@@ -61,7 +61,7 @@ const { parseETDateTime } = require('../../utils/datetime-et');
 // resets exhausted counts against this exact number, never a private copy.
 const { _internals: { maxClaimAttempts } } = require('./opportunity-queue');
 const interceptSeeder = require('./intercept-brief-seeder');
-const { resolveRetiredLinks, resolveRetiredText } = require('./retired-blog-links');
+const { resolveRetiredLinks, resolveRetiredText, resolveRetiredPayload } = require('./retired-blog-links');
 // Single source of truth for the FAQ-section policy: 'tree-shrub' (among
 // others) is FAQ-blocked, and category seeds must NEVER ride the narrow
 // operator-intercept FAQ exemption — a blocked service simply gets no FAQ.
@@ -429,7 +429,7 @@ function isCategorySeed(opportunity = {}) {
  */
 function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], schemaTypes = [] }) {
   const meta = (opportunity && typeof opportunity.signal_metadata === 'object' && opportunity.signal_metadata) || {};
-  const payload = meta.category_brief;
+  const payload = resolveRetiredPayload(meta.category_brief);
   if (!payload) return null;
 
   const outline = Array.isArray(payload.outline) ? [...payload.outline] : [];

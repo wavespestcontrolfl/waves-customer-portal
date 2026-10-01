@@ -53,7 +53,7 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('../../models/db');
-const { resolveRetiredLinks, resolveRetiredText } = require('./retired-blog-links');
+const { resolveRetiredLinks, resolveRetiredText, resolveRetiredPayload } = require('./retired-blog-links');
 const logger = require('../logger');
 const { parseETDateTime } = require('../../utils/datetime-et');
 // Same claim-budget ceiling claimNext/peek enforce — the reseed CASE below
@@ -341,7 +341,7 @@ const FAQ_SECTION_RE = /\bfaq\b|frequently asked|common questions/i;
  */
 function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], schemaTypes = [] }) {
   const meta = (opportunity && typeof opportunity.signal_metadata === 'object' && opportunity.signal_metadata) || {};
-  const payload = meta.intercept_brief;
+  const payload = resolveRetiredPayload(meta.intercept_brief);
   if (!payload) return null;
 
   const outline = Array.isArray(payload.outline) ? [...payload.outline] : [];
