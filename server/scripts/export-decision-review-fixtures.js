@@ -58,9 +58,10 @@ async function exportCases({ db, capability, statuses = DEFAULT_STATUSES, now = 
     .where({ capability })
     .whereIn('label_status', statuses)
     .whereNot('package_hash', 'like', `${UNKNOWN_HASH_PREFIX}%`)
-    // A confirmed case must carry its answer (CHECK 20261001110000 enforces it
-    // in the schema; this keeps the export honest against older rows too).
-    .whereRaw("NOT (label_status IN ('confirmed_error','confirmed_correct') AND label IS NULL)")
+    // A confirmed case must carry its answer and its reviewer provenance (CHECK
+    // 20261001120000 enforces it in the schema; this keeps the export honest
+    // against older rows too).
+    .whereRaw("NOT (label_status IN ('confirmed_error','confirmed_correct') AND (label IS NULL OR labeled_by IS NULL OR labeled_at IS NULL))")
     .select(COLUMNS)
     .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }]);
   return { capability, exported_at: now().toISOString(), cases: rows.map(rowToCase) };

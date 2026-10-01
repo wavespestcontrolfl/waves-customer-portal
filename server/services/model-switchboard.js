@@ -615,6 +615,9 @@ const LANE_AREA = {
   contact_pass: 'calls',
   call_sentiment: 'calls',
   call_self_audit: 'calls',
+  // Shadow typed decisions ride the nightly call self-audit (and inbound texts
+  // in PR 2); one area per lane, so it sits with the audit it is scored against.
+  typed_decisions: 'calls',
   lead_synopsis: 'calls',
   call_commitments: 'calls',
   csr_coach: 'calls',
