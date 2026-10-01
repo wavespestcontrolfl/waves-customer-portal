@@ -32,10 +32,10 @@
  *   - the typedReportDelivery suppression predicate (routes/services.js
  *     suppressesCustomerArtifacts) — anything but auto_send keeps findings,
  *     products and notes off customer surfaces, and the phone is one;
- *   - the note text is PARSER-APPROVED COPY ONLY: technicianReportCustomerCopy
- *     (services/service-report/technician-report-copy.js), the same reviewed
+ *   - the note text is PARSER-APPROVED COPY ONLY: reviewedReportNotes
+ *     (services/service-report/customer-report-notes.js), the same reviewed
  *     parse that feeds the written report's summary slot, with
- *     customerSafeServiceNotes (services/project-types.js) applied on top.
+ *     customerSafeServiceNotes and the access-code redactor applied on top.
  *     Raw technician_notes never egress on a report path (AGENTS.md; owner
  *     ruling 2026-07-16, report-data.js `legacy` block) — the field is internal
  *     (access codes, billing notes), and anything that is not the reviewed
@@ -366,52 +366,19 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   // compliant rows out of the spoken report.
   const reentryApplications = Array.isArray(allProducts) ? allProducts : [];
 
-  // ⭐ PARSER-APPROVED COPY ONLY — this is a REPORT path.
-  // AGENTS.md: "Raw `technician_notes` never egress on any report path
-  // (parser-approved copy only)", and the written report already obeys it —
-  // report-data.js's `legacy` block records the owner ruling (2026-07-16): the
-  // field is internal (access codes, billing notes) and "the only sanctioned
-  // path to customer copy is technicianReportCustomerCopy's reviewed parse,
-  // which already feeds the summary slot" (report-data.js ~4218).
-  // customerSafeServiceNotes alone is NOT that parse — it only scrubs the WDO
-  // inspection fee and returns an ordinary visit's notes verbatim, so speaking
-  // its output read the technician's internal note down the phone. The parse
-  // returns null for anything that is not the reviewed two-section draft, and
-  // nulls `body` when a banned-copy screen matches, so an unreviewed note now
-  // produces no spoken note at all. The WDO fee scrub still runs on top.
-  const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
-  const { customerSafeServiceNotes } = require('../project-types');
-  // A completion-time request-context rejection (visit trade name,
-  // companion contradiction) is frozen into service_data — the phone
-  // report honors it like the web report does, and an unreadable
-  // service_data fails CLOSED to "rejected" (codex r61 #3420).
-  const visitBodyRejected = (() => {
-    try {
-      const sd = typeof record.service_data === 'string'
-        ? JSON.parse(record.service_data || '{}')
-        : (record.service_data || {});
-      if (sd?.technicianReportBodyRejected) return true;
-      // A governing typed/companion snapshot that REFUSED the body
-      // (zero state, contradiction) leaves no marker — mirror the web
-      // report's acceptance rule so the phone never speaks copy the
-      // permanent report replaced (codex r65).
-      const { typedStoryAcceptsBody } = require('../service-report/activity-indicators');
-      return !typedStoryAcceptsBody(sd);
-    } catch { return true; }
-  })();
-  const reportCopy = visitBodyRejected ? null : technicianReportCustomerCopy(record.technician_notes);
-  // ⭐ PARSER-APPROVED IS NOT CODE-FREE. The reviewed parse validates shape and
-  // compliance language, but a valid one-line section can still carry "gate
-  // code 4417" — the canonical redactor runs over the approved copy too, and
-  // FAILS CLOSED: no scrub, no spoken note.
-  const redactedBody = (() => {
-    if (!(reportCopy && reportCopy.body)) return null;
-    try {
-      const { redactAccessCodes } = require('../context-aggregator');
-      if (typeof redactAccessCodes !== 'function') return null;
-      return redactAccessCodes(customerSafeServiceNotes(reportCopy.body, structured));
-    } catch { return null; }
-  })();
+  // ⭐ PARSER-APPROVED COPY ONLY — this is a REPORT path. AGENTS.md: "Raw
+  // `technician_notes` never egress on any report path (parser-approved copy
+  // only)" (owner ruling 2026-07-16, report-data.js `legacy` block).
+  // reviewedReportNotes is technicianReportCustomerCopy's reviewed parse
+  // alone, the written report's summary source: a note that is not the
+  // reviewed draft, or whose body a banned-copy screen nulled, produces no
+  // spoken note. It honors a completion-time body rejection and a governing
+  // typed story that refused the body as the web report does, fails CLOSED
+  // on unreadable service_data (codex r61 #3420, r65), and runs the WDO fee
+  // scrub and the access-code redactor over the approved copy —
+  // parser-approved is not code-free.
+  const { reviewedReportNotes } = require('../service-report/customer-report-notes');
+  const redactedBody = reviewedReportNotes(record);
   const noteText = redactedBody ? promptSafeUntrusted(redactedBody, 240) : null;
 
   const lines = [`Visit on ${speakDate(record.service_date) || 'an unrecorded date'}`

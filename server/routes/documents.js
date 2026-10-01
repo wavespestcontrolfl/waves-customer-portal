@@ -11,13 +11,13 @@ const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
 const {
   getProjectType,
-  customerSafeServiceNotes,
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
   projectRecordedFeeValues,
   projectTypeHasInternalFindingKeys,
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
+const { customerReportNotes } = require('../services/service-report/customer-report-notes');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf } = require('../services/service-report/report-identity-snapshot');
@@ -387,10 +387,11 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE DID
   // ══════════════════════════════════════════════════════
-  // Same legacy inspection-fee scrub as the service-history JSON — this PDF
-  // (and its auto_report share links) is a customer render of the same notes
-  // (codex #2817).
-  const notes = (customerSafeServiceNotes(service.technician_notes, structuredNotes) || '').trim();
+  // The same rule as the service-history JSON — this PDF (and its
+  // auto_report share links) is a customer render of the same notes: the
+  // reviewed report text only, never the tech's raw note, with the legacy
+  // inspection-fee scrub on top (customer-report-notes.js; codex #2817).
+  const notes = (customerReportNotes(service) || '').trim();
   if (notes) {
     if (y > 620) { doc.addPage(); y = 50; }
     y = sectionHeader(doc, 'What We Did', L, y);
