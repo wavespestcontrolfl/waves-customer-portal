@@ -72,7 +72,12 @@ describe('accept route wiring (source pins)', () => {
 
   test('the card enrollment records the ONE shared collection promise decided in the accept transaction (prepay_card still wins for in-lane prepay)', () => {
     expect(src).toMatch(
-      /const recurringCardPromiseCeiling = RecurringCards\.resolveCollectionPromise\(\{\s*policy: recurringCardPolicy,\s*tender: 'card',\s*annualPrepay: annualPrepaySelected,\s*\}\);/,
+      /const recurringCardPromiseCeiling = RecurringCards\.resolveCollectionPromise\(\{\s*policy: recurringCardPolicy,\s*tender: 'card',\s*annualPrepay: annualPrepaySelected,[\s\S]{0,500}setupFeeDeferred: setupFeeAfterVisitAttested\s*&& require\('\.\.\/config\/feature-gates'\)\.pafSetupFeeLive\(\)\s*&& RecurringCards\.payAfterFirstVisitSetupFeeRail\(recurringCardPolicy\),\s*\}\);/,
+    );
+    // PR-C: the in-transaction promise also knows whether the setup fee was
+    // stamped on the first visit (the one promise records it).
+    expect(src).toMatch(
+      /const expectedPromise = RecurringCards\.resolveCollectionPromise\(\{[\s\S]{0,200}setupFeeDeferred: setupFeeAfterVisitConsentShown,\s*\}\);/,
     );
     expect(src).toMatch(
       /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: \(acceptedCollectionPromise\?\.variant \|\| null\),/,
