@@ -124,7 +124,8 @@ describe('rankCitedPages', () => {
   test('listPage is evidence about the page itself — a cost guide cited for a hire question is not a list', () => {
     const rows = [row({ query: Q1, urls: ['https://www.bobvila.com/articles/pest-control-cost/', 'https://floridist.com/best-pest-control-sarasota', 'https://www.yelp.com/biz/acme'] })];
     const byHost = Object.fromEntries(rankCitedPages(rows, []).map((p) => [p.host, p.listPage]));
-    expect(byHost).toEqual({ 'bobvila.com': false, 'floridist.com': true, 'yelp.com': true });
+    // a directory business profile is one company, not a list to be added to
+    expect(byHost).toEqual({ 'bobvila.com': false, 'floridist.com': true, 'yelp.com': false });
     // a heuristic listicle candidate on a place name alone is not proof of a list
     const [guide] = rankCitedPages([row({ query: Q1, urls: ['https://someblog.example/sarasota-pest-guide'] })], []);
     expect(guide).toMatchObject({ subtype: 'listicle_candidate', listPage: false });
