@@ -374,7 +374,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('customer', `${who}: ${humanKey(field)} ${from} → ${to}`, { before: from, after: to });
     }
     if (preview.changes.email) {
-      push('operational', "The email change also stamps the lead's email-confirmed time, which counts as the correction for any open email-disagreement triage card on this lead");
+      // Triage's emailDisagreementConfirmed needs a NON-EMPTY current email
+      // as well as the stamp (Codex r2 P2) — clearing does not resolve it.
+      push('operational', preview.changes.email.to == null
+        ? "Clearing the email also stamps the lead's email-confirmed time, but an open email-disagreement triage card on this lead stays open until a real address is saved"
+        : "The email change also stamps the lead's email-confirmed time, which counts as the correction for any open email-disagreement triage card on this lead");
     }
     push('operational', "A contact-updated entry is appended to the lead's activity history; a linked customer account is NOT changed");
   }

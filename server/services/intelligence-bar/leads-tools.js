@@ -10,7 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
-const { toE164, isLikelyE164 } = require('../../utils/phone');
+const { toE164 } = require('../../utils/phone');
 const { cleanValidEmailOrNull } = require('../../utils/intake-normalize');
 const leadAttribution = require('../lead-attribution');
 
@@ -663,13 +663,20 @@ function normalizeLeadContactField(field, raw) {
       ? /^\+\d{8,15}$/.test(`+${digits}`)
       : (digits.length === 10 || (digits.length === 11 && digits.startsWith('1')));
     const e164 = wellFormed ? toE164(text) : null;
-    if (!e164 || !isLikelyE164(e164)) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
+    // Canonical E.164 (Codex r2 P2): a non-zero country code then 7–14 more
+    // digits — not the looser isLikelyE164 helper, which both admits a
+    // leading zero and rejects valid 8–9 digit international numbers.
+    // NANP (+1) numbers are exactly ten more digits with a [2-9] area code.
+    const canonical = e164 && (e164.startsWith('+1') ? /^\+1[2-9]\d{9}$/.test(e164) : /^\+[2-9]\d{7,14}$/.test(e164));
+    if (!canonical) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
     return { value: e164 };
   }
   if (field === 'email') {
     if (!text) return { value: null };
     const email = cleanValidEmailOrNull(text);
     if (!email) return { error: 'email is not a valid email address.' };
+    // leads.email is varchar(255) (Codex r2 P2): refuse at preview, not at commit.
+    if (email.length > 255) return { error: 'email is too long (255 characters max).' };
     return { value: email };
   }
   return { error: `Unknown contact field: ${field}` };

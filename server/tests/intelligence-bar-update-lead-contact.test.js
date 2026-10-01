@@ -82,6 +82,9 @@ test('invalid inputs are refused before any lookup', async () => {
   // Too many digits is refused, never truncated to the last ten.
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '941555019912' })).error).toMatch(/not a valid phone/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+1 (941) 555-01' })).error).toMatch(/not a valid phone/);
+  // Canonical E.164 only: no leading-zero country code; a 255+ char email is refused at preview.
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+0123456789' })).error).toMatch(/not a valid phone/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', email: `${'a'.repeat(250)}@example.test` })).error).toMatch(/too long/);
   // Extensions / letters are refused, never folded into the number.
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+1 (941) 555-0199 ext 23' })).error).toMatch(/no extension/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '941-555-0199 x4' })).error).toMatch(/no extension/);
@@ -91,7 +94,7 @@ test('invalid inputs are refused before any lookup', async () => {
 
 test('phone shapes: 10 digits, 1 + 10 digits, and +country all normalize to E.164', async () => {
   db.mockReturnValue(chain({ first: LEAD }));
-  for (const [raw, e164] of [['941-555-0199', '+19415550199'], ['1 (941) 555-0199', '+19415550199'], ['+44 20 7946 0958', '+442079460958']]) {
+  for (const [raw, e164] of [['941-555-0199', '+19415550199'], ['1 (941) 555-0199', '+19415550199'], ['+44 20 7946 0958', '+442079460958'], ['+299 12 34 56', '+299123456']]) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: raw });
     expect(res.changes).toEqual({ phone: { from: '+19415553333', to: e164 } });
   }
@@ -218,6 +221,13 @@ test('a lead linked to a customer says the customer account is untouched', async
   const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' });
   expect(res.linked_customer_unchanged).toBe(true);
   expect(res.note).toMatch(/customer account is NOT changed/);
+});
+
+test('authorization contract: clearing the email says the disagreement card stays open', () => {
+  const preview = { preview: true, lead_id: 'lead-1', lead_name: 'Testc Beta', lead_status: 'contacted', changes: { email: { from: 'old@example.test', to: null } } };
+  const c = buildContract({ toolName: 'update_lead_contact', params: { lead_id: 'lead-1', email: '' }, displayParams: { lead: 'Testc Beta (contacted)', email: 'old@example.test → (cleared)' }, preview });
+  expect(c.effects.map(e => e.label)).toEqual(expect.arrayContaining([expect.stringMatching(/Clearing the email.*stays open/)]));
+  expect(c.effects.map(e => e.label)).not.toEqual(expect.arrayContaining([expect.stringMatching(/counts as the correction/)]));
 });
 
 test('authorization contract: one before/after effect per changed field, tier yellow', () => {
