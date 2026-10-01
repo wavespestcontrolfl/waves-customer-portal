@@ -86,12 +86,10 @@ describe('lawnWateringSmsAlreadyHandled', () => {
     expect(lawnWateringSmsAlreadyHandled({})).toBe(false);
     expect(lawnWateringSmsAlreadyHandled(null)).toBe(false);
   });
-  test.each(['sent', 'skipped_quiet_hours', 'skipped_blocked', 'skipped_anything'])('%s is final', (status) => {
+  test.each(['sent', 'failed', 'skipped_quiet_hours', 'skipped_blocked', 'skipped_anything'])('%s is final', (status) => {
     expect(lawnWateringSmsAlreadyHandled({ lawnWateringSmsStatus: status })).toBe(true);
   });
-  test('a definite failure stays retryable, an uncertainty fence does not', () => {
-    expect(lawnWateringSmsAlreadyHandled({ lawnWateringSmsStatus: 'failed' })).toBe(false);
-    expect(lawnWateringSmsAlreadyHandled({ lawnWateringSmsStatus: 'failed', lawnWateringSmsDeliveryUnverifiedAt: 'x' })).toBe(true);
+  test('an uncertainty fence is final too', () => {
     expect(lawnWateringSmsAlreadyHandled({ lawnWateringSmsStatus: 'sending', lawnWateringSmsDeliveryUnverifiedAt: 'x' })).toBe(true);
   });
 });
@@ -125,7 +123,7 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
       internalOnly: false,
       completionTextRequested: true,
     };
-    const deps = { db: {}, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified: (r) => r, sleep: jest.fn(async () => {}) };
+    const deps = { db: {}, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified: (r) => r };
     return { state, deps, sendCustomerMessage, getTemplate, mergeNotes, merged };
   }
 
@@ -216,10 +214,10 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     }
   });
 
-  test('a definitely-rejected earlier attempt may try again on a resumed completion', async () => {
+  test('a definitely-rejected earlier attempt is never retried on a resumed completion (one try, then stop)', async () => {
     const h = harness({ notes: { lawnWateringSmsStatus: 'failed', lawnWateringSmsError: 'PROVIDER_FAILURE' } });
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
-    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skip_already_sent' });
+    expect(h.sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -273,30 +271,11 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(h.sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('a retryable block (lookup failed) is retried in place, then gives up for good', async () => {
+  test('a retryable block (lookup failed) is recorded as failed and never retried', async () => {
     const h = harness({ sendResult: { sent: false, blocked: true, retryable: true, deferred: true, code: 'CONSENT_LOOKUP_FAILED' } });
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_retries_exhausted' });
-    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(3);
-    expect(h.deps.sleep.mock.calls.map((c) => c[0])).toEqual([2000, 8000]);
-    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'skipped_retries_exhausted', lawnWateringSmsError: 'CONSENT_LOOKUP_FAILED', lawnWateringSmsDeliveryUnverifiedAt: null });
-    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
-  });
-
-  test('a retry that succeeds sends exactly once', async () => {
-    const h = harness();
-    h.sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'PROVIDER_FAILURE' });
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
-    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(2);
-    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'sent', lawnWateringSmsDeliveryUnverifiedAt: null });
-  });
-
-  test('an instruction that goes stale while waiting to retry is never retried', async () => {
-    const h = harness({ sendResult: { sent: false, code: 'PROVIDER_FAILURE' } });
-    h.deps.sleep = jest.fn(async () => {
-      h.state.notes.lawnWateringFreeze.wateringInstruction.waterInBy = new Date(Date.now() - 1000).toISOString();
-    });
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_stale' });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
     expect(h.sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'failed', lawnWateringSmsError: 'CONSENT_LOOKUP_FAILED', lawnWateringSmsDeliveryUnverifiedAt: null });
     expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
   });
 
@@ -321,11 +300,12 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
   });
 
-  test('a definite provider rejection lifts the fence and is retried in place', async () => {
+  test('a definite provider rejection is final: one try, then stop', async () => {
     const h = harness({ sendResult: { sent: false, code: 'PROVIDER_FAILURE' } });
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_retries_exhausted' });
-    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(3);
-    expect(h.state.notes.lawnWateringSmsDeliveryUnverifiedAt).toBeNull();
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
+    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'failed', lawnWateringSmsDeliveryUnverifiedAt: null });
+    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
   });
 
   test('a throw after the provider handoff keeps the fence so a retry never double-texts', async () => {
@@ -345,11 +325,12 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(h.state.notes.lawnWateringSmsStatus).toBe('sent');
   });
 
-  test('a throw that carries a definite not_sent outcome lifts the fence and is retried', async () => {
+  test('a throw that carries a definite not_sent outcome is recorded as failed (final)', async () => {
     const h = harness();
     h.sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed after reject'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }));
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
-    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
+    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'failed', lawnWateringSmsDeliveryUnverifiedAt: null });
     // ...whereas an uncertain throw keeps the fence.
     const u = harness();
     u.sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('timeout'), { providerOutcome: { sent: false, deliveryOutcome: 'uncertain' } }));

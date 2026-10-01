@@ -17,7 +17,8 @@
  * mergeRecordNotesKeys (lawnWateringSmsStatus / lawnWateringSmsAt, plus an
  * uncertainty fence written BEFORE the provider call, the same shape as the
  * completion text's completionSmsDeliveryUnverifiedAt). Anything that may have
- * been delivered blocks a resend; only a definite rejection stays retryable.
+ * been delivered blocks a resend. One try, then stop: a send known NOT
+ * delivered is final as well (owner 2026-10-01).
  *
  * Best-effort end to end: nothing here throws, blocks or fails completion.
  */
@@ -30,14 +31,12 @@ const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
 const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']);
 
-// Statuses that end the obligation for this visit. 'failed' (known not
-// delivered) is deliberately NOT here: the in-call bounded retry owns it, and
-// a crash mid-retry leaves a resumed completion free to try again. 'sending' is covered by the uncertainty
+// Statuses that end the obligation for this visit. One try, then stop (owner
+// 2026-10-01): a send known NOT delivered ('failed') is final too, never
+// retried or requeued; the report banner still carries the instruction. 'sending' is covered by the uncertainty
 // fence below, which is written in the same claim.
 const STALE_CODE = 'LAWN_WATERING_STALE';
-// Waits before each retry of a known-unsent watering text.
-const RETRY_DELAYS_MS = Object.freeze([2000, 8000]);
-const TERMINAL_STATUSES = Object.freeze(['sent', 'skipped_blocked', 'skipped_quiet_hours']);
+const TERMINAL_STATUSES = Object.freeze(['sent', 'failed', 'skipped_blocked', 'skipped_quiet_hours']);
 
 function parseNotes(value) {
   if (!value) return {};
@@ -179,8 +178,7 @@ async function sendLawnWateringSms(args, deps) {
       record.structured_notes = { ...parseNotes(record.structured_notes), ...delta };
     };
 
-    // One claim + send. 'failed' = known not delivered and worth another try
-    // (provider rejection, retryable messaging block).
+    // One claim + send; every outcome is final ('failed' = known not delivered).
     const attemptSend = async () => {
       // CLAIM before the provider call. If this write fails nothing was sent and
       // nothing can be deduped, so do not send.
@@ -229,7 +227,7 @@ async function sendLawnWateringSms(args, deps) {
         const accepted = sendErr?.providerOutcome?.sent === true;
         // A throw that carries a definite provider rejection (deliveryOutcome
         // 'not_sent', e.g. the audit write failed after Twilio refused) is known
-        // not delivered: lift the fence; the bounded retry below tries again.
+        // not delivered: record it as 'failed' (final; one try, then stop).
         const notSent = !accepted && sendErr?.providerOutcome?.deliveryOutcome === 'not_sent';
         try {
           await stamp(accepted
@@ -278,8 +276,8 @@ async function sendLawnWateringSms(args, deps) {
       }
 
       // A retryable block (consent / suppression lookup failed, a liftable
-      // hold) is known not sent but not a decision: lift the fence and leave
-      // it to the bounded retry below (freshness still bounds it).
+      // hold) is known not sent but not an opt-out: record it as 'failed'
+      // with its code, final like any known-unsent send (one try, then stop).
       if (result && result.blocked && result.retryable === true) {
         await stamp({
           lawnWateringSmsStatus: 'failed',
@@ -302,8 +300,7 @@ async function sendLawnWateringSms(args, deps) {
         return { status: 'skipped_blocked' };
       }
 
-      // Definite provider rejection: known not delivered, so the fence is lifted
-      // and the bounded retry below tries again.
+      // Definite provider rejection: known not delivered; final (one try, then stop).
       await stamp({
         lawnWateringSmsStatus: 'failed',
         lawnWateringSmsError: String((result && (result.code || result.reason)) || 'send_failed').slice(0, 64),
@@ -314,30 +311,7 @@ async function sendLawnWateringSms(args, deps) {
       return { status: 'failed' };
     };
 
-    // Nothing re-enters this sender after the completion finishes (a later
-    // submission replays the stored response), so a retryable failure is
-    // retried HERE, a bounded few times; each attempt rechecks freshness at
-    // the handoff. Exhausted = final 'failed' (the report banner still
-    // carries the instruction).
-    const sleep = deps.sleep || ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
-    let outcome = await attemptSend();
-    for (const delayMs of RETRY_DELAYS_MS) {
-      if (outcome.status !== 'failed') break;
-      await sleep(delayMs);
-      if (!wateringInstructionFresh(instruction, completedAt, Date.now())) {
-        await stamp({ lawnWateringSmsStatus: 'skipped_stale', lawnWateringSmsDeliveryUnverifiedAt: null })
-          .catch((e) => logger.warn(`[lawn-watering-sms] stale-status write failed for service_record ${record.id}: ${e.message}`));
-        return { status: 'skipped_stale' };
-      }
-      outcome = await attemptSend();
-    }
-    if (outcome.status === 'failed') {
-      await stamp({ lawnWateringSmsStatus: 'skipped_retries_exhausted' })
-        .catch((e) => logger.warn(`[lawn-watering-sms] exhausted-status write failed for service_record ${record.id}: ${e.message}`));
-      logger.warn(`[lawn-watering-sms] gave up after ${RETRY_DELAYS_MS.length + 1} attempts for service_record ${record.id}`);
-      return { status: 'skipped_retries_exhausted' };
-    }
-    return outcome;
+    return attemptSend();
   } catch (err) {
     logger.warn(`[lawn-watering-sms] unexpected error (completion unaffected): ${err.message}`);
     return { status: 'error' };
