@@ -31,13 +31,19 @@ import {
 // banner (the real top of the report, codex P1 #5496 r1), so this section
 // opens with the photo strip (its summary outside the lead's word budget) →
 // findings → water → progression → the score breakdown → rain → mowing →
-// trends. The follow-up card is not mounted: its reason is lead.next. Without
+// trends. The follow-up card is mounted only when the lead could not carry
+// its reason (otherwise that reason is lead.next). Without
 // `lead` the legacy layout below is untouched.
 function LawnReportV2LeadSection({ data, print }) {
   return (
     <PrintContext.Provider value={print}>
     <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
       {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} /> : null}
+      {/* A planned follow-up the lead could not carry (its reason was watering
+          wording under the banner, or over its word cap) keeps its own card,
+          without the "Your part" line: the banner and the lead own that
+          (codex P2 #5496 r7). */}
+      {data.followUp?.scheduled && data.followUp.reason && !data.lead.next ? <LawnFollowUpCard followUp={data.followUp} showYourPart={false} /> : null}
       {data.insights?.length ? <LawnInsightCards insights={data.insights} lead={data.lead} /> : null}
       {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} /> : null}
       {data.progression?.length >= 2 ? <LawnProgressionSlider frames={data.progression} note={data.progressionNote} /> : null}

@@ -30,7 +30,6 @@ const SNAPSHOT = {
 const LEAD = {
   headline: 'Stable, with a thin edge to watch',
   why: 'The score is mainly pulled down by stress and damage signals, while the other areas look healthy.',
-  progress: null,
   applied: 'Today we applied a broadleaf herbicide to the edge weeds.',
   yourPart: ['Raise your mower to 4 inches this week.'],
   next: 'We will recheck the thin edge and compare it with today’s photos.',
@@ -120,11 +119,10 @@ describe('LawnLeadCard layout', () => {
     expect(region).not.toHaveTextContent(/No action is needed/i);
   });
 
-  it('falls back to the status label when the lead has no headline, and shows a progress line when set', () => {
-    renderLead({ lead: { ...LEAD, headline: null, progress: 'The thin edge has started to fill in.' } });
+  it('falls back to the status label when the lead has no headline', () => {
+    renderLead({ lead: { ...LEAD, headline: null } });
     const region = screen.getByTestId('lawn-lead-region');
     expect(within(region).getByRole('heading', { level: 2 })).toHaveTextContent(/watch/i);
-    expect(region).toHaveTextContent('The thin edge has started to fill in.');
   });
 
   it('stays inside the 250 visible-word budget for a realistic payload (banner lines included)', () => {
@@ -140,7 +138,7 @@ describe('LawnLeadCard layout', () => {
   });
 
   it('renders a bare lead', () => {
-    render(<LawnLeadCard lead={{ headline: null, why: null, progress: null, applied: null, yourPart: [], next: null }} snapshot={{ overallScore: 90 }} />);
+    render(<LawnLeadCard lead={{ headline: null, why: null, applied: null, yourPart: [], next: null }} snapshot={{ overallScore: 90 }} />);
     expect(screen.getByTestId('lawn-lead-region')).toBeInTheDocument();
   });
 });
@@ -186,6 +184,42 @@ describe('LawnReportV2Section lead mode', () => {
     render(<LawnReportV2Section data={payload({ insights: [card], lead: { ...LEAD, yourPart: [], next: null } })} />);
     expect(screen.getByText('Check sprinkler coverage in that area.')).toBeInTheDocument();
     expect(screen.getByText('Recheck the moisture balance next visit.', { exact: false })).toBeInTheDocument();
+  });
+
+  it('keeps the follow-up card, without a "Your part" line, when the lead has no next line', () => {
+    const { container } = render(<LawnReportV2Section data={payload({ lead: { ...LEAD, next: null } })} />);
+    const card = screen.getByText('Follow-up already planned');
+    expect(card).toBeInTheDocument();
+    expect(screen.getByText('We will recheck the thin edge.')).toBeInTheDocument();
+    expect(screen.queryByText(/Your part:/)).toBeNull();
+    expect(screen.queryByText(/No action is needed from you/)).toBeNull();
+    // Between the photo strip and the findings.
+    const text = container.textContent;
+    expect(text.indexOf('A few thin tan patches')).toBeLessThan(text.indexOf('Follow-up already planned'));
+    expect(text.indexOf('Follow-up already planned')).toBeLessThan(text.indexOf('Priority Findings'));
+  });
+
+  it('does not mount the follow-up card when the lead carries a next line, or when it has no reason or is not scheduled', () => {
+    const { unmount } = render(<LawnReportV2Section data={payload()} />);
+    expect(screen.queryByText('Follow-up already planned')).toBeNull();
+    unmount();
+    const base = payload({ lead: { ...LEAD, next: null } }).followUp;
+    const { unmount: u2 } = render(<LawnReportV2Section data={payload({ lead: { ...LEAD, next: null }, followUp: { ...base, reason: null } })} />);
+    expect(screen.queryByText('Follow-up already planned')).toBeNull();
+    u2();
+    render(<LawnReportV2Section data={payload({ lead: { ...LEAD, next: null }, followUp: { ...base, scheduled: false } })} />);
+    expect(screen.queryByText('Follow-up already planned')).toBeNull();
+  });
+
+  it('finding rows read at 16px in lead mode and 14.5px without a lead', () => {
+    const { unmount } = render(<LawnInsightCards insights={[{ ...INSIGHT, customerAction: null, nextVisitPlan: null }]} lead={{ ...LEAD, next: null }} />);
+    const row = screen.getByText(INSIGHT.whatWeSaw).closest('div');
+    expect(row.style.fontSize).toBe('16px');
+    expect(screen.getByText(INSIGHT.whyItMatters).closest('div').style.fontSize).toBe('16px');
+    unmount();
+    render(<LawnInsightCards insights={[INSIGHT]} />);
+    expect(screen.getByText(INSIGHT.whatWeSaw).closest('div').style.fontSize).toBe('14.5px');
+    expect(screen.getByText(INSIGHT.customerAction).closest('div').style.fontSize).toBe('14.5px');
   });
 
   it('keeps a card step the lead did not carry (the lead dropped a watering step under the banner)', () => {

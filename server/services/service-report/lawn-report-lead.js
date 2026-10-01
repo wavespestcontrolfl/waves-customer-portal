@@ -1,7 +1,7 @@
 /**
  * Lawn report LEAD (lawn report rebuild P7, GATE_LAWN_REPORT_LEAD).
  *
- * The above-the-fold block of the web report: state, why, progress, what was
+ * The above-the-fold block of the web report: state, why, what was
  * applied, the homeowner's part this week and the next visit, in one place so
  * each fact has ONE owner on screen. Pure and derived: every field is read off
  * the finished reportV2, never written by a model or composed from a second
@@ -34,7 +34,7 @@ const LEAD_WORD_BUDGET = 250;
 // generated treatment narrative can run to 1,200 characters (codex P2 #5496
 // r4); what was applied is still listed in full under "What Waves did today"
 // and Products Applied further down, so it goes last of the three.
-const BUDGET_DROP_ORDER = ['progress', 'why', 'applied'];
+const BUDGET_DROP_ORDER = ['why', 'applied'];
 // Per-field word caps. Model-written copy (the narrative overlay, a generated
 // treatment narrative) reaches these fields unbounded, so any one field over
 // its cap is left out of the lead rather than cut mid-sentence; the same
@@ -42,7 +42,7 @@ const BUDGET_DROP_ORDER = ['progress', 'why', 'applied'];
 // field capped and the drop order above, the region fits the budget for any
 // banner of up to about 85 words: after the drops the most that remains is
 // headline 12 + yourPart 2 x 30 + next 30 + visit date ~9 + labels 24.
-const FIELD_WORD_CAPS = { headline: 12, why: 40, progress: 35, applied: 60, yourPart: 30, next: 30 };
+const FIELD_WORD_CAPS = { headline: 12, why: 40, applied: 60, yourPart: 30, next: 30 };
 
 // The retired follow-up card's stock line. It is a placeholder, not a task.
 const STOCK_NO_ACTION = /^no action is needed\b/i;
@@ -120,7 +120,7 @@ function deriveNext(reportV2, topIssue, bannerPresent) {
 
 /**
  * @param {object} reportV2 a finished (reconciled) lawn reportV2 payload
- * @returns {{ headline: string|null, why: string|null, progress: string|null,
+ * @returns {{ headline: string|null, why: string|null,
  *   applied: string|null, yourPart: string[], next: string|null } | null}
  *   null when there is no snapshot to lead with.
  */
@@ -132,15 +132,13 @@ function deriveLawnLead(reportV2) {
   const lead = {
     headline: pick([snapshot.statusHeadline], bannerPresent),
     why: pick([snapshot.rootCause, snapshot.scoreExplanation], bannerPresent),
-    // Slot only: a later PR writes snapshot.progress.
-    progress: pick([snapshot.progress], bannerPresent),
     // What Waves applied is a statement of record, not watering advice: a
     // product summary that says "watered in" keeps its place in the lead.
     applied: clean(snapshot.treatmentSummary),
     yourPart: deriveYourPart(reportV2, topIssue, bannerPresent),
     next: deriveNext(reportV2, topIssue, bannerPresent),
   };
-  for (const field of ['headline', 'why', 'progress', 'applied', 'next']) {
+  for (const field of ['headline', 'why', 'applied', 'next']) {
     if (countWords(lead[field]) > FIELD_WORD_CAPS[field]) lead[field] = null;
   }
   lead.yourPart = lead.yourPart.filter((task) => countWords(task) <= FIELD_WORD_CAPS.yourPart);
@@ -178,7 +176,7 @@ function leadWords(reportV2) {
   if (banner && Array.isArray(banner.lines)) parts.push(...banner.lines);
   if (banner && banner.mowHold) parts.push(banner.mowHold.line);
   if (lead) {
-    parts.push(lead.headline, lead.why, lead.progress, lead.applied, lead.next);
+    parts.push(lead.headline, lead.why, lead.applied, lead.next);
     if (Array.isArray(lead.yourPart)) parts.push(...lead.yourPart);
   }
   const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;

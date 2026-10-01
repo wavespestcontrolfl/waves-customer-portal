@@ -87,9 +87,11 @@ const BANNER_RULES = {
 
 const CELSIUS = [{ product: { name: 'Celsius WG', category: 'herbicide', irrigation_required: false }, targets: ['weeds'] }];
 
-const PROGRESS_26 = 'Since your last visit the thin areas along the front edge have started to fill in, and the color across the whole lawn looks a little deeper green now.';
+// A long-but-under-cap why and applied (40 and 60 words) exercise the budget's drop order.
+const LONG_WHY = Array.from({ length: 40 }, (_, i) => `reason${i + 1}`).join(' ');
+const LONG_APPLIED = Array.from({ length: 60 }, (_, i) => `product${i + 1}`).join(' ');
 
-function build(caseName, weekPlan, bannerKind, { progress = null } = {}) {
+function build(caseName, weekPlan, bannerKind, { long = false } = {}) {
   const base = CASES[caseName];
   const rules = BANNER_RULES[bannerKind];
   const instruction = rules ? buildWateringInstruction({ rules, completedAt: COMPLETED }) : null;
@@ -102,7 +104,7 @@ function build(caseName, weekPlan, bannerKind, { progress = null } = {}) {
     const banner = buildWateringBanner(instruction, weekPlan);
     if (banner) reportV2.banner = banner;
   }
-  if (progress) reportV2.snapshot = { ...reportV2.snapshot, progress };
+  if (long) reportV2.snapshot = { ...reportV2.snapshot, rootCause: LONG_WHY, treatmentSummary: LONG_APPLIED };
   const data = applyLawnReportReconciliation(
     { serviceLine: 'lawn', summary: base.aiSummary, lawnAssessment: base, reportV2 },
     DYNAMIC_CONTEXT_READY,
@@ -121,7 +123,7 @@ const norm = (s) => tokens(s).join(' ');
 
 function leadStrings(v2) {
   const { lead } = v2;
-  return [lead.headline, lead.why, lead.progress, lead.applied, lead.next, ...lead.yourPart].filter(Boolean);
+  return [lead.headline, lead.why, lead.applied, lead.next, ...lead.yourPart].filter(Boolean);
 }
 function bannerStrings(v2) {
   const banner = v2.banner;
@@ -160,14 +162,14 @@ describe('lawn report lead word budget', () => {
     expect(leadWords(v2)).toBeLessThanOrEqual(WORD_BUDGET);
   });
 
-  test.each(GRID)('%s / %s / banner %s: still within budget with a 26-word progress line', (caseName, planName, bannerKind, plan) => {
-    const v2 = build(caseName, plan, bannerKind, { progress: PROGRESS_26 });
-    expect(v2.lead.progress).toBe(PROGRESS_26);
+  test.each(GRID)('%s / %s / banner %s: still within budget with a long why and applied', (caseName, planName, bannerKind, plan) => {
+    const v2 = build(caseName, plan, bannerKind, { long: true });
+    expect(Object.prototype.hasOwnProperty.call(v2.lead, 'progress')).toBe(false);
     expect(leadWords(v2)).toBeLessThanOrEqual(WORD_BUDGET);
   });
 
   test.each(GRID)('%s / %s / banner %s: no lead or banner string repeats another', (caseName, planName, bannerKind, plan) => {
-    const v2 = build(caseName, plan, bannerKind, { progress: PROGRESS_26 });
+    const v2 = build(caseName, plan, bannerKind, { long: true });
     const all = [
       ...leadStrings(v2).map((text) => ({ owner: 'lead', text })),
       ...bannerStrings(v2).map((text) => ({ owner: 'banner', text })),
@@ -186,7 +188,7 @@ describe('lawn report lead word budget', () => {
   test.each(GRID.filter(([, , bannerKind]) => bannerKind !== 'absent'))(
     '%s / %s / banner %s: under a banner no lead field mentions watering',
     (caseName, planName, bannerKind, plan) => {
-      const v2 = build(caseName, plan, bannerKind, { progress: PROGRESS_26 });
+      const v2 = build(caseName, plan, bannerKind, { long: true });
       for (const text of leadStrings(v2)) {
         expect({ text, watering: WATERING_WORDS.test(text) }).toEqual({ text, watering: false });
       }

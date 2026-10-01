@@ -43,18 +43,19 @@ describe('deriveLawnLead', () => {
     expect(deriveLawnLead({ snapshot: null, insights: [] })).toBeNull();
   });
 
-  test('maps the snapshot fields, leaves progress as an empty slot', () => {
+  test('maps the snapshot fields; there is no progress slot', () => {
     expect(deriveLawnLead(reportOf())).toEqual({
       headline: 'Stable — watching weeds',
       why: 'The score is mainly pulled down by weed pressure.',
-      progress: null,
       applied: 'Today we applied a broadleaf herbicide to the edge weeds.',
       yourPart: ['Raise your mower to 4 inches this week.'],
       next: 'Spot-treat the edge weeds.',
     });
+    // A stray snapshot.progress is never read: the lead has no such key.
     const withProgress = reportOf();
     withProgress.snapshot.progress = 'The thin edge has started to fill in.';
-    expect(deriveLawnLead(withProgress).progress).toBe('The thin edge has started to fill in.');
+    expect(Object.prototype.hasOwnProperty.call(deriveLawnLead(withProgress), 'progress')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(deriveLawnLead(reportOf({ banner: HOLD_BANNER })), 'progress')).toBe(false);
   });
 
   test('why prefers rootCause over scoreExplanation; missing statusHeadline is null', () => {
@@ -227,7 +228,6 @@ describe('deriveLawnLead', () => {
 describe('lead word budget', () => {
   test('a long generated treatment narrative is dropped from the lead, never cut mid-sentence', () => {
     const r = reportOf({ banner: HOLD_BANNER });
-    r.snapshot.progress = 'Your overall score is up 5 points since August.';
     const longSummary = Array.from({ length: 30 }, (_, i) => `Today we treated area ${i + 1} along the lawn edge.`).join(' ');
     r.snapshot.treatmentSummary = longSummary;
     const lead = deriveLawnLead(r);
@@ -235,18 +235,36 @@ describe('lead word budget', () => {
     // Over its own 60-word cap, the narrative alone is left out; the short
     // fields beside it stay.
     expect(lead.applied).toBeNull();
-    expect(lead.progress).toBe('Your overall score is up 5 points since August.');
+    expect(lead.why).not.toBeNull();
     expect(lead.headline).not.toBeNull();
   });
 
-  test('drops only as much as it needs, in order: progress, then why, then applied', () => {
-    const r = reportOf({ banner: HOLD_BANNER });
-    r.snapshot.progress = Array.from({ length: 200 }, () => 'word').join(' ');
-    r.snapshot.treatmentSummary = 'Today we applied a broadleaf herbicide.';
-    const lead = deriveLawnLead(r);
-    expect(lead.progress).toBeNull();
-    expect(lead.applied).toBe('Today we applied a broadleaf herbicide.');
-    expect(leadWords({ ...r, lead })).toBeLessThanOrEqual(250);
+  test('drops only as much as it needs, in order: why, then applied', () => {
+    const words = (n) => Array.from({ length: n }, () => 'word').join(' ');
+    const build = (bannerWords) => {
+      const banner = { state: 'hold', lines: bannerWords.map(words), mowHold: null };
+      const r = reportOf({ banner, insights: [issue({ customerAction: words(30), nextVisitPlan: words(30) })], followUp: null });
+      Object.assign(r.snapshot, {
+        statusHeadline: words(12), rootCause: words(40), treatmentSummary: words(60),
+        nextVisit: { label: 'Tuesday, October 13', source: 'estimated', cadenceWeeks: 4 },
+      });
+      return { r, lead: deriveLawnLead(r) };
+    };
+    // Long-but-under-cap why (40) and applied (60) over a 70-word banner: the
+    // region would reach about 275, so why goes and applied stays.
+    const some = build([30, 20, 20]);
+    expect(some.lead.why).toBeNull();
+    expect(some.lead.applied).toBe(words(60));
+    expect(leadWords({ ...some.r, lead: some.lead })).toBeLessThanOrEqual(250);
+    // Over a 100-word banner both go.
+    const more = build([40, 30, 30]);
+    expect(more.lead.why).toBeNull();
+    expect(more.lead.applied).toBeNull();
+    expect(leadWords({ ...more.r, lead: more.lead })).toBeLessThanOrEqual(250);
+    // With room nothing is dropped.
+    const roomy = deriveLawnLead(reportOf());
+    expect(roomy.why).not.toBeNull();
+    expect(roomy.applied).not.toBeNull();
   });
 
   test('an oversized model-written step or plan is left out of the lead (it stays on its card)', () => {
@@ -266,7 +284,7 @@ describe('lead word budget', () => {
     const banner = { state: 'hold', lines: [words(40), words(30), words(14)], mowHold: null };
     const r = reportOf({ banner, insights: [issue({ customerAction: words(30), nextVisitPlan: words(30) })], followUp: null });
     Object.assign(r.snapshot, {
-      statusHeadline: words(12), rootCause: words(40), progress: words(35), treatmentSummary: words(60),
+      statusHeadline: words(12), rootCause: words(40), treatmentSummary: words(60),
       nextVisit: { label: 'Tuesday, October 13', source: 'estimated', cadenceWeeks: 4 },
     });
     const lead = deriveLawnLead(r);
@@ -277,16 +295,15 @@ describe('lead word budget', () => {
   });
 
   test('a lead inside the budget keeps every field', () => {
-    const r = reportOf();
-    r.snapshot.progress = 'Your overall score is up 5 points since August.';
-    expect(deriveLawnLead(r).progress).toBe('Your overall score is up 5 points since August.');
+    const lead = deriveLawnLead(reportOf());
+    expect(Object.values(lead).every((v) => v !== null && !(Array.isArray(v) && !v.length))).toBe(true);
   });
 });
 
 describe('leadWords', () => {
   test('counts banner lines, mow line, lead fields and 24 words of static labels', () => {
     const r = reportOf({ banner: { ...HOLD_BANNER, mowHold: { line: 'Hold off mowing for 2 days.' } } });
-    r.lead = { headline: 'Looking great', why: null, progress: null, applied: 'We applied it.', yourPart: ['Do the thing now.'], next: 'Next visit soon.' };
+    r.lead = { headline: 'Looking great', why: null, applied: 'We applied it.', yourPart: ['Do the thing now.'], next: 'Next visit soon.' };
     // banner 8 + 7, mow 6, headline 2, applied 3, yourPart 4, next 3, static 24
     expect(leadWords(r)).toBe(8 + 7 + 6 + 2 + 3 + 4 + 3 + 24);
     expect(leadWords({})).toBe(24);
@@ -294,7 +311,7 @@ describe('leadWords', () => {
 
   test('counts the next-visit date the client joins to lead.next', () => {
     const r = reportOf();
-    r.lead = { headline: null, why: null, progress: null, applied: null, yourPart: [], next: 'Recheck the edge.' };
+    r.lead = { headline: null, why: null, applied: null, yourPart: [], next: 'Recheck the edge.' };
     r.snapshot.nextVisit = { label: 'Tuesday, October 13', source: 'scheduled' };
     expect(leadWords(r)).toBe(3 + 3 + 24);
     r.snapshot.nextVisit = { label: 'Tuesday, October 13', source: 'estimated', cadenceWeeks: 4 };

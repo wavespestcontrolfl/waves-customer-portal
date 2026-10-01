@@ -329,7 +329,7 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
 // ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
 // The above-the-fold block when the payload carries reportV2.lead (server:
 // lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
-// optional progress line, what we applied, the homeowner's part, and ONE next
+// what we applied, the homeowner's part, and ONE next
 // visit line (date + the lead's reason). It replaces the hero AND the follow-up
 // card, so there is no Today's focus, "What's driving it" box, watching list,
 // "What Waves will do next", seasonal note or "no action needed" line here. The
@@ -354,7 +354,6 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
               {lead.headline || statusMeta(status).label}
             </h2>
             {lead.why ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.why}</p> : null}
-            {lead.progress ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.progress}</p> : null}
           </div>
         </div>
 
@@ -384,7 +383,7 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
 }
 
 // Reassurance card: a planned/scheduled follow-up, surfaced instead of buried in prose.
-export function LawnFollowUpCard({ followUp = null }) {
+export function LawnFollowUpCard({ followUp = null, showYourPart = true }) {
   if (!followUp || !followUp.scheduled) return null;
   return (
     <Card style={{ background: 'rgba(4, 57, 94, 0.10)', border: `1px solid ${COLORS.glassNavy}` }}>
@@ -393,7 +392,7 @@ export function LawnFollowUpCard({ followUp = null }) {
         <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16.5, color: TEXT }}>{followUp.headline || 'Follow-up already planned'}</div>
           {followUp.reason ? <p style={{ margin: '4px 0 0', fontSize: 14, color: BODY, lineHeight: 1.5 }}>{followUp.reason}</p> : null}
-          {followUp.customerAction ? (
+          {showYourPart && followUp.customerAction ? (
             <p style={{ margin: '8px 0 0', fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
               <strong style={{ color: TEXT }}>Your part:</strong> {followUp.customerAction}
             </p>
@@ -657,14 +656,14 @@ export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
                 <StatusPill status={it.status || 'tracking'} small />
               </div>
               <div style={{ display: 'grid', gap: 6 }}>
-                {it.whatWeSaw ? <InsightLine label="What we saw" value={it.whatWeSaw} /> : null}
-                {it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} /> : null}
-                {it.wavesAction ? <InsightLine label="What Waves did" value={it.wavesAction} /> : null}
-                {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong /> : null}
+                {it.whatWeSaw ? <InsightLine label="What we saw" value={it.whatWeSaw} size={lead ? 16 : 14.5} /> : null}
+                {it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} size={lead ? 16 : 14.5} /> : null}
+                {it.wavesAction ? <InsightLine label="What Waves did" value={it.wavesAction} size={lead ? 16 : 14.5} /> : null}
+                {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong size={lead ? 16 : 14.5} /> : null}
                 {/* In lead mode a plan the lead could not show (filtered under the
                     banner or over its cap) prints beside the step, so the
                     report still says a follow-up is planned (codex P2 #5496 r6). */}
-                {(inLead || !it.customerAction) && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} /> : null}
+                {(inLead || !it.customerAction) && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} size={lead ? 16 : 14.5} /> : null}
               </div>
               {it.confidence && INSIGHT_CONFIDENCE[it.confidence] ? (
                 <div style={{ marginTop: 8, fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{INSIGHT_CONFIDENCE[it.confidence]}</div>
@@ -677,9 +676,9 @@ export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
   );
 }
 
-function InsightLine({ label, value, strong }) {
+function InsightLine({ label, value, strong, size = 14.5 }) {
   return (
-    <div style={{ fontSize: 14.5, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
+    <div style={{ fontSize: size, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
       <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>{label}: </span>
       {value}
     </div>
