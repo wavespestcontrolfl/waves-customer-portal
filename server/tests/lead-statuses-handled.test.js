@@ -62,6 +62,13 @@ describe("lead status 'handled'", () => {
     }
   });
 
+  test('an inbound email inquiry never attaches to a handled lead (all three guards), and the Intelligence Bar accepts the status', () => {
+    const email = fs.readFileSync(path.join(__dirname, '../services/email/email-actions.js'), 'utf8');
+    expect(email.match(/whereNotIn\('status', \['won', 'lost', 'handled'\]\)/g)).toHaveLength(3);
+    const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/leads-tools.js'), 'utf8');
+    expect(ib).toMatch(/const LEAD_STATUSES = \[[^\]]*'handled',[^\]]*\];/s);
+  });
+
   test('the pipeline opportunity list never shows a handled lead as a new lead needing action', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-pipeline.js'), 'utf8');
     expect(src).toContain("leads.status IS DISTINCT FROM 'handled'");

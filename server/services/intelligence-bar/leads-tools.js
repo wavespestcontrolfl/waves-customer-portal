@@ -22,6 +22,7 @@ const LEAD_STATUSES = [
   'unresponsive',
   'disqualified',
   'duplicate',
+  'handled',
 ];
 const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 const ACTIVE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];

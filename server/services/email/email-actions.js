@@ -776,7 +776,7 @@ async function handleLeadInquiry(email, classification) {
           first = false;
         }
       })
-      .whereNotIn('status', ['won', 'lost'])
+      .whereNotIn('status', ['won', 'lost', 'handled'])
       .whereNull('deleted_at')
       .first();
   }
@@ -785,7 +785,7 @@ async function handleLeadInquiry(email, classification) {
   // it would glue unrelated prospects onto a single lead.
   if (!existingLead && email.from_address && !automatedSender) {
     existingLead = await db('leads').where('email', email.from_address)
-      .whereNotIn('status', ['won', 'lost'])
+      .whereNotIn('status', ['won', 'lost', 'handled'])
       .whereNull('deleted_at')
       .first();
   }
@@ -797,7 +797,7 @@ async function handleLeadInquiry(email, classification) {
       // fresh activity or have another email attached to it.
       const liveLead = await trx('leads')
         .where({ id: existingLead.id })
-        .whereNotIn('status', ['won', 'lost'])
+        .whereNotIn('status', ['won', 'lost', 'handled'])
         .whereNull('deleted_at')
         .forUpdate()
         .first();
