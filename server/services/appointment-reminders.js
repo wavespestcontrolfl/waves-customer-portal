@@ -5959,7 +5959,11 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
         entry_point: 'recipient_optin_confirmed_replay',
       },
     });
-    return result && result.sent ? { sent: true } : { sent: false, reason: (result && (result.code || result.reason)) || 'blocked' };
+    // Success-shaped sentinels (gate- / template- / internal- / owner- sids,
+    // or suppressed) delivered nothing: not sent, retryable.
+    const sentinel = /^(gate|template|internal|owner)-/.test(String(result?.sid || result?.providerMessageId || ''));
+    if (result && result.sent && !sentinel && result.suppressed !== true) return { sent: true };
+    return { sent: false, reason: (result && (result.code || result.reason)) || (sentinel || result?.suppressed ? 'suppressed' : 'blocked') };
   } catch (err) {
     logger.warn(`[appt-remind] confirmation replay to service contact failed (${err.code || err.name || 'error'})`);
     return { sent: false, reason: 'error' };

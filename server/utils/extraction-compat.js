@@ -233,7 +233,15 @@ function sameV2Person(a, b) {
 function canonicalV2Secondary(extraction) {
   const single = mapSecondaryContactToLegacy(extraction?.secondary_contact);
   const first = extraction?.secondary_contacts?.[0];
-  if (!single || !first || !sameV2Person(extraction.secondary_contact, first)) return single;
+  if (!single || !first) return single;
+  // A one-word singleton name with NO phone / email of its own also pairs
+  // with a mirror of the same name (nothing on it can conflict); otherwise
+  // the strict same-person rule applies.
+  const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const nameOf = (c) => norm(c.name_full) || norm([c.first_name, c.last_name].filter(Boolean).join(' '));
+  const sparseSameName = !extraction.secondary_contact.phone_e164 && !extraction.secondary_contact.email
+    && !!nameOf(extraction.secondary_contact) && nameOf(extraction.secondary_contact) === nameOf(first);
+  if (!sameV2Person(extraction.secondary_contact, first) && !sparseSameName) return single;
   const mirror = mapSecondaryContactToLegacy(first);
   if (!mirror) return single;
   // Same person: the mirror fills any coordinate / identity field the

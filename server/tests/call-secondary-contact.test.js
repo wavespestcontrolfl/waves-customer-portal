@@ -826,6 +826,9 @@ describe('on-site contact opt-in ask', () => {
     // kept out of the same-call fan-out until it has an opt-in row.
     expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {");
     expect(src).toContain('optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
+    // A freshly written slot phone is durably blocked (ask_failed, reclaimable)
+    // until the booking-site ask; a phone already on record is left alone.
+    expect(src).toContain("if (result === 'written') await db('recipient_optin').insert({");
     // The same-call fan-out gate is the original one.
     expect(src).toContain('const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(');
     // No booking landed: the card says so.
@@ -835,9 +838,17 @@ describe('on-site contact opt-in ask', () => {
   test('the booking site sends the on-site ask only once a visit landed: marker first (deep-merged), claim with the VISIT address, dispatch outcome on the card, reconcile', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const landed = src.indexOf('scheduledServiceId = svc.id;');
-    // Never for a street-level hold or an address-disputed visit.
-    const site = src.indexOf('if (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true && !(await isStreetLevelHoldRow(db, svc))) {', landed);
-    expect(site).toBeGreaterThan(landed);
+    // Runs AFTER any reuse activation, never for a street-level hold or an
+    // address-disputed visit, and only for a confirmed, live, future visit.
+    const activation = src.indexOf(".activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');", landed);
+    const site = src.indexOf('if (onSiteAskVisitLive) {', landed);
+    expect(site).toBeGreaterThan(activation);
+    expect(activation).toBeGreaterThan(landed);
+    const gate = src.slice(src.lastIndexOf('const onSiteAskVisitLive', site), site);
+    expect(gate).toContain('!disputeHeldReuse && houseNumberDisputed !== true');
+    expect(gate).toContain('!(await isStreetLevelHoldRow(db, svc))');
+    expect(gate).toContain("String(v.status || '').toLowerCase() !== 'confirmed' || v.customer_confirmed === false");
+    expect(gate).toContain('at.getTime() > Date.now()');
     const block = src.slice(site, site + 6000);
     // Marker before the ask; an existing visit entry's fields win (demoted_at / claim kept).
     expect(block.indexOf("'{demote_primary_on_optin}'")).toBeLessThan(block.indexOf('claimRecipientOptins({'));

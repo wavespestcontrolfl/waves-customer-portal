@@ -138,8 +138,8 @@ describe('recipient double opt-in', () => {
 describe('recipient YES / NO: consent stamp, caller demotion, confirmation replay, review card', () => {
   const KEY = '9415550123';
   const OTHER = '9415550444';
-  function fakeDb({ customer, optinRows, visit = { status: 'scheduled', scheduled_date: new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' } }) {
-    const state = { customer: { id: 'c1', service_preferences: {}, ...customer }, optin: optinRows, prefs: [], cards: [], visit };
+  function fakeDb({ customer, optinRows, reminder = null, visit = { status: 'scheduled', scheduled_date: new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' } }) {
+    const state = { customer: { id: 'c1', service_preferences: {}, ...customer }, optin: optinRows, prefs: [], cards: [], visit, reminder };
     const markers = () => state.customer.service_preferences.demote_primary_on_optin || {};
     const dbh = jest.fn((table) => {
       const ctx = { filter: {}, raw: null, whereIn: null, nullCols: [] };
@@ -157,6 +157,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
         first: jest.fn(async () => {
           if (table === 'customers') return { ...state.customer };
           if (table === 'scheduled_services') return state.visit;
+          if (table === 'appointment_reminders') return state.reminder || null;
           if (table === 'recipient_optin') return state.optin.find((r) => r.phone_key === ctx.filter.phone_key && r.customer_id === ctx.filter.customer_id) || null;
           return null;
         }),
@@ -311,6 +312,17 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.prefs).toEqual([]);
     expect(replays).toEqual([]);
     expect(entryOf(state, KEY, 's1')).toBeUndefined();
+  });
+
+  test('demotion is judged on the canonical arrival (reminder row): a combined visit already begun demotes nobody even if this member\'s own work slot is later', async () => {
+    const { dbh, state } = fakeDb({
+      customer: spouseRow({ service_preferences: marker() }),
+      optinRows: confirmed(),
+      reminder: { appointment_time: new Date(Date.now() - 3600000), cancelled: false },
+    });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([]);
+    expect(replays).toEqual([]);
   });
 
   test('two bookings for the same recipient before the reply: BOTH visits replay', async () => {

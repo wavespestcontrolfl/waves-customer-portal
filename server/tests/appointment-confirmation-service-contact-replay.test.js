@@ -190,4 +190,13 @@ describe('sendConfirmationToServiceContact', () => {
     await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
     expect(sendCustomerMessage.mock.calls[0][0].renderedSlotMs).toBe(future.getTime());
   });
+
+  test('a success-shaped sentinel (gate-/template-/internal- sid, or suppressed) is NOT sent: retryable', async () => {
+    for (const r of [{ sent: true, sid: 'gate-closed' }, { sent: true, sid: 'template-disabled' }, { sent: true, suppressed: true }]) {
+      wire();
+      sendCustomerMessage.mockResolvedValueOnce(r);
+      const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+      expect(res.sent).toBe(false);
+    }
+  });
 });

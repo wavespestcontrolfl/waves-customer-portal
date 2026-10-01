@@ -190,7 +190,11 @@ async function applyMarkerEntry(h, customer, phoneKey, visits, replays) {
     const expired = Number.isFinite(setAt) && Date.now() - setAt > MARKER_MAX_AGE_MS;
     // Same eligibility as the replay itself: a pre-visit status and a slot
     // still in the future (a visit under way or past demotes nobody).
-    const slotAt = visit ? visitSlotAt(visit) : null;
+    // The canonical customer-promised arrival (reminder row) first — a
+    // combined allocation's later member has its own later work slot.
+    const reminder = visit ? await h('appointment_reminders').where({ scheduled_service_id: visitId }).first('appointment_time', 'cancelled') : null;
+    const slotAt = reminder && reminder.cancelled ? null
+      : ((reminder && reminder.appointment_time ? new Date(reminder.appointment_time) : null) || (visit ? visitSlotAt(visit) : null));
     const notFuture = !slotAt || Number.isNaN(slotAt.getTime()) || slotAt.getTime() <= Date.now();
     if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()) || notFuture || expired) {
       await dropPath(markerPath(phoneKey, visitId));

@@ -1380,6 +1380,11 @@ describe('extraction compat adapter', () => {
     nameOnly.secondary_contact = entry('spouse_partner', false, false, 'Sample Spouse', null);
     nameOnly.secondary_contacts = [entry('spouse_partner', true, true, 'Sample Spouse', '+15550100123')];
     expect(flatView(nameOnly).secondary_contact).toMatchObject({ phone: '+15550100123', wants_appointment_texts: true, on_site: true });
+    // A one-word name with no phone/email of its own pairs with its mirror too.
+    const firstOnly = validPersisted();
+    firstOnly.secondary_contact = entry('spouse_partner', false, false, 'John', null);
+    firstOnly.secondary_contacts = [entry('spouse_partner', true, true, 'John', '+15550100123')];
+    expect(flatView(firstOnly).secondary_contact).toMatchObject({ phone: '+15550100123', on_site: true });
     expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
     // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
     const flat = flatView(single('+15550100123'));

@@ -13601,6 +13601,21 @@ const CallRecordingProcessor = {
           // (no opt-in row yet must not read as grandfathered) and from the
           // explicit-consent claim below, so nobody is asked before a visit lands.
           optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));
+          // ...and DURABLY blocked meanwhile: a just-written rowless slot phone
+          // reads as grandfathered to every later reminder sender. A BLOCKING
+          // ask_failed row (reclaimable: the booking-site claim re-asks it)
+          // holds this phone until the recipient answers. Only for a slot
+          // written by THIS pass — a phone already on record keeps whatever
+          // standing it had (a grandfathered contact is never silenced), and
+          // an existing row (confirmed / declined / pending) is left as it is.
+          if (result === 'written') await db('recipient_optin').insert({
+            phone_key: lastTen(secondaryEntry.phone),
+            phone_e164: String(secondaryEntry.phone || '').trim(),
+            status: 'ask_failed',
+            customer_id: customerId,
+            requested_by: 'call_pipeline',
+            requested_at: new Date(),
+          }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
         }
         const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
         if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {
@@ -18485,6 +18500,21 @@ const CallRecordingProcessor = {
               // appointment_notify_primary = false, replays this booking's
               // confirmation to the recipient and clears THAT entry when their
               // YES lands (a NO / failed ask clears it too).
+              if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
+                // (A street-level address hold is never activated by a pipeline
+                // reuse — only the office confirm activates it.)
+                // The reused row can be a LEGACY outbound-review booking
+                // (created pending before the 2026-08-11 hold removal): the
+                // reuse branches convert its lead and the replay repair arms
+                // reminders, but nothing stamped customer_confirmed — leaving
+                // the row hidden from customer self-service with its review
+                // card open even though customer-facing side effects armed
+                // (Codex #3361 r4 P0). The shared helper activates it
+                // (hook-first, stamp-on-success); one indexed read and a
+                // no-op for every other reused row.
+                await require('./outbound-review-confirm')
+                  .activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');
+              }
               // On-site opt-in asks (owner ruling 2026-09-30, redesigned 10-01:
               // consent is the recipient's own YES). Sent only HERE, once a visit
               // has landed — never for an unbooked / held call, and never for a
@@ -18495,8 +18525,23 @@ const CallRecordingProcessor = {
               // visit's address, then reconcileDemoteMarker settles an opt-in
               // that is already answered (confirmed earlier / failed).
               // Also never while the visit's house number is disputed (the
-              // address-dispute hold keeps customer-facing side effects off).
-              if (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true && !(await isStreetLevelHoldRow(db, svc))) {
+              // address-dispute hold keeps customer-facing side effects off),
+              // and only for a CONFIRMED, live, future visit read AFTER any reuse
+              // activation above (a skipped / completed idempotency row or a
+              // still-pending legacy row is no appointment to ask about).
+              const onSiteAskVisitLive = (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true
+                && !(await isStreetLevelHoldRow(db, svc)))
+                ? await (async () => {
+                  const v = await db('scheduled_services').where({ id: svc.id }).first('status', 'customer_confirmed', 'scheduled_date', 'window_start');
+                  if (!v || String(v.status || '').toLowerCase() !== 'confirmed' || v.customer_confirmed === false) return false;
+                  const rem = await db('appointment_reminders').where({ scheduled_service_id: svc.id }).first('appointment_time', 'cancelled');
+                  if (rem && rem.cancelled) return false;
+                  const at = (rem && rem.appointment_time ? new Date(rem.appointment_time) : null)
+                    || require('./appointment-reminders').composeScheduledApptTime(v);
+                  return !!at && !Number.isNaN(at.getTime()) && at.getTime() > Date.now();
+                })().catch(() => false)
+                : false;
+              if (onSiteAskVisitLive) {
                 onSiteAsksHandled = true;
                 const { claimRecipientOptins, dispatchRecipientOptins, reconcileDemoteMarker } = require('./recipient-optin');
                 const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -18556,21 +18601,6 @@ const CallRecordingProcessor = {
                   }
                   await reconcileDemoteMarker(customerId, phoneKey);
                 }
-              }
-              if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
-                // (A street-level address hold is never activated by a pipeline
-                // reuse — only the office confirm activates it.)
-                // The reused row can be a LEGACY outbound-review booking
-                // (created pending before the 2026-08-11 hold removal): the
-                // reuse branches convert its lead and the replay repair arms
-                // reminders, but nothing stamped customer_confirmed — leaving
-                // the row hidden from customer self-service with its review
-                // card open even though customer-facing side effects armed
-                // (Codex #3361 r4 P0). The shared helper activates it
-                // (hook-first, stamp-on-success); one indexed read and a
-                // no-op for every other reused row.
-                await require('./outbound-review-confirm')
-                  .activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');
               }
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
               // fresh follow-up child). Retroactively backfilling the Bill-To on
