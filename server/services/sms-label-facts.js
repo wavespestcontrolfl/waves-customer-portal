@@ -1041,11 +1041,11 @@ function foreignWordSet() {
   return foreignWordSetCache;
 }
 // The tokens that can speak for the text's language: lower-cased, accents removed, with names and addresses left out.
-function languageTokens(text) {
+function languageTokens(text, { keepNames = false } = {}) {
   // Title Case or ALL CAPS text is not a run of names: when nearly every word after the first is capitalized, every word counts
   // ("Hi this is Marisol Quintanilla" stays a name; "Can The Dogs Go Out Now" does not).
   const rest = (stripMarks(text).match(/[A-Za-z]{2,}/g) || []).slice(1);
-  const keepCapitalized = rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length;
+  const keepCapitalized = keepNames || (rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length);
   const raws = text.split(/\s+/).filter(Boolean);
   // An address is a house number followed, within four words, by a street word ("4821 Weatherby Oaks Cir"): only those words are
   // skipped. A number with no street word after it ("2 godziny wystarczy?", "2 hours later") leaves every word counted.
@@ -1085,12 +1085,15 @@ function isUnverifiedLanguageInbound(inbound) {
   const foreign = foreignWordSet();
   // (also held: a short text with no known English word at all, "Pot iesi?" - a language on no list, which the reply guards cannot read)
   if (tokens.length <= 3) {
-    if (tokens.some((w) => foreign.has(w))) return true;
-    const knownShort = tokens.filter(englishKnown).length;
+    // A short text is judged on ALL its words, capitalized ones included (#5520 r3): leaving a name out of two or three words
+    // lets one English word carry a foreign verb ("Can Fido mehet?"). Names in the lexicon ("Hey Adam") still read as English.
+    const all = languageTokens(original, { keepNames: true });
+    if (all.some((w) => foreign.has(w))) return true;
+    const knownShort = all.filter(englishKnown).length;
     // A short text that asks a label question must be ALL known words: one unknown word beside "outside" is exactly where a
     // foreign question hides ("Kutyak mehetnek outside?", #5520 r2). Any other short text needs half ("No growth" stays English).
     const asksLabel = askedKindsOf(text).kinds.length > 0 || askedKindsOf(text).elliptical;
-    return asksLabel ? knownShort < tokens.length : knownShort * 2 < tokens.length;
+    return asksLabel ? knownShort < all.length : knownShort * 2 < all.length;
   }
   const known = tokens.filter(englishKnown).length;
   return known / tokens.length < ENGLISH_SHARE;
@@ -1249,7 +1252,7 @@ function cleaningKinds(text) {
 // to the treatment, and so does every effect verb ("will the sprinklers be a problem for the treatment?", "will they weaken it?"); "Sprinkler issue in
 // zone 2" and "will the sprinklers hurt my new plants?" are not about the treatment (#5520 r2).
 const WATERING_EFFECT_OBJECT_SRC = '(?:treatment|treated|spray\\w*|application|applied|product|granules?|fertiliz\\w*|it|that)';
-const WATERING_EFFECT_RE = new RegExp(`\\b(?:weaken\\w*|affect\\w*|effect\\w*|hurt\\w*|harm\\w*|ruin\\w*|undo\\w*|dilut\\w*|impact\\w*|reduc\\w*|cancel\\w*|mess(?:es|ed)?\\s+(?:up|with)|interfer\\w*|matter|bother|problem|issue)\\b[^.?!]{0,30}\\b${WATERING_EFFECT_OBJECT_SRC}\\b`);
+const WATERING_EFFECT_RE = new RegExp(`\\b(?:(?:weaken\\w*|affect\\w*|hurt\\w*|harm\\w*|ruin\\w*|undo\\w*|dilut\\w*|impact\\w*|reduc\\w*|cancel\\w*|mess(?:es|ed)?\\s+(?:up|with)|interfer\\w*\\s+with|(?:have|has)\\s+an?\\s+effect\\s+on)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?|(?:a\\s+)?(?:problem|issue|matter|bother)\\s+(?:for|with|to)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?)${WATERING_EFFECT_OBJECT_SRC}\\b`);
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return cleaningKinds(text);
   const context = WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text);
@@ -1556,7 +1559,7 @@ const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upc
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
-const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|a|one|two|three|four|five|six|seven|eight|nine|ten|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|times?)\s+(?:ago|back|before|earlier|prior)|second\s+to\s+last)\b/;
+const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|times?)\s+(?:ago|back|before|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|prior)|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);

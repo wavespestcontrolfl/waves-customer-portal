@@ -3270,7 +3270,7 @@ describe('follow-up (#5416 prod sweep): the inbound language check counts only l
   });
 
   test('a short text is held on positive evidence: a function word of a language the guards cannot read', () => {
-    for (const text of ['Dlaczego nie', 'Poczekaj dwie godziny', 'khi nao', 'KIEDY PSY MOGA WYJSC', 'Kailan Puwedeng Lumabas Ang Aso', '2 godziny wystarczy?', '2 hours later czy mozna wyjsc?', '2godziny wystarczy?', 'Pot iesi?', 'Kutyak kimehetnek?', 'Kutyak mehetnek outside?']) { // #5520 r1/r2: a number glued to a word keeps the word
+    for (const text of ['Dlaczego nie', 'Poczekaj dwie godziny', 'khi nao', 'KIEDY PSY MOGA WYJSC', 'Kailan Puwedeng Lumabas Ang Aso', '2 godziny wystarczy?', '2 hours later czy mozna wyjsc?', '2godziny wystarczy?', 'Pot iesi?', 'Kutyak kimehetnek?', 'Kutyak mehetnek outside?', 'Can Fido mehet?']) { // #5520 r1-r3: a number glued to a word keeps the word
       expect([text, english(text)]).toEqual([text, false]);
     }
   });
@@ -3298,7 +3298,7 @@ describe('follow-up (#5416 r34): whether watering hurts the treatment asks rainf
     for (const text of ['Will the sprinklers weaken it?', 'will the sprinklers hurt it', 'will the sprinklers be a problem for the treatment?', 'does the irrigation dilute it']) {
       expect([text, labelFactsLib.askedLabelKinds(text).includes('rain')]).toEqual([text, true]);
     }
-    for (const text of ['what days should I water my lawn?', 'how often should I water', 'Sprinkler issue in zone 2', 'my irrigation has a problem', 'Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill?']) expect([text, labelFactsLib.askedLabelKinds(text)]).toEqual([text, []]); // #5520 r1 P2
+    for (const text of ['what days should I water my lawn?', 'how often should I water', 'Sprinkler issue in zone 2', 'my irrigation has a problem', 'Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill?', 'Will irrigation reduce my water bill if it runs all night?', 'Will sprinklers hurt my new plants if it runs overnight?']) expect([text, labelFactsLib.askedLabelKinds(text)]).toEqual([text, []]); // #5520 r1 P2
   });
   test('a bare contextual answer to it is held', () => {
     const asked = labelFactsLib.askedLabelKinds(['Will the sprinklers weaken it?']);
@@ -3308,4 +3308,9 @@ describe('follow-up (#5416 r34): whether watering hurts the treatment asks rainf
 
 test('#5520 r1 review: a watering question that also names a re-entry topic asks both kinds', () => {
   expect(labelFactsLib.askedLabelKinds('Will the sprinklers hurt the dogs if they walk on it?')).toEqual(['reentry', 'rain']);
+});
+
+test('#5520 r3: a treatment earlier TODAY is the latest visit, not an older one', () => {
+  expect(labelFactsLib.inboundRefersToOtherVisit('You did a treatment earlier today, can the dogs go out?', '2026-09-30', '2026-09-30')).toBe(false);
+  expect(labelFactsLib.inboundRefersToOtherVisit('two treatments earlier, can the dogs go out?', '2026-09-30', '2026-10-01')).toBe(true);
 });
