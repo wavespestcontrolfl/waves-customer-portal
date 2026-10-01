@@ -18,7 +18,12 @@ async function clickGate(reviewRequestId) {
 
 // The callback includes provider delivery and its durable delivery stamp.
 // Callers retain their recipient, consent, claim and outcome handling.
-async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null } = {}) {
+//
+// allowAfterCustomerReply (immediate staff composer send only): the 72-hour
+// spacing block is skipped when the customer texted in strictly after the most
+// recent ask, so staff can answer "the link didn't work". The inbound read runs
+// in the same lock hold as the spacing read and fails closed like it.
+async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null, allowAfterCustomerReply = false } = {}) {
   if (!customerId) return { sent: false, blocked: true, code: 'REVIEW_CUSTOMER_REQUIRED',
     reason: 'Select the customer receiving this review request before sending.', httpStatus: 409 };
   const result = await runExclusive(`review-send:${customerId}`, async () => {
@@ -47,7 +52,16 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
     const lastAt = Math.max(pipelineAt?.getTime() || 0, manualAt?.getTime() || 0);
     const nextAt = new Date(lastAt + history.ASK_SPACING_MS);
     if (lastAt && nextAt.getTime() > Date.now()) {
-      return { sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', nextAllowedAt: nextAt.toISOString(),
+      let customerReplied = false;
+      if (allowAfterCustomerReply) {
+        try {
+          customerReplied = await history.hasInboundTextSince(customerId, new Date(lastAt));
+        } catch {
+          return { sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE',
+            reason: 'Could not verify recent review requests. Try again after review history is available.', httpStatus: 503 };
+        }
+      }
+      if (!customerReplied) return { sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', nextAllowedAt: nextAt.toISOString(),
         reason: `A recent or unresolved review request is still inside the 72-hour window. The next ask can be sent after ${formatETDate(nextAt)} at ${formatETTime(nextAt)} Eastern.`, httpStatus: 409 };
     }
     return dispatch();

@@ -141,6 +141,7 @@ jest.mock('../services/review-ask-history', () => ({
   ...jest.requireActual('../services/review-ask-history'),
   lastDeliveredAskAt: jest.fn(async () => null),
   lastManualAskAt: jest.fn(async () => null),
+  hasInboundTextSince: jest.fn(async () => false),
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_key, fn) => fn()),
@@ -2546,6 +2547,7 @@ describe('Communications review ask serialization', () => {
     mockGates.smsGratitudeReplies = false;
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
+    history.hasInboundTextSince.mockReset().mockResolvedValue(false);
     locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
       if (held.has(key)) return { skipped: true, reason: 'lease_held' };
       held.add(key);
@@ -2935,6 +2937,37 @@ describe('Communications review ask serialization', () => {
       const response = await send(baseUrl);
       expect(response.status).toBe(409);
       expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('a customer text after the last ask lets staff resend the review link from the composer', async () => {
+    const lastAsk = new Date(Date.now() - 86400000);
+    history.lastDeliveredAskAt.mockResolvedValue(lastAsk);
+    history.hasInboundTextSince.mockResolvedValue(true);
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(history.hasInboundTextSince).toHaveBeenCalledWith('cust-A', lastAsk);
+  });
+  test('with no customer text after the last ask the composer resend is still blocked', async () => {
+    history.lastDeliveredAskAt.mockResolvedValue(new Date(Date.now() - 86400000));
+    history.hasInboundTextSince.mockResolvedValue(false);
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('an unreadable customer-text lookup fails the composer resend closed with a 503', async () => {
+    history.lastDeliveredAskAt.mockResolvedValue(new Date(Date.now() - 86400000));
+    history.hasInboundTextSince.mockRejectedValue(new Error('db down'));
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(503);
+      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
