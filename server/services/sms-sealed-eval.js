@@ -156,8 +156,12 @@ const CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
 // so items frozen before the section existed never grade a suffixed version
 // and suffixed items never grade an older one. A future fact section is one
 // more row here plus its suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
+// 'vl' = the VISIT STATUS & OPEN LOOPS section (SMS facts-gap PR 1; the drafter renders it,
+// with its fixed header, in EVERY gate-on block right after UPCOMING SERVICES — never in the
+// COMPANY FACTS / FREE RE-SERVICE tail, whose positions factPresent trusts — so it is a
+// plain substring marker like the SLA line).
 const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
-const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER });
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER, vl: 'VISIT STATUS & OPEN LOOPS:' });
 function suffixTokenMarker(token) {
   if (/^\d+$/.test(token)) return Number(token) >= 2 ? RESERVICE_FACTS_MARKER : null;
   return VERSION_SUFFIX_FACT_MARKERS[token] || null;

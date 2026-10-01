@@ -122,9 +122,11 @@ const PROMPT_VERSION = 'house_voice_v11';
 // facts as authoritative, so drafts made with them stamp the '_cf' token.
 // The two cohorts stay distinct: bare (pre both), '_cf' (company facts, no
 // re-service fact), '2' (re-service fact, no company facts), '2_cf' (both,
-// shipped), '3_cf' (both + LIVE ETA, current). 32 chars; with all four category tags ('+bclm') 37, under
-// PROMPT_VERSION_COLUMN_MAX (40).
-// The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', '3_cf', any later
+// shipped), '3_cf' (both + LIVE ETA, shipped), '3_cf_vl' (all of that + the
+// VISIT STATUS & OPEN LOOPS section and its rules, current). 35 chars; with all
+// four category tags ('+bclm') 40 — EXACTLY at PROMPT_VERSION_COLUMN_MAX (40),
+// so the next suffix needs a shorter token scheme, not another '_xx'.
+// The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', '3_cf', '3_cf_vl', any later
 // suffix, any '+category' tags): readers that must recognize ALL of them —
 // sms-auto-send's gratitude discovery — match this prefix, never the current
 // constant, so a suffix bump cannot orphan rows stamped under earlier versions.
@@ -141,7 +143,13 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // unconditional FREE RE-SERVICE line, so "3" keeps that contract and 'cf' keeps
 // COMPANY FACTS); the earlier '_eta' suffix on top of '2_cf' would have been 36
 // chars and 41 with all four category tags — one past the varchar(40) columns.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cf`;
+// VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1): the facts block carries the live
+// tech position / lateness / missed-visit / open-promise section and the gate-on
+// prompt carries the rules that act on it, so drafts made with them stamp the
+// '_vl' token (sms-sealed-eval VERSION_SUFFIX_FACT_MARKERS: vl). 'house_voice_v12_real_answers3_cf_vl'
+// is 35 chars; with all four category tags ('+bclm') 40 — at the varchar(40) bound,
+// not over it (currentPromptVersion falls back to the bare identity past it).
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cf_vl`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -4175,7 +4183,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
   // pins the full rendered system prompt.
   const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS' : ''}, the thread`;
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS, VISIT STATUS & OPEN LOOPS' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
     ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
@@ -4195,6 +4203,22 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
     ? `
 COMPANY FACTS:
 - The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
+`
+    : '';
+  // VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1), gate-on only: rules that act
+  // on the per-draft VISIT STATUS & OPEN LOOPS section (live tech position,
+  // lateness, missed visit, open promises). Static text — the section's content is
+  // per-draft data (buildFactsBlock), never interpolated here, so this stays
+  // time-invariant. The tightened voice bans live HERE, not in the shared
+  // CUSTOMER_SMS_HOUSE_VOICE constant other agents use. '' gate-off (byte-identical).
+  const visitLoopsRules = realAnswersOn
+    ? `
+VISIT STATUS & OPEN LOOPS:
+- When the VISIT STATUS & OPEN LOOPS section lists anything, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when that section is "- none".
+- Never promise an arrival time, or say the tech is "on time", unless Tech position or a LIVE ETA fact supports it. With RUNNING LATE or WINDOW PASSED, say so plainly in one sentence — those lines authorize saying we are running behind, not that the tech is "on the way" or any arrival time. When Tech position says the location is stale, do not promise an arrival time.
+- With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say we'll text times today.
+- The tech's live note is internal — paraphrase it, never quote it, and never name a chemical or product from it.
+- Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
   const handoffBullet = realAnswersOn
@@ -4246,7 +4270,7 @@ PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
 ${deferRule}
-${companyFactsRules}
+${companyFactsRules}${visitLoopsRules}
 USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and ${liveStatusMeaning}${liveEtaUseRule} If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
@@ -4368,6 +4392,103 @@ function monthlyChargeNote(dues) {
     || '. Whether these dues are currently collecting could not be confirmed, so state the dues and never a charge total';
 }
 
+// VISIT STATUS & OPEN LOOPS header — fixed, ALWAYS rendered gate-on (sealed-eval's
+// 'vl' marker, VERSION_SUFFIX_FACT_MARKERS, is this exact string).
+const VISIT_LOOPS_HEADER = 'VISIT STATUS & OPEN LOOPS:';
+// One internal field → a single capped, injection-screened line fragment ('' when
+// absent or when it reads as a prompt-control attempt). Descriptions of
+// commitments are model-extracted from call/SMS text — untrusted like exemplars.
+function visitLoopText(value, cap) {
+  const text = sanitizeSingleLine(value, cap).replace(/"/g, "'");
+  if (!text || EXEMPLAR_INJECTION_RE.test(text)) return '';
+  return text;
+}
+function visitLoopMinutes(value) {
+  if (value == null || value === '') return null; // Number(null) is 0 — never a fake "0 min"
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+}
+function visitLoopTechLine(tp) {
+  if (!tp || typeof tp !== 'object') return null;
+  const mins = visitLoopMinutes(tp.minutesSinceUpdate);
+  const ago = mins == null ? '' : `${mins} min ago`;
+  if (tp.status === 'stale') {
+    return `- Tech position: location stale${ago ? ` (last update ${ago})` : ''} — do not promise an arrival time`;
+  }
+  const name = visitLoopText(tp.techName, 60) || 'The tech';
+  const status = visitLoopText(String(tp.status || '').replace(/_/g, ' '), 30);
+  const stops = Number(tp.stopsAhead);
+  let where = '';
+  if (tp.atThisVisit === true) where = 'at this visit now';
+  else if (tp.stopsAhead != null && Number.isFinite(stops) && stops >= 0) where = `${Math.round(stops)} stop(s) ahead of this visit`;
+  if (!status && !where) return null;
+  return `- Tech position: ${name}${status ? ` is ${status}` : ''}${ago ? ` (updated ${ago})` : ''}${where ? `, ${where}` : ''}`;
+}
+function visitLoopLateLine(late) {
+  if (!late || typeof late !== 'object') return null;
+  const mins = visitLoopMinutes(late.minutesLate);
+  return mins != null
+    ? `- RUNNING LATE: dispatch flagged this visit ${mins} min past its window — acknowledge the delay plainly, apologize once, never say "on time"`
+    : '- RUNNING LATE: dispatch flagged this visit as running past its window — acknowledge the delay plainly, apologize once, never say "on time"';
+}
+function visitLoopPastWindowLine(past) {
+  if (!past || typeof past !== 'object') return null;
+  const type = visitLoopText(past.type, 60) || 'scheduled';
+  const win = visitLoopText(past.windowDisplay, 40);
+  return `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete, no tech location — say you're checking with the tech and quote FOLLOW-UP SLA RIGHT NOW`;
+}
+function visitLoopMissedLine(missed) {
+  if (!missed || typeof missed !== 'object') return null;
+  const type = visitLoopText(missed.type, 60) || 'visit';
+  const date = visitLoopText(formatEtDate(missed.date), 40);
+  const win = visitLoopText(missed.windowDisplay, 40);
+  return `- MISSED VISIT: ${type}${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was not completed — apologize once, offer the earliest OPEN TIMES slot (or say we'll text times today if OPEN TIMES is absent); never point them to a visit weeks out without an apology`;
+}
+function visitLoopNoteLine(liveNote) {
+  const note = liveNote && typeof liveNote === 'object' ? sanitizeSingleLine(liveNote.text, 240) : '';
+  if (!note) return null;
+  // The tech's raw text may name chemicals/products or make compliance claims:
+  // the shared customer-copy guard decides (fail closed — an unloadable guard
+  // reads banned), and a prompt-control attempt is withheld the same way.
+  return hasBannedCustomerCopy(note) || EXEMPLAR_INJECTION_RE.test(note)
+    ? "- Tech's live note: withheld (contains restricted copy)"
+    : `- Tech's live note (internal, paraphrase, never quote chemicals or product names): "${note.replace(/"/g, "'")}"`;
+}
+// WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
+function visitLoopItemLines(items, label, trailing) {
+  const lines = [];
+  for (const item of (Array.isArray(items) ? items : []).slice(0, 5)) {
+    if (!item || typeof item !== 'object') continue;
+    const kind = visitLoopText(item.kind, 40);
+    const description = visitLoopText(item.description, 120);
+    if (!kind && !description) continue;
+    lines.push(`- ${label}: ${[kind, description].filter(Boolean).join(' — ')}${trailing(item)}`);
+  }
+  return lines;
+}
+// Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
+// undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
+// header, then one line per present field, or the single line "- none". Pure.
+function renderVisitLoopsSection(visitLoops) {
+  const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
+  const lines = [
+    visitLoopTechLine(v.techPosition),
+    visitLoopLateLine(v.lateAlert),
+    visitLoopPastWindowLine(v.pastWindow),
+    visitLoopMissedLine(v.missedVisit),
+    visitLoopNoteLine(v.liveNote),
+    ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
+      const due = visitLoopText(i.dueText, 60);
+      return due ? ` (due ${due})` : '';
+    }),
+    ...visitLoopItemLines(v.customerWaiting, 'THEY ARE WAITING ON US FOR', (i) => {
+      const since = visitLoopText(formatEtDate(i.since), 40);
+      return since ? ` (since ${since})` : '';
+    }),
+  ].filter(Boolean);
+  return `${VISIT_LOOPS_HEADER}\n${lines.length ? lines.join('\n') : '- none'}\n`;
+}
+
 /**
  * The fact block the drafter may draw from — and the EXACT same block the
  * verifier checks the draft against, so the two agree on what counts as
@@ -4411,6 +4532,14 @@ function buildFactsBlock(context, extras = {}) {
   // against like any other section. '' gate-off (byte-identical).
   const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? renderCompanyFactsSection()
+    : '';
+  // VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1): gate-on only, '' gate-off
+  // (byte-identical). Rendered right after UPCOMING SERVICES — NOT between COMPANY
+  // FACTS and BILLING: sms-sealed-eval's factPresent, sms-shadow-judge and
+  // sms-company-facts all trust the exact "...SLA\nFREE RE-SERVICE\n[COMPANY
+  // FACTS]BILLING:" tail, so nothing may be inserted there.
+  const visitLoopsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? renderVisitLoopsSection(context.visitLoops)
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -4685,7 +4814,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}BILLING:
+${visitLoopsSection}${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -5844,6 +5973,8 @@ module.exports = {
   buildUserPrompt,
   buildUserPromptFromFacts,
   buildFactsBlock,
+  renderVisitLoopsSection,
+  VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,
   fetchVoiceExemplars,

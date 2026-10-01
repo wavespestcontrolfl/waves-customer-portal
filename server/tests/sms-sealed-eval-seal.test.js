@@ -72,10 +72,21 @@ const EXACT = exactSuffix_();
 // FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
 const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
 const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
+// 'vl' (VISIT STATUS & OPEN LOOPS, SMS facts-gap PR 1) is a plain LIKE marker. Contract order is
+// SLA, COMPANY FACTS, VL, FREE RE-SERVICE: required markers bind first, then forbidden ones.
+const VL_BINDING = '%VISIT STATUS & OPEN LOOPS:%';
 const CONTRACT_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
   D_, D_, EXACT.length, EXACT,
+  VL_BINDING,
   ...RS_BINDINGS,
+];
+// _cf+c (company facts + complaints, no 'vl'): SLA, CF, RS required, then VL forbidden.
+const CF_C_BINDINGS = [
+  '%FOLLOW-UP SLA RIGHT NOW:%',
+  D_, D_, EXACT.length, EXACT,
+  ...RS_BINDINGS,
+  VL_BINDING,
 ];
 
 describe('sealEvalItems — selection contract', () => {
@@ -250,8 +261,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(CONTRACT_BINDINGS);
-      expect(String(args[0])).not.toMatch(/NOT LIKE/); // _cf+c: every fact the version carries is required, none forbidden
+      expect(args[1]).toEqual(CF_C_BINDINGS);
+      expect(String(args[0]).match(/NOT LIKE/g) || []).toHaveLength(1); // _cf+c: every fact the version carries is required; only 'vl' (VISIT STATUS & OPEN LOOPS) is forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
@@ -346,7 +357,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 
 // #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
 // freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
-test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS and FREE RE-SERVICE lines', async () => {
+test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS, VISIT STATUS & OPEN LOOPS and FREE RE-SERVICE lines', async () => {
   const drafter = require('../services/sms-shadow-drafter');
   const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
   try {
@@ -363,7 +374,7 @@ test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND for
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
-    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
+    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND COALESCE\(facts_block, ''\) NOT LIKE \? AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
     expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
   } finally {
     spy.mockRestore();
