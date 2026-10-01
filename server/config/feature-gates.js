@@ -90,6 +90,7 @@
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_REPORT_WRITER_RULES=true (owner rules for the AI report paragraph, owner "go" 2026-09-30: one OWNER RULES block, no product/active names, amounts, footage, "safe", "per visit" or other company names in the copy, the technician note sorted by provenance, customer messages labeled and scrubbed, and output screens that reject what slips through. Every writer EXCEPT lawn and tree/shrub/palm, which stay byte-identical (owner: another lane owns them). Off unless exactly 'true', read at call time via reportWriterRulesLive(); off = byte-identical prompts, inputs and screens)
+ *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer-display only — never fed into the AI report writer's grounding. Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
@@ -743,6 +744,10 @@ const gates = {
   // TypeSafe Jev typed decisions: ships DARK. CALL-TIME reader is
   // typedDecisionsLive() below; this entry is for logGateStatus only.
   typedDecisions: gateEnvValue('GATE_TYPED_DECISIONS'),
+
+  // Portal "Your yard this month" card. Map entry for logGateStatus only; the
+  // canonical CALL-TIME reader is portalYardCalendarLive() below.
+  portalYardCalendar: process.env.GATE_PORTAL_YARD_CALENDAR === 'true',
 
   // Voice relay (Sandy) on an OpenAI model — benchmark/sandbox only. This map
   // entry is for logGateStatus only; the canonical CALL-TIME reader is
@@ -4344,6 +4349,86 @@ function logGateStatus() {
   }
 }
 
+// Known GATE_* Railway variable names, for the Intelligence Bar's
+// set_railway_gate tool (it refuses a name not listed here, so a typo can
+// never create a new variable). Derived from THIS file's own source so a new
+// gate is known the moment it is documented or registered here, with no
+// second list to keep in step: every gate name the file mentions, in code or
+// in its comments. A gate read only by some other module, and never mentioned
+// in this file, is not known here.
+//
+// Each entry says whether the gate is a plain on/off switch (`boolean`), so
+// the tool never writes 'true'/'false' into a gate that takes something else:
+//   - boolean:   the header documents it as `=true`, or the code reads it as
+//                exactly 'true' / gateEnvValue(...) — and nothing in this file
+//                shows it taking a mode or timestamp.
+//   - mode:      a mode value is visible here ('shadow', 'auto', an ISO
+//                timestamp, a *_SINCE / *_AT / *_ALLOWLIST name).
+//   - unverified: only mentioned in a comment; nothing shows how it is read.
+// Only `boolean` gates can be flipped from the bar. Each entry also records
+// its `reader` — how the code parses the value — so the bar judges the
+// current state the way the runtime does: 'loose' (gateEnvValue: '1' / 'true'
+// / 'on', any case), 'strict' (exactly 'true'; also assumed for a gate known
+// only from the header), or 'mixed' (read both ways in this file).
+// RETIRED names stay out entirely: they must not be re-enabled from the bar
+// (welcome email: owner ruling; self-book day cap: retired 2026-09-23 in
+// favor of the self-serve notice window; glass: the theme gates were removed).
+const RETIRED = new Set([
+  'GATE_ONE_TIME_WELCOME_EMAIL',
+  'GATE_SELF_BOOK_DAY_CAP',
+  'GATE_ESTIMATE_GLASS',
+  'GATE_EMAIL_GLASS',
+  'GATE_REPORT_GLASS',
+  'GATE_PORTAL_GLASS',
+]);
+const MAX_DESC = 300;
+const INVERTED_GATE_RE = /_(OFF|DISABLE|DISABLED|KILL_SWITCH)$/;
+let gateCatalogCache = null;
+
+function knownGateCatalog() {
+  if (gateCatalogCache) return gateCatalogCache;
+  const src = require('fs').readFileSync(__filename, 'utf8');
+  const tokenRe = /GATE_[A-Z0-9_]*[A-Z0-9]/g;
+  const headerEnd = src.indexOf('*/');
+  const headerDocs = new Map();
+  for (const line of src.slice(0, headerEnd).split('\n')) {
+    const m = line.match(/^ \*   (GATE_[A-Z0-9_]*[A-Z0-9])=(\S*)\s*(.*)$/);
+    if (!m) continue;
+    const text = m[3].replace(/^\(/, '').replace(/\)\s*$/, '').trim();
+    headerDocs.set(m[1], { valueIsTrue: m[2] === 'true', description: text ? text.slice(0, MAX_DESC) : null });
+  }
+  const strictEvidence = new Set();
+  const looseEvidence = new Set();
+  const modeEvidence = new Set();
+  for (const line of src.slice(headerEnd).split('\n')) {
+    for (const name of line.match(tokenRe) || []) {
+      if (/['"](shadow|auto)['"]/.test(line) || /(=|\|)\s*(shadow|auto)\b/.test(line) || /<ISO/.test(line)) modeEvidence.add(name);
+      else {
+        if (line.includes(`process.env.${name} === 'true'`)) strictEvidence.add(name);
+        if (line.includes(`gateEnvValue('${name}')`)) looseEvidence.add(name);
+      }
+    }
+  }
+  const catalog = new Map();
+  for (const name of new Set(src.match(tokenRe) || [])) {
+    if (RETIRED.has(name)) continue;
+    const doc = headerDocs.get(name);
+    const mode = modeEvidence.has(name) || /(_SINCE|_AT|_ALLOWLIST)$/.test(name) || (doc && !doc.valueIsTrue);
+    let kind = 'unverified';
+    if (mode) kind = 'mode';
+    else if ((doc && doc.valueIsTrue) || strictEvidence.has(name) || looseEvidence.has(name)) kind = 'boolean';
+    let reader = 'strict';
+    if (looseEvidence.has(name)) reader = strictEvidence.has(name) ? 'mixed' : 'loose';
+    // Inverted (negative-polarity) gates: 'true' DISABLES the named thing
+    // (GATE_LATE_PAYMENT_CHECKER_OFF=true turns the checker off), so the bar
+    // never presents 'true' as "on" for these.
+    const inverted = INVERTED_GATE_RE.test(name);
+    catalog.set(name, { name, kind, boolean: kind === 'boolean', inverted, reader, description: doc ? doc.description : null });
+  }
+  gateCatalogCache = catalog;
+  return catalog;
+}
+
 // GATE_OUTLINK_TRACKING read at CALL time — strict `=== 'true'`, same
 // convention as visitPrepPhotosLive(). The canonical reader for
 // server/services/outlink-tracking.js (render-time rewrite of outside links
@@ -4413,8 +4498,20 @@ function zoneRouteDaysLive() {
   return process.env.GATE_ZONE_ROUTE_DAYS === 'true';
 }
 
+// GATE_PORTAL_YARD_CALENDAR read at CALL time — ships DARK, off unless exactly
+// 'true' (owner-approved 2026-10-01). The one reader for GET /api/feed/yard
+// (routes/feed.js); the portal client learns the gate from that endpoint's
+// {available} answer, like the property-score card. Off = the endpoint answers
+// {available:false} and the Learn tab's Local Conditions card is untouched.
+function portalYardCalendarLive() {
+  return process.env.GATE_PORTAL_YARD_CALENDAR === 'true';
+}
+
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
+// Exported on its own line (not in the shared list above) so concurrent gate
+// PRs appending to that one-line list never conflict with this one.
+module.exports.knownGateCatalog = knownGateCatalog;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
@@ -4452,6 +4549,9 @@ module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
 module.exports.kbSpeciesQaLive = kbSpeciesQaLive;
+// Exported on its own line (not in the shared list above) so concurrent gate
+// PRs appending to that one-line list never conflict with this one.
+module.exports.portalYardCalendarLive = portalYardCalendarLive;
 // GATE_TYPED_DECISIONS reader, on its own line so gate PRs adding lines above
 // never touch this one.
 module.exports.typedDecisionsLive = typedDecisionsLive;
