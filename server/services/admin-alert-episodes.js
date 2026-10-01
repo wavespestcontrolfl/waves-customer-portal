@@ -22,8 +22,13 @@ const NotificationService = require('./notification-service');
 // the stamp once it is really fixed, or raiseAdminAlertWithReopen would
 // never see the fix and a comeback would stay silently dismissed. Rows
 // already stamped are skipped, so a re-run rewrites nothing. Returns the
-// number of rows closed.
-async function closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date() } = {}) {
+// number of rows closed. The close is also DONE (docs/admin-notifications.md
+// section 4.3: the condition the alert was about has cleared), so the row
+// leaves the bell with a one-line `resolution` — the caller's, or a generic
+// one. A person's earlier done keeps its own stamps (doneColumns COALESCEs).
+const GENERIC_RESOLUTION = 'Cleared: the condition this alert was about no longer holds';
+
+async function closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date(), resolution = null } = {}) {
   const keys = [...new Set((dedupeKeys || []).filter(Boolean).map(String))];
   if (!keys.length) return 0;
   return conn('notifications').where({ recipient_type: 'admin' })
@@ -31,6 +36,7 @@ async function closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date() 
     .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
     .update({
       read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [now]),
+      ...NotificationService._private.doneColumns({ by: 'episodes', resolution: resolution || GENERIC_RESOLUTION, at: now, keepExisting: true }),
       metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
         autoCleared: true, autoClearedReason: reason, autoClearedAt: now.toISOString(),
       })]),

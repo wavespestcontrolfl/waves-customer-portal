@@ -51,6 +51,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
 
     // A stale-visit bell the sweep retired whose visit is stuck in progress again.
     const reopened = await bell({ category: 'alert', read_at: recent,
+      done_at: recent, done_by: 'relevance', resolution: 'Visit is no longer in progress',
       metadata: { dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', recent) } });
     // The same, retired before the window: final.
     const final = await bell({ category: 'alert', read_at: old,
@@ -65,6 +66,8 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     // Unread again, and the retire pass right after left it: the visit is still stale.
     const back = await get(reopened.id);
     expect(back.read_at).toBeNull();
+    // A put-back returns the row to the bell: the done fields clear with the read.
+    expect([back.done_at, back.done_by, back.resolution]).toEqual([null, null, null]);
     expect(back.metadata).toEqual({ dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id });
     const kept = await get(final.id);
     expect(kept.read_at).toEqual(old);
@@ -76,6 +79,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
     const again = await get(reopened.id);
     expect(again.read_at).toBeInstanceOf(Date);
+    expect([again.done_by, again.resolution]).toEqual(['relevance', 'Visit is no longer in progress']);
     expect(again.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'Visit is no longer in progress' });
   });
 

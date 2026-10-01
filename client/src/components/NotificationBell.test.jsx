@@ -791,3 +791,69 @@ describe('NotificationBell admin "Show full text" (brevity guard detail)', () =>
     }
   });
 });
+
+describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3)', () => {
+  const rows = () => ([
+    { id: 'd1', category: 'schedule', title: 'Schedule: price the series', body: 'Nothing priced.', link: '/admin/dispatch',
+      created_at: new Date().toISOString(), read_at: null },
+    { id: 'live:overdue_invoices', category: 'alert', title: 'Overdue invoices', body: 'Three are overdue.', link: '/admin/invoices',
+      created_at: new Date().toISOString(), read_at: null },
+  ]);
+  const setup = () => {
+    global.fetch = vi.fn(async (url, options = {}) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      if (options.method === 'PUT') return jsonResponse({ success: true, updated: true });
+      return jsonResponse({ notifications: rows() });
+    });
+  };
+
+  it.each([['desktop', 1280], ['phone', 390]])('marks a persisted admin row done, removes it, and does not navigate (%s)', async (_label, width) => {
+    const previousWidth = window.innerWidth;
+    const previousLocation = window.location;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    setup();
+    const hrefSpy = vi.fn();
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      // One Done only: the live overlay row has no persisted id.
+      const done = await screen.findByRole('button', { name: 'Done' });
+      expect(screen.getAllByRole('button', { name: 'Done' })).toHaveLength(1);
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...window.location, set href(v) { hrefSpy(v); } },
+      });
+      fireEvent.click(done);
+      await waitFor(() => expect(screen.queryByText('Schedule: price the series')).toBeNull());
+      expect(screen.getByText('Overdue invoices')).toBeInTheDocument();
+      expect(global.fetch.mock.calls.some(([url, o]) => String(url).endsWith('/admin/notifications/d1/done') && o?.method === 'PUT')).toBe(true);
+      // Done is not read: the row's own read call never fires.
+      expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/d1/read'))).toBe(false);
+      expect(hrefSpy).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+      Object.defineProperty(window, 'location', { configurable: true, value: previousLocation });
+    }
+  });
+
+  it('keeps the row when the server refuses the done write', async () => {
+    setup();
+    global.fetch.mockImplementation(async (url, options = {}) => {
+      if (options.method === 'PUT') return { ok: false, status: 500, json: async () => ({}) };
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      return jsonResponse({ notifications: rows() });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(global.fetch.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
+    expect(screen.getByText('Schedule: price the series')).toBeInTheDocument();
+  });
+
+  it('offers no Done on a customer bell', async () => {
+    render(<NotificationBell type="customer" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findAllByText('Visit completed');
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
+  });
+});

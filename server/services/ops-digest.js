@@ -676,6 +676,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
     if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", [notAfter]);
     return q.update({
       read_at: conn.raw('COALESCE(read_at, NOW())'),
+      ...notificationService()._private.doneColumns({ by: resolvedBy, resolution: 'The check that raised this finding has run clean', keepExisting: true }),
       // Drop the dedupeKey with the resolve stamp: a resolved row must never
       // be the "standing" row notifyAdmin's rolling-window dedupe finds, or a
       // finding that clears and recurs inside the window would be swallowed
@@ -703,6 +704,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
     if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", [notAfter]);
     return q.update({
       read_at: conn.raw('COALESCE(read_at, NOW())'),
+      ...notificationService()._private.doneColumns({ by: resolvedBy, resolution: 'The check that raised this finding has run clean', keepExisting: true }),
       metadata: conn.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
     });
   };

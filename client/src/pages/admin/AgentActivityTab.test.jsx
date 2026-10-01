@@ -110,6 +110,22 @@ describe("AgentActivityTab", () => {
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n9/read", { method: "PUT" }));
   });
 
+  it("a done digest reads Done and shows its one-line resolution", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n7", kind: "digest", agent: "Waves Ops", notificationId: "n7",
+        title: "Schedule: price the series", subtitle: "schedule · done", doneAt: "2026-09-02T11:00:00Z",
+        resolution: "Series priced", status: "completed", startedAt: "2026-09-02T10:00:00Z", finishedAt: "2026-09-02T11:00:00Z",
+        durationMs: null, steps: [], stepsDone: 1, stepsTotal: 1, link: "/admin/schedule", detail: null,
+      }],
+    });
+    renderTab();
+    expect(await screen.findByText("Done")).toBeInTheDocument();
+    expect(screen.queryByText("Completed")).toBeNull();
+    expect(screen.getByText(/Series priced/)).toBeInTheDocument();
+  });
+
   it("a FIX digest keeps its remediation link as Open and marks read on follow", async () => {
     adminFetch.mockResolvedValueOnce({
       ...FEED,

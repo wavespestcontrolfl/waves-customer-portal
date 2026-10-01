@@ -208,7 +208,7 @@ async function closeSettledHotViewAlerts({
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
         const id = idOf(key);
         const why = settledReason(UUID_RE.test(id) ? await trx('estimates').where({ id }).first('id', 'status', 'archived_at') : null);
-        const closed = why ? Number(await alertEpisodes.closeAdminAlertKeys(trx, [key], why, { now })) || 0 : 0;
+        const closed = why ? Number(await alertEpisodes.closeAdminAlertKeys(trx, [key], why, { now, resolution: why.charAt(0).toUpperCase() + why.slice(1) })) || 0 : 0;
         return closed > 0 ? why : null;
       });
       if (!reason) continue;

@@ -317,7 +317,9 @@ function digestItem(row) {
   // clean is retired by services/ops-digest.js resolveOpsDigest — read +
   // metadata.resolved. It reads as done (never "failed") and says so.
   const resolved = meta.resolved === true;
-  const status = resolved ? 'completed' : isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
+  // Done (docs/admin-notifications.md section 4.3) reads as handled, never "failed".
+  const done = Boolean(row.done_at);
+  const status = resolved || done ? 'completed' : isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
   return {
     id: `digest:${row.id}`,
     kind: 'digest',
@@ -328,7 +330,7 @@ function digestItem(row) {
     // New rows never carry the prefix (the bell title already dropped it);
     // this strip only matters for a legacy row still holding one.
     title: subject.replace(DIGEST_PREFIX, ''),
-    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
+    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : done ? 'done' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),
     finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : row.read_at ? iso(row.read_at) : null,
@@ -337,6 +339,8 @@ function digestItem(row) {
     stepsDone: status === 'completed' ? 1 : 0,
     stepsTotal: 1,
     link: row.link || null,
+    doneAt: done ? iso(row.done_at) : null,
+    resolution: row.resolution ? String(row.resolution) : null,
     // The full finding: `detail` (admin-alerts-brevity scope) when the row
     // has one, else the legacy long `body` a pre-scope row still carries —
     // either way this is the only copy once the email is skipped.
@@ -415,7 +419,7 @@ function clampWindowHours(value) {
 // (metadata.resolvedAt), so a just-cleared old finding shows once as
 // "cleared" history instead of vanishing the moment it leaves the pinned
 // set (codex P2 r7). Ids are merged so a row never renders twice.
-const DIGEST_COLUMNS = ['id', 'title', 'body', 'detail', 'link', 'metadata', 'read_at', 'created_at'];
+const DIGEST_COLUMNS = ['id', 'title', 'body', 'detail', 'link', 'metadata', 'read_at', 'done_at', 'resolution', 'created_at'];
 // Safety bound on the pinned query only — an order of magnitude above any
 // real pinned set (a handful of digests a day; the fall-off retires them),
 // never the feed's MAX_ITEMS, so the "pinned rows survive" promise holds.
@@ -435,7 +439,10 @@ async function loadDigestRows(db, since, focusId) {
   // pre-scope row that never got a kind stamped.
   const IS_ACT_OR_REVIEW = "(metadata->>'kind' IN ('ACT', 'REVIEW') OR (metadata->>'kind' IS NULL AND title ~* '^(ACT:|\\[Review\\])'))";
   const IS_FIX = "(metadata->>'kind' = 'FIX' OR (metadata->>'kind' IS NULL AND title ~* '^FIX:'))";
+  // A done row (a person's, or the condition cleared) is history: it stays in
+  // the windowed set below but is never pinned.
   const pinned = await base()
+    .whereNull('done_at')
     .where((q) =>
       q.where((u) => u.whereNull('read_at').andWhereRaw(IS_ACT_OR_REVIEW))
         .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")

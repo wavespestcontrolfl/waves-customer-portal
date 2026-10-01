@@ -36,8 +36,10 @@
  * submission attached to a lead already quoted or worked), so a status or an
  * earlier estimate is never read as the new bell handled.
  *
- * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
- * — the row reads exactly like a human dismissal to anything else.
+ * A retire is `read_at = now` plus `metadata.retired = {by, reason, at}` — the
+ * row reads exactly like a human dismissal to anything else — and it is also
+ * DONE (done_by 'relevance', the reason in words as the resolution): the
+ * subject moved on, so the row leaves the bell. A put-back clears both.
  *
  * The table holds only classes whose emitter never re-raises the same alert
  * on a stable dedupe key: a new lead (one intake event per submission), a
@@ -77,6 +79,9 @@ const CLOSED_VISIT_STATUSES = new Set([...VISIT_NEVER_RAN_STATUSES, 'completed']
 // The statuses the stale in-progress bell was raised for (the removed
 // schedule-integrity-watchdog class's STALE_STATUSES).
 const STALE_IN_PROGRESS_STATUSES = new Set(['on_site', 'en_route']);
+
+// notification-service's done helpers, read lazily like candidateQuery's.
+const doneState = () => require('./notification-service')._private;
 
 const uuidOrNull = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim().toLowerCase() : null);
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -341,7 +346,11 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   const readAt = new Date(now.getTime());
   const stamp = { by: RETIRED_BY, reason, at: readAt.toISOString() };
   const [retired] = await sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at'), current)
-    .update({ read_at: readAt, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]) })
+    .update({
+      read_at: readAt,
+      ...doneState().doneColumns({ by: 'relevance', resolution: reason, at: readAt }),
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]),
+    })
     .returning(['id']);
   if (!retired) return null;
   const stillOurs = (q) => q.where({ id: row.id, read_at: readAt }).whereRaw("metadata->'retired'->>'at' = ?", [stamp.at]);
@@ -353,7 +362,7 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   } catch (err) {
     logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${err.message}`);
   }
-  await stillOurs(db('notifications')).update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
+  await stillOurs(db('notifications')).update({ read_at: null, ...doneState().DONE_CLEARED, metadata: db.raw("metadata - 'retired'") });
   return null;
 }
 
@@ -379,7 +388,7 @@ function putBack(row) {
   if (Number.isNaN(ourRead.getTime())) return 0;
   return sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row)
     .where({ read_at: ourRead })
-    .update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
+    .update({ read_at: null, ...doneState().DONE_CLEARED, metadata: db.raw("metadata - 'retired'") });
 }
 
 // The emitters in the table are one-shot: a booking cancelled or a visit or

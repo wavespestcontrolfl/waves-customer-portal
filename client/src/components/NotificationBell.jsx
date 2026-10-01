@@ -134,6 +134,26 @@ function fullTextFor(n, type) {
 // "Show full text" / "Hide full text": its own click and key handling, never
 // the row's — the row still navigates to its link and marks itself read only
 // on its own tap. `pre-wrap` keeps a list body's line breaks.
+// A persisted admin row can be marked done (docs/admin-notifications.md
+// section 4.3: read is not done). The `live:` dashboard overlay rows have no
+// persisted id and customer bells have no done state, so neither offers it.
+function canMarkDone(n, type) {
+  return type === 'admin' && n?.id != null && !String(n.id).startsWith('live:');
+}
+
+// "Done": its own click and key handling, never the row's (the row would
+// navigate to its link). `tall` gives the phone layout its 44px tap target.
+function DoneButton({ onDone, color, tall }) {
+  return (
+    <button type="button" className="waves-focus-ring" onClick={onDone} onKeyDown={(e) => e.stopPropagation()}
+      style={{
+        padding: tall ? '0 12px' : '2px 8px', minHeight: tall ? 44 : undefined, minWidth: tall ? 44 : undefined,
+        border: 0, background: 'none', cursor: 'pointer',
+        fontSize: 14, fontWeight: 600, textDecoration: 'underline', color,
+      }}>Done</button>
+  );
+}
+
 function FullText({ text, color, marginTop }) {
   const [shown, setShown] = useState(false);
   return (
@@ -458,6 +478,19 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     if (type === 'admin' || nativeCustomer) fetchCount();
   };
 
+  // Done leaves the bell: the row is removed once the server accepts it, and
+  // the badge is re-synced from the authoritative count (see markRead).
+  const markDone = async (e, n) => {
+    e.stopPropagation();
+    e.preventDefault();
+    try {
+      await requestJson(`${basePath}/${n.id}/done`, { method: 'PUT' });
+    } catch { return; }
+    setNotifications(prev => prev.filter(x => x.id !== n.id));
+    if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
+    fetchCount();
+  };
+
   const markAllRead = async () => {
     try {
       await requestJson(`${basePath}/read-all`, { method: 'PUT' });
@@ -741,8 +774,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         }}>Full report</button>
                     )}
                     {fullText && <FullText text={fullText} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
-                    <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted, marginTop: 6 }}>
-                      {timeAgo(n.created_at)}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                      <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted }}>
+                        {timeAgo(n.created_at)}
+                      </div>
+                      {canMarkDone(n, type) && <DoneButton tall onDone={(e) => markDone(e, n)} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
                     </div>
                   </div>
                   {href && (
@@ -899,8 +935,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                             }}>Full report</button>
                         )}
                         {fullText && <FullText text={fullText} marginTop={4} color={colors.text} />}
-                        <div style={{ fontSize: 11, color: colors.muted, marginTop: 4 }}>
-                          {timeAgo(n.created_at)}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                          <div style={{ fontSize: 11, color: colors.muted }}>
+                            {timeAgo(n.created_at)}
+                          </div>
+                          {canMarkDone(n, type) && <DoneButton onDone={(e) => markDone(e, n)} color={colors.text} />}
                         </div>
                       </div>
                       {!n.read_at && (

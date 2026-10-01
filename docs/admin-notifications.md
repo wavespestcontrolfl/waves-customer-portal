@@ -73,6 +73,12 @@ customer's message by this rule.
    day in total. A class that would push past that becomes a standing count.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
+5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,
+   `resolution`), the GitHub inbox model. Reading a row only stops it counting as unread; a
+   done row leaves the bell, its unread count and mark-all-read. A row goes done when the
+   condition it was about has cleared (the emitter's own close, or the relevance sweep) or when
+   a person marks it done by hand. A done row keeps a one-line `resolution` of what fixed it,
+   and a comeback of the same alert clears the done state and rings again.
 
 ## 5. Who may act
 
@@ -94,6 +100,7 @@ resolves a `person` row.
 | Forbidden tokens in headline and why | `composeAdminAlert` throws | enforced for every caller of the helper |
 | New code must use the helper | `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file against a checked-in ceiling; a file may not gain one | ratchet |
 | No emoji in admin text | `notification-service.js` | enforced, all categories |
+| Done state: a done row is hidden from the bell list, its unread count and mark-all-read (the Activity feed keeps it, marked Done). Every id-addressed done write is `NotificationService.markAdminDone`; emitters that close inside their own fenced update spread `doneColumns` into it. Auto-done sources: episode closes (`closeAdminAlertKeys`, `done_by` `episodes`), the relevance sweep (`relevance`), an ops-digest fall-off resolve, a superseded missed-call bell, a retired missing-deduction bell, a superseded promise-chaser bell, a resolved no-show dispatch tracking bell. Not done: `first-application-sibling-split`'s own copy, billing close paths, and any mark-read by a person. | `PUT /api/admin/notifications/:id/done` (same role scope as mark-read) and `/:id/reopen` (admin only); the bell's Done control | enforced |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later

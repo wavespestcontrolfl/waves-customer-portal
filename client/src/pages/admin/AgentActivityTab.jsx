@@ -140,7 +140,9 @@ function ActivityRow({ item, onReview, focused }) {
   useEffect(() => {
     if (focused) rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [focused]);
-  const meta = STATUS_META[item.status] || STATUS_META.completed;
+  // A done digest (a person's, or its condition cleared) reads "Done" and
+  // carries its one-line resolution.
+  const meta = item.doneAt ? { label: "Done", tone: "neutral" } : STATUS_META[item.status] || STATUS_META.completed;
   const expandable = item.steps?.length > 0 || item.detail;
   // Review: the owner owes a decision. A digest of any status keeps its
   // link too (a FIX: digest's remediation page) — its email was suppressed,
@@ -162,6 +164,7 @@ function ActivityRow({ item, onReview, focused }) {
           <div className="mt-0.5 text-12 text-ink-secondary">
             {item.agent}
             {item.subtitle ? ` · ${item.subtitle}` : ""}
+            {item.resolution ? ` · ${item.resolution}` : ""}
             {item.stepsTotal > 0 ? ` · ${item.stepsDone} of ${item.stepsTotal} steps` : ""}
             {item.durationMs != null ? ` · ${fmtMs(item.durationMs)}` : ""}
           </div>

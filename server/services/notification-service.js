@@ -58,6 +58,33 @@ function excludeActivityOnlyFromBell(query) {
   return query.whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'");
 }
 
+// The done state (docs/admin-notifications.md section 4.3, owner ruling
+// 2026-09-30): read is not done. A done admin row leaves the bell whether a
+// person marked it or the condition it was about cleared. done_by names who
+// (an admin user id, 'claude', or a system component); resolution is one
+// plain line of what fixed it. markAdminDone is the one id-addressed writer;
+// the emitters that close a row inside their own fenced UPDATE spread
+// doneColumns into it instead. A writer that can meet an already-done row
+// (episodes, ops-digest: they stamp read rows too) passes keepExisting, which
+// COALESCEs so the first done, a person's own included, stands.
+const MAX_RESOLUTION_CHARS = 200;
+const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
+
+function cleanResolution(text) {
+  const plain = String(stripEmoji(text) || '').replace(/\s+/g, ' ').trim();
+  return plain ? truncateAtWord(plain, MAX_RESOLUTION_CHARS) : null;
+}
+
+function doneColumns({ by, resolution = null, at = new Date(), keepExisting = false }) {
+  const columns = { done_at: at, done_by: String(by).slice(0, 64), resolution: cleanResolution(resolution) };
+  if (!keepExisting) return columns;
+  return {
+    done_at: db.raw('COALESCE(done_at, ?::timestamptz)', [columns.done_at]),
+    done_by: db.raw('COALESCE(done_by, ?)', [columns.done_by]),
+    resolution: db.raw('COALESCE(resolution, ?)', [columns.resolution]),
+  };
+}
+
 // `scheduledServiceId` (app property scope, PR 3): the five appointment keys
 // follow the visit's NON-primary saved property (enforced under
 // GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
@@ -533,7 +560,7 @@ const NotificationService = {
             const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null } : {}) };
+              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
@@ -750,7 +777,7 @@ const NotificationService = {
   // Get notifications for admin
   async getAdminNotifications(limit = 50, offset = 0, { role } = {}) {
     return excludeActivityOnlyFromBell(scopeAdminFeedToRole(
-      db('notifications').where({ recipient_type: 'admin' }),
+      db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
     ))
       .orderBy('created_at', 'desc')
@@ -765,7 +792,7 @@ const NotificationService = {
   // connection while holding one.
   async getAdminUnreadCount({ role } = {}, trx = null) {
     const [{ count }] = await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
-      (trx || db)('notifications').where({ recipient_type: 'admin' }),
+      (trx || db)('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
     ))
       .whereNull('read_at')
@@ -808,6 +835,34 @@ const NotificationService = {
       db('notifications').where({ id: notificationId, recipient_type: 'admin' }),
       role,
     ).update({ read_at: new Date() });
+    return updated > 0;
+  },
+
+  // Mark admin rows done: the ONE id-addressed done writer (see doneColumns).
+  // Admin rows only, only those not already done, under the same role scope
+  // as mark-read. read_at is stamped too so every reader keyed on it agrees.
+  // `by`: an admin user id, 'claude', or a system component. Returns the
+  // number of rows marked.
+  async markAdminDone(ids, { by, resolution = null, role } = {}, connection = db) {
+    const list = [...new Set([].concat(ids ?? []).filter(Boolean).map(String))];
+    if (!list.length || !by) return 0;
+    const at = new Date();
+    const updated = await scopeAdminFeedToRole(
+      connection('notifications').whereIn('id', list).where({ recipient_type: 'admin' }).whereNull('done_at'),
+      role,
+    ).update({
+      ...doneColumns({ by, resolution, at }),
+      read_at: connection.raw('COALESCE(read_at, ?::timestamptz)', [at]),
+    });
+    if (updated) logger.info(`[notifications] marked ${updated} admin notification(s) done`);
+    return updated;
+  },
+
+  // Put a done admin row back in the bell (read_at is left as it is).
+  async reopenAdminDone(notificationId, connection = db) {
+    const updated = await connection('notifications')
+      .where({ id: notificationId, recipient_type: 'admin' }).whereNotNull('done_at')
+      .update(DONE_CLEARED);
     return updated > 0;
   },
 
@@ -880,7 +935,7 @@ const NotificationService = {
       .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
       .whereNull('read_at')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
-      .update({ read_at: new Date() });
+      .update({ read_at: new Date(), ...doneColumns({ by: 'supersede', resolution: 'Superseded by a newer event on the same call' }) });
   },
 
   // Mark all read for customer
@@ -911,6 +966,8 @@ module.exports._private = {
   applyAdminBrevityGuard,
   normalizeAdminNotificationText,
   excludeActivityOnlyFromBell,
+  doneColumns,
+  DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,
   MAX_ADMIN_BODY_CHARS,
   DIGEST_CATEGORY,

@@ -439,4 +439,27 @@ router.put('/:id/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PUT /api/admin/notifications/:id/done — mark one done (docs/admin-notifications.md
+// section 4.3). Read is not done: a done row leaves the bell, its unread
+// count and mark-all-read. Same role scope as /:id/read (a technician can
+// only touch a tech-visible row). `resolution` is optional, one plain line.
+// Live overlay rows have no persisted id, so they cannot be marked done.
+router.put('/:id/done', async (req, res, next) => {
+  try {
+    const id = String(req.params.id);
+    if (id.startsWith('live:')) return res.status(400).json({ error: 'Live alerts clear when their count does' });
+    const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution : null;
+    const updated = await NotificationService.markAdminDone([id], { by: String(req.technicianId), resolution, role: req.techRole });
+    res.json({ success: true, updated: updated > 0 });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/notifications/:id/reopen — put a done row back in the bell.
+router.put('/:id/reopen', requireAdmin, async (req, res, next) => {
+  try {
+    const updated = await NotificationService.reopenAdminDone(String(req.params.id));
+    res.json({ success: true, updated });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

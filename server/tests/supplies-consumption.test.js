@@ -18,7 +18,10 @@
  *     for the same (product, visit).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({})),
+  _private: { doneColumns: ({ by, resolution }) => ({ done_by: by, resolution }) },
+}));
 
 const { consumeCompletionSupplies, settleOwedCompletionSupplies, completionSuppliesOwed, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');

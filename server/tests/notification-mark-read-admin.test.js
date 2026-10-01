@@ -6,8 +6,9 @@
  */
 
 jest.mock('../models/db', () => {
-  const q = { where: jest.fn(() => q), update: jest.fn(async () => 1) };
+  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNull: jest.fn(() => q), update: jest.fn(async () => 1) };
   const db = jest.fn(() => q);
+  db.raw = jest.fn((sql) => sql);
   db.__q = q;
   return db;
 });
@@ -36,5 +37,32 @@ describe('markReadAdmin', () => {
     const ok = await NotificationService.markReadAdmin('customer-notif');
     expect(db.__q.where).toHaveBeenCalledWith({ id: 'customer-notif', recipient_type: 'admin' });
     expect(ok).toBe(false);
+  });
+});
+
+describe('markAdminDone', () => {
+  beforeEach(() => {
+    db.__q.update.mockClear();
+    db.__q.update.mockResolvedValue(2);
+    db.__q.whereIn.mockClear();
+    db.__q.whereNull.mockClear();
+  });
+
+  test('stamps done and read on admin rows not yet done, with a plain, 200-character resolution', async () => {
+    const count = await NotificationService.markAdminDone(['a', 'a', 'b'], { by: 'claude', resolution: `  Fixed \u{1F600}   in PR  ${'word '.repeat(80)}` });
+    expect(count).toBe(2);
+    expect(db.__q.whereIn).toHaveBeenCalledWith('id', ['a', 'b']);
+    expect(db.__q.where).toHaveBeenCalledWith({ recipient_type: 'admin' });
+    expect(db.__q.whereNull).toHaveBeenCalledWith('done_at');
+    const patch = db.__q.update.mock.calls[0][0];
+    expect(patch).toMatchObject({ done_at: expect.any(Date), done_by: 'claude', read_at: expect.any(String) });
+    expect(patch.resolution).toMatch(/^Fixed in PR word word.*…$/);
+    expect(patch.resolution.length).toBeLessThanOrEqual(200);
+  });
+
+  test('writes nothing without ids or an actor', async () => {
+    expect(await NotificationService.markAdminDone([], { by: 'claude' })).toBe(0);
+    expect(await NotificationService.markAdminDone(['a'], {})).toBe(0);
+    expect(db.__q.update).not.toHaveBeenCalled();
   });
 });

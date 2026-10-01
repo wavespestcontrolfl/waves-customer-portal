@@ -796,7 +796,7 @@ describe('voicemail supersedes a missed-call bell for the same call (hook P1)', 
     expect(notifications.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'missed_call' });
     expect(notifications.whereNull).toHaveBeenCalledWith('read_at');
     expect(notifications.whereRaw).toHaveBeenCalledWith("metadata->'payload'->>'callLogId' = ?", ['call-1']);
-    expect(notifications.update).toHaveBeenCalledWith({ read_at: expect.any(Date) });
+    expect(notifications.update).toHaveBeenCalledWith({ read_at: expect.any(Date), done_at: expect.any(Date), done_by: 'supersede', resolution: expect.any(String) });
   });
   test('no callLogId = no-op', async () => {
     mockTables({});

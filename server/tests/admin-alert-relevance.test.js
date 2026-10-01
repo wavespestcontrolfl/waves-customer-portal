@@ -423,6 +423,8 @@ describe('runAdminAlertRelevanceSweep', () => {
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, new_lead: 1 }, rearmed: 0 });
     expect(stale.read_at).toBeInstanceOf(Date);
+    // A retire is also done: it leaves the bell, with its reason as the resolution.
+    expect(stale).toMatchObject({ done_at: stale.read_at, done_by: 'relevance', resolution: 'Visit is no longer in progress' });
     // Pure read + retired marker: every emitter-owned key survives as it was,
     // dedupe key included.
     expect(JSON.parse(stale.metadata)).toEqual({ ...staleMeta, retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: NOW.toISOString() } });

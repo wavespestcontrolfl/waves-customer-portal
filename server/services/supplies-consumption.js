@@ -211,7 +211,11 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
   const key = productId ? `supplies-consumption-failed:${productId}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).whereNull('read_at').update({
+      read_at: new Date(),
+      ...require('./notification-service')._private.doneColumns({ by: 'supplies', resolution: 'The missed stock deduction was made' }),
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb"),
+    });
     return true;
   } catch (err) {
     logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);

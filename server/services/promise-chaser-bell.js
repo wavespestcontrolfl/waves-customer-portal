@@ -366,7 +366,7 @@ async function ringForCall(call, now = new Date()) {
     .whereRaw("metadata->>'triggerKey' = 'promise_chaser'")
     .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(call.id)])
     .whereRaw("metadata->>'dedupeKey' IS DISTINCT FROM ?", [dedupeKey])
-    .update({ read_at: new Date() })
+    .update({ read_at: new Date(), ...require('./notification-service')._private.doneColumns({ by: 'promise-chaser', resolution: 'Replaced by a newer reminder for this call' }) })
     .catch((err) => logger.warn(`[promise-chaser-bell] failed to retire a superseded bell for call ${call.id}: ${err.message}`));
 
   // The canonical "already delivered" check missed-call-bell.js and

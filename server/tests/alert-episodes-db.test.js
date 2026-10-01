@@ -66,6 +66,40 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect(await close(['close-unread', 'close-read'])).toBe(0);
   });
 
+  test('done state: a close is also done (resolution kept, a person\'s own done stands) and a comeback puts the row back in the bell', async () => {
+    const auto = await bell('done-auto');
+    const person = await bell('done-person');
+    expect(await NotificationService.markAdminDone([person.id], { by: '7', resolution: 'Handled by phone' })).toBe(1);
+    // A second done of the same row writes nothing.
+    expect(await NotificationService.markAdminDone([person.id], { by: 'claude' })).toBe(0);
+    expect(await helpers.closeAdminAlertKeys(db, [key('done-auto'), key('done-person')], 'gap resolved', { resolution: 'Series priced' })).toBe(2);
+
+    const a = await get(auto.id);
+    expect(a.done_at).not.toBeNull();
+    expect([a.done_by, a.resolution]).toEqual(['episodes', 'Series priced']);
+    expect(a.read_at).not.toBeNull();
+    const p = await get(person.id);
+    expect([p.done_by, p.resolution]).toEqual(['7', 'Handled by phone']);
+    const listed = (await NotificationService.getAdminNotifications(500)).map((r) => r.id);
+    expect(listed).not.toContain(auto.id);
+    expect(listed).not.toContain(person.id);
+
+    // The problem comes back: the same raise re-rings the row and clears every done field.
+    const result = await raise('done-auto');
+    expect(result.rang).toBe(true);
+    const back = await get(auto.id);
+    expect(back.read_at).toBeNull();
+    expect([back.done_at, back.done_by, back.resolution]).toEqual([null, null, null]);
+    expect((await NotificationService.getAdminNotifications(500)).map((r) => r.id)).toContain(auto.id);
+
+    // A person reopens a done row: done fields clear, read_at stays.
+    expect(await NotificationService.reopenAdminDone(person.id)).toBe(true);
+    const reopened = await get(person.id);
+    expect([reopened.done_at, reopened.done_by, reopened.resolution]).toEqual([null, null, null]);
+    expect(reopened.read_at).not.toBeNull();
+    expect(await NotificationService.reopenAdminDone(person.id)).toBe(false);
+  });
+
   test('a quiet refresh (ringOnRefresh false) rewrites a standing READ row\'s text and keeps the read; a reopen still rings despite it', async () => {
     const quiet = { refreshOnDedupe: true, ringOnRefresh: () => false };
     const standing = await bell('quiet-standing', { read: true });
