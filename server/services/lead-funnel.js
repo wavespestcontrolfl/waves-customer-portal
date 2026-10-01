@@ -169,9 +169,11 @@ const WEB_CHANNELS_SQL = WEB_FIRST_CONTACT_CHANNELS.map((ch) => `'${ch}'`).join(
 // visitor's referrer as pageUrl when the form sent no page (and the customer
 // row copies it), so an off-site host (chatgpt.com, google.com) is a
 // referrer, never a landing page. Hosts are the spoke registry (hub
-// included) and the portal, the same fleet cors-origins.js derives.
+// included), the canonical portal and the configured portal host, the same
+// fleet cors-origins.js derives.
 const OWNED_HOSTS = [...new Set([
   ...SPOKE_SITE_KEYS,
+  'portal.wavespestcontrol.com', // canonical, whatever CLIENT_URL says (as in cors-origins.js)
   (() => { try { return new URL(publicPortalUrl()).hostname; } catch { return null; } })(),
 ].filter((h) => typeof h === 'string' && /^[a-z0-9.-]+$/.test(h)).map((h) => h.replace(/^www\./, '')))];
 const OWNED_HOSTS_SQL = OWNED_HOSTS.map((h) => `'${h}'`).join(', ');

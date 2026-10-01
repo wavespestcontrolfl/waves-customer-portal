@@ -50,6 +50,9 @@ describeDb('lead funnel breakdown keys', () => {
     expect((await keysFor({ extracted: { attribution: { pageUrl: 'https://www.google.com/search' } }, landing: 'https://chatgpt.com/' })).page).toBe('(unknown)');
     expect((await keysFor({ extracted: { attribution: { pageUrl: 'https://chatgpt.com/' } }, landing: 'https://www.sarasotaflpestcontrol.com/ants/' })).page)
       .toBe('sarasotaflpestcontrol.com/ants');
+    // the canonical portal is always a Waves site (self-booking /book)
+    expect((await keysFor({ channel: null, booking: { landing_url: 'https://portal.wavespestcontrol.com/book' } })).page)
+      .toBe('portal.wavespestcontrol.com/book');
     // a call (or a row with no lead) never inherits the customer's earlier page
     expect((await keysFor({ channel: 'call', landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
     expect((await keysFor({ channel: null, landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
