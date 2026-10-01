@@ -12532,7 +12532,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             && !(acceptedRodentSetupAmount > 0)
             && require('../config/feature-gates').pafSetupFeeLive()
             && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicy)) {
-            setupFeeAfterVisitConsentShown = true;
+            // Same eligibility the preview (/data flag, legacy page) applies:
+            // a tier whose visit count is unknown shows the BASE consent text,
+            // so that is what is recorded for it.
+            setupFeeAfterVisitConsentShown = monthlyTierVisitCountsResolvable(pricingFrequencies);
             const deferFeeAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
             const deferAnchorId = standardConversionResult?.firstScheduledServiceId || null;
             if (deferFeeAmount > 0 && deferAnchorId) {

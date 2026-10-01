@@ -2375,7 +2375,30 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   let policySpy;
 
   function setupOnlyFixture(id, { withAnchor = true, parentId = null, price = 50 } = {}) {
-    resetStore(recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }));
+    resetStore(recurringPestEstimate({
+      id,
+      token: `tok-${id}-x0123456789`,
+      // A solo MOSQUITO plan: the setup fee applies to it, and the engine's
+      // mosquito ladder (monthly12 / seasonal9) is monthly-billed tier rows with
+      // known visit counts — the REAL setup-only shape, no spy needed.
+      monthly_total: 79,
+      annual_total: 948,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: {
+            discount: 0,
+            services: [{ name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, visitsPerYear: 12 }],
+          },
+          oneTime: { items: [], membershipFee: 99 },
+          results: {
+            mq: [
+              { n: 'Monthly', key: 'monthly12', v: 12, mo: 79, ann: 948, pv: 79 },
+              { n: 'Seasonal', key: 'seasonal9', v: 9, mo: 65, ann: 780, pv: 86.67 },
+            ],
+          },
+        },
+      }),
+    }));
     db.__state.tables.scheduled_services = withAnchor ? [
       ...(parentId ? [{ id: parentId, customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null }] : []),
       { id: `ss-${id}`, customer_id: 'customers-1', recurring_parent_id: parentId, pending_setup_fee: null, estimated_price: price },
