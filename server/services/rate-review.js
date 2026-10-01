@@ -1984,16 +1984,18 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
 // before any query. A batch with sent rows is never rebuilt.
 async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null, deps = {} } = {}) {
   if (!rateReviewLive()) return { skipped: 'gate_off' };
-  // batch_key = the BUILD month; the window = anniversaries 35–65 days out
-  // (reviewWindowFor), crossing month boundaries.
-  const { from, to } = reviewWindowFor(now);
+  // batch_key = the BUILD month. A batch already emailed is finished for
+  // the month — a retried tick must not rebuild it (and slide its window).
   const batchKey = etMonthStart(now, 0).slice(0, 7);
-  const built = await buildBatch({ batchKey, anniversaryFrom: from, anniversaryTo: to, now, deps });
+  if (await alreadyEmailed(dbh, batchKey)) return { skipped: 'already_emailed', batchKey, emailed: false };
+  // No explicit window: buildBatch keeps an EXISTING batch's stored window
+  // and gives a new batch the rolling one (anniversaries 35–65 days out,
+  // reviewWindowFor), so a retry of an unsent digest never drops rows.
+  const built = await buildBatch({ batchKey, now, deps });
   if (!built.ok) {
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
     return { skipped: built.reason, batchKey };
   }
-  if (await alreadyEmailed(dbh, batchKey)) return { ...built, emailed: false, skipped: 'already_emailed' };
   let email;
   try {
     email = await sendBatchEmail({ batchKey, dbh, mailer });

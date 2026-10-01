@@ -1243,10 +1243,19 @@ describe('runMonthlyRateReview', () => {
     expect(sent.subject).toMatch(/^(ACT|OK): Rate review — November 2026/);
     expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at instanceof Date)).toBe(true);
 
-    scenario.batchRow = { batch_key: '2026-11', email_sent_at: new Date() };
-    const second = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
-    expect(second.skipped).toBe('already_emailed');
+    // a retried tick on an emailed batch neither rebuilds (no window slide, no row loss) nor re-sends
+    scenario.batchRow = { batch_key: '2026-11', email_sent_at: new Date(), window_from: '2026-12-06', window_to: '2027-01-05' };
+    const upsertsBefore = scripted.writes.batchUpserts.length;
+    const second = await rateReview.runMonthlyRateReview({ now: new Date('2026-11-10T11:20:00Z'), deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(second).toEqual({ skipped: 'already_emailed', batchKey: '2026-11', emailed: false });
+    expect(scripted.writes.batchUpserts).toHaveLength(upsertsBefore);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    // a retried tick on an UNSENT existing batch rebuilds inside the stored window, then emails
+    scenario.batchRow = { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' };
+    const retry = await rateReview.runMonthlyRateReview({ now: new Date('2026-11-10T11:20:00Z'), deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(retry.window).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    expect(retry.emailed).toBe(true);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(2);
   });
   test('an external recipient fails closed — the body names customers', async () => {
     const scripted = fixture.scriptedDb({ priorReviews: [], batchRow: { batch_key: '2026-12' } });
