@@ -861,7 +861,7 @@ describe('on-site contact opt-in ask', () => {
     // Explicit V2 consent keeps the original claim path (fresh slot only).
     // ...but never for an entry queued for the booking site; that phone is also
     // kept out of the same-call fan-out until it has an opt-in row.
-    expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact) {");
+    expect(src).toMatch(/if \(result === 'written' && secondaryEntry\?\.phone && v2SmsConsentExplicit && !onSiteDecision\.ask && !v2DoNotContact\s*&& onSiteDecision\.reason !== 'phone_not_from_v2'\) \{/);
     expect(src).toContain('if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
     // A re-added phone that already confirmed here gets the account stamp back.
     expect(src).toContain("await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));");
@@ -905,6 +905,9 @@ describe('on-site contact opt-in ask', () => {
     expect(block).toContain('propertyAddress: visitAddress ||');
     // The visit rides the claim (a send-window-deferred ask is re-checked against it).
     expect(block).toContain('visitId: svc.id,');
+    // A failed claim stays on the visit-bound retry rail (pending + visit_id), not a dead ask_failed.
+    expect(block).toContain("status: db.raw(\"CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END\"),");
+    expect(block).toContain("await markOptinAsk(entry, 'not_sent:claim_failed_retrying');");
     // 'wait' (office-review hold) and 'unknown' claim the ask without sending it.
     expect(block).toContain("if (claims.length && onSiteAskVisitState !== 'live') {");
     expect(block).toContain("onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry'");

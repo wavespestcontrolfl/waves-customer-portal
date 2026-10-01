@@ -13824,7 +13824,10 @@ const CallRecordingProcessor = {
         const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
         // Either extractor's do-not-contact request suppresses every opt-in
         // dispatch, this legacy explicit-consent path included.
-        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact) {
+        // ...and never for an on-site candidate refused because its phone is
+        // not V2-captured (that number must not be texted by any path).
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact
+          && onSiteDecision.reason !== 'phone_not_from_v2') {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -18767,17 +18770,27 @@ const CallRecordingProcessor = {
                       await markOptinAsk(entry, 'not_sent:no_new_ask');
                     }
                   } catch (askErr) {
-                    // Durable fail-closed, as the explicit-consent path: a
-                    // BLOCKING ask_failed row (save-retryable) for this phone.
+                    // The claim failed (a read / render error): keep the
+                    // obligation on the visit-bound retry rail — a PENDING,
+                    // undispatched row carrying this visit, which the recovery
+                    // sweep re-checks and sends (or releases) later. Still
+                    // blocking: a pending row holds the phone like ask_failed.
+                    // A confirmed / declined row is left as it is.
                     await db('recipient_optin').insert({
                       phone_key: phoneKey,
                       phone_e164: String(entry.phone || '').trim(),
-                      status: 'ask_failed',
+                      status: 'pending',
                       customer_id: customerId,
                       requested_by: 'call_pipeline',
                       requested_at: new Date(),
-                    }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
-                    await markOptinAsk(entry, 'not_sent:claim_failed');
+                      visit_id: svc.id,
+                    }).onConflict(['customer_id', 'phone_key']).merge({
+                      status: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END"),
+                      visit_id: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN EXCLUDED.visit_id ELSE recipient_optin.visit_id END"),
+                      dispatched_at: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN NULL ELSE recipient_optin.dispatched_at END"),
+                      updated_at: new Date(),
+                    }).catch(() => {});
+                    await markOptinAsk(entry, 'not_sent:claim_failed_retrying');
                     logger.warn(`[call-proc] on-site opt-in ask failed for ${maskSid(callSid)}: ${safeErrorToken(askErr)}`);
                   }
                 }
