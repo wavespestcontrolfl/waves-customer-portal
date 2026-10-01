@@ -784,3 +784,175 @@ describe('closed-world timing rule (terminal review)', () => {
     expect(checkNumericWhitelist('Expect 12½.', { allowedNumbers: [12, 1, 2] }).length).toBeGreaterThan(0);
   });
 });
+
+describe('whole numeric expressions, bare dry idiom, negation, line wraps (terminal review pass 2)', () => {
+  describe('numeric expressions are read whole', () => {
+    const facts = { allowedNumbers: [1, 2, 3, 4, 5, 72, 100] };
+    test.each([
+      ['Your score is 1 / 2.', '1 / 2'],
+      ['Your score is 72 / 100.', '72 / 100'],
+      ['Your score is 72/100.', '72/100'],
+      ['Your score is 72 of 100.', '72 of 100'],
+      ['Your score is 72 out of 100.', '72 out of 100'],
+      ['Your score is 3 - 4.', '3 - 4'],
+      ['Your score is 3-4.', '3-4'],
+      ['Your score is 3 to 4.', '3 to 4'],
+      ['Your score is 72 points%.', '72 points%'],
+      ['Your score is 72%.', '72%'],
+      ['Your score is 72 percent.', '72 percent'],
+      ['Your score is 72 points degrees.', null],
+      ['Your score is 1.5.', '1.5'],
+      ['Your score is 72 100.', '72 100'],
+    ])('%s rejects whole even when every digit is a supplied score', (text) => {
+      const reasons = checkNumericWhitelist(text, facts);
+      expect(reasons.length).toBeGreaterThan(0);
+    });
+
+    test('the rejected match is the whole expression, not a leftover fragment', () => {
+      expect(checkNumericWhitelist('Your score is 72 / 100.', facts)).toEqual([
+        { rule: 'numeric', match: '72 / 100', detail: 'not a single supplied score value' },
+      ]);
+      expect(checkNumericWhitelist('Your score is 72 out of 100.', facts)[0].match).toBe('72 out of 100');
+    });
+
+    test('a single signed integer, optionally with "points", still passes', () => {
+      ['Your score is 72.', 'Your score is 72 points.', 'Your score is up 5 points.', 'Your score is down 5 points.', 'Score 72, up 5 points.']
+        .forEach((text) => {
+          expect(checkNumericWhitelist(text, { allowedNumbers: [72, 5, -5] })).toEqual([]);
+        });
+    });
+  });
+
+  describe('"safe once dry" is a bare idiom only', () => {
+    const claim = (text) => expect(checkSafetyClaim(text).length).toBeGreaterThan(0);
+    const idiom = (text) => expect(checkSafetyClaim(text)).toEqual([]);
+
+    test.each([
+      'Pet-safe once dry.',
+      'Family-safe once dry.',
+      'Child-safe once dry.',
+      'Kid-safe once dry.',
+      'Lawn-safe once dry.',
+      'The pet-safe lawn is safe once dry.',
+      'Safe for pets once dry.',
+      'Safe for kids once it dries.',
+      'This product is safe once dry.',
+      'The treatment is safe once dry.',
+      'The pesticide is safe once dry.',
+      'This application is safe once dry.',
+      'The chemical is safe once it dries.',
+      'Our product is safe once dry.',
+      'It is safe once dry.',
+      'Everything is safe once dry.',
+      'The lawn is safe for pets once dry.',
+      'Treated areas are safe once dry and safe for kids.',
+      'Once dry, the product is safe.',
+      'The area is safe once dry. The product is pet-safe.',
+    ])('claim: %s', claim);
+
+    test.each([
+      'Safe once dry.',
+      'Safe once it dries.',
+      'Treated areas are safe once dry.',
+      'The lawn is safe once it dries.',
+      'Your yard will be safe once dry.',
+      'The turf is safe once it is dry.',
+      'Treated areas are safe once dry, and your technician confirms timing.',
+    ])('idiom: %s', idiom);
+
+    test('the safety scan runs first: a claim sentence is not exempted by a neighboring idiom', () => {
+      claim('Treated areas are safe once dry. This product is pet-safe.');
+      claim('This product is pet-safe. Treated areas are safe once dry.');
+    });
+
+    test('the idiom still meets the other rules (dry needs a drought flag, no figure)', () => {
+      rejects('Treated areas are safe once dry.', 'water_mow', {});
+      accepts('Treated areas are safe once dry.', { droughtFlagged: true });
+    });
+  });
+
+  describe('negated progress and state words reject whatever states are supplied', () => {
+    const everything = { progress: 'up', progressStates: ['on_track', 'ahead', 'behind', 'too_early'] };
+    const down = { progress: 'down', progressStates: ['behind'] };
+    test.each([
+      'The lawn is not improving.',
+      'The lawn is not on track.',
+      'The lawn is no longer behind.',
+      "The lawn isn't recovering.",
+      "The lawn isn’t recovering.",
+      "The lawn hasn't improved.",
+      "The turf aren't responding.",
+      'The lawn is never better.',
+      'Neither improving nor on track, nor ahead.',
+      'The turf is improving without help.'.replace('improving without help', 'without improving'),
+      'The lawn is hardly improving.',
+      'The lawn is barely recovering.',
+      'The lawn is not really improving.',
+      'There is no improvement.',
+      'The lawn is not too early.',
+    ])('%s', (text) => {
+      const out = checkProgressCoupling(text, everything);
+      expect(out.length).toBeGreaterThan(0);
+      expect(out[0].detail).toMatch(/negated|not supplied|progress/);
+      expect(out.some((r) => r.detail === 'negated progress word')).toBe(true);
+    });
+
+    test('a negated decline word rejects too', () => {
+      expect(checkProgressCoupling('The lawn is not getting worse.', down).some((r) => r.detail === 'negated progress word')).toBe(true);
+      expect(checkProgressCoupling("The lawn isn't declining.", down).some((r) => r.detail === 'negated progress word')).toBe(true);
+    });
+
+    test('the un-negated phrase passes when the state is supplied', () => {
+      expect(checkProgressCoupling('The lawn is improving.', everything)).toEqual([]);
+      expect(checkProgressCoupling('The lawn is on track.', everything)).toEqual([]);
+      expect(checkProgressCoupling('The lawn is behind schedule.', everything)).toEqual([]);
+    });
+
+    test('a negator beyond three words, or in another sentence, does not negate', () => {
+      expect(checkProgressCoupling('We did not see any weeds today, and one more thing, the lawn is improving.', everything)).toEqual([]);
+      expect(checkProgressCoupling('No weeds were seen. The lawn is improving.', everything)).toEqual([]);
+    });
+
+    test('the entry point rejects it', () => {
+      rejects('The lawn is not improving.', 'progress_coupling', everything);
+    });
+  });
+
+  describe('line wraps are plain whitespace', () => {
+    test('"Stay off\\nfor fourteen minutes." is a re-entry violation in both entry points', () => {
+      const text = 'Stay off\nfor fourteen minutes.';
+      expect(checkBannerCopy(text).map((r) => r.rule)).toContain('reentry_figure');
+      expect(checkReentryPattern(text).length).toBe(1);
+      rejects(text, 'reentry_figure', {});
+      rejects(text, 'sub_day_duration', {});
+    });
+
+    test.each([
+      'Stay off\nfor 14 minutes.',
+      'Stay off\r\nfor fourteen minutes.',
+      'Stay\noff\nfor\na\nfew\nminutes.',
+      'Keep the pets\n   off the grass for   two hours.',
+      'Please wait\n\t30 minutes.',
+      'Stay   off   for   fourteen   minutes.',
+    ])('wrapped copy still rejects: %j', (text) => {
+      expect(checkReentryPattern(text).length).toBe(1);
+      expect(checkBannerCopy(text).map((r) => r.rule)).toContain('reentry_figure');
+    });
+
+    test('a sentence still ends at punctuation or a blank line', () => {
+      expect(checkReentryPattern('Stay off the turf.\nThe visit took fourteen minutes.')).toEqual([]);
+      expect(checkReentryPattern('Stay off the turf\n\nThe visit took fourteen minutes.')).toEqual([]);
+      expect(checkReentryPattern('Stay off the turf.\n\nThe visit took fourteen minutes.')).toEqual([]);
+    });
+
+    test('other per-sentence checks see the joined sentence', () => {
+      expect(checkSafetyClaim('This product\nis pet-safe.').length).toBe(1);
+      expect(checkSafetyClaim('Treated areas\nare safe\nonce dry.')).toEqual([]);
+      expect(checkProgressCoupling('The lawn is\nnot\nimproving.', { progress: 'up' }).length).toBe(1);
+    });
+
+    test('approved sentences match across line wraps', () => {
+      accepts('Most turf shows a response\nin 3 to 7 days.', ROW);
+    });
+  });
+});

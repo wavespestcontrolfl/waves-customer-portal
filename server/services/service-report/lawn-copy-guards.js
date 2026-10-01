@@ -30,7 +30,9 @@
  *                      the score allowance: a bare signed integer or "<n>
  *                      points" whose value, sign included, is in
  *                      facts.allowedNumbers ("-5", "minus 5", "down 5 points"
- *                      are -5; "+5", "plus 5", "up 5 points" are 5).
+ *                      are -5; "+5", "plus 5", "up 5 points" are 5). The whole
+ *                      expression is read first: "1 / 2", "72 / 100", "72 of
+ *                      100", "3 - 4", "72 points%" reject whole.
  *   sub_day_duration   any second / minute / hour word anywhere, approved
  *                      sentences included. Absolute.
  *   reentry_figure     keep ... off / stay off / wait / dry in a sentence with ANY
@@ -44,12 +46,16 @@
  *   progress_coupling  G5: improving / worse / on track / behind ... only when
  *                      the supplied progress state says so. "behind" is a
  *                      progress claim unless a spatial noun follows ("behind the
- *                      house").
+ *                      house"). A negator within three words before one ("not
+ *                      improving", "no longer behind", "hasn't improved")
+ *                      rejects whatever states were supplied.
  *   banned_copy        G1/G6: the shared findBannedCustomerCopy list (cleared,
  *                      resolved, gone, guarantee, fixed re-entry figures ...).
  *   safety_claim       AGENTS.md: no pesticide is "safe" (pet-safe, safe for kids,
- *                      non-toxic, kid-friendly, natural, organic ...). Only the
- *                      "safe once dry" re-entry idiom is allowed.
+ *                      non-toxic, kid-friendly, natural, organic ...). Only a
+ *                      sentence that is exactly "safe once dry" (subject: the
+ *                      lawn, turf, grass, yard, area or surface, never a product
+ *                      or treatment) is allowed.
  *   overpromise        G1: lawn-only list the shared list lacks (eliminate,
  *                      cure, permanent, ordinance, blackout, county ...).
  *
@@ -66,6 +72,9 @@
  *
  * allowedText is REMOVED (it fed the old whole-phrase allowlist). A window the
  * writer may quote is an approved sentence, not a licensed phrase.
+ *
+ * Sentences: a single newline is plain whitespace (line wraps never hide a
+ * pattern); a sentence ends at . ! ? or at a blank line.
  *
  * Judgment calls (documented, tested):
  *  - Over-rejection is deliberate: "next visit", "warm-season turf", "one area",
@@ -105,10 +114,12 @@ function normalizeCopy(text) {
   return t;
 }
 
+// Line wraps are plain whitespace. A sentence ends at real sentence-ending
+// punctuation or at a blank line (paragraph break), never at a single newline.
 function splitSentences(text) {
   return normalizeCopy(text)
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((s) => s.trim())
+    .split(/\n\s*\n/)
+    .flatMap((paragraph) => paragraph.replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/))
     .filter(Boolean);
 }
 
@@ -138,30 +149,40 @@ const NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|t
 // any time word, relative phrase, number word or digit
 const ANY_TIMING_RE = new RegExp([TIME_WORD_RE, RELATIVE_TIME_RE, NUMBER_WORD_RE].map((re) => re.source).concat('\\d').join('|'), 'i');
 
-// The score allowance: a bare signed integer or "<n> points". The sign is "-",
-// "minus", "+", "plus", or "up"/"down" ("up 5 points" is +5, "down 5" is -5).
-// Decimals, fractions, percents and degrees never match, so they stay digits
-// in the remainder and reject.
-const SCORE_TOKEN_RE = /(?<![\w.])(?:(?<sign>[+-]|minus\s+|plus\s+|(?:up|down)\s+(?:by\s+)?)\s*)?(?<n>\d+)(?:\s+(?:points?|pts))?(?!\w|\.\d|\/\d|\s*(?:%|°|percent\b|degrees?\b))/gi;
+// The score allowance: a bare signed integer, optionally followed by "points".
+// The sign is "-", "minus", "+", "plus", or "up"/"down" ("up 5 points" is +5,
+// "down 5" is -5). The WHOLE numeric expression is tokenized before anything is
+// allowed: digits joined by spaces or operators ("1 / 2", "72 / 100", "72 of
+// 100", "3 - 4", "72 out of 100", "1.5") and a unit tail ("72 points%", "72%",
+// "72 degrees") make the expression something other than a single integer, so
+// it rejects whole instead of leaving a stripped fragment behind.
+const NUM_TERM_SRC = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)';
+const NUM_JOIN_SRC = '(?:\\s*(?:[/\\-+x\u00d7*:,%\u00b0]|\\bof\\b|\\bout\\s+of\\b|\\bto\\b|\\bor\\b|\\band\\b)\\s*|\\s+)';
+const NUMERIC_EXPR_RE = new RegExp(
+  `(?<![\\w.])(?<sign>[+-]\\s*|minus\\s+|plus\\s+|(?:up|down)\\s+(?:by\\s+)?)?(?<expr>${NUM_TERM_SRC}(?:${NUM_JOIN_SRC}${NUM_TERM_SRC})*)(?<tail>(?:\\s+(?:points?|pts))?(?:\\s*(?:%|\u00b0|percent\\b|degrees?\\b))?)`,
+  'gi'
+);
 
 function toNumberSet(list) {
   const set = new Set();
   (Array.isArray(list) ? list : []).forEach((n) => {
-    const v = typeof n === 'number' ? n : Number(String(n).replace(/−/g, '-').replace(/[^\d.-]/g, ''));
+    const v = typeof n === 'number' ? n : Number(String(n).replace(/\u2212/g, '-').replace(/[^\d.-]/g, ''));
     if (Number.isFinite(v)) set.add(v);
   });
   return set;
 }
 
 const isNegativeSign = (sign) => /^(?:-|minus|down)/i.test(sign || '');
+const isSingleScore = ({ expr, tail }) => /^\d+$/.test(expr) && /^(?:\s+(?:points?|pts))?$/i.test(tail);
 
 function checkNumericWhitelist(text, facts = {}) {
   const allowed = toNumberSet(facts.allowedNumbers);
   const reasons = [];
-  const rest = normalizeCopy(text).replace(SCORE_TOKEN_RE, (full, ...args) => {
-    const { sign, n } = args[args.length - 1];
-    const value = (isNegativeSign(sign) ? -1 : 1) * Number(n);
-    if (!allowed.has(value)) reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a supplied score value' });
+  const rest = normalizeCopy(text).replace(NUMERIC_EXPR_RE, (full, ...args) => {
+    const groups = args[args.length - 1];
+    const value = (isNegativeSign(groups.sign) ? -1 : 1) * Number(groups.expr);
+    const ok = isSingleScore(groups) && allowed.has(value);
+    if (!ok) reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a single supplied score value' });
     return ' ';
   });
   (rest.match(/\S*\d\S*/g) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'digits outside the score allowance' }));
@@ -236,22 +257,36 @@ const ITEM_PHRASES = [
 
 const stateKey = (s) => String(s || '').toLowerCase().replace(/[\s-]+/g, '_');
 
+// A negator within three words before a progress or state word flips its
+// meaning ("not improving", "no longer behind", "hasn't improved"), so it
+// rejects whatever states were supplied.
+const NEGATOR_RE = /\b(?:not|no|never|nor|without|hardly|barely|cannot|none)\b|\b\w+n't\b/i;
+function isNegated(t, index) {
+  const sentence = t.slice(0, index).split(/[.!?;:]/).pop();
+  return NEGATOR_RE.test(sentence.trim().split(/\s+/).slice(-3).join(' '));
+}
+
+const matchesOf = (re, t) => [...t.matchAll(new RegExp(re.source, 'gi'))];
+
+function judgeProgressMatch(m, t, ok, reasonDetail) {
+  if (isNegated(t, m.index)) return { rule: 'progress_coupling', match: m[0], detail: 'negated progress word' };
+  return ok ? null : { rule: 'progress_coupling', match: m[0], detail: reasonDetail };
+}
+
 function checkProgressCoupling(text, facts = {}) {
   const t = normalizeCopy(text);
   const dir = stateKey(facts.progress);
   const itemStates = new Set((Array.isArray(facts.progressStates) ? facts.progressStates : []).map(stateKey));
-  const reasons = [];
-  const up = t.match(UP_WORDS_RE);
-  if (up && dir !== 'up') reasons.push({ rule: 'progress_coupling', match: up[0], detail: `improving word with progress "${dir || 'unknown'}"` });
-  const down = t.match(DOWN_WORDS_RE);
-  if (down && dir !== 'down') reasons.push({ rule: 'progress_coupling', match: down[0], detail: `decline word with progress "${dir || 'unknown'}"` });
-  ITEM_PHRASES.forEach(({ state, re }) => {
-    const m = t.match(re);
-    if (!m) return;
-    const ok = state === 'flat' ? (dir === 'flat' || itemStates.has('flat')) : itemStates.has(state);
-    if (!ok) reasons.push({ rule: 'progress_coupling', match: m[0], detail: `state "${state}" not supplied` });
-  });
-  return reasons;
+  const checks = [
+    { re: UP_WORDS_RE, ok: dir === 'up', detail: `improving word with progress "${dir || 'unknown'}"` },
+    { re: DOWN_WORDS_RE, ok: dir === 'down', detail: `decline word with progress "${dir || 'unknown'}"` },
+    ...ITEM_PHRASES.map(({ state, re }) => ({
+      re,
+      ok: state === 'flat' ? (dir === 'flat' || itemStates.has('flat')) : itemStates.has(state),
+      detail: `state "${state}" not supplied`,
+    })),
+  ];
+  return checks.flatMap(({ re, ok, detail }) => matchesOf(re, t).map((m) => judgeProgressMatch(m, t, ok, detail)).filter(Boolean));
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +379,13 @@ function checkOverpromise(text) {
 // "the idiom is 'safe once dry' with the technician confirming timing"). The
 // idiom carries no figure, and "dry" is still a water word for model copy (the
 // banner owns re-entry), so model copy can only use it under a drought flag.
-const SAFE_ONCE_DRY_RE = /\bsafe\s+once\s+(?:it\s+(?:is\s+|has\s+)?)?(?:dry|dried)\b|\bsafe\s+once\s+it\s+dries\b/gi;
+// The idiom is a WHOLE sentence: optionally the lawn, turf, grass, yard, area or
+// surface as the subject (never a product, treatment, pesticide, application or
+// chemical, never a for-whom phrase), then a standalone "safe once dry", then
+// optionally the technician confirming timing. "pet-safe once dry", "safe for
+// pets once dry" and "this product is safe once dry" are all claims. The safety
+// scan runs first; only a sentence that is exactly the idiom is exempted.
+const SAFE_IDIOM_SENTENCE_RE = /^(?:(?:(?:the|your|these|those|this)\s+)?(?:treated\s+)?(?:lawn|turf|grass|yard|areas?|surfaces?)\s+(?:is|are|will\s+be|should\s+be|becomes?)\s+)?safe\s+once\s+(?:it\s+(?:is\s+|has\s+)?dr(?:y|ied)|it\s+dries|dr(?:y|ied))(?:,?\s+(?:and\s+)?your\s+technician\s+(?:will\s+)?confirms?\s+(?:the\s+)?timing)?[.!]?$/i;
 const SAFETY_CLAIM_RE = new RegExp([
   '\\b(?:safe|safer|safest|safely|unsafe)\\b',
   '\\b(?:harmless|non-?\\s?toxic|toxic|poison\\w*|dangerous|hazardous|harmful|deadly)\\b',
@@ -359,9 +400,11 @@ const SAFETY_CLAIM_RE = new RegExp([
 const NATURAL_CLAIM_RE = /\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b(?:[^.!?]{0,40}\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b)|\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b[^.!?]{0,40}\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b/i;
 
 function checkSafetyClaim(text) {
-  const t = normalizeCopy(text).replace(SAFE_ONCE_DRY_RE, ' ');
-  const m = t.match(SAFETY_CLAIM_RE) || t.match(NATURAL_CLAIM_RE);
-  return m ? [{ rule: 'safety_claim', match: m[0] }] : [];
+  return splitSentences(text)
+    .filter((sentence) => !SAFE_IDIOM_SENTENCE_RE.test(sentence))
+    .map((sentence) => sentence.match(SAFETY_CLAIM_RE) || sentence.match(NATURAL_CLAIM_RE))
+    .filter(Boolean)
+    .map((m) => ({ rule: 'safety_claim', match: m[0] }));
 }
 
 // ---------------------------------------------------------------------------
