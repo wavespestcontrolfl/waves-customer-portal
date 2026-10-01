@@ -92,6 +92,17 @@ describe('the SMS send step holds a live street-level hold', () => {
     });
   }
 
+  test('a visit-linked send that threads only metadata.scheduled_service_id (the card request shape) is held too', async () => {
+    isStreetLevelHoldVisit.mockResolvedValue(true);
+    const result = await sendCustomerMessage({
+      to: '+19415550142', channel: 'sms', audience: 'customer', customerId: 'cust-1', purpose: 'card_request',
+      body: 'Add a card to hold your visit.', metadata: { scheduled_service_id: 'visit-9' },
+    });
+    expect(result).toMatchObject({ sent: false, code: 'STREET_LEVEL_HOLD' });
+    expect(isStreetLevelHoldVisit).toHaveBeenCalledWith('visit-9');
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  });
+
   test('a non-hold visit is unaffected: it sends', async () => {
     const result = await sendCustomerMessage({ ...base, ...notices['a reschedule notice'] });
     expect(result.sent).toBe(true);

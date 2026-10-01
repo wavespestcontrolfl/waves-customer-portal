@@ -115,11 +115,18 @@ const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
   code: 'STREET_LEVEL_HOLD',
   reason: 'Visit is an address hold awaiting the office confirm',
 });
+// The visit a send is about: appointmentId, or (callers that thread only metadata, e.g. the
+// card request) metadata.scheduled_service_id / scheduledServiceId. metadata.visit_id is a visit
+// GROUP id and is not used.
+function heldVisitIdOf(input) {
+  return input.appointmentId || input.metadata?.scheduled_service_id || input.metadata?.scheduledServiceId || null;
+}
 async function streetLevelHoldBlocksSend(input) {
-  if (!input.appointmentId || input.audience !== 'customer') return false;
+  const visitId = heldVisitIdOf(input);
+  if (!visitId || input.audience !== 'customer') return false;
   // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
   // stops NEW holds but never releases the customer messages of holds already open.
-  return require('../street-level-hold').isStreetLevelHoldVisit(input.appointmentId);
+  return require('../street-level-hold').isStreetLevelHoldVisit(String(visitId));
 }
 
 // callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
@@ -796,7 +803,7 @@ async function sendCustomerMessageCore(input) {
   // 6.35 Street-level address hold (see streetLevelHoldBlocksSend above): nothing about
   //      a held visit reaches the customer before the office confirms the address.
   if (await streetLevelHoldBlocksSend(sendInput)) {
-    logger.info(`[send_customer_message] held: visit ${sendInput.appointmentId} is a street-level address hold (${sendInput.purpose})`);
+    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput)} is a street-level address hold (${sendInput.purpose})`);
     const blocked = { code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason };
     const audit = await persistAudit({
       input: sendInput,
