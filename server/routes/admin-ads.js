@@ -361,6 +361,35 @@ router.post('/sync/meta', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/ads/sync-status — last-sync health per ad platform, read from
+// job_health (written by runExclusive around the daily syncs). The PPC
+// dashboard shows it so a dead sync no longer reads as "no data".
+const SYNC_JOBS = [
+  { platform: 'google_ads', job: 'google-ads-sync', configured: () => require('../services/ads/google-ads-config').isConfigured() },
+  { platform: 'facebook', job: 'meta-ads-campaigns', configured: () => getMetaAds().isConfigured() },
+  { platform: 'facebook', job: 'meta-ads-performance', configured: () => getMetaAds().isConfigured() },
+];
+router.get('/sync-status', async (req, res, next) => {
+  try {
+    const rows = await db('job_health').whereIn('job_name', SYNC_JOBS.map((j) => j.job));
+    const byJob = new Map(rows.map((r) => [r.job_name, r]));
+    const syncs = SYNC_JOBS.map(({ platform, job, configured }) => {
+      const r = byJob.get(job);
+      return {
+        platform,
+        job,
+        configured: !!configured(),
+        last_success_at: r?.last_success_at ? new Date(r.last_success_at).toISOString() : null,
+        last_status: r?.last_status || null,
+        // job_health already masks digit runs; keep it short for the UI.
+        last_error: r?.last_error ? String(r.last_error).slice(0, 200) : null,
+        consecutive_failures: Number(r?.consecutive_failures) || 0,
+      };
+    });
+    res.json({ syncs });
+  } catch (err) { next(err); }
+});
+
 // =========================================================================
 // GOOGLE ADS CALL REPORTING BRIDGE
 // =========================================================================

@@ -1326,6 +1326,26 @@ accept-active estimate with a contact gap always gets the React view: the
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
 
+Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
+dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:
+true` ONLY when the gate is exactly `'true'`, the recurring card-on-file lane is on,
+and the policy the accept would resolve puts this customer on the card rail
+(a card is captured at accept, or a consented method is already saved/Auto Pay is
+active). It is OMITTED (never `false`) in every other case, so a gate-off response is
+byte-identical to before. A plan member whose Auto Pay is already active DOES carry it
+(that policy resolves to `autopay_already_active`, an on-rail state: the saved method is
+charged after the visit). Plan members NOT on Auto Pay (`existing_plan_customer`),
+payer-billed, invoice-mode, commercial manual billing, one-time and paused-Auto-Pay
+never carry it. It is a boolean about the viewer's own estimate only: no customer, payer, or
+payment-method data rides it. SCOPE: it describes the PAY-PER-APPLICATION option only.
+`/data` resolves the policy before the viewer picks a payment option
+(`paymentMethodPreference: null`), so it says nothing about annual prepay: a viewer who
+later selects annual prepay is resolved again at accept (with `GATE_PREPAY_CARD_AND_CHARGE`
+off that is the `prepay_annual` exemption and its pay-link path). A client must not show
+the after-first-visit promise on the annual-prepay option on the strength of this field.
+Informational only for now: no client reads it, and it moves no money and sends no
+message.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
