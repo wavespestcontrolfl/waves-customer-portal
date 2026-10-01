@@ -40,10 +40,10 @@ describe('renderVisitLoopsSection', () => {
     const out = renderVisitLoopsSection(fullLoops());
     expect(out.startsWith(`${HEADER}\n`)).toBe(true);
     expect(out.endsWith('\n')).toBe(true);
-    expect(out).toContain("- Tech position (today's Quarterly Pest visit, 8-10am): Sam is en route (updated 2 min ago), 3 stop(s) ahead of this visit\n");
-    expect(out).toContain('- RUNNING LATE (today\'s Quarterly Pest visit, 8-10am): dispatch flagged this visit 25 min past its window — acknowledge the delay plainly, apologize once, never say "on time"\n');
+    expect(out).toContain("- Tech position (today's Quarterly Pest visit, 8-10am): Sam is en route (updated 2 min ago), 3 stop(s) before this visit\n");
+    expect(out).toContain('- DELAY FLAGGED (today\'s Quarterly Pest visit, 8-10am): dispatch flagged this visit 25 min past its window — apologize once for the delay; never say "on time"\n');
     // a fresh Tech position line is the answer: no "no tech location" hand-off
-    expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — say plainly we're running behind and use Tech position for where the tech is; no arrival time unless a LIVE ETA fact gives one\n");
+    expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay and say how many stops come before theirs (Tech position); no arrival time unless a LIVE ETA fact gives one\n");
     expect(out).not.toContain('no tech location');
     expect(out).toContain('- MISSED VISIT: Lawn Care on Monday, Jun 8 (10am-12pm) was not completed — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology\n');
     expect(out).not.toContain('live note');
@@ -78,13 +78,13 @@ describe('renderVisitLoopsSection', () => {
 
   test('late alert without minutes still renders', () => {
     expect(renderVisitLoopsSection({ lateAlert: { type: 'unassigned_overdue', severity: 'high', minutesLate: null } }))
-      .toContain('- RUNNING LATE: dispatch flagged this visit as running past its window');
+      .toContain('- DELAY FLAGGED: dispatch flagged this visit past its window');
   });
 
-  test('a missing-tracking alert renders as a tracking gap, never RUNNING LATE', () => {
+  test('a missing-tracking alert renders as a tracking gap, never DELAY FLAGGED', () => {
     const out = renderVisitLoopsSection({ lateAlert: { type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true } });
     expect(out).toContain('- Tracking gap: no departure or arrival is recorded yet for this visit');
-    expect(out).not.toContain('RUNNING LATE');
+    expect(out).not.toContain('DELAY FLAGGED');
   });
 
   test('gate codes and card digits in a commitment are redacted', () => {
@@ -192,6 +192,23 @@ describe('system prompt', () => {
       Date.now = () => new Date('2026-06-11T03:00:00Z').getTime(); // 11pm ET
       expect(buildSystemPrompt()).toBe(day);
     } finally { Date.now = realNow; }
+  });
+});
+
+// The send-time status guard (sms-eta-freshness) stays the authority on status words:
+// the wording these lines sanction must pass it with NO live-ETA snapshot.
+describe('sanctioned delay wording passes the send-time status guard', () => {
+  const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
+  test.each([
+    "Sorry for the delay on today's visit.",
+    "Sorry for the delay on today's visit. Sam has 2 stops before yours.",
+  ])('%p', async (body) => {
+    await expect(etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, techNames: ['Sam'], promptVersion: REAL_ANSWERS_PROMPT_VERSION, outgoingBody: body }))
+      .resolves.toBeNull();
+  });
+  test('"running behind" is still a status claim the guard refuses without a snapshot', async () => {
+    await expect(etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, techNames: ['Sam'], promptVersion: REAL_ANSWERS_PROMPT_VERSION, outgoingBody: "Sorry, we're running behind today." }))
+      .resolves.toBe('eta_claim_no_snapshot');
   });
 });
 

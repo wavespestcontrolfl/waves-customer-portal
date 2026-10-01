@@ -4215,7 +4215,7 @@ COMPANY FACTS:
     ? `
 VISIT STATUS & OPEN LOOPS:
 - When the VISIT STATUS & OPEN LOOPS section lists anything, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when that section is "- none".
-- Never promise an arrival time, or say the tech is "on time", unless Tech position or a LIVE ETA fact supports it. With RUNNING LATE or WINDOW PASSED, say so plainly in one sentence — those lines authorize saying we are running behind, not that the tech is "on the way" or any arrival time. When Tech position says the location is stale, do not promise an arrival time.
+- Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on today's visit."). From a fresh Tech position you may say how many stops come before theirs. When Tech position says the location is stale, do not promise an arrival time.
 - With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
@@ -4436,7 +4436,7 @@ function visitLoopTechLine(tp) {
   const stops = Number(tp.stopsAhead);
   let where = '';
   if (tp.atThisVisit === true) where = 'at this visit now';
-  else if (tp.stopsAhead != null && Number.isFinite(stops) && stops >= 0) where = `${Math.round(stops)} stop(s) ahead of this visit`;
+  else if (tp.stopsAhead != null && Number.isFinite(stops) && stops >= 0) where = `${Math.round(stops)} stop(s) before this visit`;
   if (!status && !where) return null;
   return `- Tech position${visitLoopWhich(tp)}: ${name}${status ? ` is ${status}` : ''}${ago ? ` (updated ${ago})` : ''}${where ? `, ${where}` : ''}`;
 }
@@ -4447,8 +4447,8 @@ function visitLoopLateLine(late) {
   }
   const mins = visitLoopMinutes(late.minutesLate);
   return mins != null
-    ? `- RUNNING LATE${visitLoopWhich(late)}: dispatch flagged this visit ${mins} min past its window — acknowledge the delay plainly, apologize once, never say "on time"`
-    : `- RUNNING LATE${visitLoopWhich(late)}: dispatch flagged this visit as running past its window — acknowledge the delay plainly, apologize once, never say "on time"`;
+    ? `- DELAY FLAGGED${visitLoopWhich(late)}: dispatch flagged this visit ${mins} min past its window — apologize once for the delay; never say "on time"`
+    : `- DELAY FLAGGED${visitLoopWhich(late)}: dispatch flagged this visit past its window — apologize once for the delay; never say "on time"`;
 }
 function visitLoopPastWindowLine(past, techPosition) {
   if (!past || typeof past !== 'object') return null;
@@ -4460,7 +4460,7 @@ function visitLoopPastWindowLine(past, techPosition) {
   const located = techPosition && typeof techPosition === 'object' && techPosition.status && techPosition.status !== 'stale'
     && past.visitId != null && String(techPosition.visitId) === String(past.visitId);
   return located
-    ? `${head} — say plainly we're running behind and use Tech position for where the tech is; no arrival time unless a LIVE ETA fact gives one`
+    ? `${head} — apologize for the delay and say how many stops come before theirs (Tech position); no arrival time unless a LIVE ETA fact gives one`
     : `${head}, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
 }
 function visitLoopMissedLine(missed) {
