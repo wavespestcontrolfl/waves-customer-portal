@@ -1080,7 +1080,10 @@ function isUnverifiedLanguageInbound(inbound) {
   if (wordsOf(stripMarks(text)).length < 2) return false;
   if ([...text.matchAll(/\p{L}/gu)].some(([ch]) => !/[a-z]/.test(ch) && !ALLOWED_DIACRITICS.includes(ch))) return true;
   if (REACTION_RE.test(original)) return false;
-  const tokens = languageTokens(original);
+  // Names leave the count only when the rest is plainly English: one unknown lowercase word beside a name puts every word back
+  // ("Hi Fido kimehet most kerlek please?" is judged on all six words, #5520 r4; "Hi this is Marisol Quintanilla" stays English).
+  const withoutNames = languageTokens(original);
+  const tokens = withoutNames.every(englishKnown) ? withoutNames : languageTokens(original, { keepNames: true });
   if (!tokens.length) return false;
   const foreign = foreignWordSet();
   // (also held: a short text with no known English word at all, "Pot iesi?" - a language on no list, which the reply guards cannot read)
@@ -1252,6 +1255,9 @@ function cleaningKinds(text) {
 // to the treatment, and so does every effect verb ("will the sprinklers be a problem for the treatment?", "will they weaken it?"); "Sprinkler issue in
 // zone 2" and "will the sprinklers hurt my new plants?" are not about the treatment (#5520 r2).
 const WATERING_EFFECT_OBJECT_SRC = '(?:treatment|treated|spray\\w*|application|applied|product|granules?|fertiliz\\w*|it|that)';
+// Effectiveness wording is about the treatment whatever its grammar ("make it less effective", "affect how well it works", "whether it
+// works", #5520 r4).
+const WATERING_EFFECTIVENESS_RE = /\b(?:less\s+effective|effectiveness|(?:how\s+well|whether|if)\s+(?:it|the\s+(?:treatment|spray|product|application))\s+(?:still\s+)?works?|stop\s+(?:it\s+)?(?:from\s+)?working)\b/;
 const WATERING_EFFECT_RE = new RegExp(`\\b(?:(?:weaken\\w*|affect\\w*|hurt\\w*|harm\\w*|ruin\\w*|undo\\w*|dilut\\w*|impact\\w*|reduc\\w*|cancel\\w*|mess(?:es|ed)?\\s+(?:up|with)|interfer\\w*\\s+with|(?:have|has)\\s+an?\\s+effect\\s+on)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?|(?:a\\s+)?(?:problem|issue|matter|bother)\\s+(?:for|with|to)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?)${WATERING_EFFECT_OBJECT_SRC}\\b`);
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return cleaningKinds(text);
@@ -1259,7 +1265,7 @@ function wateringKinds(text) {
   if (context) return ['reentry', 'rain'];
   // a re-entry topic beside the watering ("will the sprinklers hurt the dogs if they walk on it?") goes to the general classifier first
   if (OTHER_REENTRY_TOPIC_RE.test(text)) return null;
-  return WATERING_EFFECT_RE.test(text) ? ['rain'] : [];
+  return WATERING_EFFECT_RE.test(text) || WATERING_EFFECTIVENESS_RE.test(text) ? ['rain'] : [];
 }
 
 function askedKindsOf(inboundText) {

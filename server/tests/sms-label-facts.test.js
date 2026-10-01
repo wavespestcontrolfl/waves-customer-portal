@@ -3314,3 +3314,13 @@ test('#5520 r3: a treatment earlier TODAY is the latest visit, not an older one'
   expect(labelFactsLib.inboundRefersToOtherVisit('You did a treatment earlier today, can the dogs go out?', '2026-09-30', '2026-09-30')).toBe(false);
   expect(labelFactsLib.inboundRefersToOtherVisit('two treatments earlier, can the dogs go out?', '2026-09-30', '2026-10-01')).toBe(true);
 });
+
+test('#5520 r4: names count again when an unknown lowercase word remains; effectiveness wording asks rain', () => {
+  const english = (t) => !labelFactsLib.isUnverifiedLanguageInbound(t) && labelFactsLib.isEnglishInbound(t);
+  expect(english('Hi Fido kimehet most kerlek please?')).toBe(false);
+  expect(english('Hi this is Marisol Quintanilla-Bergstrom')).toBe(true);
+  for (const t of ['Will irrigation affect how well it works?', 'Will the sprinklers affect whether it works?', 'Will the sprinklers make it less effective?']) {
+    expect([t, labelFactsLib.askedLabelKinds(t).includes('rain')]).toEqual([t, true]);
+  }
+  for (const t of ['Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill if it runs all night?']) expect([t, labelFactsLib.askedLabelKinds(t)]).toEqual([t, []]);
+});
