@@ -207,6 +207,18 @@ describe('recheckPlacements', () => {
     expect(r.verdict).toBe('too_early');
   });
 
+  test('on a two-surface engine only the current surface counts for the verdict', () => {
+    const rows = [
+      row({ query: Q1, date: '2026-09-25', urls: [PAGE] }),
+      row({ query: Q1, platform: 'chatgpt', model: 'gpt-5-search-api', date: '2026-10-18', urls: [PAGE], named: true }),
+      row({ query: Q1, platform: 'chatgpt', model: 'dataforseo:chatgpt_app:gpt-5', date: '2026-10-17', urls: [PAGE], named: false }),
+    ];
+    const [r] = recheckPlacements([placement()], rows, { now: NOW, currentSurfaces: { chatgpt: 'app', gemini: 'app' } });
+    // the newer API row is a retired surface; only the app row is current
+    expect(r.current).toEqual({ answers: 1, citingPage: 1, namedWhenCiting: 0 });
+    expect(r.verdict).toBe('not_named_yet');
+  });
+
   test('a date-only first_live_at (UTC midnight) keeps its calendar day', () => {
     const rows = [row({ query: Q1, date: '2026-09-25', urls: [PAGE] })];
     expect(recheckPlacements([placement({ first_live_at: new Date('2026-10-01T00:00:00.000Z') })], rows, { now: NOW })[0].liveOn).toBe('2026-10-01');

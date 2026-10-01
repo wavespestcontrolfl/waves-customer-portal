@@ -279,7 +279,7 @@ function daysBetween(fromDate, toDate) {
 }
 
 /**
- * recheckPlacements(placements, rows, { now }) → [{ prospectId, host, liveOn,
+ * recheckPlacements(placements, rows, { now, currentSurfaces }) → [{ prospectId, host, liveOn,
  *   daysLive, pages, questions, before, after, verdict }]
  * Pure. `placements` are seo_link_prospects rows with first_live_at
  * (id, target_domain, live_url, first_live_at); `rows` are mention rows (any
@@ -294,7 +294,7 @@ function daysBetween(fromDate, toDate) {
  * page_not_cited_now | not_named_yet. A placement with no live_url, or on a
  * page no engine cited before that day, is not returned.
  */
-function recheckPlacements(placements, rows, { now = new Date() } = {}) {
+function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces = null } = {}) {
   const today = etDateString(now);
   // every row, measured or not: a failed newest probe must stay the newest
   // answer for its question and engine; only measured rows are tallied
@@ -318,24 +318,22 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
     // the newest post-placement answer per question and engine: the verdict
     // reads these, so a page that stops being cited (or Waves stops being
     // named) changes it; before/after stay cumulative for context
-    const latestAfter = new Map();
     for (const r of dated) {
-      if (!questions.has(r.query) || r.date < windowStart) continue;
+      if (!questions.has(r.query) || r.date < windowStart || !r.measured) continue;
       const t = r.date < liveOn ? tally.before : tally.after;
-      if (t === tally.after) {
-        const k = `${r.query}::${r.llm_platform}`;
-        const prev = latestAfter.get(k);
-        if (!prev || r.date > prev.date) latestAfter.set(k, r);
-      }
-      if (!r.measured) continue;
       const named = r.waves_mentioned === true;
       t.answers += 1;
       if (named) t.named += 1;
       if (cites(r)) { t.citingPage += 1; if (named) t.namedWhenCiting += 1; }
     }
-    // a newest answer that failed or could not resolve its sources says
-    // nothing either way: it is left out of `current`, never replaced by an older one
-    const latest = [...latestAfter.values()].filter((r) => r.measured);
+    // the dashboard's own current selection over the answers since (newest
+    // per question, engine and model, current surface only); a current answer
+    // that failed or could not resolve its sources says nothing either way:
+    // it is left out, never replaced by an older one
+    const since = dated.filter((r) => questions.has(r.query) && r.date >= liveOn)
+      .sort((x, y) => compareStrings(y.date, x.date) || compareStrings(String(y.created_at || ''), String(x.created_at || '')));
+    const currentIds = currentRowIds(since, currentSurfaces);
+    const latest = since.filter((r) => currentIds.has(r.id) && r.measured);
     const current = { answers: latest.length, citingPage: latest.filter(cites).length, namedWhenCiting: latest.filter((r) => cites(r) && r.waves_mentioned === true).length };
     const daysLive = daysBetween(liveOn, today);
     // settle first: one early answer is not a result
@@ -356,7 +354,7 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
  * still live (live / indexed) and first seen live in the last
  * RECHECK_MAX_PLACEMENT_AGE_DAYS.
  */
-async function loadPlacementRechecks(db, { now = new Date() } = {}) {
+async function loadPlacementRechecks(db, { now = new Date(), currentSurfaces } = {}) {
   const oldest = addETDays(now, -RECHECK_MAX_PLACEMENT_AGE_DAYS);
   const placements = await db('seo_link_prospects')
     .whereIn('status', LIVE_STATUSES) // a lost placement keeps first_live_at; it is no longer live
@@ -366,7 +364,8 @@ async function loadPlacementRechecks(db, { now = new Date() } = {}) {
   const earliest = placements.reduce((m, p) => (new Date(p.first_live_at) < m ? new Date(p.first_live_at) : m), now);
   const since = etDateString(addETDays(earliest, -RECHECK_BEFORE_DAYS));
   const rows = await readCitedPageRows(db, { since });
-  return recheckPlacements(placements, rows, { now });
+  const surfaces = currentSurfaces !== undefined ? currentSurfaces : require('./llm-mention-prober').currentSurfaces;
+  return recheckPlacements(placements, rows, { now, currentSurfaces: surfaces });
 }
 
 module.exports = {

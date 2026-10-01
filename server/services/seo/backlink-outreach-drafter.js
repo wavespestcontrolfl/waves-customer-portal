@@ -171,7 +171,8 @@ const WAVES_FACTS = Object.freeze(WAVES_FACT_IDS
   .map((id) => (entityCohort.questions.find((q) => q.id === id) || {}).approved_answer)
   .filter(Boolean));
 // A cited page that already names Waves needs no pitch.
-const WAVES_LISTED_RE = /\bwaves pest control\b/i;
+// Spaces may arrive HTML-encoded (&nbsp; and friends) in the page text.
+const WAVES_LISTED_RE = /\bwaves(?:\s|&nbsp;|&#160;|&#xa0;)+pest(?:\s|&nbsp;|&#160;|&#xa0;)+control\b/i;
 const MAX_CITED_QUESTIONS = 3;
 
 /**

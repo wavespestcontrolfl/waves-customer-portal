@@ -26,7 +26,7 @@ jest.mock('../services/seo/cited-pages', () => ({
 
 const worker = require('../services/seo/link-prospect-worker');
 const drafter = require('../services/seo/backlink-outreach-drafter');
-const { parseDraft, pickLocation, SYSTEM_PROMPT, citedPageFor, citedPagesByHost, buildUserPrompt, WAVES_FACTS } = drafter._internals;
+const { parseDraft, pickLocation, SYSTEM_PROMPT, citedPageFor, citedPagesByHost, buildUserPrompt, WAVES_FACTS, WAVES_LISTED_RE } = drafter._internals;
 
 const fakeAnthropic = (text) => ({ messages: { create: async () => ({ content: [{ type: 'text', text }] }) } });
 const noFetch = async () => null; // skip personalization fetch in tests
@@ -252,6 +252,12 @@ describe('cited-page pitches', () => {
     expect(create).not.toHaveBeenCalled();
     expect(r.failed).toBe(1);
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', notes: expect.stringMatching(/cited page could not be read/) }));
+  });
+
+  test('an HTML-encoded space never hides an existing listing', () => {
+    expect(WAVES_LISTED_RE.test('3. Waves&nbsp;Pest&nbsp;Control — Lakewood Ranch')).toBe(true);
+    expect(WAVES_LISTED_RE.test('waves pest  control')).toBe(true);
+    expect(WAVES_LISTED_RE.test('Gulf waves and pest control tips')).toBe(false);
   });
 
   test('a cited page cut short (text null) fails the lease too', async () => {
