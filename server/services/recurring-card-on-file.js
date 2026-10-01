@@ -97,6 +97,44 @@ function isPrepayCardAndChargeEnabled() {
     && require('../config/feature-gates').gates.autoApplyAccountCredit === true;
 }
 
+// GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30, "customers should save
+// card, and then pay after first visit, throughout"): may the estimate page
+// tell THIS customer that nothing is charged before the first visit? Only a
+// customer on the card rail — a card the accept will capture (policy.required)
+// or one already enrolled (saved_method_consented / autopay_already_active) —
+// qualifies, and only while the recurring card lane itself is on (without
+// it no card is ever saved, so the sentence would be untrue). Every exempt
+// customer (plan member, payer-billed, invoice-mode, commercial manual
+// billing, autopay-paused, one-time, prepay legacy carve-out) keeps today's
+// wording: their accept still follows today's billing path. Copy only — this
+// moves no money. The SETUP-ONLY accept shape and annual prepay keep today's
+// behavior inside the rail and are handled by the callers, not here.
+function payAfterFirstVisitCardRail(policy) {
+  if (!require('../config/feature-gates').payAfterFirstVisitLive()) return false;
+  if (!isRecurringCardOnFileEnabled()) return false;
+  if (!policy || policy.enforced !== true) return false;
+  return payAfterFirstVisitInvoiceRail(policy);
+}
+
+// The ONE predicate for "this accept's invoice rides the card lane": the
+// policy either captures a card at accept (required) or the customer already
+// has an enrolled/consented method (saved_method_consented /
+// autopay_already_active). In-lane, the accept's first-visit invoice is
+// attached to the first visit with no pay link and charged at completion.
+// estimate-public.js's three consumers (the accept's recurringCardLaneActive,
+// the legacy-vs-React renderer pick, and the /data lane flag) all call this so
+// they cannot drift. Deliberately NOT gated on GATE_PAY_AFTER_FIRST_VISIT or
+// the card lane's own flag and does not read `enforced`: it is exactly the
+// inline predicate those three sites used before, so it changes nothing by
+// itself. payAfterFirstVisitCardRail() layers the gate on top for copy.
+// PR-B (existing customers adding a service) widens the policy resolver, not
+// this predicate.
+function payAfterFirstVisitInvoiceRail(policy) {
+  if (!policy) return false;
+  return !!policy.required
+    || ['saved_method_consented', 'autopay_already_active'].includes(policy.exemptReason || '');
+}
+
 // Grouped multi-property owner (Codex #3492 r25): the accept transaction
 // resolves an unlinked grouped estimate's customer through an accepted
 // SIBLING before any phone matching (a second property's address
@@ -1615,6 +1653,19 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           continue;
         }
       }
+      // Collections DISPUTE hold (owner ruling 2026-09-30): the fallback pay link
+      // is sent by the direct sender, which does not check the hold. A charge
+      // failure that never reached the hold-aware charge guard (a missing saved
+      // method, a refused enrollment, a stamped authentication_required) must not
+      // deliver a pay link during a dispute - or when the hold cannot be verified.
+      // Nothing terminal: the job stays claimed so the stale-claim lease retries it
+      // after the office releases the hold.
+      const fallbackHold = await require('./collections/collection-hold')
+        .messagingHeldByCollectionHold(invoice?.customer_id || row.customer_id);
+      if (fallbackHold.held) {
+        logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: ${fallbackHold.reason === 'lookup_failed' ? 'collections hold lookup failed' : 'collections dispute hold'} - no fallback pay link, retried after release`);
+        continue;
+      }
       let fallbackDelivered = false;
       // Codex round-8 audit P1 (#4131): same settled_zero_due /
       // covered_by_credit distinction as the payer branch above — a
@@ -1625,6 +1676,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         const fencedDelivery = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
         if (fencedDelivery.ceded) {
           logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
+          continue;
+        }
+        // The direct sender's own default-on hold check (backstop behind the
+        // pre-check above): a hold that landed in between is a wait - no alert,
+        // nothing resolved, the lease retries after the release.
+        if (fencedDelivery.result?.code === 'COLLECTION_HOLD_DEFER') {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: collections dispute hold at the sender - retried after release`);
           continue;
         }
         ({ settled: fallbackSettled, delivered: fallbackDelivered, creditCovered: fallbackCreditCovered } = classifyDeliveryOutcome(fencedDelivery.result));
@@ -1656,6 +1714,8 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
 module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
+  payAfterFirstVisitCardRail,
+  payAfterFirstVisitInvoiceRail,
   resolveRecurringCardPolicyForEstimate,
   resolveGroupedEstimateOwnerId,
   resolvePrepayChargeMethod,

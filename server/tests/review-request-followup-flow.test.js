@@ -1301,6 +1301,21 @@ describe('review request follow-up flow', () => {
       expect(rrUpdate).toHaveBeenCalledWith(CLAIM_STAMP);
     });
 
+    test('the inline email copy is click-guarded by default; skipClickGuard (staff composer Quick Links) sends anyway', async () => {
+      const ClickGuard = require('../services/review-click-guard');
+      const spy = jest.spyOn(ClickGuard, 'askSuppressedByClick').mockResolvedValue(true);
+      try {
+        wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { template_key: 'day0_ask' } });
+        EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); return { sent: true }; });
+        expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'review_link_clicked' });
+        expect(EmailLib.sendTemplate).not.toHaveBeenCalled();
+        wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { template_key: 'day0_ask' } });
+        spy.mockClear();
+        expect(await ReviewService.sendInlineEmailCopy('rr-1', { skipClickGuard: true })).toEqual({ sent: true });
+        expect(spy).not.toHaveBeenCalled();
+      } finally { spy.mockRestore(); }
+    });
+
     test('refuses when review or email notifications are off, or prefs cannot be read (fail closed)', async () => {
       wire({ prefs: { review_request: false, email_enabled: true } });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });

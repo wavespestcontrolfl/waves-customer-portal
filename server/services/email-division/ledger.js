@@ -310,7 +310,7 @@ async function markFailed(id, reason, { conn } = {}) {
  *     COMMITTED and store an address that was never actually checked).
  */
 async function reserveWithCap({
-  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), expectedRecipientEmail = null,
+  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), expectedRecipientEmail = null, guard = null,
 } = {}) {
   // The class the caps, the human-contact check and the outstanding guard
   // key off is the RESOLVED one (eligibility.js resolveMarketingClass), and
@@ -354,6 +354,8 @@ async function reserveWithCap({
         if (!recipientMatchesExpected(expectedRecipientEmail, retryVerdict.checks.customerEmail)) {
           return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row: null, duplicate: false };
         }
+        const retryGuard = guard ? await guard(trx) : null;
+        if (retryGuard) return { ok: false, reason: retryGuard.reason, row: null, duplicate: false };
         const otherOutstanding = marketingClass === 'marketing' ? await outstandingReservation(trx, customerId, idempotencyKey) : null;
         if (otherOutstanding) return { ok: false, reason: capReasonFor(stream, otherOutstanding.stream), row: null, duplicate: false };
         await trx('marketing_email_ledger').where({ id: existingByKey.id, status: 'failed' }).update({
@@ -372,6 +374,11 @@ async function reserveWithCap({
     if (!recipientMatchesExpected(expectedRecipientEmail, verdict.checks.customerEmail)) {
       return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row: null, duplicate: false };
     }
+    // A caller's own uniqueness rule (e.g. once per customer / estimate),
+    // judged on this same transaction under the customer's advisory lock, so
+    // two concurrent attempts serialize and exactly one can pass.
+    const callerGuard = guard ? await guard(trx) : null;
+    if (callerGuard) return { ok: false, reason: callerGuard.reason, row: null, duplicate: false };
 
     if (marketingClass === 'marketing') {
       const outstanding = await outstandingReservation(trx, customerId, idempotencyKey);
@@ -467,13 +474,28 @@ async function holdReservation(trx, id, now) {
   return { ok: true, reason: null, row };
 }
 
-function skipReservation(trx, id, reason) {
+function skipReservation(trx, id, reason, status = 'skipped') {
   return trx('marketing_email_ledger')
     .where({ id, status: 'reserved' })
-    .update({ status: 'skipped', reason, updated_at: trx.fn.now() });
+    .update({ status, reason, updated_at: trx.fn.now() });
 }
 
-async function judgeConsent(trx, row, now, expectedRecipientEmail = null) {
+async function judgeConsent(trx, row, now, expectedRecipientEmail = null, boundaryGuard = null) {
+  // The caller's own last look comes FIRST: it may wait (a share lock on the
+  // entity it reads, held to the end of this transaction), and every read that
+  // decides the send must happen AFTER the last wait — a consent or address change
+  // committed while it waited is then seen by the recheck below, not missed by a
+  // verdict read before the wait. (Customer preference and address updates do not
+  // take the marketing-email advisory lock.)
+  const callerVerdict = boundaryGuard ? await boundaryGuard(trx) : null;
+  if (callerVerdict) {
+    // A RETRYABLE verdict (the caller will rebuild and try again under the same key)
+    // settles the reservation 'failed', which a same-key retry reopens through the
+    // normal eligibility checks and frees the customer's slot at once; every other
+    // verdict is a terminal skip.
+    await skipReservation(trx, row.id, callerVerdict.reason, callerVerdict.retryable ? 'failed' : 'skipped');
+    return { ok: false, reason: callerVerdict.reason, row };
+  }
   const verdict = await eligibleForEmail({
     customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
     emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
@@ -504,7 +526,7 @@ async function judgeConsent(trx, row, now, expectedRecipientEmail = null) {
  * result does not carry the fence's reason, so `onVerdict` receives every
  * verdict as it is made: the hold's, then the boundary check's.
  */
-function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmail = null } = {}) {
+function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmail = null, boundaryGuard = null } = {}) {
   return (dispatch) => db.transaction(async (trx) => {
     const now = new Date();
     const held = await holdReservation(trx, rowId, now);
@@ -513,7 +535,7 @@ function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmai
     await dispatch(trx, async () => {
       let verdict;
       try {
-        verdict = await judgeConsent(trx, held.row, now, expectedRecipientEmail);
+        verdict = await judgeConsent(trx, held.row, now, expectedRecipientEmail, boundaryGuard);
       } catch (err) {
         // The recheck itself could not read (infrastructure), which is not a
         // consent verdict. sendOne awaits this check before it builds the
@@ -564,13 +586,13 @@ function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmai
  * settles it as failed and frees the customer's slot at once.
  */
 async function sendWithLedger({
-  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {}, expectedRecipientEmail = null,
+  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {}, expectedRecipientEmail = null, guard = null, boundaryGuard = null,
 } = {}) {
   if (template.templateKey != null && template.templateKey !== emailKey) {
     return { ok: false, sent: false, reason: REASONS.TEMPLATE_KEY_MISMATCH, row: null, duplicate: false };
   }
   const reservation = await reserveWithCap({
-    customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now, expectedRecipientEmail,
+    customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now, expectedRecipientEmail, guard,
   });
   if (!reservation.ok) {
     return { ok: false, sent: false, reason: reservation.reason, row: null, duplicate: false };
@@ -591,7 +613,7 @@ async function sendWithLedger({
       recipientId: row.customer_id,
       idempotencyKey: row.idempotency_key,
       suppressionGroupKey: groupKeyFor(row.stream, row.email_key, row.marketing_class),
-      withProviderHandoff: reservationHandoff(row.id, { onVerdict: (verdict) => { fence = verdict; }, expectedRecipientEmail }),
+      withProviderHandoff: reservationHandoff(row.id, { onVerdict: (verdict) => { fence = verdict; }, expectedRecipientEmail, boundaryGuard }),
     });
   } catch (err) {
     await markFailed(row.id, `dispatch_error:${err.code || err.status || 'unknown'}`);

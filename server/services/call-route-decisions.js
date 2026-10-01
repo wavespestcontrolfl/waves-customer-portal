@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { insertRouteDecisionLocked } = require('./call-routing-gates');
 
 const DECISION_VERSION = 'legacy-call-v1';
 const DECISION_MODE = 'shadow';
@@ -214,12 +215,11 @@ async function writeLegacyShadowRouteDecision(input = {}) {
   delete payload.metadata;
 
   try {
-    const rows = await db('route_decisions')
-      .insert(payload)
-      // Targetless: tolerant of the legacy key and the recording key alike.
-      .onConflict()
-      .ignore()
-      .returning(['id']);
+    // Through the shared insert helper: the CALL row is locked first, like every
+    // route_decisions writer (codex #5446 r2 P1), so a verdict that holds the call
+    // lock cannot have a decision row appear under it. Targetless insert (tolerant
+    // of the legacy key and the recording key alike).
+    const rows = await insertRouteDecisionLocked(db, payload, { returning: ['id'] });
     return rows?.[0] || null;
   } catch (err) {
     logger.warn(`[call-route] shadow decision skipped for call ${decision.call_log_id}: ${err.message}`);

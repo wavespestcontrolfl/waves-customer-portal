@@ -783,6 +783,9 @@ export default function CallLogTabV2() {
         body: JSON.stringify({
           verdict,
           routeDecisionId: call.routeDecision?.id || null,
+          // the revision displayed (the row's xmin): any in-place update of the decision
+          // (a reprocess refresh, the outcome update) keeps the id and changes this
+          routeDecisionRevision: call.routeDecision?.revision || null,
           wrongFields,
           note,
         }),
@@ -794,11 +797,24 @@ export default function CallLogTabV2() {
       });
       await loadCalls(callLogSearch.trim());
     } catch (err) {
-      setRouteFeedbackResult({
-        ok: false,
-        callId: call.id,
-        text: `Review failed: ${err.message || "unknown error"}`,
-      });
+      // (this tab's own adminFetch carries the parsed body on error.body)
+      if (err?.status === 409 && err?.body?.code === "STALE_ROUTE_DECISION") {
+        // The decision under this card was refreshed or superseded since the list
+        // loaded (a reprocess): reload so the next Right/Wrong judges the CURRENT
+        // decision instead of resubmitting the stale one (codex #5446 r1 P2).
+        setRouteFeedbackResult({
+          ok: false,
+          callId: call.id,
+          text: "This call was reprocessed since it loaded — review the refreshed decision before answering.",
+        });
+        await loadCalls(callLogSearch.trim()).catch(() => {});
+      } else {
+        setRouteFeedbackResult({
+          ok: false,
+          callId: call.id,
+          text: `Review failed: ${err.message || "unknown error"}`,
+        });
+      }
     } finally {
       setRouteFeedbackSavingId(null);
     }

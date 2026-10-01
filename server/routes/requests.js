@@ -1232,13 +1232,14 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
       });
     } catch (execErr) {
       logger.error(`[cancel-resolution] accepted action failed for case ${caseRow?.id}: ${execErr.message}`);
-      // A pause with nothing inside the away dates (hold_not_needed) is a
-      // pure precondition refusal: the case must not stand as 'accepted',
-      // or it replays for 24 h and hides the card for 12 months. Released
-      // only under the accept lock, from a fresh read, while no receipt and
-      // no hold stand for this case — a concurrent or retried execution of
-      // the same case that did succeed is never undone.
-      if (execErr.code === 'hold_not_needed' && caseRow?.id) {
+      // A pause with nothing inside the away dates (hold_not_needed), or one
+      // whose schedule changed under the locked re-read (hold_visits_changed,
+      // thrown before any write), is a pure precondition refusal: the case
+      // must not stand as 'accepted', or it replays for 24 h and hides the
+      // card for 12 months. Released only under the accept lock, from a fresh
+      // read, while no receipt and no hold stand for this case — a concurrent
+      // or retried execution of the same case that did succeed is never undone.
+      if (['hold_not_needed', 'hold_visits_changed'].includes(execErr.code) && caseRow?.id) {
         try {
           await CancellationResolution.releaseUnappliedCase({ caseId: caseRow.id, customerId: req.customer.id, code: execErr.code });
         } catch (markErr) { logger.warn(`[cancel-resolution] refused case ${caseRow.id} not released: ${markErr.message}`); }

@@ -127,6 +127,19 @@ test('a no-claim (state null) instruction, or one built while the products could
   expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
 });
 
+test('a state-null instruction is never frozen, even with a label mow hold (regenerated from the frozen product facts)', async () => {
+  const mowHold = { days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.' };
+  const instruction = { ...INSTRUCTION(40), state: null, lines: [], mowHold };
+  buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+    opts.wateringInstructionOut.instruction = instruction;
+    opts.wateringInstructionOut.productsLoadFailed = false;
+    return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' }, banner: { state: null, lines: [], mowHold } } };
+  });
+  const { knex, state } = fakeKnex({});
+  await run(knex);
+  expect(state.notes).not.toHaveProperty('lawnWateringFreeze');
+});
+
 test('gate back on after a rollback: the original instruction is what persists', async () => {
   const existing = { wateringInstruction: INSTRUCTION(40), banner: null };
   const { knex, state } = fakeKnex({ lawnWateringFreeze: existing });

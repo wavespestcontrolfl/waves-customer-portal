@@ -1185,17 +1185,21 @@ async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
   return detectedPlanKeys;
 }
 
+// The account-level commercial rule, in one place: the 'commercial' tier sentinel,
+// or the customer's property CHANNEL (codex #3591 r84 P1): a commercial/business
+// customer with no 'commercial' tier sentinel yet — e.g. a direct booking
+// persisting the generic shared-catalog bait label — must not be stamped a
+// residential Bronze member. Same 'commercial'+'business' set the /secure,
+// taxation, and bait channel classifiers use; commercial is never a WaveGuard
+// membership. (Also read by the email division's residential-only emails.)
+const COMMERCIAL_PROPERTY_TYPES = Object.freeze(['commercial', 'business']);
+function isCommercialAccount(customer) {
+  return tierSentinelKey(customer?.waveguard_tier) === 'commercial'
+    || COMMERCIAL_PROPERTY_TYPES.includes(String(customer?.property_type || '').toLowerCase());
+}
+
 async function enrollNoPlanCustomerTier({ database, log, customer, customerId, customerColumns, today }) {
-  if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') {
-    return { synced: false, reason: 'commercial_customer' };
-  }
-  // The customer's property CHANNEL refuses enrollment too (codex #3591
-  // r84 P1): a commercial/business customer with no 'commercial' tier
-  // sentinel yet — e.g. a direct booking persisting the generic shared-
-  // catalog bait label — must not be stamped a residential Bronze member.
-  // Same 'commercial'+'business' set the /secure, taxation, and bait
-  // channel classifiers use; commercial is never a WaveGuard membership.
-  if (['commercial', 'business'].includes(String(customer?.property_type || '').toLowerCase())) {
+  if (isCommercialAccount(customer)) {
     return { synced: false, reason: 'commercial_customer' };
   }
 
@@ -1619,6 +1623,8 @@ module.exports = {
   inferTierFromServiceCount,
   isAutoDerivedTierLabelRow,
   isCommercialServiceRow,
+  isCommercialAccount,
+  COMMERCIAL_PROPERTY_TYPES,
   isOneTimeBookingSource,
   isRodentLedServiceRow,
   isNonBaitRodentServiceRow,

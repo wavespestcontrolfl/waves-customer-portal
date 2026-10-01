@@ -25,7 +25,7 @@ const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
-const SCHEDULED_SMS_MAX_ATTEMPTS = 3;
+const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
@@ -3559,6 +3559,18 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — resume bounce recoveries parked behind a collections dispute hold: the corrected
+  // address stays staged, and the re-send goes out on the first tick after the hold is released.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('email-bounce-recovery-held', async () => {
+        await require('./email-bounce-recovery').retryHeldRecoveries();
+      });
+    } catch (err) {
+      logger.error(`[bounce-recovery] held-recovery tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY MIN — Email template automation executor. Sends due delayed/retry
   // runs created by trigger-mapped email template automations. Runs in
@@ -4287,23 +4299,31 @@ function initScheduledJobs() {
                 // terminal path an ordinary eligible:false recheck refusal
                 // takes above: blocked status, claim release, review
                 // fallback armed via onTerminal.
-                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                  status: 'blocked',
-                  updated_at: new Date(),
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?, 'terminal_pending', ?::boolean)", [`stale_replay:${recheck.reason || 'pay-link-only-body'}`, requiresTerminalHook(claimMeta.entry_point)]),
+                // A dispute-hold suppression is this invoice's only pay-link
+                // delivery: queue it onto the scheduled-invoice sender FIRST
+                // (owner ruling 2026-09-30). A queue failure throws into this
+                // row's bounded retry ladder instead of blocking it unqueued.
+                // The hand-over, the ownership marker and the terminal sms_log write are ONE
+                // transaction (blockPayLinkOnlyReplay): a crash between them can never leave the
+                // sender owning the link while this original text is replayed.
+                await require('./dispatch-completion-deferred').blockPayLinkOnlyReplay({
+                  msgId: msg.id,
+                  blockedReason: `stale_replay:${recheck.reason || 'pay-link-only-body'}`,
+                  terminalPending: requiresTerminalHook(claimMeta.entry_point),
+                  invoiceId: claimMeta.invoice_id || null,
+                  serviceRecordId: claimMeta.service_record_id || null,
+                  handOver: recheck.reason === 'collections-dispute-hold' && Boolean(claimMeta.invoice_id),
                 });
                 logger.info(`[scheduled-sms] deferred completion ${msg.id} suppressed: template body was pay-link-only, nothing safe to strip (${recheck.reason || 'invoice-not-collectible'})`);
                 await runTerminalHookDurably(msg.id, claimMeta.entry_point, recheckMeta);
                 continue;
               }
               const stampedAt = new Date();
-              const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                message_body: strippedBody,
-                metadata: db.raw(
-                  "(COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pay_link_stripped_at', ?::timestamptz, 'pay_link_stripped_reason', ?::text)) - 'mark_invoice_delivery'",
-                  [stampedAt, recheck.reason || null],
-                ),
-                updated_at: stampedAt,
+              // A dispute-hold strip also queues the invoice onto the
+              // scheduled-invoice sender, atomically with the strip (see
+              // persistStrippedPayLink).
+              const changed = await require('./dispatch-completion-deferred').persistStrippedPayLink({
+                msgId: msg.id, strippedBody, reason: recheck.reason || null, invoiceId: claimMeta.invoice_id || null, serviceRecordId: claimMeta.service_record_id || null, stampedAt,
               });
               if (!changed) throw new Error('Scheduled completion claim lost before stripping the stale pay link');
               msg.message_body = strippedBody;
@@ -4516,14 +4536,59 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
-            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+            // Re-service promise revalidation (Codex round-3 P2): the same
+            // "reviewed wording can go stale before it fires" gap as the
+            // checks above, for a free re-service promise — the customer's
+            // eligibility (their plan, an already-used re-service) can
+            // change between review/scheduling and this fire. Reuses the
+            // SAME live lane check + promised-lane snapshot the immediate
+            // send path's agentDecisionSendBlockReason runs
+            // (reservicePromiseStillEligible, sms-shadow-drafter.js) — no
+            // separate mechanism. Fail-closed on any lookup error.
+            let reserviceStale = false;
+            let reserviceReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              // Shared with the immediate send path (agent-decision-send-checks): a plain
+              // non-promise message is never blocked by this recheck's own plumbing.
+              const { scheduledReserviceBlockReason } = require('./agent-decision-send-checks');
+              const reason = await scheduledReserviceBlockReason({
+                agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, fallbackCustomerId: msg.customer_id || null, dbh: db,
+              });
+              if (reason) {
+                reserviceStale = true;
+                reserviceReason = reason;
+              }
+            }
+            // LIVE ETA revalidation (independent review + Codex round-1
+            // finding, PR #5334): a minutes-away/ETA claim is a draft-time
+            // GPS snapshot — this scheduled reply can fire long after the
+            // visit stopped being en_route, or after the 15-minute freshness
+            // window on its own facts. Same shared check the immediate
+            // /sms send and the auto-send executor run (sms-eta-freshness),
+            // same fail-closed block+retire path, no new mechanism.
+            const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
+            const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
+            // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
+            // retire the decision as stale here. The send proceeds to the provider-boundary
+            // check, which re-reads and, if still unreadable, refuses RETRYABLY onto the
+            // bounded retry rail — never sent unverified, never permanently stale.
+            const etaReason = require('./agent-decision-send-checks').isEtaInfrastructureFailure(rawEtaReason) ? null : rawEtaReason;
+            if (etaReason == null && rawEtaReason != null) {
+              logger.warn(`[scheduled-sms] ${msg.id} live ETA recheck unreadable (${rawEtaReason}); deferring to the provider-boundary check`);
+            }
+            if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
-                    : 'stale_sla_agent_decision';
+                    : slaStale
+                      ? 'stale_sla_agent_decision'
+                      : reserviceStale
+                        ? 'stale_reservice_agent_decision'
+                        : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4553,7 +4618,11 @@ function initScheduledJobs() {
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
-                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
+                        : slaStale
+                          ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
+                          : reserviceStale
+                            ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
+                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4778,6 +4847,10 @@ function initScheduledJobs() {
               // and the lane stamped at enqueue ride along in metadata for
               // the owner autopay digest to classify the send.
               ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              // The queued invoice notice's trusted dispute-hold exemption (an operator's send, the
+              // customer's own accept) rides into the replay's stored Email context.
+              ...(claimMeta.entry_point === 'invoice_send_deferred' && ['operator', 'customer'].includes(claimMeta.hold_exempt)
+                ? { hold_exempt: claimMeta.hold_exempt } : {}),
               ...(Object.prototype.hasOwnProperty.call(claimMeta, 'billing_mode_at_send')
                 ? { billing_mode_at_send: claimMeta.billing_mode_at_send ?? null }
                 : {}),
@@ -4807,6 +4880,18 @@ function initScheduledJobs() {
                 : undefined,
             },
           };
+          // LIVE ETA at the TRUE provider boundary (Codex round-40 P2): the recheck above ran
+          // before the recipient lookup and messaging-policy awaits, so a visit that changes
+          // state during them could still get "9 minutes away" delivered. The same shared
+          // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
+          // its request), composed AFTER any predicate the entry point registered.
+          if (claimMeta.agent_decision_id) {
+            const { etaProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            replayInput.providerPreSendCheck = composeProviderPreSendChecks(
+              replayInput.providerPreSendCheck,
+              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+            );
+          }
           return require('./messaging/deferred-replay-registry')
             .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           };
@@ -4906,7 +4991,10 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] lawn notification ${msg.id} waiting after a concurrent pipeline claim — rescheduled for ${lawnPipelineRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
+          } else if (['QUIET_HOURS_HOLD', 'COLLECTION_HOLD_DEFER'].includes(smsResult.code) && smsResult.nextAllowedAt) {
+            // COLLECTION_HOLD_DEFER shares this branch: an active collections
+            // dispute hold on a delayed pay-link leg waits and sends after
+            // the release, never spending an attempt.
             // Send-window hold: a validator deferral, not a delivery
             // attempt — no provider send was tried. Handled BEFORE the
             // bounded-attempt branch and with the claimed attempt REFUNDED
@@ -4922,7 +5010,7 @@ function initScheduledJobs() {
               updated_at: completedAt,
               metadata: db.raw(`
                 COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-                  'quiet_hours_hold_at', ?::timestamptz,
+                  ?::text, ?::timestamptz,
                   'scheduled_sms_attempts',
                   GREATEST(
                     CASE
@@ -4933,7 +5021,7 @@ function initScheduledJobs() {
                     0
                   )
                 )
-              `, [completedAt]),
+              `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
@@ -6187,15 +6275,29 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 6AM — Google Ads sync (campaigns, performance, search terms)
   // =========================================================================
+  // runExclusive records job_health ('google-ads-sync'), and the sync functions
+  // run with throwOnError so a failed API call fails the job instead of being
+  // swallowed into an empty result that read as success. All three run even if
+  // one fails; the first error is rethrown at the end. job_health failures
+  // surface through ops-queue laneScheduledJobs.
   cron.schedule('0 6 * * *', async () => {
     try {
       const googleAds = require('./ads/google-ads');
       if (!googleAds.isConfigured()) return;
-      logger.info('Running: Google Ads daily sync');
-      await googleAds.syncCampaigns();
-      await googleAds.syncDailyPerformance(7);
-      await googleAds.syncSearchTerms(30);
-      logger.info('Google Ads daily sync complete');
+      await runExclusive('google-ads-sync', async () => {
+        logger.info('Running: Google Ads daily sync');
+        const opts = { throwOnError: true };
+        let firstErr = null;
+        for (const step of [
+          () => googleAds.syncCampaigns(opts),
+          () => googleAds.syncDailyPerformance(7, opts),
+          () => googleAds.syncSearchTerms(30, opts),
+        ]) {
+          try { await step(); } catch (err) { firstErr = firstErr || err; }
+        }
+        if (firstErr) throw firstErr;
+        logger.info('Google Ads daily sync complete');
+      });
     } catch (err) {
       logger.error(`Google Ads sync failed: ${err.message}`);
     }
@@ -6212,8 +6314,14 @@ function initScheduledJobs() {
       const metaAds = require('./ads/meta-ads');
       if (!metaAds.isConfigured()) return;
       logger.info('Running: Meta Ads daily sync');
-      await metaAds.syncCampaigns();
-      await metaAds.syncDailyPerformance(7);
+      // throwOnError: each step runs under its own runExclusive row
+      // (meta-ads-campaigns / meta-ads-performance), so a failure records
+      // job_health 'failed'. Both steps run even if the first fails.
+      const opts = { throwOnError: true };
+      let firstErr = null;
+      try { await metaAds.syncCampaigns(opts); } catch (err) { firstErr = err; }
+      try { await metaAds.syncDailyPerformance(7, opts); } catch (err) { firstErr = firstErr || err; }
+      if (firstErr) throw firstErr;
       logger.info('Meta Ads daily sync complete');
     } catch (err) {
       logger.error(`Meta Ads sync failed: ${err.message}`);

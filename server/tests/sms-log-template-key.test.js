@@ -154,7 +154,7 @@ describe('held invoice and payment-failure texts keep their template key (codex 
   const path = require('path');
   const inv = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
   test('both invoice_send_deferred producers store template_key', () => {
-    expect(inv).toMatch(/templateKey: renderedTemplateKey,\n\s*database: trx, \.\.\.pendingChannelToQueue/);
+    expect(inv).toMatch(/templateKey: renderedTemplateKey, holdExempt,\n\s*database: trx, \.\.\.pendingChannelToQueue/);
     expect(inv).toMatch(/partial_fanout_retry: true,[\s\S]{0,200}template_key: templateKey/);
     expect(inv).toMatch(/if \(renderedTemplateKey\) err\.smsTemplateKey = renderedTemplateKey;/);
     expect(inv).toMatch(/hasEmailLeg: true,[\s\S]{0,250}template_key: sms\.heldTemplateKey/);

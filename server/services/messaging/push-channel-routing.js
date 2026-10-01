@@ -109,6 +109,9 @@ const PRESENTATION = {
   appointment_confirmation: { title: 'Appointment update', link: '/?tab=visits', category: 'service' },
   appointment_cancelled: { title: 'Appointment cancelled', link: '/?tab=visits', category: 'service' },
   tech_arrived: { title: 'Your technician has arrived', link: '/', category: 'service' },
+  // The separate lawn watering text (GATE_LAWN_WATERING_SMS) follows the
+  // completion notice's App / Text choice; its push lands on Documents too.
+  lawn_watering_instruction: { title: 'Watering after today’s visit', link: '/?tab=documents', category: 'service' },
   // en-route deep-links HOME: the authenticated live tracker (map + ETA)
   // renders on the dashboard, not the Visits tab — the tap must land on
   // the same live view the SMS /track link promises.
@@ -205,6 +208,7 @@ const APP_FIRST_TYPES = new Set([
   'tech_arrived', 'service_complete', 'service_complete_with_invoice',
   'service_complete_paid_receipt', 'service_complete_annual_prepay', 'service_complete_prepaid',
   'service_report_v1', 'service_report_v1_with_invoice', 'receipt', 'deposit_receipt',
+  'lawn_watering_instruction',
 ]);
 
 const PREF_CHANNEL_COLUMN = {
@@ -214,6 +218,7 @@ const PREF_CHANNEL_COLUMN = {
   ...Object.fromEntries(APPOINTMENT_UPDATE_TYPES.map((type) => [type, 'appointment_confirmation_channel'])),
   tech_arrived: 'tech_arrived_channel',
   ...Object.fromEntries([...APP_FIRST_TYPES].filter((type) => type.startsWith('service_')).map((type) => [type, 'service_complete_channel'])),
+  lawn_watering_instruction: 'service_complete_channel',
   tech_en_route: 'en_route_channel',
   receipt: 'payment_receipt_channel',
   deposit_receipt: 'payment_receipt_channel',
