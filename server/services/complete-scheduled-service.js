@@ -12401,13 +12401,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         && (completionTextWouldCarryPayLink || declineNoticeEligibleSansHold);
       if (invoice?.id && (invoiceSenderOwnsPayLink || heldPayLinkWouldHaveGone)) {
         try {
-          if (!invoiceSenderOwnsPayLink) {
+          // Re-arm an exhausted scheduled invoice only on the FIRST ownership hand-over (Codex #5459 r4 P2): the
+          // closeout that is newly recording invoiceSenderOwnsPayLinkFor. A retried closeout, or one whose marker is
+          // already persisted, must not keep resetting the sender's attempt cap.
+          const newlyOwning = !invoiceSenderOwnsPayLink;
+          if (newlyOwning) {
             const ownsDelta = { invoiceSenderOwnsPayLinkFor: String(invoice.id) };
             await mergeRecordNotesKeys(record.id, ownsDelta);
             Object.assign(recordStructuredNotes, ownsDelta);
             record.structured_notes = { ...parseJsonObject(record.structured_notes), ...ownsDelta };
           }
-          await require('../services/collections/collection-hold').queueHeldInvoiceForSender(invoice.id, db);
+          await require('../services/collections/collection-hold').queueHeldInvoiceForSender(invoice.id, db, { rearmExhausted: newlyOwning });
         } catch (handOverErr) {
           logger.error(`[dispatch] dispute-hold hand-over of invoice ${invoice.id} to the invoice sender FAILED for ${svc.id} — releasing for resume: ${handOverErr.message}`);
           try {

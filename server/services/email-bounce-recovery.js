@@ -553,8 +553,15 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     const stampDispatchAtProviderBoundary = (callerCheck) => async (args) => {
       const verdict = callerCheck ? await callerCheck(args) : undefined;
       if (verdict && verdict.ok === false) return verdict; // refused: no provider request follows, no marker
-      await db('email_bounce_recoveries').where({ recovery_message_id: message.id })
-        .update({ updated_at: new Date(), metadata: jsonbMerge({ [DISPATCH_STARTED_KEY]: new Date().toISOString() }) });
+      // Written on the dedicated marker connection (models/marker-db), never the root pool: this check runs inside
+      // the authority's held transaction, and a second root-pool acquisition there can wait on itself (the pool
+      // floor / one-slot pool). The same connection every other "a provider request follows" marker uses.
+      const markerDatabase = require('../models/marker-db')();
+      await markerDatabase('email_bounce_recoveries').where({ recovery_message_id: message.id })
+        .update({
+          updated_at: new Date(),
+          metadata: markerDatabase.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [DISPATCH_STARTED_KEY]: new Date().toISOString() })]),
+        });
       return verdict === undefined ? { ok: true } : verdict;
     };
     const dispatchToProvider = async (database, providerBoundaryCheck) => {

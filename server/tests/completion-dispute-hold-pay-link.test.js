@@ -97,7 +97,7 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
 
   test('a withheld pay link is HANDED OVER to the invoice sender before any customer text, durably, and a failure is never swallowed (owner ruling 2026-09-30)', () => {
     const lookup = src.indexOf('let payLinkHeldByDisputeHold =');
-    const handOver = src.indexOf('queueHeldInvoiceForSender(invoice.id, db)', lookup);
+    const handOver = src.indexOf('queueHeldInvoiceForSender(invoice.id, db, { rearmExhausted: newlyOwning })', lookup);
     const firstSmsBranch = src.indexOf('completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery', lookup);
     expect(handOver).toBeGreaterThan(lookup);
     // ahead of the completion text branch, so a failed hand-over sends nothing
@@ -110,7 +110,7 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(block).toMatch(/payLinkHeldByDisputeHold && !!invoice\?\.id && !paymentFailedNoticeSent/);
     expect(block).toMatch(/declineNoticeEligibleSansHold/);
     // the ownership marker is written BEFORE the queue write; both failures release for resume (503) + raise an alert
-    expect(block.indexOf('invoiceSenderOwnsPayLinkFor: String(invoice.id)')).toBeLessThan(block.indexOf('queueHeldInvoiceForSender(invoice.id, db)'));
+    expect(block.indexOf('invoiceSenderOwnsPayLinkFor: String(invoice.id)')).toBeLessThan(block.indexOf('queueHeldInvoiceForSender(invoice.id, db, { rearmExhausted: newlyOwning })'));
     expect(block).toMatch(/type: 'collection_hold_invoice_queue_failed'/);
     expect(block).toMatch(/releaseCompletionAttemptForResume\(completionAttempt, handOverErr\)/);
     expect(block).toMatch(/status: 503/);
@@ -133,7 +133,7 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(recheckAt).toBeGreaterThan(0);
     expect(src.slice(recheckAt, recheckAt + 200)).toMatch(/await handOverInvoiceToSender\(\)/);
     expect(recheckAt).toBeLessThan(src.indexOf('const allowCompletionInvoiceLinkBase ='));
-    expect(src.match(/queueHeldInvoiceForSender\(invoice\.id, db\)/g)).toHaveLength(1);
+    expect(src.match(/queueHeldInvoiceForSender\(invoice\.id, db, \{ rearmExhausted: newlyOwning \}\)/g)).toHaveLength(1);
   });
 
   test('a retry or resume finds the invoice owned by the sender and sends REPORT-ONLY (no second pay link)', () => {

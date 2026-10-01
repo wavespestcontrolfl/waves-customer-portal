@@ -403,7 +403,7 @@ const QUEUE_NOT_SETTLED_CODE = 'QUEUE_INVOICE_NOT_SETTLED';
 // select only rows with scheduled_send_attempts < 5).
 const SCHEDULED_SEND_ATTEMPT_CAP = 5;
 const HANDLED_INVOICE_STATUSES = new Set(['scheduled', 'sent', 'viewed', 'overdue', 'paid', 'prepaid', 'void', 'voided', 'refunded', 'canceled', 'cancelled', 'processing']);
-async function queueHeldInvoiceForSender(invoiceId, database = db) {
+async function queueHeldInvoiceForSender(invoiceId, database = db, { rearmExhausted = false } = {}) {
   if (!invoiceId) return { queued: false };
   const n = await database('invoices')
     .where({ id: invoiceId, status: 'draft' })
@@ -415,6 +415,9 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
       scheduled_send_error: null, updated_at: database.fn.now(),
     });
   if (Number(n) > 0) return { queued: true };
+  // ONE-TIME (Codex #5459 r4 P2): the caller passes rearmExhausted only on the FIRST ownership hand-over (the
+  // completion that is newly recording invoiceSenderOwnsPayLinkFor), never on an idempotent re-run, so a
+  // repeated closeout / replay cannot keep resetting the sender's attempt cap.
   // Codex #5424 r16 P2: a row that is ALREADY 'scheduled' is the sender's own only while it stays
   // runnable. processScheduledSends skips a row at its attempt cap (scheduled_send_attempts >= 5), so a
   // handoff that called it "settled" would record the sender as the pay link's owner and the release would
@@ -427,6 +430,8 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
   // (a stale-claim review hold, a payer withdrawal, the visit summary's planned-text state, a renewal
   // withheld stamp); re-arming it would clear that evidence and could send a second pay link while the
   // earlier outcome is unresolved. A parked row is never re-armed, by its null time OR by its marker.
+  let rearmed = 0;
+  if (rearmExhausted) {
   const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../invoice-helpers');
   const likeEscape = (text) => text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
   const PARK_PREFIXES = [STALE_SEND_PARK_ERROR, 'payer_billed:', SUMMARY_TEXT_PLANNED_ERROR, 'renewal_send_withheld'];
@@ -439,11 +444,12 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
   for (const prefix of PARK_PREFIXES) {
     rearmQuery = rearmQuery.whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE ?", [`${likeEscape(prefix)}%`]);
   }
-  const rearmed = await rearmQuery
+  rearmed = await rearmQuery
     .update({
       scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
       scheduled_send_error: null, updated_at: database.fn.now(),
     });
+  }
   if (Number(rearmed) > 0) return { queued: true, rearmed: true };
   const row = await database('invoices').where({ id: invoiceId })
     .first('status', 'payer_id', 'payer_statement_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at', 'scheduled_send_error');
