@@ -250,6 +250,12 @@ test('an ops digest with no stamped area takes its work page\'s area from its li
   expect(digest('/admin/estimates?tab=promised').area).toBe('Estimates');
   expect(digest('/admin/communications').area).toBe('Comms');
   expect(digest('/admin/agents?tab=activity').area).toBe('System');
+  // The live promised-estimate watcher links the pipeline page; its tab tells Leads from Estimates.
+  expect(digest('/admin/pipeline').area).toBe('Estimates');
+  expect(digest('/admin/pipeline?tab=estimates').area).toBe('Estimates');
+  expect(digest('/admin/pipeline?tab=leads').area).toBe('Leads');
+  expect(digest('/admin/pipeline?foo=1&tab=leads').area).toBe('Leads');
+  expect(digest('/admin/pipelines').area).toBe('System');
 });
 
 test('a cursor pages past the response cap: every open item exactly once, in one stable order', async () => {

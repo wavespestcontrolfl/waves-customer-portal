@@ -32,8 +32,12 @@ const AREA_BY_CATEGORY = [
   [/^(content|newsletter|knowledge|review)/, 'Content'],
   [/^(system|agents|token_alert|credential|ops_digest)/, 'System'],
 ];
-// A standing condition's area, from the admin page its link opens.
+// A standing condition's area, from the admin page its link opens. Matched on
+// the whole link: /admin/pipeline hosts both Leads and Estimates, told apart by
+// its tab (the old /admin/leads and /admin/estimates routes redirect there).
 const AREA_BY_PATH = [
+  [/^\/admin\/pipeline\/?\?(.*&)?tab=leads(&|$)/, 'Leads'],
+  [/^\/admin\/pipeline(\/|\?|$)/, 'Estimates'],
   [/^\/admin\/(invoices|billing)/, 'Billing'],
   [/^\/admin\/communications/, 'Comms'],
   [/^\/admin\/customers/, 'Customers'],
@@ -109,7 +113,7 @@ function digestLinks(row) {
 // generic System its category maps to.
 function inferredArea(row) {
   if (row.category === 'ops_digest' && row.link) {
-    const fromLink = areaFrom(AREA_BY_PATH, String(row.link).split('?')[0]);
+    const fromLink = areaFrom(AREA_BY_PATH, String(row.link));
     if (fromLink !== 'System') return fromLink;
   }
   return areaFrom(AREA_BY_CATEGORY, row.category);
@@ -157,7 +161,7 @@ function mapStanding(alert) {
   return {
     kind: 'standing',
     id: `live:${alert.id}`,
-    area: areaFrom(AREA_BY_PATH, String(alert.href || '').split('?')[0]),
+    area: areaFrom(AREA_BY_PATH, String(alert.href || '')),
     headline: alert.label,
     why: null,
     severity: 'needs-you',
