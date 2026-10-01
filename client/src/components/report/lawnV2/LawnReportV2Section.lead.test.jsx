@@ -254,7 +254,7 @@ describe('LawnReportV2Section lead mode', () => {
 });
 
 describe('program line (GATE_LAWN_EXPECTATIONS)', () => {
-  const PROGRAM = 'October gives the final feeding of the year, with iron and a preventive fungicide against fall disease such as large patch.';
+  const PROGRAM = 'In October the program focuses on the final feeding of the year with iron, plus fall disease prevention where the lawn needs it and a second thatch check.';
   const programSnapshot = { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program' };
 
   it('lead mode renders the program line exactly once, beside the trends', () => {

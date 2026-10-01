@@ -1733,9 +1733,13 @@ stamp while the gate is on, so gate-off PDFs are never served after the flip
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
 surface): instead of the peak / shoulder / dormant note it is one calendar-based,
-tier-neutral program sentence for the visit's month and grass (St. Augustine,
-Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line),
-written from `server/config/protocols.json` months, at most about 30 words, and
+tier-neutral sentence for the visit's month and grass (St. Augustine,
+Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
+says what the program focuses on that time of year, never what the visit
+applied. It is written from `server/config/protocols.json` months, and any step
+the protocol makes conditional (skipped, soil-test or weather gated, optional,
+or limited to some plans) is only stated with a qualifier such as "where the
+lawn needs it" or "when conditions allow". It is at most about 30 words, and
 never naming a product, an ordinance, a county, a blackout, a law, a clock time,
 or watering, rain or mowing guidance. While the line is in use the snapshot also
 carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
