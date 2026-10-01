@@ -1319,5 +1319,7 @@ describe('retired topics', () => {
     expect(topicKey('How to get rid of roof rats in Lakewood Ranch, FL')).toBe('rat roof');
     expect(topicKey('dollar spot fungus')).toBe('dollar fungus spot');
     expect(topicKey('flies')).toBe('fly');
+    expect(topicKey('blind mosquitoes')).toBe(topicKey('blind mosquito'));
+    expect(topicKey('mosquitoes')).toBe('mosquito');
   });
 });

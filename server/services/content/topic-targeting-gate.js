@@ -1132,6 +1132,7 @@ function spokeOnly(targetSites) {
 function stem(w) {
   if (w.length > 4 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
   if (/(?:ch|sh|x|ss)es$/.test(w)) return w.slice(0, -2);
+  if (w.length > 5 && w.endsWith('oes')) return w.slice(0, -2); // mosquitoes, tomatoes
   if (w.length > 3 && w.endsWith('s') && !/(?:ss|us|is)$/.test(w)) return w.slice(0, -1); // fungus, analysis stay
   return w;
 }
