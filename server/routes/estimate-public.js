@@ -12845,6 +12845,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               409,
             );
             termsDiffErr.code = 'SETUP_FEE_TERMS_REFRESH';
+            // The client drops its captured intent on this refresh: retire it after the
+            // rollback (same path as the consent refusals) so no recovery enrolls it.
+            if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+              droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+            }
             // The answer the accept WOULD apply, so the reloaded tab renders it
             // for this selection instead of re-attesting /data's pre-conversion
             // read (the converter can land a different lane than /data saw, e.g.
@@ -12917,6 +12922,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   409,
                 );
                 termsErr.code = 'SETUP_FEE_TERMS_REFRESH';
+                // The client drops its captured intent on this refresh: retire it after the
+                // rollback (same path as the consent refusals) so no recovery enrolls it.
+                if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+                  droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+                }
                 throw termsErr;
               }
             }
@@ -13333,6 +13343,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           409,
         );
         branchErr.code = 'SETUP_FEE_TERMS_REFRESH';
+        // The client drops its captured intent on this refresh: retire it after the
+        // rollback (same path as the consent refusals) so no recovery enrolls it.
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+        }
         branchErr.setupFeePromise = false;
         throw branchErr;
       }

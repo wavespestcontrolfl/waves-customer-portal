@@ -11322,8 +11322,12 @@ const InvoiceService = {
     // on (its claim's anchor, its own visit's root) is locked FIRST: a park
     // racing this reinstatement is then committed and visible to the read.
     const lockSeries = new Set();
-    for (const claim of (await conn("setup_fee_claims").where({ invoice_id: invoiceId }).select("scheduled_service_id")) || []) {
-      if (claim.scheduled_service_id) lockSeries.add(String(claim.scheduled_service_id));
+    // The series this invoice's own claim billed the fee from, and when.
+    const claimSeries = new Map();
+    for (const claim of (await conn("setup_fee_claims").where({ invoice_id: invoiceId }).select("scheduled_service_id", "created_at")) || []) {
+      if (!claim.scheduled_service_id) continue;
+      lockSeries.add(String(claim.scheduled_service_id));
+      claimSeries.set(String(claim.scheduled_service_id), claim.created_at || null);
     }
     const linkedVisitId = (await conn("invoices").where({ id: invoiceId }).first("scheduled_service_id"))?.scheduled_service_id;
     if (linkedVisitId) {
@@ -11333,11 +11337,24 @@ const InvoiceService = {
     for (const seriesId of [...lockSeries].sort()) {
       await conn("scheduled_services").where({ id: seriesId }).forUpdate().first("id");
     }
-    const handoffs = await conn("dispatch_alerts")
+    const handoffs = [...((await conn("dispatch_alerts")
       .where({ type: "setup_fee_office_billing" })
       .whereRaw("payload->>'sourceInvoiceId' = ?", [String(invoiceId)])
-      .select("id", "resolved_at", "payload");
-    for (const handoff of handoffs || []) {
+      .select("id", "resolved_at", "payload")) || [])];
+    // The same fee may have been handed off through a LATER carrier (a rebill
+    // of it voided in turn, then parked: that alert names the rebill, not this
+    // invoice). Any handoff on the series this invoice's claim billed from,
+    // raised after that claim, is this fee too (pre-push audit P0).
+    for (const [seriesId, claimedAt] of claimSeries) {
+      let q = conn("dispatch_alerts")
+        .where({ type: "setup_fee_office_billing" })
+        .whereRaw("payload->>'seriesId' = ?", [seriesId]);
+      if (claimedAt) q = q.where("created_at", ">=", claimedAt);
+      for (const row of (await q.select("id", "resolved_at", "payload")) || []) {
+        if (!handoffs.some((h) => String(h.id) === String(row.id))) handoffs.push(row);
+      }
+    }
+    for (const handoff of handoffs) {
       const handoffPayload = typeof handoff.payload === "string" ? JSON.parse(handoff.payload || "{}") : (handoff.payload || {});
       // Closed by an earlier reinstatement (not the office): nothing to refuse.
       if (handoffPayload.systemRetired === true) continue;

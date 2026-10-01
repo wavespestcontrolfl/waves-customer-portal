@@ -2793,6 +2793,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   const FRESH_CAPTURE_POLICY = { enforced: true, required: true, exemptReason: null };
   const savedEnv = {};
   let policySpy;
+  let retireCapture;
   // The setup-fee promise rides only a FRESH capture (the one surface that
   // renders the after_visit_card authorization), so the default customer here
   // captures a card; a saved/enrolled-method customer keeps today's invoice.
@@ -2879,6 +2880,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
     jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
     jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    retireCapture = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
   });
   afterEach(() => {
     for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
@@ -3233,6 +3235,17 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     } finally {
       Payer.resolveForInvoice.mockResolvedValue(null);
     }
+  });
+
+  // Pre-push audit P1: the client drops its captured intent on every
+  // SETUP_FEE_TERMS_REFRESH, so the accept retires it after the rollback.
+  test('gate ON, a SETUP_FEE_TERMS_REFRESH refusal retires the captured SetupIntent the tab will drop', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-refresh-retire', { billingMode: 'monthly_membership' });
+    const response = await acceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(retireCapture).toHaveBeenCalledTimes(1);
   });
 
   test('gate ON, the accept WOULD defer but the tab did not attest the promise (stale tab / older client): refused 409 for a refresh, nothing stamped or minted', async () => {

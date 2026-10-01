@@ -506,6 +506,41 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Pre-push audit P0: the fee was handed to the office through a LATER
+  // carrier (a rebill voided in turn), so the alert names that rebill, not
+  // this invoice. Un-voiding this invoice still finds it by the claim's
+  // series: an untouched handoff is closed, an acted-on one refuses.
+  test('un-void reconciles a handoff raised through a later carrier of the same fee (matched by the claim series)', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId)).toMatchObject({ status: 200 });
+      const [inv] = await mockPg('invoices').where({ customer_id: f.customerId });
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'void' });
+      const Invoices = require('../services/invoice');
+      const Obligation = require('../services/setup-fee-obligation');
+      await Invoices.restoreRodentSetupObligationForReversedInvoice(mockPg, await mockPg('invoices').where({ id: inv.id }).first());
+      const visit = await mockPg('scheduled_services').where({ id: f.childIds[0] }).first();
+      await mockPg.transaction((trx) => Obligation.parkSetupFeeStampForOffice(trx, {
+        parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test', visit,
+      }));
+      const [handoff] = await officeFeeAlerts(f);
+      const { randomUUID } = require('crypto');
+      await mockPg('dispatch_alerts').where({ id: handoff.id })
+        .update({ payload: mockPg.raw("payload || jsonb_build_object('sourceInvoiceId', ?::text)", [randomUUID()]) });
+
+      // Acted on by the office: a strict un-void refuses.
+      await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ resolved_at: new Date() });
+      await expect(mockPg.transaction((trx) => Invoices.retireRodentSetupObligationForReinstatedInvoice(trx, inv.id, { strict: true })))
+        .rejects.toThrow(/handed to the office after it was voided/);
+      // Untouched: closed as a system closure.
+      await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ resolved_at: null });
+      await mockPg.transaction((trx) => Invoices.retireRodentSetupObligationForReinstatedInvoice(trx, inv.id, { strict: true }));
+      const closed = await mockPg('dispatch_alerts').where({ id: handoff.id }).first('resolved_at', 'payload');
+      expect(closed.resolved_at).not.toBeNull();
+      expect(closed.payload.systemRetired).toBe(true);
+    } finally { await cleanup(f); }
+  });
+
   // Pre-push audit P0: a $0 completion parking the restored fee CONCURRENTLY
   // with the un-void. The un-void locks the fee's series before it reads the
   // handoffs, so it waits for the park to commit and then closes that handoff
