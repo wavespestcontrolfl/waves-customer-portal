@@ -2,7 +2,7 @@
 // closes with a cancelled / skipped visit, and an unconfirmed hold takes no
 // self-book daily-cap capacity. Synthetic data only.
 const fs = require('fs');
-const { reopenHoldCardForRestoredVisit, closeHoldCardForEndedVisit, heldVisitSubquery, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit, isStreetLevelHoldVisit } = require('../services/street-level-hold');
+const { refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, closeHoldCardForEndedVisit, heldVisitSubquery, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit, isStreetLevelHoldVisit } = require('../services/street-level-hold');
 
 const card = (status = 'open') => ({ id: 't1', status, payload: { street_level_address: true, scheduled_service_id: 'visit-1' }, summary: 'x' });
 
@@ -151,7 +151,7 @@ describe('r14: owned follow-up, review status after rejection, bell recheck, voi
     expect(await hasOwedFollowUpForStreetLevelVisit(conn({ hold: null, owed: { id: 'o1' } }), visit)).toBe(false);   // not a street-level visit
     const s = proc();
     const existing = s.indexOf('if (existingChild) return null;');
-    const owned = s.indexOf('if (await hasOwedFollowUpForStreetLevelVisit(trx, primaryRow)) return null;', existing);
+    const owned = s.indexOf('if (await hasOwedFollowUpForStreetLevelVisit(trx, primaryRow)) {', existing);
     expect(owned).toBeGreaterThan(existing);
     expect(owned - existing).toBeLessThan(900);
   });
@@ -261,5 +261,49 @@ describe('r16: order-independent close / reopen around a compensated cancellatio
     // The compensation goes through that shared point.
     const cp = fs.readFileSync(require.resolve('../services/cancellation-processor.js'), 'utf8');
     expect(cp).toContain("fromStatus: 'cancelled',\n              toStatus: svc.status,");
+  });
+});
+
+describe('r18: an OPEN owed follow-up task takes the current plan', () => {
+  const plan = (d, w = '09:00') => ({ scheduledDate: d, windowStart: w });
+  const make = (card) => {
+    const updates = [];
+    const conn = (table) => {
+      const q = {
+        where() { return q; }, whereRaw() { return q; }, whereIn(col, vals) { q._statuses = vals; return q; },
+        first: async () => (card && q._statuses && q._statuses.includes(card.status) ? card : null),
+        update: async (u) => { updates.push(u); return 1; },
+      };
+      return q;
+    };
+    conn.raw = (sql, b) => ({ sql, b });
+    return { conn, updates };
+  };
+  const visit = { id: 'v1', source_call_log_id: 'c1' };
+  const owed = (status, p) => ({ id: 'o1', status, payload: { skipped_reason: 'street_level_address_confirmed_follow_up_unbooked', ...(p ? { follow_up_plan: p } : {}) } });
+
+  test('an open card is refreshed with a newly found or corrected plan', async () => {
+    const a = make(owed('open'));
+    expect(await refreshOwedFollowUpPlan(a.conn, visit, plan('2026-10-19'))).toBe(true);
+    expect(a.updates[0].payload.b[0]).toContain('2026-10-19');
+    const b = make(owed('in_progress', { scheduled_date: '2026-10-19', window_start: '09:00' }));
+    expect(await refreshOwedFollowUpPlan(b.conn, visit, plan('2026-10-26'))).toBe(true);
+    expect(b.updates[0].payload.b[0]).toContain('2026-10-26');
+  });
+  test('resolved / dismissed cards, an unchanged plan and a null plan are left untouched', async () => {
+    for (const status of ['resolved', 'dismissed']) {
+      const r = make(owed(status));
+      expect(await refreshOwedFollowUpPlan(r.conn, visit, plan('2026-10-19'))).toBe(false);
+      expect(r.updates).toHaveLength(0);
+    }
+    const same = make(owed('open', { scheduled_date: '2026-10-19', window_start: '09:00' }));
+    expect(await refreshOwedFollowUpPlan(same.conn, visit, plan('2026-10-19'))).toBe(false);
+    expect(await refreshOwedFollowUpPlan(make(owed('open')).conn, visit, null)).toBe(false);
+  });
+  test('the reuse path refreshes the open owed card before returning without a child', () => {
+    const s = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    const at = s.indexOf('if (await hasOwedFollowUpForStreetLevelVisit(trx, primaryRow)) {');
+    expect(s.slice(at, at + 500)).toContain('await refreshOwedFollowUpPlan(trx, primaryRow, callFollowUpPlan);');
+    expect(s.slice(at, at + 600)).toContain('return null;');
   });
 });

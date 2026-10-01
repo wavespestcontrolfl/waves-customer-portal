@@ -1862,7 +1862,12 @@ function streetLevelProofAddressChanged(snapshot, row) {
   if (!snapshot || !row) return true;
   const norm = (v) => String(v || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
   const stateOf = (v) => normalizeState(String(v || '').trim()) || SERVICE_STATE;
-  return norm(snapshot.line1) !== norm(row.address_line1)
+  // The house number is compared as a STRUCTURED token (a ranged "12-14" keeps its hyphen and
+  // never equals "1214") and the street apart from it, never by stripping every separator.
+  const houseA = houseNumberOf(snapshot.line1);
+  const houseB = houseNumberOf(row.address_line1);
+  if (!houseA || !houseB || houseA !== houseB) return true;
+  return streetNameKey(snapshot.line1) !== streetNameKey(row.address_line1)
     || norm(snapshot.line2) !== norm(row.address_line2)
     || norm(snapshot.city) !== norm(row.city)
     || zip5Of(snapshot.zip) !== zip5Of(row.zip)
@@ -2223,7 +2228,7 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION, isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
-const { findStreetLevelHoldCard, isStreetLevelHoldVisit, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit } = require('./street-level-hold');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit, refreshOwedFollowUpPlan } = require('./street-level-hold');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -17018,7 +17023,12 @@ const CallRecordingProcessor = {
                   // after the confirm must not also create the child. The card, in any
                   // status, is the ownership marker (open: to be booked by hand;
                   // resolved / dismissed: booked or declined).
-                  if (await hasOwedFollowUpForStreetLevelVisit(trx, primaryRow)) return null;
+                  if (await hasOwedFollowUpForStreetLevelVisit(trx, primaryRow)) {
+                    // An OPEN owed task takes the current plan (a reprocess may have found or
+                    // corrected it); a resolved / dismissed one is left exactly as the office left it.
+                    await refreshOwedFollowUpPlan(trx, primaryRow, callFollowUpPlan);
+                    return null;
+                  }
                   // A reused primary may have been RESCHEDULED since the call
                   // was first processed — callFollowUpPlan above was spaced
                   // from the extraction's date, so a retry that lost the child

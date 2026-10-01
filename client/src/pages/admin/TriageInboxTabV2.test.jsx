@@ -477,3 +477,59 @@ describe('street-level address hold card', () => {
     await waitFor(() => expect(screen.getByText('Confirm, correct, or cancel the visit itself.')).toBeInTheDocument());
   });
 });
+
+describe('street-level address hold: office confirm', () => {
+  const holdPayload = {
+    origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1',
+    address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', visit_when: 'Mon Oct 5, 1 PM',
+    visit_link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=visit-1',
+  };
+  const hold = { ...ordinary, id: 'hold', first_name: 'Hold', last_name: 'Card', reason_code: 'outbound_booking_review',
+    feedback_verdict: null, payload: JSON.stringify(holdPayload) };
+  const mockList = (confirmImpl) => adminFetch.mockImplementation(async (url, opts) => {
+    if (url.startsWith('/admin/triage?')) return { items: [hold], counts: { open: 1, resolved: 0, dismissed: 0 } };
+    if (confirmImpl && url.includes('/status')) return confirmImpl(url, opts);
+    return { success: true };
+  });
+
+  it('an admin sees "Confirm address & book"; the dialog shows the form address and keeps the button off until the read-back box is ticked', async () => {
+    mockList();
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('1234 Sample Newbuild Trl, Parrish, FL, 34219', { selector: 'div' })).toBeInTheDocument();
+    const go = screen.getByRole('button', { name: /^confirm & book$/i });
+    expect(go).toBeDisabled();
+    fireEvent.click(screen.getByLabelText(/read this address back to the customer/i));
+    expect(go).not.toBeDisabled();
+  });
+
+  it('confirming calls the EXISTING admin status route with status confirmed for the linked visit, then reloads the inbox', async () => {
+    mockList(async () => ({ success: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    fireEvent.click(await screen.findByLabelText(/read this address back to the customer/i));
+    fireEvent.click(screen.getByRole('button', { name: /^confirm & book$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dispatch/visit-1/status', { method: 'PUT', body: JSON.stringify({ status: 'confirmed' }) }));
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([u]) => u.startsWith('/admin/triage?')).length).toBeGreaterThanOrEqual(2));
+  });
+
+  it('a refused confirm shows the server message and does not reload', async () => {
+    mockList(async () => { throw Object.assign(new Error('Office must confirm the address first.'), { status: 409 }); });
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    fireEvent.click(await screen.findByLabelText(/read this address back to the customer/i));
+    fireEvent.click(screen.getByRole('button', { name: /^confirm & book$/i }));
+    await waitFor(() => expect(screen.getByText('Office must confirm the address first.')).toBeInTheDocument());
+  });
+
+  it('a non-admin sees no confirm button, only the note', async () => {
+    mockList();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    expect(within(card).queryByRole('button', { name: /confirm address/i })).not.toBeInTheDocument();
+    expect(within(card).getByText(/needs an admin/i)).toBeInTheDocument();
+  });
+});

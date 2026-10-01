@@ -2513,7 +2513,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
     const explicitFieldConfirm = isOfficeReviewConfirm && req.techRole === 'technician';
     // A street-level address hold is released ONLY by the office: a technician token may neither
     // confirm it nor run it day-of (the office must confirm the address with the customer first).
-    if (req.techRole === 'technician' && (isOfficeReviewConfirm || takeoverCandidate)
+    // For EVERY role the day-of advances (en route, on site, completed) are refused too: the
+    // office's path is confirm first (the hold card's "Confirm address & book"), then advance.
+    // Only an unconfirmed voice_agent row can be a hold, so nothing else pays for the lookup.
+    const heldAdvance = ['en_route', 'on_site', 'completed'].includes(toStatus)
+      && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true;
+    if (((req.techRole === 'technician' && (isOfficeReviewConfirm || takeoverCandidate)) || heldAdvance)
       && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
       return res.status(409).json({
         error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',

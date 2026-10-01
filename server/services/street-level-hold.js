@@ -175,4 +175,29 @@ async function reopenHoldCardForRestoredVisit(visitId, conn = db) {
   }
 }
 
-module.exports = { reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+// The owed-follow-up card the confirm hook filed, while it is still OPEN: copy the
+// current plan onto it (jsonb merge). Resolved / dismissed cards are never touched, and
+// a null or unchanged plan writes nothing. Returns true when a card was updated.
+async function refreshOwedFollowUpPlan(conn, visit, plan) {
+  if (!plan || !visit?.id || !visit.source_call_log_id) return false;
+  const next = { scheduled_date: plan.scheduledDate || null, window_start: plan.windowStart || null };
+  const card = await conn('triage_items')
+    .where({ call_log_id: visit.source_call_log_id, reason_code: 'attached_booking_followup_unbooked' })
+    .whereRaw("payload->>'skipped_reason' = 'street_level_address_confirmed_follow_up_unbooked'")
+    .whereIn('status', ['open', 'in_progress'])
+    .first('id', 'payload');
+  if (!card) return false;
+  const payload = parsePayload(card.payload) || {};
+  const cur = payload.follow_up_plan;
+  if (cur && cur.scheduled_date === next.scheduled_date && cur.window_start === next.window_start) return false;
+  await conn('triage_items')
+    .where({ id: card.id })
+    .whereIn('status', ['open', 'in_progress'])
+    .update({
+      payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: next })]),
+      updated_at: new Date(),
+    });
+  return true;
+}
+
+module.exports = { refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };

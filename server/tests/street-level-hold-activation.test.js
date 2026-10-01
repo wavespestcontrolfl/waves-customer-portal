@@ -148,6 +148,11 @@ describe('the street-level proof is rebound after the customer-row lock', () => 
   test('an unchanged row (spelling aside) keeps the proof; any moved part, or a missing side, fails closed', () => {
     expect(streetLevelProofAddressChanged(snap, row())).toBe(false);
     expect(streetLevelProofAddressChanged(snap, row({ address_line1: '1234 sample newbuild trl.' }))).toBe(false);
+    // The house number is a structured token: a ranged 12-14 never equals 1214.
+    expect(streetLevelProofAddressChanged({ ...snap, line1: '12-14 Sample Newbuild Trl' }, row({ address_line1: '1214 Sample Newbuild Trl' }))).toBe(true);
+    expect(streetLevelProofAddressChanged({ ...snap, line1: '1214 Sample Newbuild Trl' }, row({ address_line1: '12-14 Sample Newbuild Trl' }))).toBe(true);
+    expect(streetLevelProofAddressChanged({ ...snap, line1: '12-14 Sample Newbuild Trl' }, row({ address_line1: '12-14 Sample Newbuild Trail' }))).toBe(false);
+    expect(streetLevelProofAddressChanged({ ...snap, line1: '123A Sample Newbuild Trl' }, row({ address_line1: '123B Sample Newbuild Trl' }))).toBe(true);
     for (const moved of [{ address_line1: '1240 Sample Newbuild Trl' }, { address_line2: 'Apt 2' }, { city: 'Sarasota' }, { zip: '34203' }, { state: 'GA' }]) {
       expect(streetLevelProofAddressChanged(snap, row(moved))).toBe(true);
     }
