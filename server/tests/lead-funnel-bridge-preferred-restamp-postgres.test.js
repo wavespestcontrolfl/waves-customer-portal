@@ -95,6 +95,33 @@ const { randomUUID } = require('crypto');
     }
   });
 
+  test('a stale caller never restores the row of a request that is handled NOW (status judged under the row lock, not trusted from the caller)', async () => {
+    const l = await lead({ status: 'handled' });
+    await bridge.bridgeLeadFunnelStage(l.id, 'new', database); // the admin update committed 'new', a booking handled it since
+    expect(await rows(l.id)).toHaveLength(0);
+  });
+
+  test('concurrent: the close holds the lead row and commits handled while the restamp waits -> no row is restored; the other order stamps then the cleanup deletes', async () => {
+    const l = await lead({ status: 'new' });
+    let release;
+    const hold = new Promise((r) => { release = r; });
+    const closer = database.transaction(async (trx) => {
+      await trx('leads').where({ id: l.id }).forUpdate().first('id'); // the close's row lock
+      await hold;
+      await trx('leads').where({ id: l.id }).update({ status: 'handled' });
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const restamp = bridge.bridgeLeadFunnelStage(l.id, 'new', database); // parks on the row lock
+    let settled = false;
+    restamp.then(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(settled).toBe(false);
+    release();
+    await closer;
+    await restamp;
+    expect(await rows(l.id)).toHaveLength(0);
+  });
+
   test('inside a caller transaction a failure never dooms it (savepoint)', async () => {
     const l = await lead({ status: 'new' });
     await database.transaction(async (trx) => {

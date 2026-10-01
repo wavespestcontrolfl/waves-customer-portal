@@ -140,23 +140,30 @@ const RESTAMP_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'
  * settlement), so it re-stamps the row from the lead's stored first-touch fields
  * when a preferred-time request that has none reaches an open or won status.
  * Only that lead type: every other lead without a row has none on purpose.
- * Best-effort; a savepoint when the caller is inside a transaction.
+ * Best-effort; its own transaction (a savepoint inside a caller's), lead row locked.
  */
 async function restampMissingPreferredRows(db, leadIds, leadStatus) {
   const ids = (leadIds || []).filter(Boolean);
   if (!ids.length || !RESTAMP_STATUSES.includes(leadStatus)) return 0;
-  const run = async (handle) => {
-    const rows = await handle('leads').whereIn('id', ids)
+  // The caller's `leadStatus` is only a hint (the status writers call the bridge AFTER
+  // their commit): eligibility is judged here on the lead's CURRENT status, with the
+  // row locked, so a booking that closed the request meanwhile (status 'handled',
+  // its funnel row dropped) is never given a row back by a stale caller. The close
+  // takes the same row lock, so one of the two goes first and the other sees it.
+  const run = async (trx) => {
+    const rows = await trx('leads').whereIn('id', ids)
       .where({ lead_type: 'book_preferred_time' }).whereNull('deleted_at')
-      .whereNotExists(function hasRow() { this.select(1).from('ad_service_attribution').whereRaw('ad_service_attribution.lead_id = leads.id'); });
+      .whereIn('status', RESTAMP_STATUSES)
+      .whereNotExists(function hasRow() { this.select(1).from('ad_service_attribution').whereRaw('ad_service_attribution.lead_id = leads.id'); })
+      .forUpdate();
     let stamped = 0;
     for (const row of rows) {
-      if (await stampLeadFunnelRow(handle, row, { rethrow: true })) stamped += 1;
+      if (await stampLeadFunnelRow(trx, row, { rethrow: true })) stamped += 1;
     }
     return stamped;
   };
   try {
-    return db && db.isTransaction && typeof db.transaction === 'function' ? await db.transaction((sp) => run(sp)) : await run(db);
+    return await db.transaction((trx) => run(trx));
   } catch (err) {
     logger.warn(`[lead-funnel-bridge] preferred-request funnel row restamp failed (${leadStatus}): ${err.message}`);
     return 0;
