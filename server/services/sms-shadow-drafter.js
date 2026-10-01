@@ -4457,8 +4457,10 @@ function visitLoopPastWindowLine(past, techPosition) {
   const head = `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete`;
   // A fresh Tech position line for THIS visit is the real answer; otherwise
   // (none, stale, or about another of today's visits) it is a hand-off.
+  // ...and only with a stop count to quote (no route order = no count on the line)
   const located = techPosition && typeof techPosition === 'object' && techPosition.status && techPosition.status !== 'stale'
-    && past.visitId != null && String(techPosition.visitId) === String(past.visitId);
+    && past.visitId != null && String(techPosition.visitId) === String(past.visitId)
+    && techPosition.stopsAhead != null && Number.isFinite(Number(techPosition.stopsAhead));
   return located
     ? `${head} — apologize for the delay and say how many stops come before theirs (Tech position); no arrival time unless a LIVE ETA fact gives one`
     : `${head}, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
@@ -4499,7 +4501,9 @@ function visitLoopsNeedAnswer(context) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return false;
   const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
   const listed = (list) => Array.isArray(list) && list.some((i) => i && typeof i === 'object');
-  return Boolean(v.lateAlert || v.pastWindow || v.missedVisit) || listed(v.weOwe) || listed(v.customerWaiting);
+  // a tracking gap is explicitly not confirmed lateness: not a loop
+  const delay = v.lateAlert && typeof v.lateAlert === 'object' && v.lateAlert.missingTracking !== true;
+  return Boolean(delay || v.pastWindow || v.missedVisit) || listed(v.weOwe) || listed(v.customerWaiting);
 }
 // Marks a draft whose section showed time-sensitive VISIT STATUS (tech position, a
 // flagged delay, a passed window, a missed visit): the send boundary holds it to the

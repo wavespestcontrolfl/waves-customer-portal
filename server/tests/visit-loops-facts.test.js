@@ -257,6 +257,11 @@ describe('pastWindow', () => {
     expect((await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow, conn })).pastWindow).toBeNull();
   });
 
+  test('a window that crosses midnight (23:00-01:00) is not passed in the evening', async () => {
+    const out = await run({ status: 'confirmed', window_start: '23:00:00', window_end: '23:30:00' }, new Date('2026-10-02T02:00:00Z')); // 22:00 ET
+    expect(out.pastWindow).toBeNull();
+  });
+
   test('no start time: falls back to window_end', async () => {
     const out = await run({ status: 'pending', window_start: null, window_end: '11:30:00' });
     expect(out.pastWindow).toMatchObject({ minutesPast: 30 });
@@ -289,6 +294,11 @@ describe('missedVisit', () => {
     const q = conn.calls.find((c) => c.table === 'scheduled_services');
     expect(hasOp(q.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '<' && a[2] === '2026-10-01')).toBe(true);
     expect(hasOp(q.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-09-24')).toBe(true);
+    // ET calendar days across spring DST: 00:30 EDT on Mar 9 2026 looks back to Mar 2, not Mar 1
+    const dst = fakeConn({ scheduled_services: () => null, reschedule_log: () => null });
+    await loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: new Date('2026-03-09T04:30:00Z'), conn: dst });
+    const dq = dst.calls.find((c) => c.table === 'scheduled_services');
+    expect(hasOp(dq.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-03-02')).toBe(true);
     expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'status' && a[1].join() === 'pending,confirmed')).toBe(true);
     // performed-but-not-closed rows are excluded: a tracker 'complete' or a written service record
     expect(hasOp(q.ops, 'where', (a) => typeof a[0] === 'function')).toBe(true);
@@ -362,7 +372,7 @@ describe('weOwe and customerWaiting', () => {
       callRow({ id: 'c-2', party: 'customer', kind: 'send_photos', description: 'Send photos of the fence', call_started_at: '2026-09-29T14:00:00Z' }),
     ]);
     const out = await run(ctxConn({}));
-    expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', limit: 50 }));
+    expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves', limit: 50 }));
     // no resolved deadline: the spoken words, dated to the call
     expect(out.weOwe).toEqual([{ id: 'c-1', kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow (said Wed, Sep 30)', source: 'call' }]);
     expect(out.customerWaiting).toEqual([]);
@@ -395,6 +405,15 @@ describe('weOwe and customerWaiting', () => {
     listSmsCommitments.mockResolvedValue([smsRow({ id: 's-1' }), smsRow({ id: 'e-1', channel: 'email', description: 'Send the quote' })]);
     const out = await run(ctxConn({ 'e-1': { basis: 'promise' } }));
     expect(out.weOwe).toEqual([expect.objectContaining({ description: 'Send the quote', source: 'email' })]);
+    // only the enabled channel is read, so the page limit bounds rendered rows
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ channels: ['email'] }));
+  });
+
+  test('descriptions are redacted BEFORE the 120-char clip (a straddling code never survives)', async () => {
+    smsCommitmentsEnabled.mockReturnValue(true);
+    listSmsCommitments.mockResolvedValue([smsRow({ id: 's-1', description: `${'x'.repeat(110)} 4545 is the gate code` })]);
+    const out = await run(ctxConn({ 's-1': { basis: 'promise' } }));
+    expect(out.weOwe[0].description).not.toContain('4545');
   });
 
   test('dedupe by id, newest first, capped at 5, description capped at 120', async () => {

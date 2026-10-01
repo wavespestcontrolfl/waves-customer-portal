@@ -438,8 +438,8 @@ describe('open-loop commitments recheck', () => {
   const { openLoopsBlockReason, scheduledOpenLoopsBlockReason } = require('../services/agent-decision-send-checks');
   const withIds = (ids) => decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_commitment_ids: ids }) });
   const commitmentsDb = (rows) => (table) => {
-    const q = { whereIn: () => q, select: async () => rows, where: () => q, first: async () => ({ input_snapshot: JSON.stringify({ visit_loop_commitment_ids: ['cc-1'] }) }) };
-    return table === 'call_commitments' || table === 'agent_decisions' ? q : null;
+    const q = { whereIn: () => q, whereRaw: (sql) => { q.raws = [...(q.raws || []), sql]; return q; }, select: async () => rows, where: () => q, first: async () => ({ input_snapshot: JSON.stringify({ visit_loop_commitment_ids: ['cc-1'] }) }) };
+    return table === 'call_commitments as cc' || table === 'agent_decisions' ? q : null;
   };
 
   test('no ids on the snapshot: no read, no block', async () => {
@@ -452,6 +452,16 @@ describe('open-loop commitments recheck', () => {
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']), dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }, { id: 'cc-2', status: 'open' }]) })).resolves.toBeNull();
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']), dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }, { id: 'cc-2', status: 'fulfilled' }]) })).resolves.toBe('commitment_closed');
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh: commitmentsDb([]) })).resolves.toBe('commitment_closed');
+  });
+
+  test('the recheck applies the canonical readers\' stale-AI-row exclusion (a superseded row reads as closed)', async () => {
+    let seen = null;
+    const dbh = (table) => {
+      const q = { whereIn: () => q, whereRaw: (sql) => { seen = sql; return q; }, select: async () => [] };
+      return table === 'call_commitments as cc' ? q : null;
+    };
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh })).resolves.toBe('commitment_closed');
+    expect(seen).toMatch(/^NOT COALESCE\(\(cc\.human_state IS NULL AND cc\.source = 'ai'.*last_seen_generation/);
   });
 
   test('a read error fails closed', async () => {

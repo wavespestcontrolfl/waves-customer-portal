@@ -328,7 +328,12 @@ async function openLoopsBlockReason({ decision, outgoingBody = null, dbh, now = 
   try {
     const conn = dbh || require('../models/db');
     if (ids.length) {
-      const rows = await conn('call_commitments').whereIn('id', ids).select('id', 'status');
+      // the canonical readers' liveness too: an AI call row superseded by a later
+      // processing generation stays status 'open' but is no longer live
+      const { staleAiRowSql } = require('./call-commitments');
+      const rows = await conn('call_commitments as cc').whereIn('cc.id', ids)
+        .whereRaw(`NOT COALESCE(${staleAiRowSql('cc')}, false)`)
+        .select('cc.id', 'cc.status');
       const open = new Set((rows || []).filter((r) => r.status === 'open').map((r) => String(r.id)));
       if (!ids.every((id) => open.has(id))) return 'commitment_closed';
     }

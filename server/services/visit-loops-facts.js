@@ -29,7 +29,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, etParts } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { calendarDay } = require('./live-eta-destination');
 const { JOIN_INELIGIBLE_STATUSES, UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
@@ -108,11 +108,14 @@ function familyKey(serviceType) {
   return t.trim() || null;
 }
 
-// The customer-facing end of the arrival window, in ET minutes since midnight.
+// The customer-facing end of the arrival window, in ET minutes since midnight of
+// the visit day; a window that crosses midnight (23:00-01:00) ends past 1440.
 function customerWindowEndMinutes(row) {
+  const start = hhmmToMinutes(row.window_start);
   const range = arrivalWindowRange(String(row.window_start || ''));
-  if (range) return hhmmToMinutes(range.split('-')[1]);
-  return hhmmToMinutes(row.window_end);
+  const end = range ? hhmmToMinutes(range.split('-')[1]) : hhmmToMinutes(row.window_end);
+  if (end == null) return null;
+  return start != null && end < start ? end + 1440 : end;
 }
 
 function windowLabel(row, deriveWindow) {
@@ -276,7 +279,8 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
 // ── missed visit ────────────────────────────────────────────────────────────
 async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
   const today = etDateString(now);
-  const since = etDateString(new Date(now.getTime() - MISSED_LOOKBACK_DAYS * 86400000));
+  // ET calendar days, not fixed 24h periods (a DST week would reach an 8th day back)
+  const since = etDateString(addETDays(now, -MISSED_LOOKBACK_DAYS));
   const candidates = [];
 
   const unfinished = await conn('scheduled_services')
@@ -340,6 +344,9 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
 }
 
 // ── open promises / asks ────────────────────────────────────────────────────
+// Redact before clipping: a credential straddling the cap would lose the words
+// the redactor keys on (lazy require — the aggregator requires this module).
+const safeDescription = (value) => clip(require('./context-aggregator').redactAccessCodes(String(value == null ? '' : value)), DESCRIPTION_MAX);
 const rowSourceAt = (r) => toDate(r.call_started_at) || toDate(r.sms_started_at) || toDate(r.created_at);
 
 async function loadCommitments({ conn, customerId, now }) {
@@ -348,7 +355,8 @@ async function loadCommitments({ conn, customerId, now }) {
   // writing; rows recorded while it was on are still owed after a rollback.
   {
     const { listOpenCommitments } = require('./call-commitments');
-    const calls = await safely('call commitments', [], () => listOpenCommitments(conn, { customerId, limit: 50, now }));
+    // party 'waves' in the query, so the limit bounds the rows actually rendered
+    const calls = await safely('call commitments', [], () => listOpenCommitments(conn, { customerId, party: 'waves', limit: 50, now }));
     for (const r of calls) rows.push({ ...r, __source: 'call' });
   }
   // SMS + email rows share one reader; each channel keeps its own gate.
@@ -357,7 +365,8 @@ async function loadCommitments({ conn, customerId, now }) {
     const smsOn = smsCommitmentsEnabled();
     const emailOn = gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
     if (!smsOn && !emailOn) return null;
-    const listed = await listSmsCommitments(conn, { customerId, limit: 50, now });
+    // only the enabled channels are read, so the limit bounds the rows rendered
+    const listed = await listSmsCommitments(conn, { customerId, limit: 50, now, channels: [smsOn && 'sms', emailOn && 'email'].filter(Boolean) });
     const kept = listed.filter((r) => (r.channel === 'email' ? emailOn : smsOn));
     // The reader's select omits sms_context (basis: promise vs request, and the
     // spoken due text); one keyed read supplies it.
@@ -394,7 +403,7 @@ async function loadCommitments({ conn, customerId, now }) {
       // call_commitments.id — the send boundary re-checks it is still open.
       id: r.id == null ? null : String(r.id),
       kind: r.kind || null,
-      description: clip(r.description, DESCRIPTION_MAX),
+      description: safeDescription(r.description),
       // A passed deadline is said as overdue, never restated as a future time; a
       // resolved deadline is the ET instant (spoken "tomorrow" from yesterday's call
       // would read as a day later today); only without one is the spoken text used,
@@ -407,7 +416,7 @@ async function loadCommitments({ conn, customerId, now }) {
   });
   const customerWaiting = unique.filter(isWaiting).sort(byRecent).slice(0, LIST_MAX).map((r) => {
     const at = rowSourceAt(r);
-    return { id: r.id == null ? null : String(r.id), kind: r.kind || null, description: clip(r.description, DESCRIPTION_MAX), since: at ? etDateString(at) : null };
+    return { id: r.id == null ? null : String(r.id), kind: r.kind || null, description: safeDescription(r.description), since: at ? etDateString(at) : null };
   });
   return { weOwe, customerWaiting };
 }

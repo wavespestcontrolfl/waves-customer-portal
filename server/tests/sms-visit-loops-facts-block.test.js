@@ -11,6 +11,7 @@ const {
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
   visitLoopStatus,
+  visitLoopsNeedAnswer,
   REAL_ANSWERS_PROMPT_VERSION,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
 } = require('../services/sms-shadow-drafter');
@@ -70,8 +71,9 @@ describe('renderVisitLoopsSection', () => {
 
   test('WINDOW PASSED without a fresh tech position (none, or stale) hands off to the SLA', () => {
     const pastWindow = { visitId: 'v1', type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 };
-    const otherVisit = { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 1, visitId: 'v2' };
-    for (const techPosition of [null, { techName: 'Sam', status: 'stale', minutesSinceUpdate: 30, visitId: 'v1' }, otherVisit]) {
+    const otherVisit = { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 1, visitId: 'v2', stopsAhead: 1 };
+    const noCount = { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 1, visitId: 'v1', stopsAhead: null };
+    for (const techPosition of [null, { techName: 'Sam', status: 'stale', minutesSinceUpdate: 30, visitId: 'v1' }, otherVisit, noCount]) {
       expect(renderVisitLoopsSection({ pastWindow, techPosition }))
         .toContain("has passed and the visit is not marked complete, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised");
     }
@@ -221,6 +223,18 @@ describe('visitLoopCommitmentIds', () => {
     expect(visitLoopCommitmentIds({ visitLoops: v })).toEqual(['w0', 'w1', 'w2', 'w3', 'w4', 'q1']);
     expect(visitLoopCommitmentIds(null)).toEqual([]);
     expect(visitLoopCommitmentIds({})).toEqual([]);
+  });
+});
+
+describe('visitLoopsNeedAnswer', () => {
+  test('delay, passed window, missed visit and listed promises/asks need an answer; a tracking gap or position alone does not', () => {
+    process.env[GATE] = 'true';
+    expect(visitLoopsNeedAnswer({ visitLoops: { lateAlert: { type: 'tech_late', missingTracking: false } } })).toBe(true);
+    expect(visitLoopsNeedAnswer({ visitLoops: { lateAlert: { type: 'tech_late', missingTracking: true } } })).toBe(false);
+    expect(visitLoopsNeedAnswer({ visitLoops: { techPosition: { status: 'en_route' } } })).toBe(false);
+    expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(true);
+    delete process.env[GATE];
+    expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(false);
   });
 });
 
