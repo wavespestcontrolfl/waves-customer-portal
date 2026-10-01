@@ -124,6 +124,10 @@ function heldVisitIdOf(input) {
 async function streetLevelHoldBlocksSend(input) {
   const visitId = heldVisitIdOf(input);
   if (!visitId || input.audience !== 'customer') return false;
+  // The card-on-file invitation the office-confirm hook itself sends (and its lazy-activation twin)
+  // is part of releasing the hold: the hook runs before the confirmed stamp lands, and only after
+  // the office approved the address (the activation guards refuse a hold otherwise).
+  if (input.purpose === 'card_request' && input.metadata?.trigger === 'outbound_review_confirm') return false;
   // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
   // stops NEW holds but never releases the customer messages of holds already open.
   return require('../street-level-hold').isStreetLevelHoldVisit(String(visitId));

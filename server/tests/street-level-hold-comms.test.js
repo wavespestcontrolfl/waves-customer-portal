@@ -103,6 +103,22 @@ describe('the SMS send step holds a live street-level hold', () => {
     expect(sendViaTwilio).not.toHaveBeenCalled();
   });
 
+  test('the office-confirm hook\'s own card invitation is part of the release and is not held; every other card-request trigger still is', async () => {
+    isStreetLevelHoldVisit.mockResolvedValue(true);
+    const send = (trigger) => sendCustomerMessage({
+      to: '+19415550142', channel: 'sms', audience: 'customer', customerId: 'cust-1', purpose: 'card_request',
+      body: 'Add a card to hold your visit.', metadata: { scheduled_service_id: 'visit-9', trigger },
+    });
+    expect((await send('outbound_review_confirm')).sent).toBe(true);
+    for (const trigger of ['admin', 'previsit_sweep', 'booking']) {
+      const r = await send(trigger);
+      expect(r).toMatchObject({ sent: false, code: 'STREET_LEVEL_HOLD' });
+    }
+    // The hook really sends under that trigger.
+    const src = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
+    expect(src).toContain("trigger: 'outbound_review_confirm'");
+  });
+
   test('a non-hold visit is unaffected: it sends', async () => {
     const result = await sendCustomerMessage({ ...base, ...notices['a reschedule notice'] });
     expect(result.sent).toBe(true);
