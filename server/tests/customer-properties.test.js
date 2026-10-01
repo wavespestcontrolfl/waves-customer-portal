@@ -1,4 +1,4 @@
-const { normStreet, addressKey, findSamePremises, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole, syncPrimaryAddress } = require('../services/customer-properties');
+const { normStreet, addressKey, findSamePremises, samePremisesRows, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole, syncPrimaryAddress } = require('../services/customer-properties');
 
 describe('address key normalization (suffix + ZIP)', () => {
   test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
@@ -129,6 +129,9 @@ describe('customer-properties pure helpers', () => {
     expect(findSamePremises([exact, glen], { address_line1: '500 Demo Lane', city: 'Venice', zip: '34285' })).toBe(exact);
     expect(findSamePremises([exact, glen], { address_line1: '200 Example Glen', city: 'Parrish' })).toBeNull();
     expect(findSamePremises([], { address_line1: '' })).toBeNull();
+    // an exact key match wins over a same-house-only one
+    const exactGlen = { id: 'c', address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' };
+    expect(samePremisesRows([glen, exactGlen], { address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' })).toEqual([exactGlen]);
   });
 });
 

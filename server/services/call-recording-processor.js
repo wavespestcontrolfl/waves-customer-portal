@@ -5696,15 +5696,17 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
   let lat = null;
   let lng = null;
   try {
-    const { addressKey } = require('./customer-properties');
-    const callKey = addressKey({
+    const { addressKey, samePremisesRows } = require('./customer-properties');
+    const callAddress = {
       address_line1: address.line1, address_line2: address.line2, city: address.city, zip: address.zip,
-    });
-    if (callKey) {
+    };
+    if (addressKey(callAddress)) {
       const props = await trx('customer_properties')
         .where({ customer_id: customerId, active: true })
         .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude');
-      const matches = props.filter((p) => addressKey(p) === callKey);
+      // The same same-house match recordCallProperty dedupes on, so a call
+      // that restates a saved address as "Glen" for "Gln" still links it.
+      const matches = samePremisesRows(props, callAddress);
       if (matches.length === 1) {
         propertyId = matches[0].id;
         // The property's own geocode rides along — without it the visit's

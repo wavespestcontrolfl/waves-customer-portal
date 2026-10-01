@@ -159,21 +159,29 @@ function premisesKey({ address_line1, address_line2, zip } = {}) {
 }
 
 /**
- * The row in `existingProps` that is the same house as `candidate`: the full
- * address key, else street + unit + ZIP (premisesKey). Without a ZIP on both
- * sides the city is the only locality evidence, so the full key decides alone.
- * A caller resolving the row recordCallProperty declined to insert uses this,
- * so it finds exactly the row the dedupe matched (pure).
+ * Rows in `existingProps` that are the same house as `candidate`: the exact
+ * full-address-key matches when there are any, else the street + unit + ZIP
+ * (premisesKey) matches. Without a ZIP on the candidate the city is the only
+ * locality evidence, so only the full key counts. Callers resolving the row
+ * recordCallProperty declined to insert use this, so they see exactly what
+ * the dedupe matched; a caller that needs one row keeps its own ambiguity
+ * guard on the length (pure).
  */
-function findSamePremises(existingProps, candidate = {}) {
+function samePremisesRows(existingProps, candidate = {}) {
   const key = addressKey(candidate);
-  if (!key) return null;
-  const zip = normalizeZip(candidate.zip);
-  const premises = zip ? premisesKey(candidate) : null;
+  if (!key) return [];
   const rows = existingProps || [];
-  return rows.find((p) => addressKey(p) === key)
-    || (premises && rows.find((p) => normalizeZip(p.zip) === zip && premisesKey(p) === premises))
-    || null;
+  const exact = rows.filter((p) => addressKey(p) === key);
+  if (exact.length) return exact;
+  const zip = normalizeZip(candidate.zip);
+  if (!zip) return [];
+  const premises = premisesKey(candidate);
+  return rows.filter((p) => normalizeZip(p.zip) === zip && premisesKey(p) === premises);
+}
+
+/** The first same-house row (see samePremisesRows), or null (pure). */
+function findSamePremises(existingProps, candidate = {}) {
+  return samePremisesRows(existingProps, candidate)[0] || null;
 }
 
 /** True when `candidate` has a street and its full address isn't already in `existingProps` (pure). */
@@ -1135,6 +1143,7 @@ module.exports = {
   defaultRelationshipForContactRole,
   isNewAddress,
   findSamePremises,
+  samePremisesRows,
   completePrimaryFromCall,
   syncPrimaryAddress,
   syncPrimaryCoordsFromCustomer,
