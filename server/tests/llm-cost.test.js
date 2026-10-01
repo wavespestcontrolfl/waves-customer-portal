@@ -145,6 +145,15 @@ describe('long-prompt tiers', () => {
     expect(out.usd).toBeCloseTo(2 + 4, 9);
     expect(out.unpricedCalls).toBe(1);
   });
+
+  test('a session turn reaching a tier may be several short calls: unpriced; one below every tier stays base-rate', () => {
+    const prices = new Map([['claude-opus-5-5', { input: 5, output: 25, tiers: [{ minPromptTokens: 200000, input: 10, output: 37.5 }] }]]);
+    const turn = (input) => ({ lane_id: 'lead_agent', row_kind: 'session_turn', provider: 'anthropic', model: 'claude-opus-5-5', calls: 1, usage_unknown: 0, per_call: true, input_tokens: input, output_tokens: 0 });
+    // three 90k-token calls in one turn: 270k in total, no single call past 200k
+    const out = llmCost.foldLaneCosts([turn(270000), { ...turn(100000), per_call: undefined }], prices).get('lead_agent');
+    expect(out.usd).toBeCloseTo(0.5, 9);
+    expect(out.unpricedCalls).toBe(1);
+  });
 });
 
 describe('costUsd', () => {
@@ -346,6 +355,17 @@ postgres('llm cost (PostgreSQL)', () => {
     const res = await llmCost.laneCosts(atET('2026-09-30', '00'), atET('2026-10-01', '00'), { conn: app });
     expect(res.byLane.get('sms_draft').usd).toBeCloseTo(0.4 * 2 + 0.3 * 4, 9);
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
+  });
+
+  test('a session turn whose total prompt reaches a tier is unpriced, not billed at the tier', async () => {
+    const sol = { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015' }] } };
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([sol])), now: NOW });
+    const at = atET('2026-09-30');
+    const openai = { provider: 'openai', requested_model: 'gpt-6-sol', served_model: 'gpt-6-sol', created_at: at, row_kind: 'session_turn' };
+    await app('llm_dispatch_log').insert([row({ ...openai, input_tokens: 300_000 }), row({ ...openai, input_tokens: 100_000 })]);
+    const res = await llmCost.laneCosts(atET('2026-09-30', '00'), atET('2026-10-01', '00'), { conn: app });
+    expect(res.byLane.get('sms_draft').usd).toBeCloseTo(0.1 * 2, 9);
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(1);
   });
 
   test('the spend check pulls missing prices, raises one item for a spike, then closes it once spend is normal', async () => {

@@ -268,7 +268,9 @@ function costUsd(provider, t, p) {
 // counts rows whose usage was never captured (null counters). With a
 // `tierFloor`, calls whose prompt reaches it come back one row each
 // (`per_call`), so each can be priced at its own long-prompt tier; a sum of
-// several calls cannot say which tier any of them reached.
+// several calls cannot say which tier any of them reached. A session_turn
+// row is itself a delta over one or more model calls: below the floor every
+// call in it was too, at or above it the turn is ambiguous.
 function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
   const scoped = () => conn(LEDGER)
     .whereIn('row_kind', ROW_KINDS)
@@ -300,6 +302,7 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
     .whereRaw(`${PROMPT_TOKENS_SQL} >= ?`, [tierFloor])
     .select(
       'lane_id',
+      'row_kind',
       'provider',
       conn.raw('COALESCE(served_model, requested_model) AS model'),
       conn.raw('1 AS calls'),
@@ -314,8 +317,9 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
 /**
  * Fold lane × model rows into per-lane estimates (pure):
  * Map(laneId → { usd, unpricedCalls }). unpricedCalls = calls with no usage,
- * plus every call on a model the price table does not list or at a
- * long-prompt tier the feed gives no rate for.
+ * plus every call on a model the price table does not list, at a
+ * long-prompt tier the feed gives no rate for, or in a session turn whose
+ * total prompt reaches a tier (one turn can be several shorter calls).
  */
 function foldLaneCosts(rows, prices) {
   const out = new Map();
@@ -325,7 +329,9 @@ function foldLaneCosts(rows, prices) {
     const unknown = Number(r.usage_unknown) || 0;
     const price = priceFor(prices, r.model);
     // a summed row holds only calls below every tier threshold: base rates
-    const rates = price && r.per_call ? ratesForCall(price, promptTokens(r.provider, r)) : price;
+    let rates = price && r.per_call ? ratesForCall(price, promptTokens(r.provider, r)) : price;
+    // a session turn that reached a tier may be several shorter calls: unknown which rate applies
+    if (r.row_kind === 'session_turn' && rates !== price) rates = null;
     const cost = costUsd(r.provider, r, rates);
     if (cost == null) lane.unpricedCalls += calls;
     else {
