@@ -152,8 +152,9 @@ function scopeToProspects(qb, alias = 'leads') {
 // A staff status write is refused when it would SET it (codex #5477 r9), or when the
 // booking closed the request after staff loaded it, so a change made from that stale
 // open view would reopen it (codex #5477 r13). Reopening a request staff SAW handled
-// stays possible. `seen` = the status staff loaded, `now` = the status under the row
-// lock. Returns the refusal (status code + message) or null.
+// stays possible, but only when the caller says so (`seen` = the status its page
+// showed; absent counts as not handled). `now` = the status under the row lock.
+// Returns the refusal (status code + message) or null.
 function handledStatusRefusal(requested, seen, now) {
   if (requested === undefined) return null;
   // Setting it is judged on the LOCKED status only (a client-supplied `seen` must

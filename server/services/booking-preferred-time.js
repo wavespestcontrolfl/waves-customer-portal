@@ -201,7 +201,8 @@ async function lockPhone(trx, phone) {
 
 // Visit statuses that no longer hold a self-booking; mirrors the replay guard in
 // routes/booking.js (createSelfBooking) so both agree on "live".
-const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled'];
+// no_show (20260615000005) is terminal too: the customer missed it (codex #5477 r14).
+const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled', 'no_show'];
 // App/DB clock skew a booking may sit either side of a request it belongs to.
 const BOOKING_SLACK_MS = 60 * 1000;
 
@@ -403,17 +404,21 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   // rings.
   const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt, leadId });
 
-  // A booking can close the request between the reconcile above and the bell
-  // being written (the reconcile's lookup ran just before that booking
-  // committed): re-read THIS lead's status right before ringing, and stay silent
-  // for one that is already handled.
   if (created && notify && !alreadyBooked) {
-    try {
-      const now = await db('leads').where({ id: leadId }).first('status');
-      if (now?.status === CLOSED_STATUS) return { created, leadId };
-    } catch (err) {
-      logger.warn(`[booking:preferred-time] pre-bell status recheck failed: ${err.message}`);
-    }
+    // A booking can close the request after the reconcile above, even while the
+    // bell is being dispatched (codex #5477 r14): the dispatcher re-asks right
+    // before it writes the bell (shouldContinue) and again before the push
+    // (beforePush), so a committed close suppresses both. A failed read rings
+    // (the request then simply stays open work, as on any failure here).
+    const stillOpen = async () => {
+      try {
+        const now = await db('leads').where({ id: leadId }).first('status');
+        return now?.status !== CLOSED_STATUS;
+      } catch (err) {
+        logger.warn(`[booking:preferred-time] pre-bell status recheck failed: ${err.message}`);
+        return true;
+      }
+    };
     try {
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('new_lead', {
@@ -425,7 +430,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
         service: serviceLabel || null,
         phone: phoneE164,
         leadId,
-      });
+      }, { shouldContinue: stillOpen, beforePush: stillOpen });
     } catch (err) {
       logger.warn(`[booking:preferred-time] admin bell failed: ${err.message}`);
     }

@@ -522,16 +522,18 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(mockSendSMS).not.toHaveBeenCalled();
   });
 
-  test('pre-bell recheck (codex #5477 r3 P1): the reconcile saw no booking, but a booking handled the request before the bell is written -> no new_lead bell', async () => {
-    mockStatusRead = 'handled'; // the status read right before the bell
+  test('pre-bell recheck (codex #5477 r3 P1, r14): the dispatcher re-asks right before the bell row and again before the push; a booking that handled the request by then suppresses both', async () => {
+    mockStatusRead = 'handled'; // what the dispatcher's last-moment checks read
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
-    expect(mockTriggerNotification).not.toHaveBeenCalled();
-    // still open at that read: the bell rings as before
-    mockTriggerNotification.mockClear();
+    const [key, , opts] = mockTriggerNotification.mock.calls[0];
+    expect(key).toBe('new_lead');
+    expect(await opts.shouldContinue()).toBe(false);
+    expect(await opts.beforePush()).toBe(false);
+    // still open at those checks: the bell and push go out as before
     mockStatusRead = 'new';
-    await post(baseUrl, { ...validBody({ phone: '(941) 555-0111' }), capture_token: loopbackToken() });
-    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+    expect(await opts.shouldContinue()).toBe(true);
+    expect(await opts.beforePush()).toBe(true);
   });
 
   test('a race booking never wins the lead or touches its funnel row (even with several open requests: each closes as handled, none converted)', async () => {
@@ -957,6 +959,12 @@ describe('a completed booking closes the customer\'s open preferred-time request
     mockScheduledService = { ...mockScheduledService, service_type: bookedService };
     mockLockedLead = { ...mockLockedLead, service_interest: 'Lawn Care + Pest Control' };
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed });
+  });
+
+  test('a visit the customer missed (no_show) is dead too (codex #5477 r14): nothing closes', async () => {
+    mockLockedVisitChange = { status: 'no_show' };
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 0 });
+    expect(closeWrites()).toHaveLength(0);
   });
 
   test('a merge repoints the visit between the owner read and the lock (codex #5477 r13): the close judges the winner in the same run, not later', async () => {

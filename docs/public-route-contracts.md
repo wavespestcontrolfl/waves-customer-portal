@@ -994,7 +994,7 @@ form, call, estimate or email fan-out. The close runs inside the per-(lead,
 visit) transaction that takes, in order, the booked customer `FOR SHARE`
 (the visit's CURRENT owner, so a merge since the booking is judged on the
 winner; re-reading their phone, name and email), the booked visit `FOR UPDATE` (still
-live and not a callback; customer before visit, the order a customer merge
+live, not cancelled / skipped / rescheduled / no_show, and not a callback; customer before visit, the order a customer merge
 uses), and the lead `FOR UPDATE` (still `book_preferred_time`, open, not
 converted or deleted, no estimate attached, phone still matching the
 customer's current phone, `customer_id` null or the booker's, identity still
@@ -1004,7 +1004,7 @@ corroborated, same service line), then writes ONE `status_change` activity row
 replay never closes twice; a newer request is new work and stays open. The office
 gets ONE admin FYI per close (area Leads, category `lead`, linked to the lead,
 deduped per (lead, visit)) and nothing else: no customer message of any kind.
-`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. Writers that read a lead open and write later re-assert it at the write, so a close in between wins: attaching an estimate (`attachLeadToEstimate`, 409 when the lead closed since) and the Agent Ops mark-contacted / follow-up / draft actions (409). The lead's `first_contact_channel`
+`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it), and moves a lead off it only when the caller sends `seen_status: 'handled'` (the status its page showed; the Leads page sends it with every status change and mark-lost, and a caller that sends none is refused with 409) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. Writers that read a lead open and write later re-assert it at the write, so a close in between wins: attaching an estimate (`attachLeadToEstimate`, 409 when the lead closed since) and the Agent Ops mark-contacted / follow-up / draft actions (409). The lead's `first_contact_channel`
 is `booking`, so the shared customer-originated-contact allowlist
 (`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
 booking that committed while a submit was still in flight (its close ran before

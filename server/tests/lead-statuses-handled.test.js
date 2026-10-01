@@ -98,7 +98,10 @@ describe("lead status 'handled'", () => {
     for (const t of tools) expect(t.input_schema.properties.new_status.enum).not.toContain('handled');
     const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
     // judged on the status the CLIENT showed (its page may be hours old), else the one read on arrival
-    expect(route).toMatch(/const refusal = handledStatusRefusal\(updates\.status, req\.body\.seen_status \?\? existingLead\.status, current\.status\);\s*if \(refusal\) return \{ refusal \};/);
+    expect(route).toMatch(/const refusal = handledStatusRefusal\(updates\.status, req\.body\.seen_status, current\.status\);\s*if \(refusal\) return \{ refusal \};/);
+    expect(route).toMatch(/const seen = req\.body\.seen_status; \/\/ explicit only/);
+    // no seen status (an older tab): a handled lead never moves off handled (codex #5477 r14)
+    expect(require('../services/lead-statuses').handledStatusRefusal('contacted', undefined, 'handled')).toMatchObject({ code: 409 });
     // mark-lost: the same refusal, re-asserted in markLost's UPDATE (notIfStatusIn)
     expect(route).toMatch(/const refusal = handledStatusRefusal\('lost', seen, existing\.status\);/);
     expect(route).toMatch(/notIfStatusIn: seen === 'handled' \? \[\] : \['handled'\]/);
