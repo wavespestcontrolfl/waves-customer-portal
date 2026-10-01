@@ -453,3 +453,157 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
     });
   });
 });
+
+// ── Label mow hold (P2b) ─────────────────────────────────────────────────
+describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () => {
+  const OLD = process.env.GATE_LAWN_WATERING_RULE;
+  beforeEach(() => { process.env.GATE_LAWN_WATERING_RULE = 'true'; });
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_LAWN_WATERING_RULE; else process.env.GATE_LAWN_WATERING_RULE = OLD;
+  });
+  const MOW_LINE = 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.';
+  const withMow = (rule, mowHoldDays) => ({ ...facts(rule), mowHoldDays });
+  const serviceFacts = (map) => ({
+    ...serviceWith(HOLD),
+    service_data: JSON.stringify({ reportIdentitySnapshot: buildReportIdentitySnapshot({ visit: {}, productFacts: map }) }),
+  });
+
+  test('a hold with a label mow hold: the banner carries the mow line beside the unchanged watering lines', async () => {
+    const out = {};
+    const data = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: withMow(HOLD, 2) }), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+    const banner = data.reportV2.banner;
+    expect(banner.state).toBe('hold');
+    expect(banner.lines).toEqual(['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.']);
+    expect(banner.mowHold).toEqual({ days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: MOW_LINE });
+    // The frozen instruction carries it too, outside `lines`.
+    expect(out.instruction.mowHold).toEqual(banner.mowHold);
+    expect(out.instruction.lines.join(' ')).not.toMatch(/mow/i);
+    // Aftercare, hero task and the rest of the report never restate it.
+    expect(JSON.stringify(data.reportV2.aftercare)).not.toMatch(/mow/i);
+  });
+
+  test('no label mow hold: no mowHold key anywhere, and the payload equals a facts set without the key', async () => {
+    const withNull = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: withMow(HOLD, null) }), 'token-w1', makeKnex(fixtures()));
+    const without = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: facts(HOLD) }), 'token-w1', makeKnex(fixtures()));
+    expect(withNull.reportV2.banner).not.toHaveProperty('mowHold');
+    expect(JSON.stringify(withNull)).not.toMatch(/mowHold|mow_hold|Mowing: hold/);
+    expect(JSON.parse(JSON.stringify(withNull))).toEqual(JSON.parse(JSON.stringify(without)));
+  });
+
+  test('the max across products wins, and an invalid stored value is ignored', async () => {
+    const second = PRODUCT_ID.replace('5555', '6666');
+    const third = PRODUCT_ID.replace('5555', '7777');
+    const service = serviceFacts({
+      [PRODUCT_ID]: withMow(HOLD, 2),
+      [second]: { ...withMow(WATER_IN, 4), name: 'Arena 50 WDG' },
+      [third]: { ...withMow(HOLD, 99), name: 'Third Product' },
+    });
+    const rows = [PRODUCT_ID, second, third].map((id, i) => ({ id: `sp-${i}`, service_record_id: 'svc-lawn-w1', product_id: id, product_name: `P${i}`, created_at: `2026-09-30T18:0${i}:00Z` }));
+    const data = await buildReportV1Data(service, 'token-w1', makeKnex({ ...fixtures(), service_products: rows }));
+    expect(data.reportV2.banner.mowHold).toMatchObject({ days: 4, untilDate: '2026-10-04', untilLabel: 'Sun 3 PM' });
+  });
+
+  test('a visit whose watering rule is unknown still gets its mow line (banner with no watering lines)', async () => {
+    const out = {};
+    const data = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: withMow(null, 3) }), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+    expect(data.reportV2.banner).toMatchObject({ state: null, lines: [], expiresAt: null, mowHold: { days: 3, untilLabel: 'Sat 3 PM' } });
+    expect(out.instruction.state).toBeNull();
+    // The watering side stays the legacy path.
+    expect(data.reportV2.aftercare.evidenceSource).toBeUndefined();
+  });
+
+  test('gate off: the mow hold changes nothing in the payload', async () => {
+    delete process.env.GATE_LAWN_WATERING_RULE;
+    const withValue = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: withMow(HOLD, 2) }), 'token-w1', makeKnex(fixtures()));
+    const without = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: facts(HOLD) }), 'token-w1', makeKnex(fixtures()));
+    expect(withValue.reportV2.banner).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(withValue))).toEqual(JSON.parse(JSON.stringify(without)));
+  });
+
+  test('the public applications[] payload never carries mowHoldDays or the mow column', async () => {
+    const data = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: withMow(HOLD, 2) }), 'token-w1', makeKnex(fixtures()));
+    expect(JSON.stringify(data.applications)).not.toMatch(/mowHold|mow_hold/i);
+  });
+
+  test('old frozen facts (no mowHoldDays key) make no claim, even when the live catalog now has a value', async () => {
+    const data = await buildReportV1Data(
+      serviceFacts({ [PRODUCT_ID]: facts(HOLD) }),
+      'token-w1',
+      makeKnex({ ...fixtures(), products_catalog: [{ id: PRODUCT_ID, name: 'Celsius WG', category: 'herbicide', mow_hold_days: 5, post_application_watering: HOLD }] }),
+    );
+    expect(data.reportV2.banner.state).toBe('hold');
+    expect(data.reportV2.banner).not.toHaveProperty('mowHold');
+  });
+
+  describe('frozen replay', () => {
+    const frozenWith = (service, instruction) => ({ ...service, structured_notes: JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instruction } }) });
+
+    test('a frozen instruction replays its own mow hold; a later catalog or facts change never rewrites it', async () => {
+      const out = {};
+      const first = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: withMow(HOLD, 2) }), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+      const frozen = JSON.parse(JSON.stringify(out.instruction));
+      const replay = await buildReportV1Data(frozenWith(serviceFacts({ [PRODUCT_ID]: withMow(HOLD, 9) }), frozen), 'token-w1', makeKnex(fixtures()));
+      expect(replay.reportV2.banner).toEqual(first.reportV2.banner);
+    });
+
+    test('an instruction frozen before this change (no mowHold key) stays without one', async () => {
+      const out = {};
+      await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: facts(HOLD) }), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+      const frozen = JSON.parse(JSON.stringify(out.instruction));
+      delete frozen.mowHold;
+      const replay = await buildReportV1Data(frozenWith(serviceFacts({ [PRODUCT_ID]: withMow(HOLD, 9) }), frozen), 'token-w1', makeKnex(fixtures()));
+      expect(replay.reportV2.banner.state).toBe('hold');
+      expect(replay.reportV2.banner).not.toHaveProperty('mowHold');
+    });
+
+    test('a state-null frozen instruction is never replayed: the mow line is regenerated from the frozen facts', async () => {
+      const mowOnly = { state: null, lines: [], minutes: {}, mowHold: { days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: MOW_LINE } };
+      const service = serviceFacts({ [PRODUCT_ID]: withMow(null, 7) });
+      const replay = await buildReportV1Data(frozenWith(service, mowOnly), 'token-w1', makeKnex(fixtures()));
+      expect(replay.reportV2.banner).toMatchObject({ state: null, lines: [], mowHold: { days: 7 } });
+    });
+
+    test('a hold frozen with the first mow shape (no untilAt) replays its mow line as written', async () => {
+      const { buildWateringBanner } = require('../services/service-report/report-data');
+      const legacyMow = { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' };
+      const hold = { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: null, expiresAt: null, ruleSource: 'label', mowHold: legacyMow };
+      expect(buildWateringBanner(hold, null).mowHold).toEqual(legacyMow);
+    });
+
+    test('a frozen banner with a malformed mow hold prints no mow line', async () => {
+      const { buildWateringBanner } = require('../services/service-report/report-data');
+      const hold = { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: null, expiresAt: null, ruleSource: 'label' };
+      expect(buildWateringBanner({ ...hold, mowHold: { days: 2, line: 'no date' } }, null)).not.toHaveProperty('mowHold');
+      expect(buildWateringBanner({ ...hold, state: null, lines: [], mowHold: { days: 2 } }, null)).toBeNull();
+    });
+  });
+
+  describe('cache signature', () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const record = (mowHoldDays, notes = {}) => ({
+      id: 'svc-lawn-w1', customer_id: 'cust-lawn-w1', structured_notes: JSON.stringify(notes),
+      service_data: JSON.stringify({ reportIdentitySnapshot: buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: withMow(HOLD, mowHoldDays) } }) }),
+    });
+    const signatureFor = async (row) => {
+      const knex = makeKnex({ ...fixtures(), products_catalog: [{ id: PRODUCT_ID, name: 'Celsius WG', category: 'herbicide' }], service_records: [row] });
+      return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
+    };
+
+    test('an unfrozen visit re-keys when its mowHoldDays changes, and is stable otherwise', async () => {
+      const two = await signatureFor(record(2));
+      expect(await signatureFor(record(2))).toBe(two);
+      expect(await signatureFor(record(3))).not.toBe(two);
+      expect(await signatureFor(record(null))).not.toBe(two);
+    });
+
+    test('a visit with no mow hold keeps the stamp it had before this field existed', async () => {
+      const legacy = { id: 'svc-lawn-w1', customer_id: 'cust-lawn-w1', structured_notes: '{}',
+        service_data: JSON.stringify({ reportIdentitySnapshot: buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: facts(HOLD) } }) }) };
+      expect(await signatureFor(record(null))).toBe(await signatureFor(legacy));
+    });
+
+    test('an invalid stored value stamps like no value', async () => {
+      expect(await signatureFor(record(99))).toBe(await signatureFor(record(null)));
+    });
+  });
+});

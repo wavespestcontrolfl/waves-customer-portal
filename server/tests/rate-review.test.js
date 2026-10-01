@@ -154,6 +154,42 @@ describe('trimmed median and the usable-visit floor', () => {
     expect(P.lineDurationStats(unpaid).usableVisits).toBe(3);
     expect(P.lineDurationStats(unpaid).revenuePerHourCents).toBeNull();
   });
+  test('a prepay-covered visit earns the term\'s SETTLED share; a refunded, unpaid or invoice-less term earns nothing', () => {
+    // $404 term, 4 covered visits, fully settled → $101 per visit
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: 404, visits: 4 } }))).toBe(10100);
+    // $100 refunded off the same term → $76 per visit
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: 304, visits: 4 } }))).toBe(7600);
+    // reversed / unpaid / no prepay invoice → settlement unknown → no revenue, never the charged amount
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: null, visits: 4 } }))).toBeNull();
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: 0, visits: 4 } }))).toBeNull();
+    // a paid visit invoice still wins over the term share
+    const both = fixture.visit('c', 'pest_control', { minutes: 40, revenue: 117, prepay: { id: 't1', settled: 404, visits: 4 } });
+    expect(P.visitRevenueCents(both)).toBe(11700);
+    // a term from before coverage_visit_count existed infers the count from the line's cadence / catalog count, as resolveCurrentRate does
+    const legacy = fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't0', settled: 404, visits: null } });
+    expect(P.visitRevenueCents(legacy)).toBeNull();
+    expect(P.visitRevenueCents(legacy, { termVisitsFallback: 4 })).toBe(10100);
+    expect(P.lineDurationStats([40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', prepay: { id: 't0', settled: 404, visits: null } })), { termVisitsFallback: 4 }).revenuePerHourCents).toBe(P.lineDurationStats([40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 101 }))).revenuePerHourCents);
+    // the SQL never reads the charged stamps
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(q).toMatch(/AS term_settled_amount/);
+    expect(q).toMatch(/pi\.id = apt\.prepay_invoice_id/);
+    expect(q).not.toMatch(/prepaid_amount|term_prepay_amount/);
+    // the settled share is COVERAGE money (the term's prepay_amount), capped by what settled — a setup line on the prepay invoice never counts
+    expect(q).toMatch(/LEAST\(apt\.prepay_amount, pi\.total - COALESCE/);
+    // a combined setup + application invoice keeps its application lines; a pure setup invoice contributes nothing
+    expect(q).toMatch(/jsonb_array_elements\(i\.line_items::jsonb\) li/);
+    expect(q).toMatch(/COALESCE\(li ->> 'name', li ->> 'description', ''\) ILIKE '%setup%'/);
+    expect(q).toMatch(/jsonb_typeof\(COALESCE\(i\.line_items::jsonb, 'null'::jsonb\)\) = 'array'/);
+    expect(q).not.toMatch(/AND NOT \(COALESCE\(i\.title, ''\) ILIKE '%setup%'/);
+    // and $/hr follows: three settled prepay visits rank, three refunded ones leave $/hr unavailable
+    const settled = [40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', prepay: { id: 't1', settled: 404, visits: 4 } }));
+    expect(P.lineDurationStats(settled).revenuePerHourCents).toBe(Math.round((303 * 100) / (126 / 60)));
+    const refunded = settled.map((v) => ({ ...v, term_settled_amount: null }));
+    expect(P.lineDurationStats(refunded).revenuePerHourCents).toBeNull();
+    expect(P.lineDurationStats(refunded).usableVisits).toBe(3);
+  });
   test('the longest paired visit is dropped from $/hr once ≥ 4 are usable', () => {
     const rows = [40, 45, 50, 200].map((m) => fixture.visit('c', 'pest_control', { minutes: m, revenue: 100 }));
     const stats = P.lineDurationStats(rows);
@@ -298,6 +334,9 @@ describe('exception rules', () => {
     ['two cadences open in one family', { cadenceConflict: true }, 'cadence_conflict'],
     ['one_time lane on a recurring series', { billingLane: 'one_time' }, 'lane_cleanup'],
     ['engine replay needs a human (manual review / heuristic turf / LOW confidence)', { listLowConfidence: true }, 'list_low_confidence'],
+    ['unclassified service family', { familyKey: 'other' }, 'unsupported_family'],
+    ['a ledger component the engine replay did not price (palm sold on a separate estimate)', { listBundleIncomplete: true }, 'list_bundle_incomplete'],
+    ['a per-application tree/shrub line carrying both the bed program and palm injections (blended median)', { multiProgramLine: true }, 'multi_program_line'],
     ['two live prepay terms could cover the line', { prepayTermAmbiguous: true }, 'prepay_term_ambiguous'],
     ['monthly dues with no per-family attribution', { rateUnattributed: true }, 'rate_unattributed'],
     ['facts loader failed (fail closed)', { facts: null }, 'facts_unavailable'],
@@ -316,6 +355,15 @@ describe('exception rules', () => {
       expect(seen.has(flag)).toBe(true);
     }
   });
+  test('an open re-service callback holds only its own family; an unknown lane holds every family', () => {
+    const lawnOpen = fixture.facts({ openCallbackLanes: ['lawn'] });
+    expect(P.CALLBACK_LANE_FOR_FAMILY).toEqual({ pest_control: 'pest', lawn_care: 'lawn' });
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src).toMatch(/openLanes\.includes\('unknown'\)/);
+    expect(src).toMatch(/familyLane != null && openLanes\.includes\(familyLane\)/);
+    expect(src).not.toMatch(/facts\.openCallbackLanes\.length\)/);
+    void lawnOpen;
+  });
   test('computeSnapshot: exception rows keep their band and proposal but hold status exception', () => {
     const row = P.computeSnapshot({
       ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', visitsPerYear: 4, tenureMonths: 6,
@@ -331,9 +379,14 @@ describe('exception rules', () => {
     const noRate = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', currentRateCents: 0, listRateCents: 11700 });
     expect(noRate.status).toBe('skipped');
     expect(noRate.flags).toContain('no_current_rate');
-    const noList = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', currentRateCents: 11700, listRateCents: null });
+    const noList = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', visitsPerYear: 4, currentRateCents: 11700, listRateCents: null });
     expect(noList.status).toBe('skipped');
     expect(noList.flags).toContain('no_list_rate');
+    // an application-unit line with no annual visit count is skipped, never green with annual_delta_cents 0
+    const noVpy = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'other', visitsPerYear: null, currentRateCents: 10400, listRateCents: 11700 });
+    expect(noVpy.status).toBe('skipped');
+    expect(noVpy.flags).toContain('no_visits_per_year');
+    expect(noVpy.delta_cents).toBe(0);
   });
   test('computeSnapshot: monthly dues are normalized to per-application dollars before the bands, cap and minimum apply', () => {
     // 12 visits/yr billed monthly: $55/mo = $55/application; list $60 → C → to list $60/application = $60/mo
@@ -460,14 +513,21 @@ describe('current rate per billing lane', () => {
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application' }), planLine: perApp, liveTerms: [blankA, blankB] })).toMatchObject({ cents: 11700, source: 'visit_median', prepayTermAmbiguous: true, prepayTermMissing: false });
   });
   test('open visits all stamped $0 are a free line when the zero is authoritative — never a fee-fallback increase', () => {
-    const zeroWithBase = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base: true });
+    const zeroWithBase = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base_visits: 3 });
     const customer = fixture.customer(1, { per_application_fee: 117 });
     expect(P.resolveCurrentRate({ customer, planLine: zeroWithBase })).toMatchObject({ cents: 0, source: 'stamped_zero', stampedZeroFree: true });
     const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 0, currentRateSource: 'stamped_zero', stampedZeroFree: true, rateUnit: 'application', listRateCents: 11700, listRateSource: 'engine', facts: fixture.facts() });
     expect(row.status).toBe('skipped');
     expect(row.flags).toEqual(expect.arrayContaining(['stamped_zero_free', 'no_current_rate']));
     // a bare stamped 0 with no base and the stamped-zero gate off is indistinguishable from never priced → fee fallback (today's billing rule)
-    const bare = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base: false });
+    const bare = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base_visits: 0 });
+    // the authority is counted PER VISIT: three $0 visits with one base are not a free line while the gate is off
+    const partialBase = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base_visits: 1 });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application', per_application_fee: 117 }), planLine: partialBase })).toMatchObject({ cents: 11700, source: 'per_application_fee' });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application', per_application_fee: null }), planLine: partialBase }).stampedZeroFree).toBeUndefined();
+    const src0 = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src0).toMatch(/count\(\*\) FILTER \(WHERE estimated_price = 0 AND primary_line_price > 0\)::int AS zero_with_base_visits/);
+    expect(src0).not.toMatch(/bool_or\(estimated_price = 0/);
     const prior = process.env.GATE_STAMPED_ZERO_FREE;
     process.env.GATE_STAMPED_ZERO_FREE = 'false';
     try {
@@ -478,12 +538,34 @@ describe('current rate per billing lane', () => {
       if (prior === undefined) delete process.env.GATE_STAMPED_ZERO_FREE; else process.env.GATE_STAMPED_ZERO_FREE = prior;
     }
     // a priced median always wins over zero-stamped siblings
-    const mixed = fixture.planLine('c', 'pest_control', 'quarterly', 117, { priced_visits: 2, zero_priced_visits: 1, zero_with_base: true });
+    // one discounted-to-zero visit beside NULL-priced ones is not a free line: the NULL-priced visits bill the per-application fee
+    const oneZero = fixture.planLine('c', 'pest_control', 'quarterly', null, { open_visits: 3, priced_visits: 0, zero_priced_visits: 1, zero_with_base_visits: 1 });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application', per_application_fee: 117 }), planLine: oneZero })).toMatchObject({ cents: 11700, source: 'per_application_fee' });
+    const noFee = fixture.customer(1, { billing_mode: 'per_application', per_application_fee: null });
+    expect(P.resolveCurrentRate({ customer: noFee, planLine: oneZero })).toMatchObject({ cents: 0, source: 'none' });
+    expect(P.resolveCurrentRate({ customer: noFee, planLine: oneZero }).stampedZeroFree).toBeUndefined();
+    const mixed = fixture.planLine('c', 'pest_control', 'quarterly', 117, { priced_visits: 2, zero_priced_visits: 1, zero_with_base_visits: 1 });
     expect(P.resolveCurrentRate({ customer, planLine: mixed })).toMatchObject({ cents: 11700, source: 'visit_median' });
   });
   test('per_visit and NULL lanes read the visit stamp (the exception rule flags lane_cleanup)', () => {
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_visit' }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
-    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: null }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: null, waveguard_tier: null, monthly_rate: null }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
+  });
+  test('a legacy NULL billing_mode resolves through billing-lane.js: a real tier with dues is a monthly member, not a cleanup lane', () => {
+    const { resolveBillingLane } = require('../services/billing-lane');
+    const legacy = fixture.customer(1, { billing_mode: null, waveguard_tier: 'Silver', monthly_rate: 55 });
+    expect(resolveBillingLane(legacy)).toEqual({ mode: 'monthly_membership', source: 'inferred' });
+    expect(P.resolveCurrentRate({ customer: legacy, planLine: fixture.planLine('c', 'pest_control', 'quarterly', 117, { account_lines: 1 }) })).toMatchObject({ cents: 5500, source: 'monthly_rate', unit: 'month' });
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'monthly_membership', laneInferred: true, anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 5500, rateUnit: 'month', listRateCents: 5500, facts: fixture.facts() });
+    expect(row.flags).toContain('lane_inferred');
+    expect(row.flags).not.toContain('lane_cleanup');
+    // informational only — the lane rule itself decides any hold; an inferred monthly member ranks normally
+    expect(row.status).not.toBe('exception');
+    expect(row.flags.filter((f) => rateReview.EXCEPTION_FLAGS.includes(f))).toEqual([]);
+    expect(P.evaluateExceptions({ familyKey: 'pest_control', billingLane: 'monthly_membership', laneInferred: true, anniversaryDate: '2025-01-10', tenureMonths: 21, facts: fixture.facts() })).toEqual([]);
+    // a NULL mode with no tier / dues infers per_visit → cleanup, as before
+    const bare = fixture.customer(1, { billing_mode: null, waveguard_tier: null, monthly_rate: null });
+    expect(resolveBillingLane(bare).mode).toBe('per_visit');
   });
 });
 
@@ -542,6 +624,74 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(Object.keys(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly' }).services).sort()).toEqual(['lawn', 'mosquito', 'pest']);
     expect(sold.services.lawn).toBeDefined();
   });
+  test('a standalone palm program never injects tree_shrub as a prior qualifying service (pest + palm stays Bronze, as the engine prices it)', () => {
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: ['palm_injection_semiannual'] })).toBeNull();
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program'] })).toBe('tree_shrub');
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program', 'palm_injection_semiannual'] })).toBe('tree_shrub');
+    expect(P.qualifyingKeyForLine({ familyKey: 'tree_shrub', serviceKeys: [] })).toBe('tree_shrub'); // unknown keys: a real program
+    expect(P.qualifyingKeyForLine({ familyKey: 'rodent', serviceKeys: ['rodent_bait'] })).toBe('rodent_bait');
+    expect(P.qualifyingKeyForLine({ familyKey: 'other', serviceKeys: ['x'] })).toBeNull();
+    const sold = { homeSqFt: 2100, services: { pest: { frequency: 'quarterly' } } };
+    const pestPlusPalm = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [{ familyKey: 'pest_control', serviceKeys: ['pest_control_quarterly'] }, { familyKey: 'tree_shrub', serviceKeys: ['palm_injection_semiannual'] }] });
+    expect(pestPlusPalm.services.pest).toBeDefined();
+    expect(pestPlusPalm.priorQualifyingServices).toEqual([]);
+    expect(pestPlusPalm.recurringCustomer).toBeUndefined();
+    const pestPlusTrees = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [{ familyKey: 'pest_control', serviceKeys: ['pest_control_quarterly'] }, { familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program'] }] });
+    expect(pestPlusTrees.priorQualifyingServices).toEqual(['tree_shrub']);
+    // bare family strings still work as before
+    expect(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'rodent'] }).priorQualifyingServices).toEqual(['rodent_bait']);
+  });
+  test('tree/shrub and palm are reconciled as separate programs: a cancelled tree/shrub program never survives on a palm rider', () => {
+    const pestLine = { familyKey: 'pest_control', serviceKeys: ['pest_control_quarterly'] };
+    // sold pest + tree/shrub; the tree/shrub program was cancelled since, palm injections remain
+    const sold = { homeSqFt: 2100, services: { pest: { frequency: 'quarterly' }, treeShrub: { tier: 'enhanced' } } };
+    const out = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [pestLine, { familyKey: 'tree_shrub', serviceKeys: ['palm_injection_semiannual'] }] });
+    expect(out.services.treeShrub).toBeUndefined();
+    expect(out.priorQualifyingServices).toEqual([]); // palm qualifies for nothing → pest replays at Bronze
+    expect(out.recurringCustomer).toBeUndefined();
+    // sold pest + palm; palm cancelled since, a real tree/shrub program added
+    const soldPalm = { homeSqFt: 2100, palmCount: 6, services: { pest: { frequency: 'quarterly' }, palmInjection: { count: 6 } } };
+    const out2 = P.listReplayInputs(soldPalm, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [pestLine, { familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program'] }] });
+    expect(out2.services.palmInjection).toBeUndefined();
+    expect(out2.priorQualifyingServices).toEqual(['tree_shrub']);
+    // both programs active (one consolidated family line) → both saved services survive, nothing is a prior
+    const out3 = P.listReplayInputs({ homeSqFt: 2100, services: { treeShrub: { tier: 'enhanced' }, palm: { count: 2 } } }, { familyKey: 'tree_shrub', cadence: 'bimonthly', activeFamilies: [{ familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program', 'palm_injection_semiannual'] }] });
+    expect(out3.services.treeShrub).toBeDefined();
+    expect(out3.services.palm).toBeDefined();
+    expect(out3.priorQualifyingServices).toEqual([]);
+    // sold pest + palm; a bed program added later (same consolidated line) counts as a prior even though the palm rider survived
+    const out5 = P.listReplayInputs(soldPalm, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [pestLine, { familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program', 'palm_injection_semiannual'] }] });
+    expect(out5.services.palmInjection).toBeDefined();
+    expect(out5.priorQualifyingServices).toEqual(['tree_shrub']);
+    // a tree_shrub line without catalog keys is of unknown composition: it keeps whatever was sold
+    const out4 = P.listReplayInputs({ homeSqFt: 2100, services: { pest: { frequency: 'quarterly' }, treeShrub: { tier: 'enhanced' }, palm: { count: 2 } } }, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'tree_shrub'] });
+    expect(out4.services.treeShrub).toBeDefined();
+    expect(out4.services.palm).toBeDefined();
+    expect(out4.priorQualifyingServices).toEqual([]);
+  });
+  test('the ORIGINAL-mix replay restores the server-stamped prior qualifying services; the client-posted copy never survives', () => {
+    const inputs = { lotSqFt: 8000, priorQualifyingServices: ['pest_control', 'mosquito'], recurringCustomer: true, services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } };
+    // original mix with the server-stamped evidence → priors restored (sold as a Silver add-on)
+    const original = P.listReplayInputs(inputs, { familyKey: null, cadence: null, activeFamilies: null, savedPriorQualifying: ['pest_control'] });
+    expect(original.priorQualifyingServices).toEqual(['pest_control']);
+    expect(original.recurringCustomer).toBe(true);
+    // no server stamp → the client-posted list is gone
+    const bare = P.listReplayInputs(inputs, { familyKey: null, cadence: null, activeFamilies: null, savedPriorQualifying: null });
+    expect(bare.priorQualifyingServices).toBeUndefined();
+    expect(bare.recurringCustomer).toBeUndefined();
+    // the current-bundle replay derives priors from today's plan lines, not the stamp
+    const current = P.listReplayInputs(inputs, { familyKey: 'lawn_care', cadence: 'every_6_weeks', activeFamilies: ['lawn_care', 'pest_control', 'rodent'], savedPriorQualifying: ['pest_control'] });
+    expect(current.priorQualifyingServices).toEqual(['pest_control', 'rodent_bait']);
+  });
+  test('every server-owned replay stamp comes off through the shared client-identity sanitizer', () => {
+    const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
+    for (const stamp of ['treeShrubPricingKnobs', 'palmAnnualRounding', 'catalogPricing', 'termitePricingKnobs', 'rodentWaveguardPostureReplay']) expect(CLIENT_IDENTITY_FIELDS).toContain(stamp);
+    const saved = { homeSqFt: 2100, treeShrubPricingKnobs: { x: 1 }, palmAnnualRounding: { y: 2 }, catalogPricing: { z: 3 }, services: { pest: { frequency: 'quarterly' } } };
+    const clean = P.listReplayInputs(saved, { familyKey: 'pest_control', cadence: 'quarterly' });
+    for (const stamp of CLIENT_IDENTITY_FIELDS) expect(clean[stamp]).toBeUndefined();
+    expect(clean.homeSqFt).toBe(2100);
+    expect(saved.catalogPricing).toEqual({ z: 3 }); // never mutates the stored inputs
+  });
   test('historical pins come off: a v1-pinned pest quote, frozen floors and minimums reprice at today\'s list', () => {
     const saved = {
       homeSqFt: 2100, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 89, lawnProgramMinimumMonthly: 45, useLawnCostFloor: true,
@@ -591,15 +741,37 @@ describe('engine replay runs at the line\'s own cadence', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src.indexOf("sv.frequency LIKE 'seasonal%'")).toBeLessThan(src.indexOf("s.recurring_pattern IN ('monthly','monthly_nth_weekday') THEN 'monthly'"));
   });
+  test('an engine item\'s application count comes through the converter\'s alias vocabulary — the palm engine says appsPerYear', () => {
+    expect(P.engineItemVisits({ visitsPerYear: 4 })).toBe(4);
+    expect(P.engineItemVisits({ appsPerYear: 2 })).toBe(2); // pricePalmInjection's field
+    expect(P.engineItemVisits({ treatmentsPerYear: 2 })).toBe(2);
+    expect(P.engineItemVisits({ apps: 3 })).toBe(3);
+    expect(P.engineItemVisits({ visits: 9 })).toBe(9);
+    expect(P.engineItemVisits({ frequency: 6 })).toBe(6); // lawn's field, outside the converter list
+    expect(P.engineItemVisits({})).toBeNull();
+    const palm = { lineItems: [{ service: 'palm_injection', annualAfterDiscount: 300, appsPerYear: 2 }], waveGuard: { tier: 'bronze' } };
+    expect(P.listRateFromEngineResult(palm, 'tree_shrub', 'semiannual')).toMatchObject({ perAppCents: 15000, cadenceMismatch: false });
+  });
+  test('a standalone palm program is the tree/shrub family\'s primary item, never a rider of a missing line', () => {
+    const palmOnly = { lineItems: [{ service: 'palm_injection', annualAfterDiscount: 300, visitsPerYear: 2 }], waveGuard: { tier: 'bronze' } };
+    expect(P.listRateFromEngineResult(palmOnly, 'tree_shrub', 'semiannual', { includeRiders: true, riderAllow: ['palm_injection'] })).toMatchObject({ perAppCents: 15000, monthlyCents: 2500, riderServices: [], cadenceMismatch: false });
+    expect(P.listRateFromEngineResult(palmOnly, 'tree_shrub', 'semiannual')).toMatchObject({ perAppCents: 15000 });
+    // with a tree_shrub line present it stays the primary and palm is the rider
+    const both = { lineItems: [{ service: 'palm_injection', annualAfterDiscount: 150, visitsPerYear: 2 }, { service: 'tree_shrub', annualAfterDiscount: 360, visitsPerYear: 6 }], waveGuard: { tier: 'silver' } };
+    expect(P.listRateFromEngineResult(both, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ perAppCents: 6000, monthlyCents: 4250, riderServices: ['palm_injection'] });
+  });
   test('a palm rider joins the monthly list figure exactly where the ledger slice sums it, never the per-application one', () => {
     const result = { lineItems: [{ service: 'tree_shrub', annualAfterDiscount: 360, visitsPerYear: 6 }, { service: 'palm_injection', annualAfterDiscount: 150, visitsPerYear: 2 }], waveGuard: { tier: 'silver' } };
     const monthly = P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true });
     expect(monthly).toMatchObject({ monthlyCents: 4250, perAppCents: 6000, riderServices: ['palm_injection'] });
     const perApp = P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly');
     expect(perApp).toMatchObject({ monthlyCents: 3000, perAppCents: 6000, riderServices: [] });
-    // a rider that needs a custom quote is left out rather than priced at $0
+    // a rider the slice carries that needs a human holds the WHOLE line (the current rate includes the rider; a rider-free list would compare mismatched bundles)
     const quoteRequired = { lineItems: [result.lineItems[0], { ...result.lineItems[1], quoteRequired: true }], waveGuard: { tier: 'silver' } };
-    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true }).monthlyCents).toBe(3000);
+    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true })).toMatchObject({ lowConfidence: true });
+    // … but a rider the slice does NOT carry is ignored entirely, confident or not
+    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub'] })).toMatchObject({ monthlyCents: 3000, riderServices: [] });
+    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly')).toMatchObject({ monthlyCents: 3000 });
     // a rider on the saved estimate that the ledger no longer carries (cancelled since) stays out of the list
     expect(P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub'] })).toMatchObject({ monthlyCents: 3000, riderServices: [] });
     expect(P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ monthlyCents: 4250, riderServices: ['palm_injection'] });
@@ -675,6 +847,21 @@ describe('the review window: anniversaries 35–65 days out from the build date'
     expect(P.reviewWindowFor(new Date('2026-11-01T11:20:00Z'))).toEqual({ from: '2026-12-06', to: '2027-01-05' });
     // a late-evening ET build still counts from the ET calendar day
     expect(P.reviewWindowFor(new Date('2026-12-01T03:30:00Z'))).toEqual({ from: '2027-01-04', to: '2027-02-03' }); // 2026-11-30 22:30 ET
+    // the monthly job anchors on the FIRST of the build month: a day-2 retry covers the same window as day 1
+    expect(P.reviewWindowFor(new Date('2026-11-02T11:20:00Z'), { anchor: '2026-11-01' })).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    expect(P.reviewWindowFor(new Date('2026-11-07T11:20:00Z'), { anchor: '2026-11-01' })).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+  });
+  test('a retry after a day-1 build that never persisted still anchors on the first of the month — no anniversary falls through', async () => {
+    const scripted = fixture.scriptedDb({ planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, batchRow: null });
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    const retry = await rateReview.runMonthlyRateReview({ now: new Date('2026-11-02T11:20:00Z'), deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(retry.batchKey).toBe('2026-11');
+    expect(retry.window).toEqual({ from: '2026-12-06', to: '2027-01-05' }); // not Dec 7 – Jan 6
+    // an ad-hoc admin build with no window still anchors on the build date
+    const adhoc = await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-02T11:20:00Z') });
+    expect(adhoc.window).toEqual({ from: '2026-12-07', to: '2027-01-06' });
   });
   test('buildBatch defaults to that window when no explicit from/to is given, and an explicit window wins', async () => {
     const scripted = fixture.scriptedDb({ planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0 });
@@ -687,6 +874,36 @@ describe('the review window: anniversaries 35–65 days out from the build date'
     const explicit = await rateReview.buildBatch({ batchKey: '2026-11', anniversaryFrom: '2026-01-01', anniversaryTo: '2026-12-31', now: NOW });
     expect(explicit.window).toEqual({ from: '2026-01-01', to: '2026-12-31' });
   });
+  test('a rebuild of a batch whose digest already went out resets the one-email marker and says so', async () => {
+    const scenario = { planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, batchRow: { batch_key: '2026-11', window_from: '2026-12-06', window_to: '2027-01-05', email_sent_at: new Date('2026-11-01T10:30:00Z') } };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    const rebuilt = await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-10T11:20:00Z') });
+    expect(rebuilt.digestReset).toBe(true);
+    const upsert = scripted.writes.batchUpserts[scripted.writes.batchUpserts.length - 1];
+    expect(upsert.email_sent_at).toBeNull();
+    expect(upsert.email_subject).toBeNull();
+    const merged = scripted.mock.results.map((r) => r.value).find((q) => q && q.calls && q.calls.some(([n]) => n === 'merge'));
+    expect(merged.calls.find(([n]) => n === 'merge')[1][0]).toEqual(expect.arrayContaining(['email_sent_at', 'email_subject']));
+    scenario.batchRow = { batch_key: '2026-11', window_from: '2026-12-06', window_to: '2027-01-05', email_sent_at: null };
+    expect((await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-10T11:20:00Z') })).digestReset).toBe(false);
+  });
+  test('a recompute of an EXISTING batch keeps the window it was built with — a later rebuild never slides it and drops rows', async () => {
+    const scenario = { planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, batchRow: { batch_key: '2026-11', window_from: '2026-12-06', window_to: '2027-01-05' } };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    // rebuilt nine days later: the rolling window would now start Dec 15
+    const rebuilt = await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-10T11:20:00Z') });
+    expect(rebuilt.window).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    // an explicit window still wins, and a batch with no stored row takes the rolling default
+    expect((await rateReview.buildBatch({ batchKey: '2026-11', anniversaryFrom: '2026-12-10', anniversaryTo: '2026-12-20', now: new Date('2026-11-10T11:20:00Z') })).window).toEqual({ from: '2026-12-10', to: '2026-12-20' });
+    scenario.batchRow = null;
+    expect((await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-10T11:20:00Z') })).window).toEqual({ from: '2026-12-15', to: '2027-01-14' });
+  });
   test('impossible batch months and calendar dates are 400s in the service', async () => {
     await expect(rateReview.buildBatch({ batchKey: '2026-13' })).rejects.toMatchObject({ status: 400 });
     await expect(rateReview.buildBatch({ batchKey: '2026-00' })).rejects.toMatchObject({ status: 400 });
@@ -696,6 +913,12 @@ describe('the review window: anniversaries 35–65 days out from the build date'
     expect(() => P.assertYmd('2026-02-29', 'x')).toThrow(/real calendar date/);
     expect(() => P.assertYmd('2028-02-29', 'x')).not.toThrow();
   });
+  test('day lookbacks walk the ET calendar: a window crossing the spring DST change never lands a day early', () => {
+    // 2027-03-15 00:30 EDT (04:30Z), the day after the Mar 14 transition: 10 ET days back is Mar 5; fixed 24h ms arithmetic would say Mar 4 (23:30 EST)
+    expect(P.daysAgoYmd(new Date('2027-03-15T04:30:00Z'), 10)).toBe('2027-03-05');
+    expect(P.daysAgoYmd(new Date('2026-11-01T11:20:00Z'), 90)).toBe('2026-08-03');
+    expect(P.daysAgoYmd(new Date('2026-11-01T11:20:00Z'), 365)).toBe('2025-11-01');
+  });
   test('the manual-edit cutoff is calendar-exact (Mar 31 − 6 months = Sep 30, never Oct 1)', () => {
     expect(P.monthsAgoYmd(new Date('2027-03-31T16:00:00Z'), 6)).toBe('2026-09-30');
     expect(P.monthsAgoYmd(new Date('2026-11-01T11:20:00Z'), 12)).toBe('2025-11-01');
@@ -704,7 +927,8 @@ describe('the review window: anniversaries 35–65 days out from the build date'
 });
 
 describe('carry-forward: an exception or skipped line comes back next month', () => {
-  const entry = (overrides = {}) => ({ customer: { id: 'c1', member_since: '2024-06-15', created_at: '2024-06-15T12:00:00Z' }, familyKey: 'pest_control', first: null, acceptedAt: null, ...overrides });
+  // an imported line: member_since on the account, its first portal visit on record (a line with no completed visit has no anniversary at all)
+  const entry = (overrides = {}) => ({ customer: { id: 'c1', member_since: '2024-06-15', created_at: '2024-06-15T12:00:00Z' }, familyKey: 'pest_control', first: { first_visit: '2026-05-10', completed_visits: 2 }, acceptedAt: null, ...overrides });
   // build 2026-11-01: window Dec 6 – Jan 5; carry floor = 2026-08-03
   const args = { from: '2026-12-06', to: '2027-01-05', now: NOW };
   test('a line whose latest earlier snapshot was an exception within 90 days is carried with its original review date', () => {
@@ -747,7 +971,7 @@ describe('carry-forward: an exception or skipped line comes back next month', ()
     const octoberAccount = fixture.customer(15, { member_since: '2024-10-20', last_name: 'Carried' }); // October anniversary
     const scenario = {
       planLines: [...book.planLines, fixture.planLine(octoberAccount.id, 'pest_control', 'quarterly', 110)],
-      customers: [...book.customerRows, octoberAccount], firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms,
+      customers: [...book.customerRows, octoberAccount], firstVisits: [...book.firstVisits, { customer_id: octoberAccount.id, line: 'pest_control', first_visit: '2026-05-05', completed_visits: 2 }], completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms,
       ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
       latestSnapshots: [{ customer_id: octoberAccount.id, family_key: 'pest_control', status: 'exception', review_date: '2026-10-20', batch_key: '2026-09', computed_at: '2026-09-01T10:20:00Z' }],
     };
@@ -787,6 +1011,19 @@ describe('engine replay guards', () => {
     const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id);
     expect(row.list_rate_source).toBe('cadence_mode');
     expect(JSON.parse(row.flags)).toEqual(expect.arrayContaining(['engine_sync_failed', 'list_from_cadence_mode']));
+  });
+  test('constants are refreshed once per batch UNCONDITIONALLY — needsSync() saying "fresh" on this pod is not trusted', async () => {
+    const engine = { ...fixture.fakePricingEngine(), needsSync: () => false, syncConstantsFromDB: jest.fn(async () => false) };
+    const { scripted, run } = scenarioWith(engine);
+    await run();
+    expect(engine.syncConstantsFromDB).toHaveBeenCalledTimes(1);
+    expect(engine.generateEstimate).not.toHaveBeenCalled();
+    expect(JSON.parse(scripted.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id).flags)).toContain('engine_sync_failed');
+    const throwing = { ...fixture.fakePricingEngine(), syncConstantsFromDB: jest.fn(async () => { throw new Error('db down'); }) };
+    const b = scenarioWith(throwing);
+    await b.run();
+    expect(throwing.generateEstimate).not.toHaveBeenCalled();
+    expect(await P.syncPricingConstants({ pricingEngine: { generateEstimate: () => ({}) } })).toBe(true); // an engine with no bridge has nothing to refresh
   });
   test('a replay that throws is engine_replay_failed, and a sync that succeeds prices normally', async () => {
     const throwing = { ...fixture.fakePricingEngine(), needsSync: () => false, generateEstimate: jest.fn(() => { throw new Error('boom'); }) };
@@ -835,6 +1072,320 @@ describe('engine replay guards', () => {
     const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === customer.id);
     expect(row.anniversary_date).toBe('2025-12-05'); // first completed visit after the EARLIEST acceptance (2025-11-28)
   });
+  test('held lanes never feed the cadence mode: three per_visit accounts cannot become a clean account\'s list rate', async () => {
+    const perVisit = [20, 21, 22].map((n) => fixture.customer(n, { member_since: '2024-11-0' + (n - 19), billing_mode: 'per_visit', last_name: 'PV ' + n }));
+    const clean = fixture.customer(23, { member_since: '2024-12-09', last_name: 'Clean No Estimate' });
+    const scenario = {
+      // only the per_visit accounts and the clean account share pest/bimonthly — no estimate anywhere on this cadence
+      planLines: [...perVisit.map((c) => fixture.planLine(c.id, 'pest_control', 'bimonthly', 95)), fixture.planLine(clean.id, 'pest_control', 'bimonthly', 90)],
+      customers: [...perVisit, clean], firstVisits: [...perVisit, clean].map((c) => ({ customer_id: c.id, line: 'pest_control', first_visit: '2026-05-06', completed_visits: 3 })), completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async () => fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: [] }));
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === clean.id);
+    expect(row.list_rate_source).toBe('none');
+    expect(row.status).toBe('skipped');
+    expect(JSON.parse(row.flags)).toContain('no_list_rate');
+  });
+  test('commercial accounts are no pricing reference: out of the cadence mode and the $/hr quartiles', async () => {
+    // December anniversaries (imported lines: member_since 2024-12-10/11/12) so every fixture sits in the December window
+    const commercial = [24, 25, 26].map((n) => fixture.customer(n, { member_since: '2024-12-1' + (n - 24), property_type: 'commercial', last_name: 'Commercial ' + n }));
+    const clean = fixture.customer(27, { member_since: '2024-12-09', last_name: 'Residential No Estimate' });
+    const scenario = {
+      planLines: [...commercial.map((c) => fixture.planLine(c.id, 'pest_control', 'bimonthly', 250)), fixture.planLine(clean.id, 'pest_control', 'bimonthly', 90)],
+      customers: [...commercial, clean], firstVisits: [...commercial, clean].map((c) => ({ customer_id: c.id, line: 'pest_control', first_visit: '2026-05-06', completed_visits: 3 })), completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async () => fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: [] }));
+    const out = await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === clean.id);
+    expect(row.list_rate_source).toBe('none'); // three commercial $250 contracts never became the residential list rate
+    expect(row.status).toBe('skipped');
+    expect(out.lineRph.pest_control).toBeUndefined();
+    for (const c of commercial) {
+      const commercialRow = scripted.writes.snapshotInserts.find((r) => r.customer_id === c.id);
+      expect(commercialRow).toBeDefined();
+      expect(commercialRow.status).toBe('exception');
+      expect(JSON.parse(commercialRow.flags)).toContain('commercial');
+    }
+  });
+  test('a config read that FAILS fails the batch; a missing row still defaults', async () => {
+    const failing = fixture.scriptedDb({ planLines: [], customers: [], configError: new Error('relation unavailable') });
+    db.mockImplementation((table) => failing(table));
+    db.raw.mockImplementation((...args) => failing.raw(...args));
+    await expect(rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW })).rejects.toThrow('relation unavailable');
+    expect(failing.writes.snapshotInserts).toHaveLength(0);
+    expect(failing.writes.batchUpserts).toHaveLength(0);
+    const missing = fixture.scriptedDb({ planLines: [], customers: [], config: null });
+    db.mockImplementation((table) => missing(table));
+    db.raw.mockImplementation((...args) => missing.raw(...args));
+    db.transaction.mockImplementation((fn) => missing.transaction(fn));
+    expect((await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW })).config).toMatchObject(DEFAULT_CONFIG);
+  });
+  test('an unclassified family never borrows a list rate from other unclassified lines and is held', async () => {
+    const others = [16, 17, 18].map((n) => fixture.customer(n, { member_since: '2024-12-0' + (n - 15), last_name: 'Other ' + n }));
+    const scenario = {
+      planLines: [...book.planLines, ...others.map((c) => fixture.planLine(c.id, 'other', 'quarterly', 150))],
+      customers: [...book.customerRows, ...others], firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms,
+      ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    for (const c of others) {
+      const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === c.id);
+      expect(row.list_rate_source).toBe('none');
+      expect(row.status).toBe('exception');
+      expect(JSON.parse(row.flags)).toContain('unsupported_family');
+    }
+  });
+  test('the book and history loaders mirror the canonical purchased-plan row predicate', () => {
+    const { isPlanSeriesRow, isCountingSourceStatus, COUNTING_SOURCE_STATUSES } = require('../services/recurring-series-cancel-reseed');
+    // the SQL says what isPlanSeriesRow says: recurring root or legacy child, never a booster, callback or included follow-up
+    expect(P.PLAN_ROW_SQL).toMatch(/s\.is_recurring = true OR \(s\.is_recurring IS NULL AND s\.recurring_parent_id IS NOT NULL\)/);
+    expect(P.PLAN_ROW_SQL).toMatch(/COALESCE\(s\.is_callback, false\) = false/);
+    expect(P.PLAN_ROW_SQL).toMatch(/COALESCE\(s\.followup_included, false\) = false/);
+    expect(isPlanSeriesRow({ is_recurring: false, recurring_parent_id: 'root' })).toBe(false); // booster
+    expect(isPlanSeriesRow({ is_recurring: true, is_callback: true })).toBe(false);
+    expect(isPlanSeriesRow({ is_recurring: null, recurring_parent_id: 'root' })).toBe(true);
+    // live statuses = the reconciler's counting statuses (no 'rescheduled' placeholder)
+    expect(P.LIVE_STATUS_SQL).toBe(`(s.status IS NULL OR s.status IN (${COUNTING_SOURCE_STATUSES.map((st) => `'${st}'`).join(', ')}))`);
+    expect(isCountingSourceStatus('rescheduled')).toBe(false);
+    expect(P.LIVE_STATUS_SQL).not.toMatch(/rescheduled/);
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
+    expect(planQuery).toMatch(/\$\{LIVE_STATUS_SQL\}/);
+    expect(planQuery).toMatch(/\$\{PLAN_ROW_SQL\}/);
+    // the scheduled row's frozen category snapshot outranks the live (mutable) catalog category
+    expect(src).toMatch(/COALESCE\(s\.service_category_snapshot, sv\.category,/);
+    expect(src).not.toMatch(/COALESCE\(sv\.category, s\.service_category_snapshot/);
+    for (const fn of ['loadFirstCompletedVisits', 'loadCompletedVisitRows']) {
+      const body = src.slice(src.indexOf(`async function ${fn}`), src.indexOf('`, [', src.indexOf(`async function ${fn}`)));
+      expect(body).toMatch(/\$\{PLAN_ROW_SQL\}/);
+    }
+    expect(src).not.toMatch(/RECURRING_SQL/);
+    expect(planQuery).toMatch(/c\.active = true/);
+    expect(planQuery).toMatch(/c\.pipeline_stage IN \('active_customer', 'won', 'at_risk'\)/);
+    const revenue = src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));
+    expect(revenue).toMatch(/refund_amount/);
+    // linked the way invoice.js links payments to invoices — never a payments.invoice_id (there is none)
+    expect(revenue).toMatch(/p\.stripe_payment_intent_id = i\.stripe_payment_intent_id/);
+    expect(revenue).toMatch(/metadata::jsonb ->> 'invoice_id' = i\.id::text/);
+    expect(revenue).not.toMatch(/p\.invoice_id/);
+    // settled monthly dues are net of refunds on BOTH rails — netting one alone would let the other's gross figure win GREATEST
+    const dues = src.slice(src.indexOf('async function loadSettledDues'), src.indexOf('function duesPerVisitCents'));
+    // a partial refund returns its surcharge share too (refunded_surcharge_cents) — only the BASE refund comes off revenue, on every rail
+    expect(P.REFUND_BASE_SQL).toBe('GREATEST(COALESCE(p.refund_amount, 0) - COALESCE(p.refunded_surcharge_cents, 0) / 100.0, 0)');
+    expect(dues).toMatch(/sum\(amount - COALESCE\(surcharge_amount_cents, 0\) \/ 100\.0 - GREATEST\(COALESCE\(refund_amount, 0\) - COALESCE\(refunded_surcharge_cents, 0\) \/ 100\.0, 0\)\)/);
+    expect(dues).toMatch(/\$\{REFUND_BASE_SQL\}/);
+    expect(revenue).toMatch(/SELECT sum\(\$\{REFUND_BASE_SQL\}\) FROM payments p/);
+    expect(src).not.toMatch(/sum\(COALESCE\(p\.refund_amount, 0\)\)/);
+    // an invoice linked only through its service record (invoice.js linkedScheduledServiceId) still pairs its revenue
+    const completed = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(completed).toMatch(/SELECT DISTINCT ON \(scheduled_service_id\) scheduled_service_id, id AS service_record_id,/);
+    expect(revenue).toMatch(/OR \(i\.service_record_id IS NOT NULL AND i\.service_record_id = sr\.service_record_id\)/);
+    expect(dues).toMatch(/sum\(i\.total\) - COALESCE\(sum\(\(/);
+    expect(dues).toMatch(/GREATEST\(COALESCE\(inv\.amount, 0\), COALESCE\(pay\.amount, 0\)\)/);
+  });
+  test('the current rate is the recurring application\'s own price (rowServicePrice), never a composite visit\'s appointment total', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
+    // estimate-membership-context.js rowServicePrice: no add-ons → estimated_price; composite → primary net of its line discount; appointment-level discount → withheld
+    expect(planQuery).toMatch(/NOT EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\)/);
+    expect(planQuery).toMatch(/COALESCE\(s\.discount_dollars, 0\) > 0 OR s\.discount_type IS NOT NULL OR s\.discount_id IS NOT NULL THEN NULL/);
+    expect(planQuery).toMatch(/s\.primary_line_price - COALESCE\(s\.line_discount_dollars, 0\) > 0/);
+    expect(planQuery).toMatch(/WITHIN GROUP \(ORDER BY service_price\) FILTER \(WHERE service_price > 0\) AS median_price/);
+    expect(planQuery).not.toMatch(/ORDER BY estimated_price/);
+    expect(planQuery).toMatch(/count\(\*\) FILTER \(WHERE service_price IS NULL AND estimated_price > 0\)::int AS withheld_visits/);
+    // every priced open visit composite with an unattributable discount → no application price → held, never the account fee
+    const customer = fixture.customer(1, { billing_mode: 'per_application', per_application_fee: 95 });
+    const withheld = P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', null, { withheld_visits: 3 }), liveTerms: [], ledgerSlice: null });
+    expect(withheld).toMatchObject({ cents: 0, source: 'none', unit: 'application', rateUnattributed: true, compositeWithheld: true });
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 0, currentRateSource: 'none', rateUnit: 'application', rateUnattributed: true, compositeWithheld: true, facts: fixture.facts() });
+    expect(row.status).toBe('skipped');
+    expect(row.flags).toEqual(expect.arrayContaining(['rate_unattributed', 'composite_discount_withheld', 'no_current_rate']));
+    // visits that do decompose still price the line; an unpriced book still falls to the fee
+    expect(P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', 117, { withheld_visits: 1 }), liveTerms: [], ledgerSlice: null })).toMatchObject({ cents: 11700, source: 'visit_median' });
+    expect(P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'pest_control', 'quarterly', null), liveTerms: [], ledgerSlice: null })).toMatchObject({ cents: 9500, source: 'per_application_fee' });
+  });
+  test('a composite visit (add-ons in the same stop) is no $/hr or wall-clock evidence for the line — excluded and counted, never the whole stop\'s money over the whole stop\'s clock', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(q).toMatch(/\(EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) OR \$\{COMBINED_CATALOG_SQL\}\) AS composite_visit/);
+    const plain = [40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 117 }));
+    const composite = [75, 80].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 192, composite: true }));
+    const stats = P.lineDurationStats([...plain, ...composite]);
+    expect(stats).toMatchObject({ usableVisits: 3, notHomeVisits: 3, compositeVisits: 2, treatmentMinutesMedian: 42 });
+    expect(stats.revenuePerHourCents).toBe(P.lineDurationStats(plain).revenuePerHourCents);
+    // only composite visits → no evidence at all (no $/hr, so no nudge either — never a biased one)
+    expect(P.lineDurationStats(composite)).toMatchObject({ usableVisits: 0, compositeVisits: 2, revenuePerHourCents: null, treatmentMinutesMedian: null });
+    // the home / not-home allowance medians skip them too
+    const book = [
+      ...[30, 31, 32].map((m) => fixture.visit('h', 'pest_control', { minutes: m, interaction: 'tech_home_spoke_with_them' })),
+      ...[20, 21, 22].map((m) => fixture.visit('n', 'pest_control', { minutes: m, interaction: 'not_home_full_access' })),
+      ...[90, 95, 99].map((m) => fixture.visit('x', 'pest_control', { minutes: m, interaction: 'tech_home_spoke_with_them', composite: true })),
+    ];
+    expect(P.computeLineAllowances(book).pest_control).toMatchObject({ allowance_minutes: 10, home_median: 31, not_home_median: 21, home_n: 3, not_home_n: 3, source: 'line' });
+    // the owner sees why the evidence is thinner
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 11700, rateUnit: 'application', listRateCents: 11700, usableVisits: 3, compositeVisits: 2, facts: fixture.facts() });
+    expect(row.flags).toContain('composite_visits_excluded');
+    expect(row.status).not.toBe('exception');
+  });
+  test('the retired combined catalog identities (two programs in one row, no addon rows) are composites: no evidence for a line, withheld in the current rate', () => {
+    expect(P.RETIRED_COMBINED_CATALOG_KEYS).toEqual(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']); // estimate-converter.js RETIRED_COMBINED_CATALOG_KEYS
+    expect(P.COMBINED_CATALOG_SQL).toBe("COALESCE(s.service_key_snapshot, sv.service_key) IN ('pest_termite_bait_quarterly', 'lawn_tree_shrub_combo')");
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const completed = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(completed).toMatch(/\(EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) OR \$\{COMBINED_CATALOG_SQL\}\) AS composite_visit/);
+    const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
+    expect(planQuery).toMatch(/CASE\n\s+WHEN \$\{COMBINED_CATALOG_SQL\} THEN NULL\n\s+WHEN NOT EXISTS/);
+  });
+  test('a combined completion-packet invoice credits each member its own settled share, never its whole total to the anchor member', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const revenue = src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));
+    // visit-completion-invoice.js mintPacketInvoice: one invoice under billed[0].member.id, members linked via visit_completion_packet_items.invoice_id
+    expect(revenue).toMatch(/OR EXISTS \(SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2\.invoice_id = i\.id AND pm2\.scheduled_service_id = s\.id\)/);
+    expect(revenue).toMatch(/LEFT JOIN LATERAL \(/);
+    expect(revenue).toMatch(/COALESCE\(s\.estimated_price, s\.primary_line_price, 0\) \/ sum\(COALESCE\(m\.estimated_price, m\.primary_line_price\)\)/);
+    expect(revenue).toMatch(/HAVING count\(\*\) > 1/);
+    // a combined first-application invoice (estimate-converter stamps the anchor AND each covered sibling with its id) splits the same way; a member with no price makes the whole invoice unattributable
+    expect(revenue).toMatch(/OR s\.first_application_invoice_id = i\.id/);
+    expect(revenue).toMatch(/SELECT b\.id FROM scheduled_services b WHERE b\.first_application_invoice_id = i\.id/);
+    expect(revenue).toMatch(/WHEN count\(\*\) FILTER \(WHERE COALESCE\(m\.estimated_price, m\.primary_line_price\) > 0\) < count\(\*\) THEN 0/);
+    // the deposit paid at acceptance is consideration: total is the remaining balance, the credit survives as the negative deposit_credit line
+    expect(P.depositCreditSql('i')).toMatch(/WHERE dc ->> 'category' = 'deposit_credit'/);
+    expect(P.depositCreditSql('i')).toMatch(/SELECT -sum\(NULLIF\(regexp_replace\(dc ->> 'amount'/);
+    expect(revenue).toMatch(/\), 0\) \+ \$\{depositCreditSql\('i'\)\},/); // net settled consideration
+    expect(revenue).toMatch(/ELSE i\.total \+ \$\{depositCreditSql\('i'\)\} END/); // the plain-invoice cap
+    expect(revenue).toMatch(/AND COALESCE\(li ->> 'category', ''\) <> 'deposit_credit'\)/); // never netted out of the application lines
+    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(q).toMatch(/\), 0\) \+ \$\{depositCreditSql\('pi'\)\}\)/); // the prepay settlement too
+    expect(revenue).toMatch(/\) \* COALESCE\(share\.fraction, 1\)\)/);
+    expect(revenue).not.toMatch(/WHERE i\.scheduled_service_id = s\.id AND/);
+  });
+  test('a monthly replay must price every ledger component — a palm program sold on a separate estimate is no rider of the bed replay', () => {
+    const bedOnly = { lineItems: [{ service: 'tree_shrub', annualAfterDiscount: 360, visitsPerYear: 6 }], waveGuard: { tier: 'silver' } };
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toEqual({ bundleIncomplete: true, missingServices: ['palm_injection'], tier: 'silver' });
+    // the reverse: a palm-only replay cannot stand in for a slice that also pays for the bed program
+    const palmOnly = { lineItems: [{ service: 'palm_injection', annualAfterDiscount: 300, visitsPerYear: 2 }], waveGuard: { tier: 'bronze' } };
+    expect(P.listRateFromEngineResult(palmOnly, 'tree_shrub', 'semiannual', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ bundleIncomplete: true, missingServices: ['tree_shrub'] });
+    // a slice that carries only what the replay priced is complete; the per-application lane never needs riders
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub'] })).toMatchObject({ monthlyCents: 3000, riderServices: [] });
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ perAppCents: 6000 });
+    // ledger keys outside this line's engine programs (an unrelated family in the slice) are not required of the replay
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'unattributed'] })).toMatchObject({ monthlyCents: 3000 });
+    // and the held line is an exception, not a silent one-program comparison
+    expect(rateReview.EXCEPTION_FLAGS).toContain('list_bundle_incomplete');
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'tree_shrub', cadence: 'bimonthly', visitsPerYear: 6, billingLane: 'monthly_membership', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 4250, rateUnit: 'month', listRateCents: null, listBundleIncomplete: true, facts: fixture.facts() });
+    expect(row.status).toBe('exception');
+    expect(row.flags).toContain('list_bundle_incomplete');
+  });
+  test('a downward-performance nudge (B → C on bottom-quartile $/hr) never proposes less than the pass-through', () => {
+    const lineRph = { q1: 8000, median: 9000, q3: 10000, n: 4 };
+    const unnudged = P.classifyBand({ currentCents: 11500, listCents: 11700, config: DEFAULT_CONFIG });
+    expect(unnudged).toMatchObject({ band: 'B', proposedCents: 11900, deltaCents: 400, noChange: false });
+    const nudged = P.classifyBand({ currentCents: 11500, listCents: 11700, rph: 7000, lineRph, usableVisits: 4, config: DEFAULT_CONFIG });
+    expect(nudged.flags).toContain('rph_bottom_quartile');
+    expect(nudged).toMatchObject({ band: 'C', proposedCents: 11900, deltaCents: 400, noChange: false }); // list ($117) sits under the pass-through — never no_change
+    // when list is the bigger ask, C still goes to list
+    const wideGap = P.classifyBand({ currentCents: 11000, listCents: 11500, rph: 7000, lineRph, usableVisits: 4, config: DEFAULT_CONFIG });
+    expect(wideGap).toMatchObject({ band: 'C', proposedCents: 11500 });
+  });
+  test('a no-estimate line backdates to member_since only when it was running at import; a program first seen later starts at its first visit', () => {
+    // the account reached the portal with a pest program (first visit Apr 5); lawn was first seen Aug 20
+    const pest = P.resolveAnniversary({ firstCompletedVisit: '2026-04-05', acceptedAt: null, memberSince: '2024-12-10', accountFirstVisit: '2026-04-05', presenceWindowDays: P.presenceWindowFor(4) });
+    expect(pest).toMatchObject({ date: '2024-12-10', source: 'member_since', conflict: false });
+    const lawn = P.resolveAnniversary({ firstCompletedVisit: '2026-08-20', acceptedAt: null, memberSince: '2024-12-10', accountFirstVisit: '2026-04-05', presenceWindowDays: P.presenceWindowFor(9) });
+    expect(lawn).toMatchObject({ date: '2026-08-20', source: 'first_visit', conflict: true }); // informational: member_since predates it
+    // a semiannual program's first visit may trail the account's by its own interval — still present at import
+    expect(P.presenceWindowFor(2)).toBe(213);
+    expect(P.resolveAnniversary({ firstCompletedVisit: '2026-10-01', acceptedAt: null, memberSince: '2024-12-10', accountFirstVisit: '2026-04-05', presenceWindowDays: P.presenceWindowFor(2) }).source).toBe('member_since');
+    expect(P.presenceWindowFor(4)).toBe(121);
+    expect(P.presenceWindowFor(null)).toBe(90);
+    // no account-level evidence keeps the old rule
+    expect(P.resolveAnniversary({ firstCompletedVisit: '2026-08-20', acceptedAt: null, memberSince: '2024-12-10' }).source).toBe('member_since');
+    // no accepted estimate and no completed visit yet: the line's age is unknown — never the account's membership (held as no_anniversary)
+    expect(P.resolveAnniversary({ firstCompletedVisit: null, acceptedAt: null, memberSince: '2024-12-10' })).toEqual({ date: null, source: null, conflict: false });
+    expect(P.resolveAnniversary({ firstCompletedVisit: null, acceptedAt: '2026-03-01T15:00:00Z', memberSince: '2024-12-10' })).toMatchObject({ date: '2026-03-01', source: 'estimate_accept' });
+    // the batch passes the account's earliest visit and the line's cadence window
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
+    // the account's earliest visit comes from the COMPLETE completed history, cancelled programs included — never just the active book
+    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits \}\)/);
+    const history = new Map([['c|lawn_care', { customer_id: 'c', line: 'lawn_care', first_visit: '2026-01-05' }], ['c|tree_shrub', { customer_id: 'c', line: 'tree_shrub', first_visit: '2026-08-20' }]]);
+    expect(P.accountFirstVisits(history, []).get('c')).toBe('2026-01-05');
+    expect(P.accountFirstVisits(null, [{ customer: { id: 'c' }, first: { first_visit: '2026-08-20' } }]).get('c')).toBe('2026-08-20');
+  });
+  test('a program added to an imported account after a since-cancelled one is dated by its own first visit — the cancelled program still dates the account\'s arrival', async () => {
+    const book = fixture.decemberBook();
+    const target = book.customers.belowList.id; // member_since 2025-01-10
+    const added = fixture.planLine(target, 'tree_shrub', 'bimonthly', 80, { service_keys: ['tree_shrub_program'] }); // no estimate
+    const run = async (history) => {
+      const scenario = { planLines: [...book.planLines, added], customers: book.customerRows, firstVisits: [...book.firstVisits, ...history], completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+      const scripted = fixture.scriptedDb(scenario);
+      db.mockImplementation((table) => scripted(table));
+      db.raw.mockImplementation((...args) => scripted.raw(...args));
+      db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+      mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+      mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+      await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-01-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+      return scripted.writes.snapshotInserts.find((r) => r.customer_id === target && r.family_key === 'tree_shrub');
+    };
+    // the account arrived with a (since cancelled) lawn program in January; tree/shrub first seen in August → its own start, under the lock
+    const later = await run([{ customer_id: target, line: 'lawn_care', first_visit: '2026-01-05', completed_visits: 2 }, { customer_id: target, line: 'tree_shrub', first_visit: '2026-08-20', completed_visits: 2 }]);
+    expect(later).toMatchObject({ anniversary_date: '2026-08-20', anniversary_source: 'first_visit', status: 'exception' });
+    expect(JSON.parse(later.flags)).toContain('tenure_under_lock');
+    // tree/shrub first seen with the account's own first visit (December 2025 pest) → present at import → member_since
+    const withAccount = await run([{ customer_id: target, line: 'tree_shrub', first_visit: '2025-12-20', completed_visits: 4 }]);
+    expect(withAccount).toMatchObject({ anniversary_date: '2025-01-10', anniversary_source: 'member_since' });
+  });
+  test('the sold-mix replay (hand-picked-tier evidence) keeps the stamped rodent posture; the current-list replay strips it', async () => {
+    const engine = { generateEstimate: jest.fn(() => ({ lineItems: [], waveGuard: { tier: 'bronze' } })) };
+    const estimate = { id: 'e-rodent', estimate_data: { engineInputs: { homeSqFt: 2000, rodentBaitLegacyReplay: { qualifies: false }, rodentWaveguardPostureReplay: { posture: 'legacy' }, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } } } };
+    await P.replayEstimate(estimate, { familyKey: null, cadence: null, activeFamilies: null, soldMix: true }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[0][0]).toMatchObject({ rodentBaitLegacyReplay: { qualifies: false }, rodentWaveguardPostureReplay: { posture: 'legacy' } });
+    await P.replayEstimate(estimate, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'rodent'] }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[1][0].rodentBaitLegacyReplay).toBeUndefined();
+    expect(engine.generateEstimate.mock.calls[1][0].rodentWaveguardPostureReplay).toBeUndefined();
+    expect(P.SOLD_POSTURE_KEYS).toEqual(['rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay']);
+    // real saved estimates carry the posture in estimate_data.result, not in the extracted inputs: the pins come from the
+    // same signal readers the authoritative recompute uses (rodent-bait-legacy-replay.js)
+    const { rodentBaitLegacyReplaySignal, rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    const legacyData = { engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } }, result: { lineItems: [{ service: 'pest_control', annual: 468 }, { service: 'rodent_bait', mo: 29, annual: 348 }] } };
+    expect(rodentBaitLegacyReplaySignal(legacyData)).toEqual({ monthly: 29 });
+    engine.generateEstimate.mockClear();
+    await P.replayEstimate({ id: 'e-legacy', estimate_data: legacyData }, { familyKey: null, cadence: null, activeFamilies: null, soldMix: true }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[0][0].rodentBaitLegacyReplay).toEqual({ monthly: 29 });
+    const postureData = { engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } }, result: { lineItems: [{ service: 'rodent_bait', stations: 6, tierQualifier: false, excludeFromPctDiscount: true }] } };
+    expect(rodentWaveguardPostureReplaySignal(postureData)).toEqual({ tierQualifier: false, excludeFromPctDiscount: true });
+    await P.replayEstimate({ id: 'e-posture', estimate_data: postureData }, { familyKey: null, cadence: null, activeFamilies: null, soldMix: true }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[1][0].rodentWaveguardPostureReplay).toEqual({ tierQualifier: false, excludeFromPctDiscount: true });
+    expect(engine.generateEstimate.mock.calls[1][0].rodentBaitLegacyReplay).toBeUndefined(); // new-model evidence → no legacy pin
+    expect(P.soldPosturePins({}, {})).toEqual({ rodentBaitLegacyReplay: null, rodentWaveguardPostureReplay: null });
+  });
+  test('the whole-account dues fallback compares against every program the line carries', () => {
+    expect(P.engineKeysForLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual'])).toEqual(['tree_shrub', 'palm_injection']);
+    expect(P.engineKeysForLine('tree_shrub', ['palm_injection_semiannual'])).toEqual(['palm_injection']);
+    expect(P.engineKeysForLine('pest_control', ['pest_control_quarterly'])).toEqual(['pest_control']);
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src).toMatch(/const bundledDues = monthly && \['ledger_slice', 'monthly_rate'\]\.includes\(current\.source\);/);
+    expect(src).toMatch(/riderAllow: current\.source === 'ledger_slice' && ledgerSlice \? ledgerSlice\.family_keys : engineKeysForLine\(familyKey, serviceKeys\)/);
+    // a $45 combined dues rate beside a bed-only replay is held, never a false no-change
+    const bedOnly = { lineItems: [{ service: 'tree_shrub', annualAfterDiscount: 540, visitsPerYear: 6 }], waveGuard: { tier: 'silver' } };
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: P.engineKeysForLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual']) })).toMatchObject({ bundleIncomplete: true, missingServices: ['palm_injection'] });
+  });
   test('a family restarted on a new estimate takes the first completed visit of the current series', () => {
     const first = { first_visit: '2024-03-10', completed_dates: ['2024-03-10', '2024-06-10', '2026-07-02', '2026-10-02'] };
     expect(P.firstCompletedVisitFor(first, '2026-06-20T15:00:00Z')).toBe('2026-07-02');
@@ -870,7 +1421,7 @@ describe('gate off is a no-op', () => {
     const fs = require('fs');
     const path = require('path');
     const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
-    const start = scheduler.indexOf("cron.schedule('20 6 1 * *'");
+    const start = scheduler.indexOf("cron.schedule('20 6 1-7 * *'");
     expect(start).toBeGreaterThan(0);
     const tick = scheduler.slice(start, scheduler.indexOf('cron.schedule(', start + 10));
     expect(tick).toMatch(/rateReviewLive\(\)\) return;/);
@@ -1059,6 +1610,36 @@ describe('buildBatch over the synthetic December book', () => {
     db.transaction.mockImplementation((fn) => scripted.transaction(fn));
   });
 
+  test('an existing-member add-on estimate sold at Silver is not a hand-picked tier', async () => {
+    const member = fixture.customer(19, { member_since: '2025-02-01', waveguard_tier: 'Silver', last_name: 'Member Add-on' });
+    const addon = { id: fixture.ESTIMATE(10), customer_id: member.id, accepted_at: '2025-11-26T16:00:00Z', waveguard_tier: 'Silver',
+      // server-stamped evidence at the top level: the customer already had pest when lawn was sold
+      estimate_data: { inputs: { lotSqFt: 8000, services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } }, priorQualifyingServices: ['pest_control'] } };
+    const lines = [...book.planLines,
+      fixture.planLine(member.id, 'pest_control', 'quarterly', 117, { account_lines: 2 }),
+      fixture.planLine(member.id, 'lawn_care', 'every_6_weeks', 61, { source_estimate_ids: [addon.id], account_lines: 2 })];
+    const scenario = {
+      planLines: lines, customers: [...book.customerRows, member],
+      firstVisits: [...book.firstVisits, { customer_id: member.id, line: 'pest_control', first_visit: '2025-03-01', completed_visits: 6 }, { customer_id: member.id, line: 'lawn_care', first_visit: '2025-12-03', completed_visits: 5 }],
+      completedVisits: book.completedVisits, estimates: [...book.estimates, addon], terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const db5 = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => db5(table));
+    db.raw.mockImplementation((...args) => db5.raw(...args));
+    db.transaction.mockImplementation((fn) => db5.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    const engine = fixture.fakePricingEngine({ tier: 'derive' });
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: engine } });
+    const row = db5.writes.snapshotInserts.find((r) => r.customer_id === member.id && r.family_key === 'lawn_care');
+    expect(row.list_rate_source).toBe('engine');
+    expect(JSON.parse(row.flags)).not.toContain('hand_picked_tier');
+    // the original-mix replay carried the stamped prior (lawn + pest → silver); the client-posted copy is never what decides it
+    expect(engine.generateEstimate.mock.calls.some(([inputs]) => Array.isArray(inputs.priorQualifyingServices) && inputs.priorQualifyingServices.length === 1 && inputs.priorQualifyingServices[0] === 'pest_control')).toBe(true);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+  });
+
   test('a line sold quarterly but now running bimonthly is listed at the bimonthly engine price', async () => {
     const bimonthly = fixture.customer(11, { member_since: '2025-02-01', last_name: 'Bimonthly' });
     const lines = [...book.planLines, fixture.planLine(bimonthly.id, 'pest_control', 'bimonthly', 100, { source_estimate_ids: [fixture.ESTIMATE(6)] })];
@@ -1229,10 +1810,183 @@ describe('runMonthlyRateReview', () => {
     expect(sent.subject).toMatch(/^(ACT|OK): Rate review — November 2026/);
     expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at instanceof Date)).toBe(true);
 
-    scenario.batchRow = { batch_key: '2026-11', email_sent_at: new Date() };
-    const second = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
-    expect(second.skipped).toBe('already_emailed');
+    // a retried tick on an emailed batch neither rebuilds (no window slide, no row loss) nor re-sends
+    scenario.batchRow = { batch_key: '2026-11', email_sent_at: new Date(), window_from: '2026-12-06', window_to: '2027-01-05' };
+    const upsertsBefore = scripted.writes.batchUpserts.length;
+    const second = await rateReview.runMonthlyRateReview({ now: new Date('2026-11-10T11:20:00Z'), deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(second).toEqual({ skipped: 'already_emailed', batchKey: '2026-11', emailed: false });
+    expect(scripted.writes.batchUpserts).toHaveLength(upsertsBefore);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    // a retried tick on an UNSENT existing batch rebuilds inside the stored window, then emails
+    scenario.batchRow = { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' };
+    const retry = await rateReview.runMonthlyRateReview({ now: new Date('2026-11-10T11:20:00Z'), deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(retry.window).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    expect(retry.emailed).toBe(true);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(2);
+  });
+  test('a digest delivery failure is thrown to the cron runner after the batch is persisted (job_health records it; the day 2–7 tick retries)', async () => {
+    const book = fixture.decemberBook();
+    const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const sendgrid = require('../services/sendgrid-mail');
+    // the provider's message carries its raw response body — an address must never ride the re-thrown error into the scheduler's log line
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('sendgrid 503: {"errors":[{"message":"bounced: someone@example.com"}]}'), { status: 503 }));
+    const failure = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } }).catch((e) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toBe('rate review digest delivery failed for 2026-11 (status 503)');
+    expect(failure.message).not.toMatch(/@|bounced/);
+    expect(failure).toMatchObject({ status: 503, code: 'RATE_REVIEW_DIGEST_DELIVERY_FAILED' });
+    expect(scripted.writes.batchUpserts).toHaveLength(1); // the batch itself landed
+    expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at)).toBe(false); // nothing stamped → the next tick retries
+    const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(scheduler).toMatch(/cron\.schedule\('20 6 1-7 \* \*'/);
+  });
+  test('the delivery stamp names the batch version it described: a rebuild that lands mid-send leaves email_sent_at unset for the next delivery', async () => {
+    const book = fixture.decemberBook();
+    const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null, batchStampRows: 0 };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const out = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(out.emailed).toBe(true);
+    expect(out.email.stamped).toBe(false);
+    // the stamp was conditioned on the version the digest was composed from (buildBatch's computed_at)
+    const stamp = db.mock.results.map((r) => r.value).find((q) => q && Array.isArray(q.calls) && q.calls.some(([n]) => n === 'update') && q.calls.some(([n, a]) => n === 'where' && a[0] === 'computed_at'));
+    expect(stamp).toBeDefined();
+    expect(stamp.calls.find(([n, a]) => n === 'where' && a[0] === 'computed_at')[1][1]).toEqual(NOW);
+    expect(stamp.calls.find(([n]) => n === 'update')[1][0].email_sent_at).toBeInstanceOf(Date);
+    // with the version intact the stamp lands
+    scenario.batchStampRows = 1;
+    scenario.batchRow = { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' };
+    const again = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(again.email.stamped).toBe(true);
+    // no batch row at all → nothing to describe, nothing sent
+    const empty = fixture.scriptedDb({ priorReviews: [], batchRow: null });
+    db.mockImplementation((table) => empty(table));
+    expect(await rateReview.sendBatchEmail({ batchKey: '2026-11' })).toEqual({ sent: false, skipped: 'no_batch' });
+  });
+  test('a tick whose digest was not delivered (mailer unconfigured, external recipient) is a FAILED tick, not a healthy one', async () => {
+    const book = fixture.decemberBook();
+    const make = () => {
+      const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+      const scripted = fixture.scriptedDb(scenario);
+      db.mockImplementation((table) => scripted(table));
+      db.raw.mockImplementation((...args) => scripted.raw(...args));
+      db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+      mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+      mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+      return scripted;
+    };
+    const unconfigured = { isConfigured: () => false, sendOne: jest.fn() };
+    let scripted = make();
+    const failure = await rateReview.runMonthlyRateReview({ now: NOW, mailer: unconfigured, deps: { pricingEngine: fixture.fakePricingEngine() } }).catch((e) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({ code: 'RATE_REVIEW_DIGEST_NOT_DELIVERED', skipped: 'unconfigured' });
+    expect(failure.message).toBe('rate review digest not delivered for 2026-11 (unconfigured)');
+    expect(unconfigured.sendOne).not.toHaveBeenCalled();
+    expect(scripted.writes.batchUpserts).toHaveLength(1); // the batch landed
+    expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at)).toBe(false); // nothing stamped → the next tick retries
+    // an external recipient: the same failed tick, and the address never rides the error
+    scripted = make();
+    process.env.RATE_REVIEW_DIGEST_EMAIL = 'someone@example.com';
+    try {
+      const external = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } }).catch((e) => e);
+      expect(external).toMatchObject({ code: 'RATE_REVIEW_DIGEST_NOT_DELIVERED', skipped: 'recipient' });
+      expect(external.message).not.toMatch(/@/);
+      expect(require('../services/sendgrid-mail').sendOne).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.RATE_REVIEW_DIGEST_EMAIL;
+    }
+  });
+  test('a granted retention offer or an active plan hold holds only its own family; a failed read or an unknown family holds every line', async () => {
+    expect(P.familySignalTouchesLine(['lawn_care'], 'pest_control')).toBe(false);
+    expect(P.familySignalTouchesLine(['pest_control'], 'pest_control')).toBe(true);
+    expect(P.familySignalTouchesLine(['palm_injection'], 'tree_shrub')).toBe(true); // the ledger's vocabulary for the family
+    expect(P.familySignalTouchesLine(['termite_bait'], 'termite')).toBe(true);
+    expect(P.familySignalTouchesLine([], 'pest_control')).toBe(false);
+    expect(P.familySignalTouchesLine('error', 'pest_control')).toBe(true);
+    expect(P.familySignalTouchesLine(['something_new'], 'pest_control')).toBe(true); // fail closed
+    // the loader reads the offers' families (never a customer-wide count)
+    const book = fixture.decemberBook();
+    const target = book.customers.belowList.id;
+    const run = async (signals) => {
+      const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals, batchRow: null };
+      const scripted = fixture.scriptedDb(scenario);
+      db.mockImplementation((table) => scripted(table));
+      db.raw.mockImplementation((...args) => scripted.raw(...args));
+      db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+      mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+      mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+      const signalsRead = await P.loadExceptionSignals(db, target, { now: NOW, config: DEFAULT_CONFIG });
+      await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+      const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === target && r.family_key === 'pest_control');
+      return { signalsRead, flags: JSON.parse(row.flags) };
+    };
+    const lawnOnly = await run({ [target]: { retentionOfferFamilies: ['lawn_care'], holds: ['lawn_care'] } });
+    expect(lawnOnly.signalsRead.retentionOfferFamilies).toEqual(['lawn_care']);
+    expect(lawnOnly.flags).not.toContain('retention_offer_active');
+    expect(lawnOnly.flags).not.toContain('plan_hold_active');
+    const own = await run({ [target]: { retentionOfferFamilies: ['pest_control'], holds: ['pest_control'] } });
+    expect(own.flags).toEqual(expect.arrayContaining(['retention_offer_active', 'plan_hold_active']));
+    // a cancellation case holds the families it names (scope; [] = the whole account)
+    expect(P.cancellationCaseTouchesLine([['lawn_care']], 'pest_control')).toBe(false);
+    expect(P.cancellationCaseTouchesLine([['lawn_care'], []], 'pest_control')).toBe(true);
+    expect(P.cancellationCaseTouchesLine([['palm_injection']], 'tree_shrub')).toBe(true);
+    expect(P.cancellationCaseTouchesLine([], 'pest_control')).toBe(false);
+    expect(P.cancellationCaseTouchesLine('error', 'pest_control')).toBe(true);
+    const lawnCase = await run({ [target]: { cancellationCaseScopes: [['lawn_care']] } });
+    expect(lawnCase.signalsRead.cancellationCaseScopes).toEqual([['lawn_care']]);
+    expect(lawnCase.flags).not.toContain('cancellation_case_recent');
+    expect((await run({ [target]: { cancellationCaseScopes: [[]] } })).flags).toContain('cancellation_case_recent');
+    expect((await run({ [target]: { cancellationCaseScopes: [['pest_control']] } })).flags).toContain('cancellation_case_recent');
+  });
+  test('only ORDINARY lines are references — the cadence mode and the $/hr quartiles share one population', () => {
+    const ordinary = (n, rph = 9000) => ({ customer: fixture.customer(n, { billing_mode: 'per_application' }), serviceKeys: ['pest_control_quarterly'], familyKey: 'pest_control', cadence: 'quarterly', current: { cents: 11700 + n, unit: 'application', source: 'visit_median' }, stats: { revenuePerHourCents: rph }, planLine: { cadence_conflict: false }, multiProgram: false });
+    const book = [ordinary(1), ordinary(2), ordinary(3), ordinary(4),
+      { ...ordinary(5, 30000), multiProgram: true },                       // blended tree/shrub + palm median
+      { ...ordinary(6, 30000), planLine: { cadence_conflict: true } },     // two cadences open
+      { ...ordinary(7, 30000), current: { cents: 4000, unit: 'month', source: 'ledger_slice' } }, // dues, not a per-application price
+      { ...ordinary(8, 30000), current: { cents: 11700, unit: 'application', source: 'visit_median', prepayMidTerm: true } },
+      { ...ordinary(9, 30000), customer: fixture.customer(9, { billing_mode: 'per_application', waveguard_tier: 'Commercial' }) },
+    ];
+    expect(book.slice(4).map(P.isOrdinaryReference)).toEqual([false, false, false, false, false]);
+    const refs = P.computeLineReferences(book);
+    expect(refs.lineRphStats.get('pest_control')).toMatchObject({ n: 4, median: 9000 });
+    expect(refs.cadenceModes.get('pest_control|quarterly')).toBeDefined();
+    // the four ordinary accounts are the only samples: the 30000 $/hr held rows never set a quartile
+    expect(refs.lineRphStats.get('pest_control').q3).toBeLessThanOrEqual(9000);
+  });
+  test('a per-application tree/shrub line carrying both programs is held as multi_program_line, never a blended green', async () => {
+    expect(P.isMultiProgramLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual'])).toBe(true);
+    expect(P.isMultiProgramLine('tree_shrub', ['palm_injection_semiannual'])).toBe(false);
+    expect(P.isMultiProgramLine('tree_shrub', ['tree_shrub_program'])).toBe(false);
+    expect(P.isMultiProgramLine('tree_shrub', [])).toBe(false);
+    expect(P.isMultiProgramLine('pest_control', ['pest_control_quarterly', 'palm_injection_semiannual'])).toBe(false);
+    const book = fixture.decemberBook();
+    const target = book.customers.belowList.id;
+    const extra = fixture.planLine(target, 'tree_shrub', 'bimonthly', 80, { service_keys: ['tree_shrub_program', 'palm_injection_semiannual'] });
+    const scenario = { planLines: [...book.planLines, extra], customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    // an explicit window that covers the imported line's member_since anniversary
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-11-15', anniversaryTo: '2027-01-15', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === target && r.family_key === 'tree_shrub');
+    expect(row).toBeDefined();
+    expect(JSON.parse(row.flags)).toEqual(expect.arrayContaining(['multi_program_line', 'no_anniversary'])); // no estimate, no visit yet → its age is unknown
+    expect(row.anniversary_date).toBeNull();
+    expect(row.status).toBe('exception');
   });
   test('an external recipient fails closed — the body names customers', async () => {
     const scripted = fixture.scriptedDb({ priorReviews: [], batchRow: { batch_key: '2026-12' } });

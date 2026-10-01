@@ -74,11 +74,13 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etMonthStart, addETDays, validCalendarDate } = require('../utils/datetime-et');
 const { addMonthsSameDay } = require('../utils/date-only');
+const { sanitizeClientIdentityFields } = require('./estimate-client-identity-fields');
 const { rateReviewLive, isEnabled } = require('../config/feature-gates');
 const { resolveActualMinutes } = require('./pricing-reality-check');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
-const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+const { hasAuthoritativeZeroPrice, resolveBillingLane } = require('./billing-lane');
+const { COUNTING_SOURCE_STATUSES } = require('./recurring-series-cancel-reseed');
 
 const SNAPSHOTS = 'rate_review_snapshots';
 const BATCHES = 'rate_review_batches';
@@ -107,7 +109,7 @@ const CADENCE_VISITS = Object.freeze({ monthly: 12, bimonthly: 6, quarterly: 4, 
 const ENGINE_SERVICE_KEYS = Object.freeze({
   pest_control: ['pest_control'],
   lawn_care: ['lawn_care'],
-  tree_shrub: ['tree_shrub'],
+  tree_shrub: ['tree_shrub', 'palm_injection'], // ordered: a palm-only series (catalog category tree_shrub) prices as palm_injection alone
   mosquito: ['mosquito'],
   termite: ['termite_bait'],
   rodent: ['rodent_bait'],
@@ -132,6 +134,21 @@ const LEDGER_FAMILIES_FOR_LINE = Object.freeze({
   termite: ['termite_bait', 'termite'],
   rodent: ['rodent_bait', 'rodent'],
 });
+const KNOWN_LEDGER_FAMILIES = new Set(Object.values(LEDGER_FAMILIES_FOR_LINE).flat());
+// A granted retention offer and an active plan hold are scoped to ONE plan
+// family (retention_offers / plan_holds family_key — the ledger's
+// vocabulary, which LEDGER_FAMILIES_FOR_LINE maps this line to): a lawn
+// offer never holds the pest review (the invoice rails apply an offer to
+// its own family only, visit-completion-payment.js). A failed read or an
+// unrecognised family key holds every line — fail closed.
+function familySignalTouchesLine(families, familyKey) {
+  if (families === 'error' || !Array.isArray(families)) return true;
+  const lineFamilies = LEDGER_FAMILIES_FOR_LINE[familyKey] || [familyKey];
+  return families.some((f) => lineFamilies.includes(f) || !KNOWN_LEDGER_FAMILIES.has(f));
+}
+// reservice-scheduler's open-callback lane keys per family (facts.js
+// openCallbackLanes); families with no re-service lane are never held by one.
+const CALLBACK_LANE_FOR_FAMILY = Object.freeze({ pest_control: 'pest', lawn_care: 'lawn' });
 const MAX_USABLE_MINUTES = 240;
 // A home visit's wall clock minus the allowance never reads below this —
 // an allowance is a line average, not this visit's conversation.
@@ -309,12 +326,21 @@ function monthsAgoYmd(now, months) {
   return addMonthsSameDay(etDateString(now), -months);
 }
 
-function reviewWindowFor(now) {
-  return { from: etDateString(addETDays(now, REVIEW_WINDOW_FROM_DAYS)), to: etDateString(addETDays(now, REVIEW_WINDOW_TO_DAYS)) };
+// `anchor` = the build date the window counts from. The monthly job anchors
+// on the FIRST of the build month whatever day its tick runs (a day-2
+// retry after a failed day-1 build must cover the same Dec 6 – Jan 5, not
+// Dec 7 – Jan 6 — anniversaries would otherwise fall through, and carry-
+// forward only reads earlier batches); an ad-hoc build anchors on today.
+function reviewWindowFor(now, { anchor = null } = {}) {
+  const base = anchor ? new Date(`${anchor}T12:00:00Z`) : now;
+  return { from: etDateString(addETDays(base, REVIEW_WINDOW_FROM_DAYS)), to: etDateString(addETDays(base, REVIEW_WINDOW_TO_DAYS)) };
 }
 
+// N ET calendar days before `now` — addETDays walks the ET calendar, so a
+// window that crosses a DST transition never lands a day early (fixed
+// 24-hour subtraction did, just after midnight EDT).
 function daysAgoYmd(now, days) {
-  return etDateString(new Date(now.getTime() - days * DAY_MS));
+  return etDateString(addETDays(now, -days));
 }
 
 // The anniversary's occurrence inside [from, to] (YYYY-MM-DD), or null when
@@ -326,6 +352,7 @@ function daysAgoYmd(now, days) {
 // old on 2026-12-05, which is what the December batch (built November 1)
 // reviews.
 function anniversaryInWindow(anniversaryYmd, fromYmd, toYmd) {
+  if (!anniversaryYmd) return null;
   if (!anniversaryYmd) return null;
   const from = ymdParts(fromYmd);
   const to = ymdParts(toYmd);
@@ -417,6 +444,7 @@ function computeLineAllowances(visitRows, { minSample = MIN_ALLOWANCE_SAMPLE } =
   const byLine = new Map();
   const pooled = { home: [], not_home: [] };
   for (const row of visitRows || []) {
+    if (row.composite_visit) continue; // add-on work inside the stop — not this line's wall clock
     const wall = wallMinutesFor(row);
     if (wall == null) continue;
     const interaction = interactionFor(row);
@@ -450,15 +478,23 @@ function allowanceFor(allowances, line) {
   return entry ? finite(entry.allowance_minutes) || 0 : 0;
 }
 
-function visitRevenueCents(row) {
+// Settled revenue for one visit: its paid invoice (net of refunds), else —
+// for a prepay-covered visit — the covering term's SETTLED amount (its
+// prepay invoice paid and collectible, net of refunds on the linked
+// payments) spread over the covered visits. A term whose invoice is unpaid,
+// reversed, or missing (settlement unknown) yields no revenue: the stamped
+// prepaid_amount / original prepay_amount are what was CHARGED, not what
+// settled (clearPrepaidStampsForTerm keeps completed visits' stamps after a
+// refund), so they are never used here.
+function visitRevenueCents(row, { termVisitsFallback = null } = {}) {
   const paid = positive(row.paid_revenue);
   if (paid != null) return Math.round(paid * 100);
   if (row.annual_prepay_term_id) {
-    const prepaid = positive(row.prepaid_amount);
-    if (prepaid != null) return Math.round(prepaid * 100);
-    const term = positive(row.term_prepay_amount);
-    const visits = positive(row.term_visit_count);
-    if (term != null && visits != null) return Math.round((term / visits) * 100);
+    const settled = positive(row.term_settled_amount);
+    // a term from before coverage_visit_count existed (nullable) infers its
+    // count the way resolveCurrentRate does — the line's cadence / catalog count
+    const visits = positive(row.term_visit_count) || positive(termVisitsFallback);
+    if (settled != null && visits != null) return Math.round((settled / visits) * 100);
   }
   return null;
 }
@@ -484,13 +520,20 @@ function revenuePerHour(paired) {
 // monthly members pay at account level, so their visits carry no invoice of
 // their own. Used only for a visit with no paired revenue; flagged
 // rph_from_dues.
-function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0, duesRevenueCents = null } = {}) {
+function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0, duesRevenueCents = null, termVisitsFallback = null } = {}) {
   const usable = [];
   let duesAttributed = 0;
+  let compositeVisits = 0;
   for (const row of visitRows || []) {
+    // A composite visit (add-ons performed in the same stop) is no evidence
+    // for the line: the invoice's primary and add-on lines could be split,
+    // the minutes cannot — attributing the application's money to the whole
+    // stop's clock would understate $/hr exactly where it decides a band.
+    // Excluded from both, counted for the owner (composite_visits_excluded).
+    if (row.composite_visit) { compositeVisits += 1; continue; }
     const t = treatmentMinutesFor(row, allowanceMinutes);
     if (!t) continue;
-    let revenueCents = visitRevenueCents(row);
+    let revenueCents = visitRevenueCents(row, { termVisitsFallback });
     if (revenueCents == null && duesRevenueCents > 0) { revenueCents = duesRevenueCents; duesAttributed += 1; }
     usable.push({ ...t, revenueCents });
   }
@@ -516,6 +559,7 @@ function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinute
     allowanceMinutesApplied: usable.some((u) => u.adjustment === 'allowance') ? Math.max(0, finite(allowanceMinutes) || 0) : null,
     capturedConversationVisits: usable.filter((u) => u.adjustment === 'captured').length,
     duesAttributedVisits: revenuePerHourCents != null ? duesAttributed : 0,
+    compositeVisits,
     treatmentMinutesMedian,
     revenuePerHourCents,
     rphFromNotHome,
@@ -571,6 +615,10 @@ function classifyBand({ currentCents, listCents, rph = null, lineRph = null, usa
   else if (band === 'B') target = roundToWholeDollars(currentCents * (1 + config.pass_through_pct / 100));
   else if (band === 'C') target = roundToWholeDollars(listCents);
   else target = floorToWholeDollars(currentCents + Math.min(currentCents * (config.cap_pct / 100), config.cap_cents));
+  // A downward-performance nudge (B → C on bottom-quartile $/hr) asks for
+  // MORE than the pass-through, never less: list can sit under current +
+  // pass-through when the gap is small, so the B proposal is the floor.
+  if (band === 'C' && flags.includes('rph_bottom_quartile')) target = Math.max(target, roundToWholeDollars(currentCents * (1 + config.pass_through_pct / 100)));
 
   const capCents = Math.min(currentCents * (config.cap_pct / 100), config.cap_cents);
   const capped = Math.min(target, floorToWholeDollars(currentCents + capCents));
@@ -589,121 +637,144 @@ function classifyBand({ currentCents, listCents, rph = null, lineRph = null, usa
 
 // ── exception rules (pure; takes already-loaded facts) ──────────────────
 
-const EXCEPTION_FLAGS = Object.freeze([
-  'tenure_under_lock', 'prepay_mid_term', 'prepay_term_missing', 'reviewed_within_12mo', 'manual_rate_edit_recent',
-  'retention_offer_active', 'plan_hold_active', 'callback_recent', 'cancellation_case_recent', 'complaint_open',
-  'past_due', 'hand_picked_tier', 'commercial', 'termite_program', 'multi_property', 'lane_cleanup', 'cadence_conflict',
-  'prepay_term_ambiguous', 'rate_unattributed', 'list_low_confidence', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
-]);
-
-function evaluateExceptions(line, config = DEFAULT_CONFIG) {
-  const flags = [];
-  const f = line.facts || null;
-  if (!line.anniversaryDate) flags.push('no_anniversary');
-  else if (line.tenureMonths != null && line.tenureMonths < config.lock_months) flags.push('tenure_under_lock');
-  if (line.prepayMidTerm) flags.push('prepay_mid_term');
-  if (line.prepayTermMissing) flags.push('prepay_term_missing');
-  if (line.prepayTermAmbiguous) flags.push('prepay_term_ambiguous');
-  if (line.rateUnattributed) flags.push('rate_unattributed');
-  if (line.cadenceConflict) flags.push('cadence_conflict');
-  if (line.reviewedWithin12mo) flags.push('reviewed_within_12mo');
-  if (line.manualRateEditRecent) flags.push('manual_rate_edit_recent');
-  if (line.retentionOfferActive) flags.push('retention_offer_active');
-  if (line.planHoldActive) flags.push('plan_hold_active');
-  if (line.callbackRecent) flags.push('callback_recent');
-  if (line.cancellationCaseRecent) flags.push('cancellation_case_recent');
-  if (f && f.openComplaint) flags.push('complaint_open');
-  if (f && f.accountCurrent === false) flags.push('past_due');
-  if (line.handPickedTier) flags.push('hand_picked_tier');
-  if (line.commercial) flags.push('commercial');
-  if (line.familyKey === 'termite' || (f && f.termiteRental)) flags.push('termite_program');
-  if (f && f.multiProperty) flags.push('multi_property');
+// ── exception rules — one row per hold flag, in reporting order ─────────
+// `f` is the account's cancellation facts (null when the loader failed).
+const EXCEPTION_RULES = Object.freeze([
+  ['no_anniversary', (l) => !l.anniversaryDate],
+  ['tenure_under_lock', (l, c) => !!l.anniversaryDate && l.tenureMonths != null && l.tenureMonths < c.lock_months],
+  ['prepay_mid_term', (l) => !!l.prepayMidTerm],
+  ['prepay_term_missing', (l) => !!l.prepayTermMissing],
+  ['prepay_term_ambiguous', (l) => !!l.prepayTermAmbiguous],
+  ['rate_unattributed', (l) => !!l.rateUnattributed],
+  ['cadence_conflict', (l) => !!l.cadenceConflict],
+  ['reviewed_within_12mo', (l) => !!l.reviewedWithin12mo],
+  ['manual_rate_edit_recent', (l) => !!l.manualRateEditRecent],
+  ['retention_offer_active', (l) => !!l.retentionOfferActive],
+  ['plan_hold_active', (l) => !!l.planHoldActive],
+  ['callback_recent', (l) => !!l.callbackRecent],
+  ['cancellation_case_recent', (l) => !!l.cancellationCaseRecent],
+  ['complaint_open', (l, c, f) => !!(f && f.openComplaint)],
+  ['past_due', (l, c, f) => !!(f && f.accountCurrent === false)],
+  ['hand_picked_tier', (l) => !!l.handPickedTier],
+  ['commercial', (l) => !!l.commercial],
+  ['termite_program', (l, c, f) => l.familyKey === 'termite' || !!(f && f.termiteRental)],
+  ['multi_property', (l, c, f) => !!(f && f.multiProperty)],
   // per_visit and one_time are explicit per-visit lanes (billing-lane.js); a
   // recurring series on either, or on the legacy NULL lane, is cleanup first.
-  if (line.billingLane === 'per_visit' || line.billingLane === 'one_time' || line.billingLane == null) flags.push('lane_cleanup');
-  if (line.listLowConfidence) flags.push('list_low_confidence');
-  if (!f) flags.push('facts_unavailable');
-  else if (f.moneyFactsDegraded) flags.push('facts_degraded');
-  return flags;
+  ['lane_cleanup', (l) => l.billingLane === 'per_visit' || l.billingLane === 'one_time' || l.billingLane == null],
+  ['list_low_confidence', (l) => !!l.listLowConfidence],
+  ['list_bundle_incomplete', (l) => !!l.listBundleIncomplete],
+  ['multi_program_line', (l) => !!l.multiProgramLine],
+  ['unsupported_family', (l) => l.familyKey === 'other'],
+  ['facts_unavailable', (l, c, f) => !f],
+  ['facts_degraded', (l, c, f) => !!(f && f.moneyFactsDegraded)],
+]);
+// every hold flag a snapshot can carry (no_current_rate is assigned by the
+// band math, not a rule)
+const EXCEPTION_FLAGS = Object.freeze([...EXCEPTION_RULES.map(([flag]) => flag), 'no_current_rate']);
+
+// Informational flags (never a hold), in reporting order. A flag given as a
+// function names itself from the line (engine_sync_failed / engine_replay_failed).
+const INFO_FLAG_RULES = Object.freeze([
+  ['list_from_cadence_mode', (l) => l.listRateSource === 'cadence_mode'],
+  ['list_cadence_mismatch', (l) => !!l.listCadenceMismatch],
+  ['anniversary_predates_portal', (l) => !!l.anniversaryConflict],
+  ['stamped_zero_free', (l) => !!l.stampedZeroFree],
+  ['carried_forward', (l) => !!l.carriedFrom],
+  // a legacy NULL billing_mode resolved through the canonical lane rule
+  // (billing-lane.js) — the lane itself decides any hold
+  ['lane_inferred', (l) => !!l.laneInferred],
+  ['composite_discount_withheld', (l) => !!l.compositeWithheld],
+  [(l) => l.engineUnavailable, (l) => !!l.engineUnavailable],
+  ['rph_from_not_home_visits', (l) => !!l.rphFromNotHome],
+  ['interaction_unknown', (l) => l.unknownInteractionVisits > 0],
+  ['conversation_minutes_captured', (l) => l.capturedConversationVisits > 0],
+  ['rph_from_dues', (l) => l.duesAttributedVisits > 0],
+  ['composite_visits_excluded', (l) => l.compositeVisits > 0],
+]);
+
+function informationalFlags(line) {
+  return INFO_FLAG_RULES.filter(([, applies]) => applies(line)).map(([flag]) => (typeof flag === 'function' ? flag(line) : flag));
+}
+
+function evaluateExceptions(line, config = DEFAULT_CONFIG) {
+  const facts = line.facts || null;
+  return EXCEPTION_RULES.filter(([, applies]) => applies(line, config, facts)).map(([flag]) => flag);
 }
 
 // ── snapshot assembly (pure) ────────────────────────────────────────────
 
+// Band math per rate unit. Monthly dues are a cadence's annual price spread
+// over 12 months; the bands, the $ cap and the minimum are PER APPLICATION,
+// so a monthly line is normalized to the per-application equivalent
+// (monthly × 12 ÷ visits), classified there, and the whole-dollar
+// per-application proposal is spread back over 12.
+function classifyLine(line, config) {
+  const current = line.currentRateCents || 0;
+  const vpy = line.visitsPerYear || 0;
+  if (current <= 0) return { band: null, gapPct: null, proposedCents: 0, deltaCents: 0, noChange: true, flags: ['no_current_rate'] };
+  // No annual visit count (a legacy/custom cadence with no catalog count):
+  // a proposal with no annual impact is not actionable — skipped, never
+  // green with annual_delta_cents 0.
+  if (!(vpy > 0)) return { band: null, gapPct: null, proposedCents: current, deltaCents: 0, noChange: true, flags: ['no_visits_per_year'] };
+  const evidence = { rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config };
+  if (line.rateUnit !== 'month') return classifyBand({ currentCents: current, listCents: line.listRateCents, ...evidence });
+  const perAppCurrent = Math.round((current * 12) / vpy);
+  const perAppList = line.listRateCents != null ? Math.round((line.listRateCents * 12) / vpy) : null;
+  const perApp = classifyBand({ currentCents: perAppCurrent, listCents: perAppList, ...evidence });
+  const proposedMonthly = perApp.noChange ? current : Math.round((perApp.proposedCents * vpy) / 12);
+  return { ...perApp, proposedCents: proposedMonthly, deltaCents: proposedMonthly - current, perApplication: { current: perAppCurrent, list: perAppList, proposed: perApp.proposedCents, delta: perApp.deltaCents } };
+}
+
+// Column defaults applied in one pass (a `??` per column was a decision each).
+const SNAPSHOT_ROW_DEFAULTS = Object.freeze({
+  visits_per_year: null, billing_lane: null, anniversary_date: null, anniversary_source: null, review_date: null, tenure_months: null,
+  current_rate_source: 'none', rate_unit: 'application', list_rate_cents: null, list_rate_source: 'none',
+  usable_visits: 0, home_visits: 0, not_home_visits: 0, allowance_minutes_applied: null, treatment_minutes_median: null, revenue_per_hour_cents: null,
+});
+
 function computeSnapshot(line, config = DEFAULT_CONFIG) {
   const exceptions = evaluateExceptions(line, config);
-  const flags = [...exceptions];
-  if (line.listRateSource === 'cadence_mode') flags.push('list_from_cadence_mode');
-  if (line.listCadenceMismatch) flags.push('list_cadence_mismatch');
-  if (line.anniversaryConflict) flags.push('anniversary_predates_portal');
-  if (line.stampedZeroFree) flags.push('stamped_zero_free');
-  if (line.carriedFrom) flags.push('carried_forward');
-  if (line.engineUnavailable) flags.push(line.engineUnavailable);
-  if (line.rphFromNotHome) flags.push('rph_from_not_home_visits');
-  if (line.unknownInteractionVisits > 0) flags.push('interaction_unknown');
-  if (line.capturedConversationVisits > 0) flags.push('conversation_minutes_captured');
-  if (line.duesAttributedVisits > 0) flags.push('rph_from_dues');
-
+  const classified = classifyLine(line, config);
+  const flags = [...new Set([...exceptions, ...informationalFlags(line), ...classified.flags])];
   const current = line.currentRateCents || 0;
-  const monthlyUnit = line.rateUnit === 'month';
-  const vpy = line.visitsPerYear || 0;
-  let classified;
-  if (current <= 0) {
-    classified = { band: null, gapPct: null, proposedCents: 0, deltaCents: 0, noChange: true, flags: ['no_current_rate'] };
-  } else if (!monthlyUnit) {
-    classified = classifyBand({ currentCents: current, listCents: line.listRateCents, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config });
-  } else if (vpy > 0) {
-    // Monthly dues are a cadence's annual price spread over 12 months; the
-    // bands, the $ cap and the minimum are PER APPLICATION. Normalize to the
-    // per-application equivalent (monthly × 12 ÷ visits), classify there,
-    // then spread the whole-dollar per-application proposal back over 12.
-    const perAppCurrent = Math.round((current * 12) / vpy);
-    const perAppList = line.listRateCents != null ? Math.round((line.listRateCents * 12) / vpy) : null;
-    const perApp = classifyBand({ currentCents: perAppCurrent, listCents: perAppList, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config });
-    const proposedMonthly = perApp.noChange ? current : Math.round((perApp.proposedCents * vpy) / 12);
-    classified = { ...perApp, proposedCents: proposedMonthly, deltaCents: proposedMonthly - current, perApplication: { current: perAppCurrent, list: perAppList, proposed: perApp.proposedCents, delta: perApp.deltaCents } };
-  } else {
-    classified = { band: null, gapPct: null, proposedCents: current, deltaCents: 0, noChange: true, flags: ['no_visits_per_year'] };
-  }
-  for (const flag of classified.flags) if (!flags.includes(flag)) flags.push(flag);
-
-  const unitMultiplier = monthlyUnit ? 12 : vpy;
-  let status;
+  let status = 'green';
   if (current <= 0 || (classified.band == null && !exceptions.length)) status = 'skipped';
   else if (exceptions.length) status = 'exception';
   else if (classified.noChange) status = 'no_change';
-  else status = 'green';
-
-  return {
+  const row = {
     batch_key: line.batchKey,
     customer_id: line.customerId,
     family_key: line.familyKey,
     cadence: line.cadence,
-    visits_per_year: line.visitsPerYear ?? null,
-    billing_lane: line.billingLane ?? null,
-    anniversary_date: line.anniversaryDate ?? null,
-    anniversary_source: line.anniversarySource ?? null,
-    review_date: line.reviewDate ?? null,
-    tenure_months: line.tenureMonths ?? null,
+    visits_per_year: line.visitsPerYear,
+    billing_lane: line.billingLane,
+    anniversary_date: line.anniversaryDate,
+    anniversary_source: line.anniversarySource,
+    review_date: line.reviewDate,
+    tenure_months: line.tenureMonths,
     current_rate_cents: current,
-    current_rate_source: line.currentRateSource || 'none',
-    rate_unit: line.rateUnit || 'application',
-    list_rate_cents: line.listRateCents ?? null,
-    list_rate_source: line.listRateSource || 'none',
+    current_rate_source: line.currentRateSource,
+    rate_unit: line.rateUnit,
+    list_rate_cents: line.listRateCents,
+    list_rate_source: line.listRateSource,
     gap_pct: classified.gapPct,
-    usable_visits: line.usableVisits || 0,
-    home_visits: line.homeVisits || 0,
-    not_home_visits: line.notHomeVisits || 0,
-    allowance_minutes_applied: line.allowanceMinutesApplied ?? null,
+    usable_visits: line.usableVisits,
+    home_visits: line.homeVisits,
+    not_home_visits: line.notHomeVisits,
+    allowance_minutes_applied: line.allowanceMinutesApplied,
     rph_from_not_home: !!line.rphFromNotHome,
-    treatment_minutes_median: line.treatmentMinutesMedian ?? null,
-    revenue_per_hour_cents: line.revenuePerHourCents ?? null,
+    treatment_minutes_median: line.treatmentMinutesMedian,
+    revenue_per_hour_cents: line.revenuePerHourCents,
     band: classified.band,
     proposed_rate_cents: classified.proposedCents,
     delta_cents: classified.deltaCents,
-    annual_delta_cents: Math.round(classified.deltaCents * unitMultiplier),
+    annual_delta_cents: Math.round(classified.deltaCents * (line.rateUnit === 'month' ? 12 : (line.visitsPerYear || 0))),
     flags,
     status,
   };
+  for (const [column, fallback] of Object.entries(SNAPSHOT_ROW_DEFAULTS)) if (row[column] == null) row[column] = fallback;
+  return row;
 }
 
 // ── anniversary ─────────────────────────────────────────────────────────
@@ -711,7 +782,8 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
 // The line's start date. Portal-sold line (its visits link an accepted
 // estimate): first completed recurring visit, else the accept date — the
 // 12-month lock runs from the first application the customer paid for.
-// Imported line (no accepted estimate in the portal): the EARLIER of
+// Imported line (no accepted estimate in the portal, a completed visit on
+// record): the EARLIER of
 // customers.member_since and the first completed visit — the portal went
 // live April 2026, so for an imported account the first visit here is a
 // lower bound on tenure, not the start (member_since is real back to 2024;
@@ -720,17 +792,35 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
 // (informational flag, never a hold).
 // firstCompletedVisit and memberSince are DATE columns; acceptedAt is an
 // instant (estimates.accepted_at) read on the ET calendar.
-function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince }) {
+// A no-estimate line backdates to member_since only when it was already
+// running when the account reached the portal: its first completed visit
+// falls within one visit interval (+30 days' grace) of the ACCOUNT's
+// earliest completed visit here — an import brings the account and its
+// running programs in together, and a quarterly or semiannual program's
+// first visit can trail the account's by its own interval. A program first
+// seen later was added since, whatever the admin booked it without, and
+// starts at its first visit.
+const IMPORT_PRESENCE_DAYS = 90;
+function presenceWindowFor(visitsPerYear) {
+  return visitsPerYear > 0 ? Math.round(365 / visitsPerYear) + 30 : IMPORT_PRESENCE_DAYS;
+}
+function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS }) {
   const firstVisit = dateColumn(firstCompletedVisit);
   const accepted = etDay(acceptedAt);
   const member = dateColumn(memberSince);
+  const accountFirst = dateColumn(accountFirstVisit);
+  const presentAtImport = !accountFirst || !firstVisit || (ymdToUtcMs(firstVisit) - ymdToUtcMs(accountFirst)) / DAY_MS <= presenceWindowDays;
   let date = null;
   let source = null;
   if (accepted) {
     if (firstVisit) { date = firstVisit; source = 'first_visit'; } else { date = accepted; source = 'estimate_accept'; }
   } else if (member && firstVisit) {
-    if (member <= firstVisit) { date = member; source = 'member_since'; } else { date = firstVisit; source = 'first_visit'; }
-  } else if (member) { date = member; source = 'member_since'; } else if (firstVisit) { date = firstVisit; source = 'first_visit'; }
+    if (member <= firstVisit && presentAtImport) { date = member; source = 'member_since'; } else { date = firstVisit; source = 'first_visit'; }
+  } else if (firstVisit) { date = firstVisit; source = 'first_visit'; }
+  // No accepted estimate and no completed visit yet: the line's age is
+  // unknown — never the account's membership (an admin-booked program can
+  // be days old) — and the row is held (no_anniversary) until its first
+  // application dates it.
   let conflict = false;
   if (date && member && source !== 'member_since') {
     conflict = (ymdToUtcMs(date) - ymdToUtcMs(member)) / DAY_MS > 90;
@@ -762,23 +852,25 @@ function lazyTranslateV2() {
 // engine shape there, but is the UI form on an admin V2 save, so it only
 // counts when it carries a services map. Returns null when nothing can be
 // replayed (→ cadence mode or skipped).
+const isObject = (value) => !!value && typeof value === 'object';
+
 function engineInputsFromEstimate(estimate, deps = {}) {
   const data = parseJson(estimate && estimate.estimate_data);
-  if (!data || typeof data !== 'object') return null;
+  if (!isObject(data)) return null;
   const req = data.engineRequest;
-  if (req && typeof req === 'object' && req.profile && typeof req.profile === 'object') {
+  if (isObject(req) && isObject(req.profile)) {
     const translate = deps.translateV2CallToV1Input !== undefined ? deps.translateV2CallToV1Input : lazyTranslateV2();
     if (typeof translate === 'function') {
       try {
         const v1 = translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {});
-        if (v1 && typeof v1 === 'object') return v1;
+        if (isObject(v1)) return v1;
       } catch (err) {
         logger.warn(`[rate-review] engineRequest translation failed for estimate ${estimate.id}: ${err.message}`);
       }
     }
   }
-  if (data.engineInputs && typeof data.engineInputs === 'object') return data.engineInputs;
-  if (data.inputs && typeof data.inputs === 'object' && data.inputs.services && typeof data.inputs.services === 'object') return data.inputs;
+  if (isObject(data.engineInputs)) return data.engineInputs;
+  if (isObject(data.inputs) && isObject(data.inputs.services)) return data.inputs;
   return null;
 }
 
@@ -798,15 +890,86 @@ function hasSizeInput(inputs, line) {
 // Engine `services.<key>` entries → ranking family, and the engine's
 // qualifying-service keys per family (priorQualifyingServices vocabulary).
 const ENGINE_INPUT_SERVICE_FAMILY = Object.freeze({
-  pest: 'pest_control', lawn: 'lawn_care', treeShrub: 'tree_shrub', mosquito: 'mosquito',
+  pest: 'pest_control', lawn: 'lawn_care', treeShrub: 'tree_shrub', palmInjection: 'tree_shrub', palm: 'tree_shrub', mosquito: 'mosquito',
   termite: 'termite', termiteBait: 'termite', termite_bait: 'termite', rodent: 'rodent', rodentBait: 'rodent', rodent_bait: 'rodent',
 });
+// Within the tree_shrub family the engine prices two PROGRAMS under
+// different input keys — `treeShrub` (the bed program) and `palmInjection`
+// / `palm` (estimate-engine.js: services.palmInjection || services.palm).
+// The current-bundle reconciliation works per program, never per family: a
+// saved program survives only while an active line still carries it,
+// judged by the line's catalog service keys (palm_injection* = palm,
+// anything else = tree/shrub), so a cancelled tree/shrub program cannot
+// keep its qualifying discount on the strength of a surviving palm rider.
+const ENGINE_INPUT_SERVICE_PROGRAM = Object.freeze({ ...ENGINE_INPUT_SERVICE_FAMILY, palmInjection: 'palm', palm: 'palm' });
+function isPalmServiceKey(key) {
+  return /palm/.test(String(key || '').toLowerCase());
+}
+// The programs an active plan line carries. A tree_shrub line without
+// catalog keys is of unknown composition: it keeps whatever was sold.
+function linePrograms(line) {
+  if (!line || !line.familyKey) return [];
+  if (line.familyKey !== 'tree_shrub') return [line.familyKey];
+  const keys = Array.isArray(line.serviceKeys) ? line.serviceKeys : [];
+  if (!keys.length) return ['tree_shrub', 'palm'];
+  const out = [];
+  if (keys.some((k) => !isPalmServiceKey(k))) out.push('tree_shrub');
+  if (keys.some(isPalmServiceKey)) out.push('palm');
+  return out;
+}
+// The engine services a line's own programs price as — the whole-account
+// dues fallback (customers.monthly_rate; no ledger slice names the
+// components) compares against every program the line carries.
+const PROGRAM_ENGINE_KEY = Object.freeze({ tree_shrub: 'tree_shrub', palm: 'palm_injection' });
+function engineKeysForLine(familyKey, serviceKeys) {
+  return linePrograms({ familyKey, serviceKeys }).map((program) => PROGRAM_ENGINE_KEY[program] || program);
+}
+// The program a line's QUALIFYING key (qualifyingKeyForLine) stands for —
+// for a tree_shrub line that is the bed program; palm qualifies for nothing.
+function qualifyingProgramForLine(line) {
+  return line && line.familyKey ? line.familyKey : null;
+}
 const QUALIFYING_KEY_FOR_FAMILY = Object.freeze({
   pest_control: 'pest_control', lawn_care: 'lawn_care', tree_shrub: 'tree_shrub', mosquito: 'mosquito', termite: 'termite_bait', rodent: 'rodent_bait',
 });
+// The engine qualifying key an ACTIVE plan line contributes as a prior
+// service — from its catalog service keys, not its family: a palm-only
+// tree_shrub line (palm_injection*) qualifies for nothing.
+// A tree_shrub family whose open visits carry BOTH programs (bed keys and
+// palm_injection* keys) on one cadence: a per-application median across
+// their distinct prices is a blend, and the replay prices one primary item
+// (riders join monthly figures only) — held (multi_program_line). The
+// monthly ledger slice sums both programs and its replay must then price
+// every component (list_bundle_incomplete), so it is not held here.
+function isMultiProgramLine(familyKey, serviceKeys) {
+  if (familyKey !== 'tree_shrub') return false;
+  const keys = (Array.isArray(serviceKeys) ? serviceKeys : []).map((k) => String(k || '').toLowerCase());
+  return keys.some(isPalmServiceKey) && keys.some((k) => !isPalmServiceKey(k));
+}
+
+function qualifyingKeyForLine(line) {
+  const keys = (line && Array.isArray(line.serviceKeys) ? line.serviceKeys : []).map((k) => String(k || '').toLowerCase());
+  if (line.familyKey === 'tree_shrub') {
+    if (keys.length && keys.every(isPalmServiceKey)) return null; // standalone palm program
+    return 'tree_shrub';
+  }
+  return QUALIFYING_KEY_FOR_FAMILY[line.familyKey] || null;
+}
+
 const PEST_FREQUENCY_FOR_CADENCE = Object.freeze({ quarterly: 'quarterly', bimonthly: 'bimonthly', monthly: 'monthly' });
 const LAWN_TIER_FOR_CADENCE = Object.freeze({ every_6_weeks: 'enhanced', monthly: 'premium', bimonthly: 'standard' });
 const MOSQUITO_TIER_FOR_CADENCE = Object.freeze({ seasonal: 'seasonal', monthly: 'monthly' });
+// Re-keying a saved service to the line's own cadence: the engine prices
+// pest by `frequency`, lawn by `tier` + `lawnFreq`, mosquito by `tier`.
+const CADENCE_REKEY = Object.freeze({
+  pest_control: { service: 'pest', keyFor: (cadence) => PEST_FREQUENCY_FOR_CADENCE[cadence], apply: (svc, key) => ({ ...svc, frequency: key }) },
+  lawn_care: {
+    service: 'lawn',
+    keyFor: (cadence) => LAWN_TIER_FOR_CADENCE[cadence],
+    apply: (svc, key, cadence, clean) => { delete clean.lawnFreq; return { ...svc, tier: key, lawnFreq: CADENCE_VISITS[cadence] }; },
+  },
+  mosquito: { service: 'mosquito', keyFor: (cadence) => MOSQUITO_TIER_FOR_CADENCE[cadence], apply: (svc, key) => ({ ...svc, tier: key }) },
+});
 
 // Quote-time concessions come off so the replay prices TODAY'S LIST for the
 // same property, services and (engine-derived) tier — at the cadence the
@@ -819,47 +982,65 @@ const REPLAY_PIN_KEYS = ['manualDiscount', 'serviceSpecificDiscounts', 'serviceS
   'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs'];
 const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersion'], lawn: ['programMinimumMonthly', 'useLawnCostFloor'] });
 
-// `activeFamilies`: the customer's plan lines TODAY. The engine derives the
-// WaveGuard tier from the services it prices plus priorQualifyingServices,
-// so the replay's bundle is reconciled to the current plan — a program the
-// customer has since cancelled comes out of the estimate's services, one
-// added since (on another estimate) goes in as a prior qualifying service —
-// and the list carries today's tier, not the one the old quote was sold at.
-function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFamilies = null } = {}) {
-  const clean = JSON.parse(JSON.stringify(inputs));
+// `activeFamilies`: the customer's plan lines TODAY, as
+// { familyKey, serviceKeys } (a bare family string is read as a line whose
+// catalog keys are unknown). The engine derives the WaveGuard tier from the
+// services it prices plus priorQualifyingServices, so the replay's bundle
+// is reconciled to the current plan — a program the customer has since
+// cancelled comes out of the estimate's services, one added since (on
+// another estimate) goes in as a prior qualifying service — and the list
+// carries today's tier, not the one the old quote was sold at. The prior
+// key is derived from the line's SERVICE keys, never its family alone: a
+// palm-only program sits in the tree_shrub family but does not qualify
+// (estimate-engine.js counts palm_injection toward no tier), so it adds
+// nothing — a pest + palm account stays Bronze, as the engine prices it.
+// `savedPriorQualifying`: the SERVER-stamped prior-qualifying services on
+// estimate_data (admin-estimate-persistence writes the top-level key only
+// when it repriced at the server) — restored for the ORIGINAL-mix replay
+// so an add-on estimate legitimately sold at Silver (the customer already
+// had another program) replays at Silver, not Bronze. Never the client-
+// posted copy inside the inputs, which the sanitizer strips.
+function listReplayInputs(inputs, { familyKey, cadence, activeFamilies, savedPriorQualifying } = {}) {
+  // The shared client-identity sanitizer first (estimate-client-identity-
+  // fields.js: every server-owned replay stamp — treeShrubPricingKnobs,
+  // palmAnnualRounding, catalogPricing, the identity flags …), the same
+  // pass admin-estimate-persistence runs before an authoritative recompute;
+  // the local pin list below covers the service-level pins it does not.
+  const clean = sanitizeClientIdentityFields(JSON.parse(JSON.stringify(inputs)));
   for (const key of REPLAY_PIN_KEYS) delete clean[key];
-  if (clean.services && typeof clean.services === 'object') {
-    for (const [service, keys] of Object.entries(REPLAY_PIN_SERVICE_KEYS)) {
-      if (clean.services[service] && typeof clean.services[service] === 'object') {
-        for (const key of keys) delete clean.services[service][key];
-      }
-    }
+  const services = isObject(clean.services) ? clean.services : null;
+  for (const [service, keys] of Object.entries(REPLAY_PIN_SERVICE_KEYS)) {
+    if (!services || !isObject(services[service])) continue;
+    for (const key of keys) delete services[service][key];
   }
-  if (Array.isArray(activeFamilies) && clean.services && typeof clean.services === 'object') {
-    const active = new Set(activeFamilies);
-    const present = new Set();
-    for (const [service, value] of Object.entries(clean.services)) {
-      const family = ENGINE_INPUT_SERVICE_FAMILY[service];
-      if (!family) continue; // one-time / commercial / unknown keys are left as saved
-      if (!value) continue;
-      if (active.has(family)) present.add(family);
-      else delete clean.services[service]; // cancelled since the quote
-    }
-    const priors = [...active].filter((family) => !present.has(family)).map((family) => QUALIFYING_KEY_FOR_FAMILY[family]).filter(Boolean);
-    clean.priorQualifyingServices = priors;
-    if (priors.length) clean.recurringCustomer = true;
+  if (!Array.isArray(activeFamilies) && Array.isArray(savedPriorQualifying) && savedPriorQualifying.length) {
+    clean.priorQualifyingServices = savedPriorQualifying.map(String);
+    clean.recurringCustomer = true;
   }
-  if (familyKey === 'pest_control' && clean.services && clean.services.pest && PEST_FREQUENCY_FOR_CADENCE[cadence]) {
-    clean.services.pest = { ...clean.services.pest, frequency: PEST_FREQUENCY_FOR_CADENCE[cadence] };
-  }
-  if (familyKey === 'lawn_care' && clean.services && clean.services.lawn && LAWN_TIER_FOR_CADENCE[cadence]) {
-    clean.services.lawn = { ...clean.services.lawn, tier: LAWN_TIER_FOR_CADENCE[cadence], lawnFreq: CADENCE_VISITS[cadence] };
-    delete clean.lawnFreq;
-  }
-  if (familyKey === 'mosquito' && clean.services && clean.services.mosquito && MOSQUITO_TIER_FOR_CADENCE[cadence]) {
-    clean.services.mosquito = { ...clean.services.mosquito, tier: MOSQUITO_TIER_FOR_CADENCE[cadence] };
-  }
+  if (Array.isArray(activeFamilies) && services) reconcileToActivePrograms(clean, services, activeFamilies);
+  const rekey = CADENCE_REKEY[familyKey];
+  const cadenceKey = rekey && rekey.keyFor(cadence);
+  if (cadenceKey && services && services[rekey.service]) services[rekey.service] = rekey.apply(services[rekey.service], cadenceKey, cadence, clean);
   return clean;
+}
+
+// The current-bundle reconciliation (see listReplayInputs): a saved program
+// survives only while an active line still carries it; every other active
+// program the engine counts toward the tier goes in as a prior — a bed
+// program added after a pest + palm quote included.
+function reconcileToActivePrograms(clean, services, activeFamilies) {
+  const lines = activeFamilies.map((f) => (typeof f === 'string' ? { familyKey: f, serviceKeys: [] } : f));
+  const activePrograms = new Set(lines.flatMap(linePrograms));
+  const present = new Set(); // programs the surviving saved services price inside the bundle
+  for (const [service, value] of Object.entries(services)) {
+    const program = ENGINE_INPUT_SERVICE_PROGRAM[service];
+    if (!program || !value) continue; // one-time / commercial / unknown keys are left as saved
+    if (activePrograms.has(program)) present.add(program);
+    else delete services[service]; // cancelled since the quote
+  }
+  const priors = [...new Set(lines.filter((l) => !present.has(qualifyingProgramForLine(l))).map(qualifyingKeyForLine).filter(Boolean))];
+  clean.priorQualifyingServices = priors;
+  if (priors.length) clean.recurringCustomer = true;
 }
 
 // The engine's own review-gating predicates (estimator-engine/draft-builder
@@ -885,15 +1066,38 @@ function engineReviewPredicates() {
 
 // An engine line that needs a human (manual review, measurement, custom
 // quote, heuristic turf, LOW pricing confidence) is not a list price.
+// The engine's WaveGuard tier as a comparable key (null when absent).
+const tierKey = (tier) => (tier ? String(tier).toLowerCase() : null);
+function engineTier(result) {
+  return tierKey(result && result.waveGuard && result.waveGuard.tier);
+}
+
 function engineItemLowConfidence(item) {
   const { lineRequiresReview, lineHasHeuristicTurf } = engineReviewPredicates();
   return lineRequiresReview(item) || lineHasHeuristicTurf(item) || String(item.pricingConfidence || '').toUpperCase() === 'LOW';
 }
 
-// Engine items carry their annual application count as visitsPerYear
-// (pest, tree & shrub), frequency (lawn) or visits (mosquito).
+// Engine items carry their annual application count under the persisted
+// aliases the converter's canonical resolver recognises (estimate-converter
+// visitsPerYearForRecurringService: visitsPerYear / appsPerYear / visits /
+// apps / treatmentsPerYear — pest and tree & shrub say visitsPerYear, palm
+// says appsPerYear, mosquito says visits); lawn's `frequency` is the one
+// field outside that vocabulary. The local list is the fallback if the
+// converter cannot load here — the same aliases, so never a different count.
+let visitCountResolverCached;
+function visitCountResolver() {
+  if (visitCountResolverCached === undefined) {
+    try {
+      const { visitsPerYearForRecurringService } = require('./estimate-converter');
+      visitCountResolverCached = typeof visitsPerYearForRecurringService === 'function' ? visitsPerYearForRecurringService : null;
+    } catch {
+      visitCountResolverCached = null;
+    }
+  }
+  return visitCountResolverCached || ((item) => positive(item.visitsPerYear) ?? positive(item.appsPerYear) ?? positive(item.visits) ?? positive(item.apps) ?? positive(item.treatmentsPerYear) ?? null);
+}
 function engineItemVisits(item) {
-  return positive(item.visitsPerYear) ?? positive(item.frequency) ?? positive(item.visits);
+  return positive(visitCountResolver()(item || {})) ?? positive(item.frequency);
 }
 
 // `expectedVisits`: the line's own applications per year (seasonal mosquito
@@ -902,12 +1106,25 @@ function engineItemVisits(item) {
 // `riderAllow`: the ledger family keys the current monthly slice actually
 // sums (ledgerSliceForLine(...).family_keys) — a rider priced on the saved
 // estimate but cancelled since has no slice and must not inflate the list.
-function listRateFromEngineResult(result, line, cadence, { includeRiders = false, expectedVisits = null, riderAllow = null } = {}) {
+function listRateFromEngineResult(result, line, cadence, { includeRiders, expectedVisits, riderAllow } = {}) {
   const keys = ENGINE_SERVICE_KEYS[line] || [];
   const items = result && Array.isArray(result.lineItems) ? result.lineItems : [];
-  const item = items.find((i) => keys.includes(i.service));
+  const tier = engineTier(result);
+  // First key present wins (tree_shrub before palm_injection); a standalone
+  // palm program is then the primary, never a rider of a missing line.
+  const item = keys.map((k) => items.find((i) => i.service === k)).find(Boolean);
   if (!item) return null;
-  if (engineItemLowConfidence(item)) return { lowConfidence: true, tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null };
+  // Every ledger component that is one of this line's engine programs must
+  // be priced in the replay, as the primary or a rider. A monthly Tree &
+  // Shrub slice carrying palm injections sold on a SEPARATE estimate
+  // replays the bed program alone (reconciliation adds the other program
+  // as tier context, never as a priced service): that one-program list is
+  // no comparison for the combined ledger rate — held (list_bundle_incomplete).
+  if (includeRiders && Array.isArray(riderAllow)) {
+    const missing = riderAllow.filter((k) => keys.includes(k) && !items.some((i) => i.service === k));
+    if (missing.length) return { bundleIncomplete: true, missingServices: missing, tier };
+  }
+  if (engineItemLowConfidence(item)) return { lowConfidence: true, tier };
   const annual = positive(item.annualAfterDiscount ?? item.annual);
   const visits = engineItemVisits(item);
   if (!annual || !visits) return null;
@@ -916,34 +1133,74 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   // Riders (a palm program beside Tree & Shrub) join the MONTHLY figure only,
   // mirroring the ledger slice the monthly current rate was read from.
   const riderKeys = includeRiders
-    ? (ENGINE_RIDER_KEYS[line] || []).filter((k) => !Array.isArray(riderAllow) || riderAllow.includes(k))
+    ? (ENGINE_RIDER_KEYS[line] || []).filter((k) => k !== item.service && (!Array.isArray(riderAllow) || riderAllow.includes(k)))
     : [];
-  const riders = items.filter((i) => riderKeys.includes(i.service) && !engineItemLowConfidence(i));
+  const riders = items.filter((i) => riderKeys.includes(i.service));
+  // A rider the current slice carries is part of the compared bundle: one
+  // that needs a human holds the whole line, never a silent drop that
+  // compares a rider-inclusive current rate against a rider-free list.
+  if (riders.some((i) => engineItemLowConfidence(i))) return { lowConfidence: true, tier };
   const riderAnnual = riders.reduce((sum, r) => sum + (positive(r.annualAfterDiscount ?? r.annual) || 0), 0);
   return {
     perAppCents: Math.round((annual / visits) * 100),
     monthlyCents: Math.round(((annual + riderAnnual) / 12) * 100),
     riderServices: riders.map((r) => r.service),
     cadenceMismatch,
-    tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null,
+    tier,
   };
 }
 
-async function replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps) {
+// One authoritative refresh of the engine's DB-backed constants per batch,
+// UNCONDITIONALLY — the process-local needsSync() interval can report
+// "fresh" on a pod whose constants another pod's pricing edit just made
+// stale. false (the bridge never rejects) = no engine list for the batch.
+async function syncPricingConstants(deps = {}) {
+  const engine = deps.pricingEngine || require('./pricing-engine');
+  if (typeof engine.syncConstantsFromDB !== 'function') return true;
+  try {
+    const synced = await engine.syncConstantsFromDB();
+    if (synced === false) logger.warn('[rate-review] pricing constants did not sync — no engine list rates this batch');
+    return synced !== false;
+  } catch (err) {
+    logger.warn(`[rate-review] pricing constants sync threw — no engine list rates this batch: ${err.message}`);
+    return false;
+  }
+}
+
+// How rodent counted toward the tier THEN (a legacy rodent bait plan
+// qualified for nothing; a new-model row froze its WaveGuard flags): the
+// sold-mix replay — the hand-picked-tier evidence — derives the two pins
+// from the SAVED RESULT (estimate_data.result / engineResult) with the
+// signal readers the authoritative recompute and the public replay use
+// (rodent-bait-legacy-replay.js; admin-estimate-persistence.js), falling
+// back to a stamp the extracted inputs may still carry, so a Bronze that
+// was the engine's own doing replays Bronze. The current-list replay prices
+// today's rules and lets the sanitizer strip them.
+const SOLD_POSTURE_KEYS = ['rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
+function soldPosturePins(data, inputs) {
+  let signals = null;
+  try { signals = require('./rodent-bait-legacy-replay'); } catch { signals = null; }
+  const stamped = (key) => (isObject(inputs[key]) ? inputs[key] : null);
+  return {
+    rodentBaitLegacyReplay: (signals && signals.rodentBaitLegacyReplaySignal(data || {})) || stamped('rodentBaitLegacyReplay'),
+    rodentWaveguardPostureReplay: (signals && signals.rodentWaveguardPostureReplaySignal(data || {})) || stamped('rodentWaveguardPostureReplay'),
+  };
+}
+
+async function replayEstimate(estimate, { familyKey, cadence, activeFamilies, soldMix = false }, deps) {
   const inputs = engineInputsFromEstimate(estimate, deps);
   if (!inputs) return null;
+  if (deps.engineSynced === false) return { unavailable: 'engine_sync_failed' };
   const engine = deps.pricingEngine || require('./pricing-engine');
+  const data = parseJson(estimate.estimate_data);
+  const savedPriorQualifying = data && Array.isArray(data.priorQualifyingServices) ? data.priorQualifyingServices : null;
   try {
-    // syncConstantsFromDB resolves false (never rejects) when the DB read
-    // fails. Stale in-memory constants are not today's list: no replay.
-    if (typeof engine.needsSync === 'function' && engine.needsSync() && typeof engine.syncConstantsFromDB === 'function') {
-      const synced = await engine.syncConstantsFromDB();
-      if (synced === false) {
-        logger.warn(`[rate-review] pricing constants did not sync — no engine list rate for estimate ${estimate.id}`);
-        return { unavailable: 'engine_sync_failed' };
-      }
+    const replayInputs = listReplayInputs(inputs, { familyKey, cadence, activeFamilies, savedPriorQualifying });
+    if (soldMix) {
+      const pins = soldPosturePins(data, inputs);
+      for (const key of SOLD_POSTURE_KEYS) if (pins[key]) replayInputs[key] = pins[key];
     }
-    return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence, activeFamilies })) };
+    return { inputs, result: engine.generateEstimate(replayInputs) };
   } catch (err) {
     logger.warn(`[rate-review] engine replay failed for estimate ${estimate.id}: ${err.message}`);
     return { unavailable: 'engine_replay_failed' };
@@ -952,13 +1209,12 @@ async function replayEstimate(estimate, { familyKey, cadence, activeFamilies }, 
 
 // ── data loaders ────────────────────────────────────────────────────────
 
+// The admin-editable knobs. A MISSING row defaults (the seed migration
+// guarantees one); a read that FAILS propagates — a batch ranked, persisted
+// and emailed on DEFAULT_CONFIG while the owner's edited caps were
+// unreadable would be a valid-looking batch under the wrong rules.
 async function loadConfig(dbh = db) {
-  let row = null;
-  try {
-    row = await dbh(CONFIG).where({ id: 1 }).first();
-  } catch (err) {
-    logger.warn(`[rate-review] config read failed, using defaults: ${err.message}`);
-  }
+  const row = await dbh(CONFIG).where({ id: 1 }).first();
   const config = { ...DEFAULT_CONFIG };
   if (row) {
     for (const key of Object.keys(DEFAULT_CONFIG)) {
@@ -969,7 +1225,10 @@ async function loadConfig(dbh = db) {
   return config;
 }
 
-const LINE_SQL = `CASE COALESCE(sv.category, s.service_category_snapshot,
+// The scheduled row's FROZEN service_category_snapshot first (a later
+// catalog re-categorization must not move a booked series between
+// families); the live catalog only when the row carries no snapshot.
+const LINE_SQL = `CASE COALESCE(s.service_category_snapshot, sv.category,
     CASE WHEN s.service_type ILIKE '%mosquito%' THEN 'mosquito'
          WHEN s.service_type ILIKE '%termite%' OR s.service_type ILIKE '%wdo%' THEN 'termite'
          WHEN s.service_type ILIKE '%rodent%' OR s.service_type ILIKE '%trap%' THEN 'rodent'
@@ -993,32 +1252,59 @@ const CADENCE_SQL = `CASE WHEN sv.frequency LIKE 'seasonal%' OR s.recurring_patt
   WHEN (s.recurring_pattern = 'custom' OR s.recurring_pattern IS NULL) AND s.recurring_interval_days IS NULL AND sv.frequency IN ('monthly','quarterly','every_6_weeks','semiannual') THEN sv.frequency
   ELSE 'other' END`;
 
-const RECURRING_SQL = '(COALESCE(s.is_recurring, false) OR s.recurring_parent_id IS NOT NULL)';
+// SQL mirror of recurring-series-cancel-reseed.js#isPlanSeriesRow — the
+// purchased-plan row predicate: the recurring root or a child (explicitly
+// recurring, or a legacy null-flagged child of a root), never an explicit
+// booster (is_recurring = false + parent), a free re-service callback or an
+// included follow-up. One rule for the book and the history loaders.
+const PLAN_ROW_SQL = `((s.is_recurring = true OR (s.is_recurring IS NULL AND s.recurring_parent_id IS NOT NULL))
+  AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
+// Live upcoming rows = the same statuses the plan-count reconciler counts
+// (isCountingSourceStatus: NULL or COUNTING_SOURCE_STATUSES) — a
+// 'rescheduled' placeholder is not an application on the books.
+const LIVE_STATUS_SQL = `(s.status IS NULL OR s.status IN (${COUNTING_SOURCE_STATUSES.map((st) => `'${st}'`).join(', ')}))`;
 
-// Every active recurring plan line in the book: real customer × line ×
-// cadence with ≥1 open future recurring visit (pre-read definition).
+// Every active recurring plan line in the book: real, live customer × line
+// × cadence with ≥1 upcoming purchased-plan row (PLAN_ROW_SQL ×
+// LIVE_STATUS_SQL; the pre-read definition narrowed to the canonical
+// plan-row predicate).
 async function loadActivePlanLines(dbh, { today }) {
   const { rows } = await dbh.raw(`
     WITH ov AS (
       SELECT s.id, s.customer_id, s.scheduled_date, s.estimated_price, s.primary_line_price, s.annual_prepay_term_id, s.source_estimate_id,
+        -- what the RECURRING APPLICATION costs on this visit, never the appointment total
+        -- (estimate-membership-context.js rowServicePrice, codex #3359): a row without add-ons
+        -- is its estimated_price; a composite row (scheduled_service_addons) is its
+        -- primary_line_price net of its own line discount, or NOTHING when an appointment-level
+        -- discount spans the primary and the add-ons with no recorded apportionment
+        CASE
+          WHEN ${COMBINED_CATALOG_SQL} THEN NULL
+          WHEN NOT EXISTS (SELECT 1 FROM scheduled_service_addons a WHERE a.scheduled_service_id = s.id)
+            THEN CASE WHEN s.estimated_price > 0 THEN s.estimated_price END
+          WHEN COALESCE(s.discount_dollars, 0) > 0 OR s.discount_type IS NOT NULL OR s.discount_id IS NOT NULL THEN NULL
+          WHEN s.primary_line_price - COALESCE(s.line_discount_dollars, 0) > 0 THEN s.primary_line_price - COALESCE(s.line_discount_dollars, 0)
+          ELSE NULL
+        END AS service_price,
         COALESCE(s.service_key_snapshot, sv.service_key) AS skey, sv.visits_per_year AS cat_vpy,
         ${LINE_SQL} AS line, ${CADENCE_SQL} AS cadence
       FROM scheduled_services s
       LEFT JOIN services sv ON sv.id = s.service_id
       JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date >= ?
-        AND s.status IN ('pending', 'confirmed', 'rescheduled')
-        AND ${RECURRING_SQL}
+        AND ${LIVE_STATUS_SQL}
+        AND ${PLAN_ROW_SQL}
         AND c.deleted_at IS NULL
+        AND c.active = true
         AND c.pipeline_stage IN ('active_customer', 'won', 'at_risk')
     )
     SELECT customer_id, line AS family_key, cadence,
       count(*)::int AS open_visits,
       min(scheduled_date) AS next_visit,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY estimated_price) FILTER (WHERE estimated_price > 0) AS median_price,
-      count(estimated_price) FILTER (WHERE estimated_price > 0)::int AS priced_visits,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY service_price) FILTER (WHERE service_price > 0) AS median_price,
+      count(service_price) FILTER (WHERE service_price > 0)::int AS priced_visits,
+      count(*) FILTER (WHERE service_price IS NULL AND estimated_price > 0)::int AS withheld_visits,
       count(*) FILTER (WHERE estimated_price = 0)::int AS zero_priced_visits,
-      bool_or(estimated_price = 0 AND primary_line_price > 0) AS zero_with_base,
+      count(*) FILTER (WHERE estimated_price = 0 AND primary_line_price > 0)::int AS zero_with_base_visits,
       bool_or(annual_prepay_term_id IS NOT NULL) AS prepay_linked,
       array_remove(array_agg(DISTINCT annual_prepay_term_id), NULL) AS prepay_term_ids,
       max(cat_vpy)::int AS catalog_vpy,
@@ -1053,8 +1339,7 @@ async function loadFirstCompletedVisits(dbh, customerIds) {
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ANY(?::uuid[])
       AND s.status = 'completed'
-      AND COALESCE(s.is_callback, false) = false
-      AND ${RECURRING_SQL}
+      AND ${PLAN_ROW_SQL}
     GROUP BY 1, 2
   `, [customerIds]);
   const map = new Map();
@@ -1092,7 +1377,43 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
 }
 
 // Completed non-callback recurring visits of the last 12 months with every
-// duration source pricing-reality-check reads, plus the settled revenue.
+// duration source pricing-reality-check reads, plus the settled revenue —
+// the paid invoice total NET of any refund recorded on its payments (a
+// partially refunded invoice stays 'paid'; the refund lives on the payment,
+// linked the way invoice.js links them: Stripe intent / charge id, or the
+// payment's metadata invoice_id — there is no payments.invoice_id). A
+// combined setup/initial + first-application invoice contributes its
+// application lines only; a pure setup invoice contributes nothing.
+// The retired combined catalog identities — one scheduled row that performed
+// TWO programs (estimate-converter.js RETIRED_COMBINED_CATALOG_KEYS /
+// comboRouteFamiliesFromCatalogKey: pest + termite bait, lawn + tree & shrub)
+// with no addon row and no per-program split of its price or its minutes.
+// Historical rows survive their retirement inside the lookback: composite
+// in the completed-visit evidence, withheld in the current-rate decomposition.
+const RETIRED_COMBINED_CATALOG_KEYS = Object.freeze(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']);
+const COMBINED_CATALOG_SQL = `COALESCE(s.service_key_snapshot, sv.service_key) IN (${RETIRED_COMBINED_CATALOG_KEYS.map((k) => `'${k}'`).join(', ')})`;
+
+// A partial refund's refund_amount carries the prorated card surcharge
+// returned with it (stripe.js _refundPayment → payments.refunded_surcharge_cents)
+// while invoices.total never held the surcharge: the BASE refund is what
+// comes off revenue. The dues payment rail nets the surcharge out of the
+// charge the same way (payments.surcharge_amount_cents).
+const REFUND_BASE_SQL = 'GREATEST(COALESCE(p.refund_amount, 0) - COALESCE(p.refunded_surcharge_cents, 0) / 100.0, 0)';
+
+// The deposit paid at acceptance and applied to an invoice is part of what
+// the customer paid for the application: invoices.total is the REMAINING
+// balance after the credit, and the credit survives only as the negative
+// `deposit_credit` line item (invoice.js create — there is no column).
+// Consideration = total + that credit; a fully deposit-funded application
+// (total 0) still pairs its revenue.
+function depositCreditSql(alias) {
+  return `COALESCE((
+            SELECT -sum(NULLIF(regexp_replace(dc ->> 'amount', '[^0-9.-]', '', 'g'), '')::numeric)
+            FROM jsonb_array_elements(CASE WHEN jsonb_typeof(COALESCE(${alias}.line_items::jsonb, 'null'::jsonb)) = 'array' THEN ${alias}.line_items::jsonb ELSE '[]'::jsonb END) dc
+            WHERE dc ->> 'category' = 'deposit_credit'
+          ), 0)`;
+}
+
 async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
   if (!customerIds.length) return [];
   const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
@@ -1103,7 +1424,7 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       WHERE entry_type = 'job' AND status IN ('completed', 'edited') AND job_id IS NOT NULL
       GROUP BY job_id
     ), sr AS (
-      SELECT DISTINCT ON (scheduled_service_id) scheduled_service_id,
+      SELECT DISTINCT ON (scheduled_service_id) scheduled_service_id, id AS service_record_id,
         started_at AS service_record_started_at, ended_at AS service_record_ended_at,
         structured_notes AS service_record_structured_notes, customer_interaction
       FROM service_records
@@ -1113,16 +1434,77 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
     SELECT s.id, s.customer_id, s.scheduled_date, ${LINE_SQL} AS line, ${CADENCE_SQL} AS cadence,
       s.service_time_minutes, s.actual_duration_minutes, s.actual_start_time, s.actual_end_time,
       s.check_in_time, s.check_out_time, s.arrived_at, s.completed_at,
-      s.annual_prepay_term_id, s.prepaid_amount,
-      apt.prepay_amount AS term_prepay_amount, apt.coverage_visit_count AS term_visit_count,
+      s.annual_prepay_term_id,
+      -- a visit that also performed add-ons (scheduled_service_addons): its minutes and its money
+      -- cover more than one program, with no per-line split of either — no evidence for this line
+      (EXISTS (SELECT 1 FROM scheduled_service_addons a WHERE a.scheduled_service_id = s.id) OR ${COMBINED_CATALOG_SQL}) AS composite_visit,
+      apt.coverage_visit_count AS term_visit_count,
+      -- the term's COVERAGE money (prepay_amount — the invoice total may also carry a setup line), capped by what settled net of refunds
+      (SELECT LEAST(apt.prepay_amount, pi.total - COALESCE((
+          SELECT sum(${REFUND_BASE_SQL}) FROM payments p
+          WHERE COALESCE(p.refund_amount, 0) > 0
+            AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pi.stripe_payment_intent_id)
+              OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = pi.stripe_charge_id)
+              OR p.metadata::jsonb ->> 'invoice_id' = pi.id::text)
+        ), 0) + ${depositCreditSql('pi')})
+        FROM invoices pi
+        WHERE pi.id = apt.prepay_invoice_id AND pi.archived_at IS NULL
+          AND (pi.paid_at IS NOT NULL OR pi.status IN ('paid', 'prepaid'))
+          AND pi.status NOT IN (${notSettled.map(() => '?').join(', ')})
+      ) AS term_settled_amount,
       te.time_entry_minutes, te.time_entry_clock_in, te.time_entry_clock_out,
       sr.service_record_started_at, sr.service_record_ended_at, sr.service_record_structured_notes, sr.customer_interaction,
-      (SELECT sum(i.total) FROM invoices i
-        WHERE i.scheduled_service_id = s.id AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
+      (SELECT sum(LEAST(
+          i.total - COALESCE((
+            SELECT sum(${REFUND_BASE_SQL}) FROM payments p
+            WHERE COALESCE(p.refund_amount, 0) > 0
+              AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+                OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
+                OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
+          ), 0) + ${depositCreditSql('i')},
+          -- a combined setup/initial + application invoice contributes its APPLICATION lines only
+          CASE WHEN (COALESCE(i.title, '') ILIKE '%setup%' OR COALESCE(i.title, '') ILIKE '%initial%'
+                     OR COALESCE(i.line_items::text, '') ILIKE '%setup%' OR COALESCE(i.line_items::text, '') ILIKE '%initial%')
+               THEN CASE WHEN jsonb_typeof(COALESCE(i.line_items::jsonb, 'null'::jsonb)) = 'array'
+                         THEN (SELECT COALESCE(sum(NULLIF(regexp_replace(li ->> 'amount', '[^0-9.-]', '', 'g'), '')::numeric), 0)
+                               FROM jsonb_array_elements(i.line_items::jsonb) li
+                               WHERE NOT (COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%setup%'
+                                          OR COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%initial%')
+                                 AND COALESCE(li ->> 'category', '') <> 'deposit_credit')
+                         ELSE 0 END
+               ELSE i.total + ${depositCreditSql('i')} END
+        ) * COALESCE(share.fraction, 1))
+        FROM invoices i
+        -- an invoice shared by several visits — a completion-packet invoice (visit-completion-
+        -- invoice.js: ONE invoice under billed[0].member.id, every billed member linked through
+        -- visit_completion_packet_items.invoice_id) or a combined first-application invoice
+        -- (estimate-converter.js stampCombinedFirstApplicationInvoiceCoverage: the anchor AND each
+        -- covered sibling carry its id in first_application_invoice_id) — credits each member its
+        -- own share of the settled total, pro rata by the members' visit prices (estimated_price,
+        -- else the primary_line_price a folded sibling carries); a member with no price makes the
+        -- split unknowable and the whole invoice contributes nothing — never its total to the anchor
+        LEFT JOIN LATERAL (
+          SELECT CASE
+              WHEN count(*) FILTER (WHERE COALESCE(m.estimated_price, m.primary_line_price) > 0) < count(*) THEN 0
+              WHEN sum(COALESCE(m.estimated_price, m.primary_line_price)) > 0
+                THEN COALESCE(s.estimated_price, s.primary_line_price, 0) / sum(COALESCE(m.estimated_price, m.primary_line_price))
+              ELSE 0 END AS fraction
+          FROM (
+            SELECT pm.scheduled_service_id AS id FROM visit_completion_packet_items pm WHERE pm.invoice_id = i.id
+            UNION
+            SELECT b.id FROM scheduled_services b WHERE b.first_application_invoice_id = i.id
+          ) mem
+          JOIN scheduled_services m ON m.id = mem.id
+          HAVING count(*) > 1
+        ) share ON true
+        WHERE (i.scheduled_service_id = s.id
+               -- an invoice linked only through its service record (invoice.js linkedScheduledServiceId)
+               OR (i.service_record_id IS NOT NULL AND i.service_record_id = sr.service_record_id)
+               OR s.first_application_invoice_id = i.id
+               OR EXISTS (SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2.invoice_id = i.id AND pm2.scheduled_service_id = s.id))
+          AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
           AND (i.paid_at IS NOT NULL OR i.status IN ('paid', 'prepaid'))
           AND i.status NOT IN (${notSettled.map(() => '?').join(', ')})
-          AND NOT (COALESCE(i.title, '') ILIKE '%setup%' OR COALESCE(i.title, '') ILIKE '%initial%'
-                   OR COALESCE(i.line_items::text, '') ILIKE '%setup%' OR COALESCE(i.line_items::text, '') ILIKE '%initial%')
       ) AS paid_revenue
     FROM scheduled_services s
     LEFT JOIN services sv ON sv.id = s.service_id
@@ -1131,31 +1513,42 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
     LEFT JOIN annual_prepay_terms apt ON apt.id = s.annual_prepay_term_id
     WHERE s.customer_id = ANY(?::uuid[])
       AND s.status = 'completed'
-      AND COALESCE(s.is_callback, false) = false
-      AND ${RECURRING_SQL}
+      AND ${PLAN_ROW_SQL}
       AND s.scheduled_date >= ?
-  `, [...notSettled, customerIds, sinceYmd]);
+  `, [...notSettled, ...notSettled, customerIds, sinceYmd]);
   return rows;
 }
 
 // Settled membership dues per customer over the lookback — the monthly
 // lane's revenue (facts.js posture: both rails carry chargeMonthly's
 // "WaveGuard Monthly" marker and can double-count one payment, so the
-// LARGER rail counts, never the sum).
+// LARGER rail counts, never the sum). Both rails are NET of refunds: a
+// partially refunded dues payment stays 'paid' with the refund on
+// refund_amount, and a dues invoice is netted by the refunds on the
+// payments linked to it (invoice.js's linkage: Stripe intent / charge id,
+// metadata invoice_id) — netting one rail alone would let the other's
+// gross figure win the GREATEST.
 async function loadSettledDues(dbh, customerIds, { sinceYmd }) {
   if (!customerIds.length) return new Map();
   const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
   const { rows } = await dbh.raw(`
     WITH inv AS (
-      SELECT customer_id, sum(total) AS amount FROM invoices
-      WHERE customer_id = ANY(?::uuid[]) AND archived_at IS NULL
-        AND (paid_at IS NOT NULL OR status IN ('paid', 'prepaid'))
-        AND status NOT IN (${notSettled.map(() => '?').join(', ')})
-        AND title ILIKE '%WaveGuard Monthly%'
-        AND (COALESCE(paid_at, created_at) AT TIME ZONE 'America/New_York')::date >= ?
-      GROUP BY customer_id
+      SELECT i.customer_id, sum(i.total) - COALESCE(sum((
+          SELECT sum(${REFUND_BASE_SQL}) FROM payments p
+          WHERE COALESCE(p.refund_amount, 0) > 0
+            AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+              OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
+              OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
+        )), 0) AS amount
+      FROM invoices i
+      WHERE i.customer_id = ANY(?::uuid[]) AND i.archived_at IS NULL
+        AND (i.paid_at IS NOT NULL OR i.status IN ('paid', 'prepaid'))
+        AND i.status NOT IN (${notSettled.map(() => '?').join(', ')})
+        AND i.title ILIKE '%WaveGuard Monthly%'
+        AND (COALESCE(i.paid_at, i.created_at) AT TIME ZONE 'America/New_York')::date >= ?
+      GROUP BY i.customer_id
     ), pay AS (
-      SELECT customer_id, sum(amount) AS amount FROM payments
+      SELECT customer_id, sum(amount - COALESCE(surcharge_amount_cents, 0) / 100.0 - GREATEST(COALESCE(refund_amount, 0) - COALESCE(refunded_surcharge_cents, 0) / 100.0, 0)) AS amount FROM payments
       WHERE customer_id = ANY(?::uuid[]) AND status = 'paid'
         AND (description ILIKE '%WaveGuard Monthly%' OR metadata->>'type' = 'monthly_autopay')
         AND (created_at AT TIME ZONE 'America/New_York')::date >= ?
@@ -1274,17 +1667,18 @@ async function loadExceptionSignals(dbh, customerId, { now, config }) {
       .where(function recentOrOpen() {
         this.where('status', 'open').orWhereRaw("(created_at AT TIME ZONE 'America/New_York')::date >= ?", [sinceYmd]);
       })
-      .count({ n: '*' }).first()),
+      .select('scope')),
     leg(() => dbh('retention_offers')
       .where({ customer_id: customerId, status: 'granted' })
       .where(function notExpired() { this.whereNull('expires_at').orWhere('expires_at', '>', now); })
-      .count({ n: '*' }).first()),
+      .select('family_key')),
     leg(() => dbh('plan_holds').where({ customer_id: customerId, status: 'active' }).select('family_key')),
   ]);
   return {
     callbackLines: callbacks === 'error' ? 'error' : callbacks.map((r) => r.line),
-    cancellationCaseRecent: cases === 'error' ? true : Number(cases && cases.n) > 0,
-    retentionOfferActive: offers === 'error' ? true : Number(offers && offers.n) > 0,
+    // each case names the families it covers (cancellation_cases.scope; [] = the whole account)
+    cancellationCaseScopes: cases === 'error' ? 'error' : cases.map((c) => parseJson(c.scope) || []),
+    retentionOfferFamilies: offers === 'error' ? 'error' : offers.map((o) => o.family_key),
     planHoldFamilies: holds === 'error' ? 'error' : holds.map((h) => h.family_key),
   };
 }
@@ -1341,8 +1735,11 @@ function matchPrepayTerm(terms, planLine, familyKey) {
   return { term: null, ambiguous: unlabeled.length > 0 };
 }
 
+// `lane` comes from billing-lane.js#resolveBillingLane — the canonical
+// reader: an explicit billing_mode wins; a legacy NULL infers
+// monthly_membership for a real WaveGuard tier with dues, else per_visit.
 function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
-  const lane = customer.billing_mode || null;
+  const lane = resolveBillingLane(customer).mode;
   const prepayLinked = !!planLine.prepay_linked;
   const visitMedianCents = toCents(planLine.median_price);
   const feeCents = toCents(customer.per_application_fee);
@@ -1350,11 +1747,22 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
   // that zero is authoritative (billing-lane.js hasAuthoritativeZeroPrice:
   // GATE_STAMPED_ZERO_FREE on, or a positive primary_line_price base) — it
   // is a free line, never a fee-fallback candidate for an increase.
-  const authoritativeZero = !(visitMedianCents > 0) && (planLine.zero_priced_visits || 0) > 0
-    && hasAuthoritativeZeroPrice(0, planLine.zero_with_base ? 1 : null);
+  // … and only when EVERY open visit is stamped $0: one discounted-to-zero
+  // visit beside NULL-priced ones (which bill the per-application fee,
+  // completionInvoiceAmount) is not a free line.
+  // … and every zero visit carries the authority ITSELF (counted per visit,
+  // never bool_or over the line): with the gate off, a $0 visit without a
+  // primary_line_price base bills the fee.
+  const zeroVisits = planLine.zero_priced_visits || 0;
+  const authoritativeZero = !(visitMedianCents > 0) && zeroVisits > 0 && zeroVisits === planLine.open_visits
+    && hasAuthoritativeZeroPrice(0, planLine.zero_with_base_visits === zeroVisits ? 1 : null);
   const fromVisits = () => {
     if (visitMedianCents > 0) return { cents: visitMedianCents, source: 'visit_median', unit: 'application' };
     if (authoritativeZero) return { cents: 0, source: 'stamped_zero', unit: 'application', stampedZeroFree: true };
+    // Every priced open visit is composite with an appointment-level discount
+    // (rowServicePrice withholds: the application's share of that net is
+    // unrecorded) — held as rate_unattributed, never priced off the account fee.
+    if ((planLine.withheld_visits || 0) > 0) return { cents: 0, source: 'none', unit: 'application', rateUnattributed: true, compositeWithheld: true };
     if (feeCents > 0) return { cents: feeCents, source: 'per_application_fee', unit: 'application' };
     return { cents: 0, source: 'none', unit: 'application' };
   };
@@ -1370,12 +1778,12 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
     if (cents) return { cents, source: 'prepay_term', unit: 'application', prepayMidTerm: true, prepayTermId: term.id };
     return { ...fromVisits(), prepayMidTerm: true, prepayTermId: term.id };
   }
-  if (lane === 'annual_prepay' || prepayLinked || ambiguous) {
+  const prepayLane = lane === 'annual_prepay' || prepayLinked;
+  if (prepayLane || ambiguous) {
     // Prepay by scalar or visit link but no resolvable live term — or live
     // terms that could belong to more than one line: held, priced off the
     // visits so the owner still sees numbers.
-    const fallback = fromVisits();
-    return { ...fallback, prepayTermMissing: lane === 'annual_prepay' || prepayLinked, prepayTermAmbiguous: ambiguous };
+    return { ...fromVisits(), prepayTermMissing: prepayLane, prepayTermAmbiguous: ambiguous };
   }
   if (lane === 'monthly_membership') {
     if (isEnabled('planRateLedger') && ledgerSlice && positive(ledgerSlice.monthly_rate)) {
@@ -1423,7 +1831,7 @@ function consolidatePlanLines(rows) {
       service_keys: [...new Set(sorted.flatMap((r) => r.service_keys || []))],
       prepay_linked: sorted.some((r) => r.prepay_linked),
       zero_priced_visits: sorted.reduce((n, r) => n + (Number(r.zero_priced_visits) || 0), 0),
-      zero_with_base: sorted.some((r) => r.zero_with_base),
+      zero_with_base_visits: sorted.reduce((n, r) => n + (Number(r.zero_with_base_visits) || 0), 0),
     });
   }
   const linesPerCustomer = new Map();
@@ -1448,6 +1856,7 @@ function assertBatchKey(batchKey) {
 }
 
 function assertYmd(value, name) {
+  if (value == null) return; // optional
   if (!DATE_RE.test(String(value || '')) || !validCalendarDate(String(value))) {
     const err = new Error(`${name} must be a real calendar date, YYYY-MM-DD`);
     err.status = 400;
@@ -1499,7 +1908,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
     loadLiveTerms(dbh, customerIds, { today }),
     loadLedgerSlices(dbh, customerIds),
   ]);
-  const monthlyIds = [...customers.values()].filter((c) => c.billing_mode === 'monthly_membership').map((c) => c.id);
+  const monthlyIds = [...customers.values()].filter((c) => resolveBillingLane(c).mode === 'monthly_membership').map((c) => c.id);
   const settledDues = await loadSettledDues(dbh, monthlyIds, { sinceYmd });
   const estimateIds = [...new Set(planLines.flatMap((p) => p.source_estimate_ids || []))];
   const estimates = await loadEstimates(dbh, estimateIds);
@@ -1517,97 +1926,123 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
 
 // Stage 2 — one book entry per plan line: current rate per lane, duration /
 // revenue stats, list rate by engine replay (newest estimate first).
+// get-or-compute on the per-batch replay cache
+async function memo(cache, key, compute) {
+  if (!cache.has(key)) cache.set(key, await compute());
+  return cache.get(key);
+}
+
+// Stage 2b — the engine replay for one line. The NEWEST applicable
+// estimate that replays at the line's own cadence gives today's list; a
+// result whose cadence still does not match the line (a family the replay
+// cannot re-cadence) is NOT a list rate — discarded (list_cadence_mismatch),
+// and the row falls to the cadence mode or is skipped. Hand-picked-tier
+// evidence (tierMoved) compares the estimate's SAVED tier with a replay of
+// the mix it was sold with (no reconciliation) — a tier that moved because
+// the customer later added or dropped a program is the engine's own doing,
+// not a manual pick.
+async function replayListForLine(candidates, { familyKey, cadence, activeFamilies, visitsPerYear, monthly, includeRiders, riderAllow, replayCache, deps }) {
+  const out = { list: { cents: null, source: 'none', cadenceMismatch: false, engineTier: null }, engineUnavailable: null, listLowConfidence: false, listBundleIncomplete: false };
+  const bundleKey = activeFamilies.map((l) => `${l.familyKey}:${l.serviceKeys.join('+')}`).join(',');
+  for (const estimate of candidates) {
+    if (!hasSizeInput(engineInputsFromEstimate(estimate, deps), familyKey)) continue;
+    const replay = await memo(replayCache, `${estimate.id}|${familyKey}|${cadence}|${bundleKey}`, () => replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
+    if (!replay) continue;
+    if (replay.unavailable) { out.engineUnavailable = replay.unavailable; continue; }
+    const rate = listRateFromEngineResult(replay.result, familyKey, cadence, { includeRiders, riderAllow, expectedVisits: visitsPerYear });
+    if (!rate) continue;
+    if (rate.lowConfidence) { out.listLowConfidence = true; continue; }
+    if (rate.bundleIncomplete) { out.listBundleIncomplete = true; continue; }
+    const original = await memo(replayCache, `${estimate.id}|original`, () => replayEstimate(estimate, { familyKey: null, cadence: null, activeFamilies: null, soldMix: true }, deps));
+    const originalTier = engineTier(original && original.result);
+    const estimateTier = tierKey(estimate.waveguard_tier);
+    const tierMoved = !!(originalTier && estimateTier && originalTier !== estimateTier);
+    if (rate.cadenceMismatch) {
+      out.list = { cents: null, source: 'none', cadenceMismatch: true, engineTier: rate.tier, originalTier, estimateTier, tierMoved };
+      continue;
+    }
+    out.list = { cents: monthly ? rate.monthlyCents : rate.perAppCents, source: 'engine', cadenceMismatch: false, engineTier: rate.tier, originalTier, estimateTier, tierMoved };
+    break;
+  }
+  return out;
+}
+
 async function assembleBookEntry(inputs, planLine, { config, replayCache, deps }) {
   const { customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances, planLines } = inputs;
-    const customer = customers.get(planLine.customer_id);
-    if (!customer) return null;
-    const familyKey = planLine.family_key;
-    const cadence = planLine.cadence;
-    const ledgerSlice = ledgerSliceForLine(ledger, customer.id, familyKey);
-    const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice });
-    const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
-    const lineVisits = visitsByLine.get(`${customer.id}|${familyKey}`) || [];
-    const stats = lineDurationStats(lineVisits, {
-      config,
-      allowanceMinutes: allowanceFor(allowances, familyKey),
-      duesRevenueCents: current.unit === 'month'
-        ? duesPerVisitCents({ settledCents: settledDues.get(customer.id) || 0, ledger, customerId: customer.id, familyKey, accountLines: planLine.account_lines, completedVisits: lineVisits.length })
-        : null,
-    });
-    const first = firstVisits.get(`${customer.id}|${familyKey}`) || null;
-
-    // Earliest acceptance anchors the anniversary; the NEWEST applicable
-    // estimate is replayed first for today's list (updated size / inputs).
-    const linkedEstimates = (planLine.source_estimate_ids || []).map((id) => estimates.get(id)).filter(Boolean)
-      .sort((a, b) => new Date(a.accepted_at || 0) - new Date(b.accepted_at || 0));
-    const acceptedAt = linkedEstimates.length ? linkedEstimates[0].accepted_at : null;
-    const replayCandidates = [...linkedEstimates].reverse();
-
-    // Engine replay at the line's own cadence. A result whose cadence still
-    // does not match the line (a family the replay cannot re-cadence) is NOT
-    // a list rate — it is discarded (list_cadence_mismatch), and the row
-    // falls to the cadence mode or is skipped.
-    let list = { cents: null, source: 'none', cadenceMismatch: false, engineTier: null };
-    let engineUnavailable = null;
-    let listLowConfidence = false;
-    for (const estimate of replayCandidates) {
-      const inputs = engineInputsFromEstimate(estimate, deps);
-      if (!hasSizeInput(inputs, familyKey)) continue;
-      const activeFamilies = planLines.filter((p) => p.customer_id === customer.id).map((p) => p.family_key).sort();
-      const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.join(',')}`;
-      if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
-      const replay = replayCache.get(cacheKey);
-      if (replay && replay.unavailable) { engineUnavailable = replay.unavailable; continue; }
-      const rate = replay
-        ? listRateFromEngineResult(replay.result, familyKey, cadence, {
-          includeRiders: current.unit === 'month' && current.source === 'ledger_slice',
-          riderAllow: ledgerSlice ? ledgerSlice.family_keys : [],
-          expectedVisits: visitsPerYear,
-        })
-        : null;
-      if (!rate) continue;
-      if (rate.lowConfidence) { listLowConfidence = true; continue; }
-      // Hand-picked tier evidence compares the estimate's SAVED tier with a
-      // replay of the mix it was sold with (no reconciliation) — a tier that
-      // moved because the customer later added or dropped a program is the
-      // engine's own doing, not a manual pick.
-      const originalKey = `${estimate.id}|original`;
-      if (!replayCache.has(originalKey)) replayCache.set(originalKey, await replayEstimate(estimate, { familyKey: null, cadence: null, activeFamilies: null }, deps));
-      const original = replayCache.get(originalKey);
-      const originalTier = original && original.result && original.result.waveGuard && original.result.waveGuard.tier ? String(original.result.waveGuard.tier).toLowerCase() : null;
-      const estimateTier = estimate.waveguard_tier ? String(estimate.waveguard_tier).toLowerCase() : null;
-      if (rate.cadenceMismatch) {
-        list = { cents: null, source: 'none', cadenceMismatch: true, engineTier: rate.tier, originalTier, estimateTier };
-        continue;
-      }
-      list = { cents: current.unit === 'month' ? rate.monthlyCents : rate.perAppCents, source: 'engine', cadenceMismatch: false, engineTier: rate.tier, originalTier, estimateTier };
-      break;
-    }
-
-    return {
-      planLine, customer, familyKey, cadence,
-      visitsPerYear,
-      current, stats, first, acceptedAt, list,
-      engineUnavailable, listLowConfidence,
-      serviceKeys: planLine.service_keys || [],
-    };
+  const customer = customers.get(planLine.customer_id);
+  if (!customer) return null;
+  const { family_key: familyKey, cadence } = planLine;
+  const serviceKeys = planLine.service_keys || [];
+  const ledgerSlice = ledgerSliceForLine(ledger, customer.id, familyKey);
+  const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice });
+  const monthly = current.unit === 'month';
+  const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
+  const lineVisits = visitsByLine.get(`${customer.id}|${familyKey}`) || [];
+  const stats = lineDurationStats(lineVisits, {
+    config,
+    allowanceMinutes: allowanceFor(allowances, familyKey),
+    termVisitsFallback: visitsPerYear,
+    duesRevenueCents: monthly
+      ? duesPerVisitCents({ settledCents: settledDues.get(customer.id) || 0, ledger, customerId: customer.id, familyKey, accountLines: planLine.account_lines, completedVisits: lineVisits.length })
+      : null,
+  });
+  // Earliest acceptance anchors the anniversary; the NEWEST applicable
+  // estimate is replayed first for today's list (updated size / inputs).
+  const linkedEstimates = (planLine.source_estimate_ids || []).map((id) => estimates.get(id)).filter(Boolean)
+    .sort((a, b) => new Date(a.accepted_at || 0) - new Date(b.accepted_at || 0));
+  const acceptedAt = linkedEstimates.length ? linkedEstimates[0].accepted_at : null;
+  // the customer's plan lines TODAY, for the current-bundle reconciliation
+  const activeFamilies = planLines.filter((p) => p.customer_id === customer.id)
+    .map((p) => ({ familyKey: p.family_key, serviceKeys: p.service_keys || [] }))
+    .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
+  // Dues price the family's whole bundle (the ledger slice's components, or
+  // every program the line carries when customers.monthly_rate stood in):
+  // the replay must price each of them (list_bundle_incomplete otherwise).
+  const bundledDues = monthly && ['ledger_slice', 'monthly_rate'].includes(current.source);
+  const replayed = await replayListForLine([...linkedEstimates].reverse(), {
+    familyKey, cadence, activeFamilies, visitsPerYear, monthly,
+    includeRiders: bundledDues,
+    riderAllow: current.source === 'ledger_slice' && ledgerSlice ? ledgerSlice.family_keys : engineKeysForLine(familyKey, serviceKeys),
+    replayCache, deps,
+  });
+  return {
+    planLine, customer, familyKey, cadence, visitsPerYear, current, stats,
+    first: firstVisits.get(`${customer.id}|${familyKey}`) || null,
+    acceptedAt,
+    ...replayed,
+    multiProgram: !monthly && isMultiProgramLine(familyKey, serviceKeys),
+    serviceKeys,
+  };
 }
 
 // Stage 3 — references across the whole book: revenue/hour quartiles per
 // family and the cadence-mode list rate per family × cadence.
+// Only an ORDINARY, attributable line is a reference for the others: a
+// per_application account priced off its visits / fee, one program per
+// row, one cadence. Prepaid lines (discounted term pricing), per_visit /
+// one_time / NULL lanes (cleanup), multi-program rows (a blended median),
+// cadence conflicts, unclassified families and commercial accounts
+// (contract pricing) establish neither another line's list rate nor the
+// revenue-per-hour quartiles that nudge it — the same population for both.
+function isOrdinaryReference(entry) {
+  return entry.current.cents > 0 && entry.current.unit === 'application' && entry.familyKey !== 'other'
+    && ['visit_median', 'per_application_fee'].includes(entry.current.source) && !entry.current.prepayMidTerm
+    && !entry.multiProgram && !entry.planLine.cadence_conflict
+    && !isCommercialCustomer(entry.customer, entry.serviceKeys)
+    && resolveBillingLane(entry.customer).mode === 'per_application';
+}
+
 function computeLineReferences(book) {
   const modeByGroup = new Map();
   const rphByFamily = new Map();
   for (const entry of book) {
-    if (entry.current.cents > 0 && entry.current.unit === 'application') {
-      const key = `${entry.familyKey}|${entry.cadence}`;
-      if (!modeByGroup.has(key)) modeByGroup.set(key, []);
-      modeByGroup.get(key).push(entry.current.cents);
-    }
-    if (entry.stats.revenuePerHourCents != null) {
-      if (!rphByFamily.has(entry.familyKey)) rphByFamily.set(entry.familyKey, []);
-      rphByFamily.get(entry.familyKey).push(entry.stats.revenuePerHourCents);
-    }
+    if (!isOrdinaryReference(entry)) continue;
+    const key = `${entry.familyKey}|${entry.cadence}`;
+    if (!modeByGroup.has(key)) modeByGroup.set(key, []);
+    modeByGroup.get(key).push(entry.current.cents);
+    if (entry.stats.revenuePerHourCents == null) continue;
+    if (!rphByFamily.has(entry.familyKey)) rphByFamily.set(entry.familyKey, []);
+    rphByFamily.get(entry.familyKey).push(entry.stats.revenuePerHourCents);
   }
   const lineRphStats = new Map([...rphByFamily].map(([family, values]) => [family, quartiles(values)]));
   const cadenceModes = new Map();
@@ -1625,8 +2060,23 @@ function computeLineReferences(book) {
 // date is at most CARRY_FORWARD_MAX_DAYS_PAST days behind the build and not
 // beyond the window. A line with no anniversary at all is listed (flag
 // no_anniversary).
-function selectReviewEntries(book, { from, to, now, latestByLine }) {
+// The account's earliest completed visit in the portal, per customer —
+// over the COMPLETE completed history (loadFirstCompletedVisits: every
+// family, cancelled programs included), never just the active book: a
+// cancelled pest program's April visits still date the account's arrival.
+function accountFirstVisits(firstVisits, book) {
+  const accountFirst = new Map();
+  const rows = firstVisits ? [...firstVisits.values()] : book.map((entry) => ({ customer_id: entry.customer.id, first_visit: entry.first && entry.first.first_visit }));
+  for (const row of rows) {
+    const day = dateColumn(row.first_visit);
+    if (day && (!accountFirst.has(row.customer_id) || day < accountFirst.get(row.customer_id))) accountFirst.set(row.customer_id, day);
+  }
+  return accountFirst;
+}
+
+function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
+  const accountFirst = accountFirstVisits(firstVisits, book);
   const selected = [];
   for (const entry of book) {
     const anniversary = resolveAnniversary({
@@ -1634,9 +2084,11 @@ function selectReviewEntries(book, { from, to, now, latestByLine }) {
       acceptedAt: entry.acceptedAt,
       // member_since is a DATE; the created_at fallback is an instant.
       memberSince: dateColumn(entry.customer.member_since) || etDay(entry.customer.created_at),
+      accountFirstVisit: accountFirst.get(entry.customer.id) || null,
+      presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
     });
     entry.anniversary = anniversary;
-    entry.reviewDate = anniversary.date ? anniversaryInWindow(anniversary.date, from, to) : null;
+    entry.reviewDate = anniversaryInWindow(anniversary.date, from, to);
     entry.carriedFrom = null;
     if (!anniversary.date || entry.reviewDate) { selected.push(entry); continue; }
     const latest = latestByLine.get(`${entry.customer.id}|${entry.familyKey}`);
@@ -1647,6 +2099,9 @@ function selectReviewEntries(book, { from, to, now, latestByLine }) {
     entry.carriedFrom = latest.batch_key;
     selected.push(entry);
   }
+  // Tenure is measured AT the review date (the anniversary's occurrence in
+  // the window, or the carried-forward one), never at build time.
+  for (const entry of selected) entry.tenureMonths = entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null;
   return selected;
 }
 
@@ -1665,138 +2120,169 @@ async function loadReviewFacts(dbh, selected, { now, config, batchKey }) {
 }
 
 // Stage 6 — the snapshot row for one selected entry.
-function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }) {
-    const { customer, familyKey, cadence, current, stats, list } = entry;
-    const { priorReviews, factsByCustomer, signalsByCustomer } = reviewFacts;
-    const { cadenceModes, lineRphStats } = refs;
-    const facts = factsByCustomer.get(customer.id) || null;
-    const signals = signalsByCustomer.get(customer.id) || null;
-    // No replayable estimate → the book's per-application mode for this
-    // family × cadence; a monthly-billed line takes it spread over 12 months
-    // (mode × visits ÷ 12) so the two units compare like for like.
-    let listCents = list.cents;
-    let listSource = list.source;
-    if (listCents == null) {
-      const mode = cadenceModes.get(`${familyKey}|${cadence}`);
-      if (mode && current.unit === 'application') { listCents = mode; listSource = 'cadence_mode'; }
-      else if (mode && current.unit === 'month' && entry.visitsPerYear > 0) { listCents = Math.round((mode * entry.visitsPerYear) / 12); listSource = 'cadence_mode'; }
-    }
-    if (listCents == null) listSource = 'none';
-    // Hand-picked tier (owner ruling 2026-09-01: call-the-office, permanent):
-    // the provenance column says manual, or the accepted estimate carries a
-    // tier the engine does not derive from its own inputs. The customer's
-    // live tier is deliberately NOT compared — a multi-plan customer's older
-    // single-line estimate replays at a lower tier than the account now has.
-    const tierSource = String(customer.waveguard_tier_source || '').toLowerCase();
-    const handPickedTier = tierSource === 'manual'
-      || !!(list.source === 'engine' && list.originalTier && list.estimateTier && list.originalTier !== list.estimateTier);
-    const manualAt = facts && facts.manualPriceOverrideAt ? etDay(facts.manualPriceOverrideAt) : null;
-    const tierProtected = customer.tier_protected_until && dateColumn(customer.tier_protected_until) >= today;
-    const callbackLines = signals ? signals.callbackLines : 'error';
-    const callbackRecent = callbackLines === 'error'
-      || callbackLines.some((line) => line === familyKey || line === 'other')
-      || !!(facts && Array.isArray(facts.openCallbackLanes) && facts.openCallbackLanes.length);
-    const holdFamilies = signals ? signals.planHoldFamilies : 'error';
-    const planHoldActive = holdFamilies === 'error' || holdFamilies.length > 0 || !!tierProtected;
+// A failed signal read holds every line (fail closed) — the loader's own
+// shape, so one default replaces a per-field 'error' fallback.
+const SIGNALS_UNAVAILABLE = Object.freeze({ callbackLines: 'error', cancellationCaseScopes: 'error', retentionOfferFamilies: 'error', planHoldFamilies: 'error' });
 
-    const line = {
-      batchKey,
-      customerId: customer.id,
-      familyKey,
-      cadence,
-      visitsPerYear: entry.visitsPerYear,
-      billingLane: customer.billing_mode || null,
-      anniversaryDate: entry.anniversary.date,
-      anniversarySource: entry.anniversary.source,
-      anniversaryConflict: entry.anniversary.conflict,
-      reviewDate: entry.reviewDate,
-      carriedFrom: entry.carriedFrom,
-      engineUnavailable: entry.engineUnavailable,
-      listLowConfidence: entry.listLowConfidence,
-      tenureMonths: entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null,
-      currentRateCents: current.cents,
-      currentRateSource: current.source,
-      stampedZeroFree: !!current.stampedZeroFree,
-      rateUnit: current.unit,
-      listRateCents: listCents,
-      listRateSource: listSource,
-      listCadenceMismatch: list.cadenceMismatch,
-      usableVisits: stats.usableVisits,
-      homeVisits: stats.homeVisits,
-      notHomeVisits: stats.notHomeVisits,
-      unknownInteractionVisits: stats.unknownInteractionVisits,
-      allowanceMinutesApplied: stats.allowanceMinutesApplied,
-      capturedConversationVisits: stats.capturedConversationVisits,
-      duesAttributedVisits: stats.duesAttributedVisits,
-      rphFromNotHome: stats.rphFromNotHome,
-      treatmentMinutesMedian: stats.treatmentMinutesMedian,
-      revenuePerHourCents: stats.revenuePerHourCents,
-      lineRph: lineRphStats.get(familyKey) || null,
-      prepayMidTerm: !!current.prepayMidTerm,
-      prepayTermMissing: !!current.prepayTermMissing,
-      prepayTermAmbiguous: !!current.prepayTermAmbiguous,
-      rateUnattributed: !!current.rateUnattributed,
-      cadenceConflict: !!entry.planLine.cadence_conflict,
-      reviewedWithin12mo: priorReviews.has(`${customer.id}|${familyKey}`),
-      manualRateEditRecent: !!(manualAt && manualAt >= manualEditCutoff),
-      retentionOfferActive: !signals || signals.retentionOfferActive,
-      planHoldActive,
-      callbackRecent,
-      cancellationCaseRecent: !signals || signals.cancellationCaseRecent,
-      handPickedTier,
-      commercial: isCommercialCustomer(customer, entry.serviceKeys),
-      facts,
-    };
-    return computeSnapshot(line, config);
+// A cancellation case holds the families it names (cancellation_cases.scope;
+// [] = the whole account): a lawn-only case holds the lawn review, not pest.
+function cancellationCaseTouchesLine(scopes, familyKey) {
+  if (scopes === 'error' || !Array.isArray(scopes)) return true;
+  return scopes.some((scope) => !Array.isArray(scope) || scope.length === 0 || familySignalTouchesLine(scope, familyKey));
 }
 
-async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null, now = new Date(), deps = {} } = {}) {
-  if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
-  assertBatchKey(batchKey);
-  // No explicit window → the standing review window relative to the build
-  // date (35–65 days out), the same one the monthly job uses.
-  const defaults = reviewWindowFor(now);
+// Completed / recent callbacks (loadExceptionSignals callbackLines, by line;
+// 'other' = unclassified) and open re-service callbacks (facts
+// openCallbackLanes: 'pest' | 'lawn' | 'unknown') hold only the family they
+// belong to; a failed read or an unknown lane holds every family.
+function callbackHoldsFamily(callbackLines, openLanes, familyKey) {
+  if (callbackLines === 'error' || openLanes.includes('unknown')) return true;
+  const familyLane = CALLBACK_LANE_FOR_FAMILY[familyKey] || null;
+  return callbackLines.some((line) => line === familyKey || line === 'other') || (familyLane != null && openLanes.includes(familyLane));
+}
+
+function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }) {
+  const { customer, familyKey, cadence, current, stats, list } = entry;
+  const { priorReviews, factsByCustomer, signalsByCustomer } = reviewFacts;
+  const facts = factsByCustomer.get(customer.id) || null;
+  const signals = signalsByCustomer.get(customer.id) || SIGNALS_UNAVAILABLE;
+  // No replayable estimate → the book's per-application mode for this
+  // family × cadence; a monthly-billed line takes it spread over 12 months
+  // (mode × visits ÷ 12) so the two units compare like for like.
+  let listCents = list.cents;
+  const mode = listCents == null ? refs.cadenceModes.get(`${familyKey}|${cadence}`) : null;
+  if (mode) listCents = current.unit === 'month' ? (entry.visitsPerYear > 0 ? Math.round((mode * entry.visitsPerYear) / 12) : null) : mode;
+  const listSource = listCents == null ? 'none' : (mode ? 'cadence_mode' : list.source);
+  // Hand-picked tier (owner ruling 2026-09-01: call-the-office, permanent):
+  // the provenance column says manual, or the accepted estimate carries a
+  // tier the engine does not derive from its own inputs (list.tierMoved,
+  // replayListForLine). The customer's live tier is deliberately NOT
+  // compared — a multi-plan customer's older single-line estimate replays
+  // at a lower tier than the account now has.
+  const handPickedTier = String(customer.waveguard_tier_source || '').toLowerCase() === 'manual' || (list.source === 'engine' && !!list.tierMoved);
+  const manualAt = facts ? etDay(facts.manualPriceOverrideAt) : null;
+  const tierProtected = !!(customer.tier_protected_until && dateColumn(customer.tier_protected_until) >= today);
+  const openLanes = Array.isArray(facts && facts.openCallbackLanes) ? facts.openCallbackLanes : [];
+  const lane = resolveBillingLane(customer);
+  const line = {
+    batchKey,
+    customerId: customer.id,
+    familyKey,
+    cadence,
+    visitsPerYear: entry.visitsPerYear,
+    billingLane: lane.mode,
+    laneInferred: lane.source === 'inferred',
+    anniversaryDate: entry.anniversary.date,
+    anniversarySource: entry.anniversary.source,
+    anniversaryConflict: entry.anniversary.conflict,
+    reviewDate: entry.reviewDate,
+    tenureMonths: entry.tenureMonths,
+    carriedFrom: entry.carriedFrom,
+    engineUnavailable: entry.engineUnavailable,
+    listLowConfidence: entry.listLowConfidence,
+    listBundleIncomplete: entry.listBundleIncomplete,
+    multiProgramLine: !!entry.multiProgram,
+    currentRateCents: current.cents,
+    currentRateSource: current.source,
+    stampedZeroFree: !!current.stampedZeroFree,
+    rateUnit: current.unit,
+    listRateCents: listCents,
+    listRateSource: listSource,
+    listCadenceMismatch: list.cadenceMismatch,
+    ...stats,
+    lineRph: refs.lineRphStats.get(familyKey) || null,
+    prepayMidTerm: !!current.prepayMidTerm,
+    prepayTermMissing: !!current.prepayTermMissing,
+    prepayTermAmbiguous: !!current.prepayTermAmbiguous,
+    rateUnattributed: !!current.rateUnattributed,
+    compositeWithheld: !!current.compositeWithheld,
+    cadenceConflict: !!entry.planLine.cadence_conflict,
+    reviewedWithin12mo: priorReviews.has(`${customer.id}|${familyKey}`),
+    manualRateEditRecent: !!(manualAt && manualAt >= manualEditCutoff),
+    retentionOfferActive: familySignalTouchesLine(signals.retentionOfferFamilies, familyKey),
+    planHoldActive: familySignalTouchesLine(signals.planHoldFamilies, familyKey) || tierProtected,
+    callbackRecent: callbackHoldsFamily(signals.callbackLines, openLanes, familyKey),
+    cancellationCaseRecent: cancellationCaseTouchesLine(signals.cancellationCaseScopes, familyKey),
+    handPickedTier,
+    commercial: isCommercialCustomer(customer, entry.serviceKeys),
+    facts,
+  };
+  return computeSnapshot(line, config);
+}
+
+// The window a build uses: explicit from/to win; otherwise an EXISTING
+// batch keeps the window it was built with (a recompute must never drop
+// rows by sliding the window to today), and a new batch takes the standing
+// review window (35–65 days out) counted from `windowAnchor` when the
+// caller names one (the monthly job: the first of the build month) or from
+// the build date. An allowed rebuild of a batch whose digest already went
+// out resets the one-email marker (digestReset): the rankings the owner
+// read are stale, so the next delivery (the day 1–7 tick, or the admin
+// build route right away) sends the updated digest instead of
+// 'already_emailed' forever.
+function assertWindowOrder(from, to) {
+  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+}
+
+function resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, windowAnchor }) {
+  const stored = existing ? { from: dateColumn(existing.window_from), to: dateColumn(existing.window_to) } : null;
+  const defaults = !(anniversaryFrom && anniversaryTo) && stored && stored.from && stored.to ? stored : reviewWindowFor(now, { anchor: windowAnchor });
   const from = anniversaryFrom || defaults.from;
   const to = anniversaryTo || defaults.to;
-  assertYmd(from, 'anniversaryFrom');
-  assertYmd(to, 'anniversaryTo');
-  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+  assertWindowOrder(from, to);
+  return { from, to, digestReset: !!(existing && existing.email_sent_at) };
+}
+
+async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor = null, trx = null, now = new Date(), deps = {} } = {}) {
+  if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
+  assertBatchKey(batchKey);
+  assertYmd(anniversaryFrom, 'anniversaryFrom');
+  assertYmd(anniversaryTo, 'anniversaryTo');
+  if (anniversaryFrom && anniversaryTo) assertWindowOrder(anniversaryFrom, anniversaryTo); // before any read
 
   const dbh = trx || db;
   if (await batchHasSentRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', batchKey };
   if (await batchHasScheduledRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_scheduled_rows', batchKey };
 
+  const existing = await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to', 'email_sent_at');
+  const { from, to, digestReset } = resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, windowAnchor });
+
   const today = etDateString(now);
   const config = await loadConfig(dbh);
   const inputs = await loadBookInputs(dbh, { today, sinceYmd: daysAgoYmd(now, LOOKBACK_DAYS) });
   const { planLines, allowances } = inputs;
+  const engineSynced = await syncPricingConstants(deps);
   const replayCache = new Map();
   const book = [];
   for (const planLine of planLines) {
-    const entry = await assembleBookEntry(inputs, planLine, { config, replayCache, deps });
+    const entry = await assembleBookEntry(inputs, planLine, { config, replayCache, deps: { ...deps, engineSynced } });
     if (entry) book.push(entry);
   }
   const refs = computeLineReferences(book);
   const { lineRphStats } = refs;
   const latestByLine = await loadLatestSnapshots(dbh, inputs.customerIds, { batchKey });
-  const selected = selectReviewEntries(book, { from, to, now, latestByLine });
+  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits });
   const reviewFacts = await loadReviewFacts(dbh, selected, { now, config, batchKey });
   const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
   const rows = selected.map((entry) => rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }));
 
   const computedAt = now;
   const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
+  // Literal table names on every WRITER (insert / merge / update): the
+  // status-integrity scan in tests/annual-prepay-term-states.test.js fails
+  // closed on a mutation chain behind a dynamic table expression. Reads
+  // keep the constants.
   const write = async (conn) => {
     await lockBatch(conn, batchKey);
     await assertBatchRebuildable(conn, batchKey);
-    await conn(BATCHES).insert({
+    await conn('rate_review_batches').insert({
       batch_key: batchKey, window_from: from, window_to: to,
       allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson),
-      book_lines: book.length, computed_at: computedAt, updated_at: computedAt,
-    }).onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at']);
+      book_lines: book.length, computed_at: computedAt, updated_at: computedAt, email_sent_at: null, email_subject: null,
+    }).onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at', 'email_sent_at', 'email_subject']);
     await conn(SNAPSHOTS).where({ batch_key: batchKey }).whereNotIn('status', SENT_STATUSES).delete();
     if (rows.length) {
-      await conn(SNAPSHOTS).insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
+      await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
     }
   };
   try {
@@ -1810,7 +2296,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
 
   const summary = summarizeRows(rows);
   logger.info(`[rate-review] batch ${batchKey} built: ${rows.length} rows (${summary.green} green, ${summary.exception} exceptions, ${summary.no_change} no-change, ${summary.skipped} skipped) from ${book.length} active plan lines`);
-  return { ok: true, batchKey, window: { from, to }, rows: rows.length, summary, config, allowances, lineRph: lineRphJson };
+  return { ok: true, batchKey, window: { from, to }, rows: rows.length, summary, config, allowances, lineRph: lineRphJson, digestReset };
 }
 
 // ── summaries / reads ───────────────────────────────────────────────────
@@ -1963,8 +2449,26 @@ async function alreadyEmailed(dbh, batchKey) {
   return !!(row && row.email_sent_at);
 }
 
-async function stampEmailed(dbh, batchKey, subject) {
-  await dbh(BATCHES).where({ batch_key: batchKey }).update({ email_sent_at: new Date(), email_subject: subject, updated_at: new Date() });
+// The stamp names the batch VERSION the digest described (computed_at, set
+// by buildBatch and replaced on every rebuild): a rebuild that lands
+// between composing and stamping updates no row, email_sent_at stays
+// null, and the next delivery (the day 1–7 tick, or the admin route) sends
+// the rebuilt rankings — the owner is never told a batch is delivered when
+// the digest described an older one. The admin build also runs under the
+// tick's own lock (routes/admin-rate-review.js), so the two entry points
+// never interleave in the first place.
+async function stampEmailed(dbh, batchKey, subject, computedAt) {
+  // literal table name — see the writer note in buildBatch
+  const stamped = await dbh('rate_review_batches')
+    .where({ batch_key: batchKey })
+    .where('computed_at', computedAt)
+    .update({ email_sent_at: new Date(), email_subject: subject, updated_at: new Date() });
+  return Number(stamped) > 0;
+}
+
+// The one-email marker, for callers outside this module (the admin digest route).
+function batchEmailed(batchKey, dbh = db) {
+  return alreadyEmailed(dbh, batchKey);
 }
 
 async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
@@ -1972,6 +2476,8 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
   const { deliverOpsDigest } = require('./ops-digest');
   const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
   const batch = await getBatch(batchKey, dbh);
+  if (!batch.batch || !batch.batch.computed_at) return { sent: false, skipped: 'no_batch' };
+  const version = batch.batch.computed_at;
   const composed = composeBatchEmail(batch);
   if (typeof sendgrid.isConfigured === 'function' && !sendgrid.isConfigured()) {
     logger.warn('[rate-review] mailer not configured — skipping batch email');
@@ -2004,8 +2510,9 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
       suppressErrorLog: true,
     }),
   });
-  await stampEmailed(dbh, batchKey, composed.subject);
-  return { sent: true, subject: composed.subject, rows: batch.summary.rows };
+  const stamped = await stampEmailed(dbh, batchKey, composed.subject, version);
+  if (!stamped) logger.warn(`[rate-review] digest for ${batchKey} described a version the batch no longer has — not stamped; the rebuilt rankings go out on the next delivery`);
+  return { sent: true, stamped, subject: composed.subject, rows: batch.summary.rows };
 }
 
 // Scheduler entry (1st of the month): build the batch for anniversaries in
@@ -2013,24 +2520,50 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
 // before any query. A batch with sent rows is never rebuilt.
 async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null, deps = {} } = {}) {
   if (!rateReviewLive()) return { skipped: 'gate_off' };
-  // batch_key = the BUILD month; the window = anniversaries 35–65 days out
-  // (reviewWindowFor), crossing month boundaries.
-  const { from, to } = reviewWindowFor(now);
+  // batch_key = the BUILD month. A batch already emailed is finished for
+  // the month — a retried tick must not rebuild it (and slide its window).
   const batchKey = etMonthStart(now, 0).slice(0, 7);
-  const built = await buildBatch({ batchKey, anniversaryFrom: from, anniversaryTo: to, now, deps });
+  if (await alreadyEmailed(dbh, batchKey)) return { skipped: 'already_emailed', batchKey, emailed: false };
+  // No explicit window: buildBatch keeps an EXISTING batch's stored window;
+  // a NEW batch (a day-1 build, or a retry after a day-1 build that failed
+  // before persisting) is anchored on the first of the build month, so every
+  // tick of the month covers the same anniversaries.
+  const built = await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps });
   if (!built.ok) {
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
     return { skipped: built.reason, batchKey };
   }
-  if (await alreadyEmailed(dbh, batchKey)) return { ...built, emailed: false, skipped: 'already_emailed' };
+  // The batch is persisted either way. A delivery failure is RE-THROWN so
+  // runExclusive records the job as failed (job_health) instead of a quiet
+  // success with email_sent_at still null; the tick runs on days 1–7 and is
+  // idempotent (an emailed batch is skipped above, an unsent one rebuilds
+  // inside its stored window), so the digest is retried the next morning.
   let email;
   try {
     email = await sendBatchEmail({ batchKey, dbh, mailer });
   } catch (err) {
-    logger.error(`[rate-review] batch email failed for ${batchKey} (status ${Number.isInteger(err && err.status) ? err.status : 'network'})`);
-    return { ...built, emailed: false, error: true };
+    // The provider's message can carry its raw response body (which can hold
+    // email addresses — PII never goes to logs): log and re-throw a status-
+    // only error, so the scheduler's generic catch prints nothing else.
+    const status = Number.isInteger(err && err.status) ? err.status : 'network';
+    logger.error(`[rate-review] batch email failed for ${batchKey} (status ${status}) — batch persisted, delivery will retry`);
+    const sanitized = new Error(`rate review digest delivery failed for ${batchKey} (status ${status})`);
+    sanitized.status = err && err.status;
+    sanitized.code = 'RATE_REVIEW_DIGEST_DELIVERY_FAILED';
+    throw sanitized;
   }
-  return { ...built, emailed: !!email.sent, email };
+  // A digest the tick could not deliver (mailer unconfigured, recipient not
+  // an internal address) is a FAILED tick too — never a healthy job_health
+  // row for a month nobody was told about; the day 1–7 ticks retry, the
+  // batch stays persisted. Manual callers (the admin route) see the skip.
+  if (!email.sent) {
+    logger.error(`[rate-review] digest for ${batchKey} not delivered (${email.skipped}) — batch persisted, delivery will retry`);
+    const undelivered = new Error(`rate review digest not delivered for ${batchKey} (${email.skipped})`);
+    undelivered.code = 'RATE_REVIEW_DIGEST_NOT_DELIVERED';
+    undelivered.skipped = email.skipped;
+    throw undelivered;
+  }
+  return { ...built, emailed: true, email };
 }
 
 module.exports = {
@@ -2040,7 +2573,7 @@ module.exports = {
   // anniversary / coverage helpers, shared with the apply lane
   // (services/rate-review-apply.js) so a notice targets exactly the visits
   // this ranking priced.
-  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, RECURRING_SQL },
+  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL },
   lockBatch,
   LEDGER_FAMILIES_FOR_LINE,
   anniversaryInWindow,
@@ -2053,11 +2586,30 @@ module.exports = {
   loadConfig,
   runMonthlyRateReview,
   sendBatchEmail,
+  batchEmailed,
   composeBatchEmail,
   _private: {
+    soldPosturePins,
+    COMBINED_CATALOG_SQL,
+    RETIRED_COMBINED_CATALOG_KEYS,
+    accountFirstVisits,
+    presenceWindowFor,
+    IMPORT_PRESENCE_DAYS,
+    SOLD_POSTURE_KEYS,
+    computeLineReferences,
+    isOrdinaryReference,
+    cancellationCaseTouchesLine,
+    engineKeysForLine,
+    replayEstimate,
+    REFUND_BASE_SQL,
+    engineItemVisits,
+    depositCreditSql,
+    familySignalTouchesLine,
+    isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
-    isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel,
-    CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS,
+    isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
+    PLAN_ROW_SQL, LIVE_STATUS_SQL,
+    CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,

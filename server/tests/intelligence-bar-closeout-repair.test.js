@@ -446,7 +446,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
       actorId: 'tech-admin', expectedPrice: 129, expectedTotal: 138.03, expectedBreakdown: { subtotal: 129, discount: 0, tax: 9.03 }, refuseDepositCredit: true,
       serviceRecordId: 'rec-1', requireCompletedVisit: true, refuseLiveCardHold: true,
     }));
-    expect(InvoiceService.sendViaSMSAndEmail).toHaveBeenCalledWith('inv-9', { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: 'tech-admin', skipAccountCreditAutoApply: true, expectedTotal: 138.03 });
+    expect(InvoiceService.sendViaSMSAndEmail).toHaveBeenCalledWith('inv-9', { firstDeliveryOnly: true, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: 'tech-admin', skipAccountCreditAutoApply: true, expectedTotal: 138.03 });
 
     // A failed mint leaves the send not attempted.
     InvoiceService.sendViaSMSAndEmail.mockClear();

@@ -98,7 +98,8 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
       purpose: 'service_completion',
       customerId: service.customer_id,
       identityTrustLevel: 'admin_operator',
-      metadata: { original_message_type: 'visit_recap', service_record_id: service.id },
+      // scheduled_service_id lets the shared send step hold the recap while an address hold is live.
+      metadata: { original_message_type: 'visit_recap', service_record_id: service.id, scheduled_service_id: scheduledServiceId },
     });
   } catch (err) {
     await releaseClaim();

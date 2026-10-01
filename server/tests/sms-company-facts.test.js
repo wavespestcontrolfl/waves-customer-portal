@@ -53,8 +53,10 @@ describe('gate off — byte-identical to before COMPANY FACTS', () => {
     expect(currentPromptVersion()).toBe(PROMPT_VERSION);
   });
 
-  test('verifier system prompt is untouched (byte-identical to main)', () => {
-    expect(sha(buildVerifierSystemPrompt())).toBe('362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8');
+  // Re-pinned in the PR #5334 merge: COMPANY FACTS still leaves the verifier prompt
+  // alone; the hash moved only because #5334 adds the LIVE ETA grounding lines.
+  test('verifier system prompt is untouched by COMPANY FACTS', () => {
+    expect(sha(buildVerifierSystemPrompt())).toBe('0d344c10327046f48e38984936097ebe867e084b14c8dc9da16db188b1ee33f3');
   });
 });
 
@@ -89,9 +91,12 @@ describe('gate on', () => {
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers_cf');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers_cf');
+    // both cohorts stay distinct: the company-facts token, the re-service token (PR #5336) AND the LIVE ETA bump (PR #5334): "3" supersedes "2"
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cf');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
+    expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
+    expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
     expect(all.startsWith('house_voice_v12')).toBe(true);
@@ -156,6 +161,7 @@ describe('sealed-eval fact contract for the _cf version', () => {
   const OLD = 'house_voice_v12_real_answers';
   const withCf = `X\n${SLA}\n${renderCompanyFactsSection()}BILLING:\n- b\n`;
   const noCf = `X\n${SLA}\nBILLING:\n- b\n`;
+  const withCfRs = `X\n${SLA}\nFREE RE-SERVICE: not eligible\n${renderCompanyFactsSection()}BILLING:\n- b\n`;
 
   test('_cf requires COMPANY FACTS; the older identity and v11 forbid it', () => {
     expect(requiredFactMarkers(CF)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER]);
@@ -172,8 +178,9 @@ describe('sealed-eval fact contract for the _cf version', () => {
     expect(itemCompatibleWith(withCf, OLD)).toBe(false);
     expect(itemCompatibleWith(noCf, OLD)).toBe(true);
     expect(itemCompatibleWith(withCf, 'house_voice_v11')).toBe(false);
-    expect(itemCompatibleWith(`${withCf}FREE RE-SERVICE: not eligible\n`, `${CF}+c`)).toBe(true);
-    expect(itemCompatibleWith(`${noCf}FREE RE-SERVICE: not eligible\n`, `${CF}+c`)).toBe(false);
+    expect(itemCompatibleWith(withCfRs, `${CF}+c`)).toBe(true);
+    expect(itemCompatibleWith(noCf, `${CF}+c`)).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}\nFREE RE-SERVICE: not eligible\nBILLING:\n- b\n`, `${CF}+c`)).toBe(false); // re-service line but no company section
   });
 
   test('a real gate-on facts block satisfies the live _cf contract', () => {

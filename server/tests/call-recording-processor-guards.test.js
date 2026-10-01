@@ -2543,3 +2543,32 @@ describe('outbound prior-contact: the call.customer_id created_at lookup is live
     expect(src).not.toContain("db('customers').where({ id: call.customer_id }).first('created_at')");
   });
 });
+
+// Owner ruling 2026-09-30 (#5466): a reply to the customer's own inbound call
+// is never held to 8 AM — but only when it IS a reply to something they just
+// did. Fable review: processAllPending retries and admin force-reprocess can
+// book a visit days after the call at 11 PM; those sends keep the hold.
+describe('inbound-reply quiet-hours marker is fresh-inbound only (#5466)', () => {
+  const { isFreshInboundCall } = require('../services/call-recording-processor')._test;
+  const NOW = Date.parse('2026-10-01T02:00:00Z');
+
+  test('fresh inbound call → true; outbound → false; stale / undated → false', () => {
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW - 10 * 60 * 1000) }, NOW)).toBe(true);
+    expect(isFreshInboundCall({ direction: 'outbound-api', created_at: new Date(NOW - 10 * 60 * 1000) }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW - 2 * 24 * 60 * 60 * 1000) }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound' }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW + 60 * 1000) }, NOW)).toBe(false);
+  });
+
+  test('all three call-pipeline send sites use the fresh-inbound helper, never a bare direction check', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const cardAt = src.indexOf("trigger: 'ai_call_pipeline',\n                recipientPhone");
+    expect(cardAt).toBeGreaterThan(-1);
+    expect(src.slice(cardAt, cardAt + 500)).toContain('customerInitiated: isFreshInboundCall(call)');
+    const confirmationSites = src.split("purpose: 'appointment_confirmation',").slice(1)
+      .map((chunk) => chunk.slice(0, 1400));
+    const marked = confirmationSites.filter((c) => c.includes("isFreshInboundCall(call) ? { customerInitiated: true } : {}"));
+    expect(marked).toHaveLength(2);
+    expect(src).not.toContain('!isOutboundCall(call) ? { customerInitiated: true }');
+  });
+});

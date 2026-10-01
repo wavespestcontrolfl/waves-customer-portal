@@ -367,7 +367,7 @@ describe('closeSettledHotViewAlerts', () => {
     await run({ conn });
     expect(conn).not.toHaveBeenCalled();
     expect(conn.trx).not.toHaveBeenCalled();
-    expect(alertEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn.trx, ['estimate_hot_view:est-1'], 'estimate gone', { now: NOW });
+    expect(alertEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn.trx, ['estimate_hot_view:est-1'], 'estimate gone', { now: NOW, resolution: 'Estimate gone' });
   });
 
   test('each close re-reads its estimate under the raise path\'s own advisory lock: one made active again since the first read is left open', async () => {

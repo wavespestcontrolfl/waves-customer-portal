@@ -247,6 +247,19 @@ describe('scheduleNoticeRows — per_application effective date', () => {
     const out = await scheduleBook(pestBook(1, { snapshot: { family_key: 'termite' } }));
     expect(out.held.map((h) => h.reason)).toEqual(['termite_program']);
   });
+  test('the activity-log write rides its own savepoint: a failed insert never costs the scheduled rows', async () => {
+    const book = pestBook();
+    mockDb.reset(book);
+    delete mockDb.store.activity_log; // the insert throws ("unknown table") — only its savepoint rolls back
+    const out = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
+    expect(out).toMatchObject({ ok: true, created: 1 });
+    expect(notices()).toHaveLength(1);
+    expect(snapshots()[0].notice_id).toBe(notices()[0].id);
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/rate-review-apply.js'), 'utf8');
+    expect(src).toMatch(/await dbh\.transaction\(async \(sp\) => \{\n\s+await sp\('activity_log'\)\.insert\(/);
+  });
   test('idempotent: a second call schedules nothing new and reports the row as already scheduled', async () => {
     await scheduleBook(pestBook());
     const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
@@ -961,15 +974,35 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     mockDb.reset({ annual_prepay_terms: [term(), term({ id: TERM(2), term_start: '2025-05-15', term_end: '2026-05-14', next_term_prepay_amount: '450.00' })] });
     expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
   });
-  test('a term already renewed, cancelled or decided, or one with no noticed amount, is no predecessor', async () => {
-    mockDb.reset({ annual_prepay_terms: [term({ status: 'renewed' })] });
+  test('a Renew DECISION is not a successor: the amount stays enforceable until a successor term exists; a successor on the books settles it', async () => {
+    // recordDecision('renew') marks the term renewed without creating the successor — the guard must still hold
+    mockDb.reset({ annual_prepay_terms: [term({ status: 'renewed', renewal_decision: 'renew' })] });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    // a successor term already created (at whatever amount) → the guard has done its job
+    mockDb.reset({ annual_prepay_terms: [term({ status: 'renewed', renewal_decision: 'renew' }), { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '484.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) }] });
+    expect(await renew(468)).toBeNull();
+  });
+  test('a term cancelled, switched or decided away, or one with no noticed amount, is no predecessor', async () => {
+    mockDb.reset({ annual_prepay_terms: [term({ status: 'cancelled' })] });
     expect(await renew(468)).toBeNull();
     mockDb.reset({ annual_prepay_terms: [term({ renewal_decision: 'cancel' })] });
+    expect(await renew(468)).toBeNull();
+    mockDb.reset({ annual_prepay_terms: [term({ renewal_decision: 'switch_plan' })] });
     expect(await renew(468)).toBeNull();
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })] });
     expect(await renew(468)).toBeNull();
     mockDb.reset({ annual_prepay_terms: [term()] });
     expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(2), amount: 468, coverageServiceType: 'Quarterly Pest Control', termStart: '2027-05-15', today: '2027-05-14' })).toBeNull();
+  });
+  test('an unlabeled legacy term keeps its protection on a named-service renewal through the applied notice that named it', async () => {
+    const unlabeled = term({ coverage_service_type: null });
+    mockDb.reset({ annual_prepay_terms: [unlabeled] });
+    // no notice attribution yet → a named request does not match an unlabeled term
+    expect(await renew(468)).toBeNull();
+    // the apply recorded the notice for this term under the pest line → the pest renewal is guarded
+    mockDb.reset({ annual_prepay_terms: [unlabeled], price_change_notices: [fixture.noticeRow(1, { billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-01T08:10:00Z'), metadata: { term_id: TERM(1) } })] });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull(); // another family's renewal is not blocked
   });
   test('inside a write transaction the candidate terms are read FOR UPDATE — whatever their noticed amount is right now — so the nightly apply\'s first write serializes against the renewal', async () => {
     mockDb.reset({ annual_prepay_terms: [term()] });

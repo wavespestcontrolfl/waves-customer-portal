@@ -3,6 +3,12 @@ const mockWithCustomerCommsLock = jest.fn(async (database, _customerId, fn) => f
 const mockIsEnabled = jest.fn(() => false);
 const mockEnroll = jest.fn();
 
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -191,6 +197,26 @@ test('a known not-sent result clears its marker and retries in branded mode with
   });
   expect(markerClear.update).toHaveBeenCalled();
   expect(mockEnroll).not.toHaveBeenCalled();
+});
+
+test('a hold that commits at the lifecycle handoff keeps the obligation pending (coded defer, never a terminal block)', async () => {
+  const markerWrite = query();
+  const markerClear = query();
+  wire({
+    payments: [query({ first: payment })],
+    customers: [query({ first: { id: 'cust-1' } })],
+    notification_prefs: [query({ first: { payment_issue_channels: ['email'] } })],
+    sms_log: [markerWrite, markerClear],
+  });
+  // The lifecycle sender's own result for a hold at its provider handoff.
+  mockSendRetryNotice.mockImplementationOnce(async () => ({
+    ok: false, blocked: true, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+    reason: 'Customer has an active collections dispute hold; delivery deferred until it is released',
+  }));
+
+  const outcome = await BillingRetryEmail.replayPaymentRetryNotice({ ...replayMeta, billing_retry_email_mode: 'branded' });
+  expect(outcome).toMatchObject({ sent: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+  expect(require('../services/collections/collection-hold').isHoldSuppression(outcome)).toBe(true);
 });
 
 test('an existing provider-start marker parks the row before any provider call', async () => {

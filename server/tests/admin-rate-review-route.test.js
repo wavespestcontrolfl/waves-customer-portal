@@ -29,11 +29,20 @@ jest.mock('../middleware/admin-auth', () => ({
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
+const mockSendBatchEmail = jest.fn();
+const mockBatchEmailed = jest.fn(async () => false);
+const mockRunExclusive = jest.fn(async (_name, fn) => fn());
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: (...args) => mockRunExclusive(...args),
+  wasLockSkipped: (result) => !!(result && result.skipped === true),
+}));
 jest.mock('../services/rate-review', () => ({
   listBatches: (...args) => mockListBatches(...args),
   getBatch: (...args) => mockGetBatch(...args),
   buildBatch: (...args) => mockBuildBatch(...args),
   loadConfig: (...args) => mockLoadConfig(...args),
+  sendBatchEmail: (...args) => mockSendBatchEmail(...args),
+  batchEmailed: (...args) => mockBatchEmailed(...args),
 }));
 
 const express = require('express');
@@ -73,7 +82,7 @@ beforeEach(() => {
 afterAll(() => { delete process.env.GATE_RATE_REVIEW; });
 
 describe('gate off', () => {
-  test.each([['GET', '/batches'], ['GET', '/batches/2026-12'], ['POST', '/batches/2026-12/build']])('%s %s answers 404 and calls nothing', async (method, path) => {
+  test.each([['GET', '/batches'], ['GET', '/batches/2026-12'], ['POST', '/batches/2026-12/build'], ['POST', '/batches/2026-12/digest']])('%s %s answers 404 and calls nothing', async (method, path) => {
     process.env.GATE_RATE_REVIEW = 'false';
     await withServer(async (base) => {
       const out = await call(base, method, `/api/admin/rate-review${path}`);
@@ -83,6 +92,7 @@ describe('gate off', () => {
     expect(mockListBatches).not.toHaveBeenCalled();
     expect(mockGetBatch).not.toHaveBeenCalled();
     expect(mockBuildBatch).not.toHaveBeenCalled();
+    expect(mockSendBatchEmail).not.toHaveBeenCalled();
   });
 });
 
@@ -93,6 +103,7 @@ describe('auth', () => {
       expect((await call(base, 'GET', '/api/admin/rate-review/batches', { token: null })).status).toBe(401);
       expect((await call(base, 'GET', '/api/admin/rate-review/batches', { token: 'tech' })).status).toBe(403);
       expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build', { token: 'tech' })).status).toBe(403);
+      expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest', { token: 'tech' })).status).toBe(403);
     });
   });
 });
@@ -129,6 +140,75 @@ describe('POST /batches/:key/build', () => {
     await withServer(async (base) => {
       await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
       expect(mockBuildBatch).toHaveBeenCalledWith({ batchKey: '2026-12', anniversaryFrom: null, anniversaryTo: null });
+    });
+  });
+  test('a rebuild that reset an already-delivered digest re-sends the updated ops email; an unchanged one sends nothing', async () => {
+    mockBuildBatch.mockResolvedValue({ ok: true, batchKey: '2026-12', window: { from: '2026-12-06', to: '2027-01-05' }, rows: 6, summary: { rows: 6 }, allowances: {}, digestReset: true });
+    mockSendBatchEmail.mockResolvedValue({ sent: true, subject: 'ACT: Rate review — …' });
+    await withServer(async (base) => {
+      const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(out.status).toBe(200);
+      expect(out.body.digest).toBe('resent');
+      expect(mockSendBatchEmail).toHaveBeenCalledWith({ batchKey: '2026-12' });
+      mockSendBatchEmail.mockClear();
+      mockBuildBatch.mockResolvedValue({ ok: true, batchKey: '2026-12', window: { from: '2026-12-06', to: '2027-01-05' }, rows: 6, summary: { rows: 6 }, allowances: {}, digestReset: false });
+      const quiet = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(quiet.body.digest).toBe('unchanged');
+      expect(mockSendBatchEmail).not.toHaveBeenCalled();
+      // a delivery failure is answered as one: the rebuild landed (the batch comes back), the digest did not (502)
+      mockBuildBatch.mockResolvedValue({ ok: true, batchKey: '2026-12', window: { from: '2026-12-06', to: '2027-01-05' }, rows: 6, summary: { rows: 6 }, allowances: {}, digestReset: true });
+      mockSendBatchEmail.mockRejectedValue(Object.assign(new Error('sendgrid 503: {"errors":[{"message":"bounced: someone@example.com"}]}'), { status: 503 }));
+      const failed = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(failed.status).toBe(502);
+      expect(failed.body).toMatchObject({ ok: false, built: true, reason: 'digest_delivery_failed', digest: 'failed', digestStatus: 503, batchKey: '2026-12', rows: 6 });
+      expect(JSON.stringify(failed.body)).not.toMatch(/@|bounced/);
+    });
+  });
+  test('POST /batches/:key/digest delivers the owner digest on demand under the same lock', async () => {
+    mockSendBatchEmail.mockResolvedValue({ sent: true, stamped: true, subject: 'ACT: Rate review — …', rows: 6 });
+    await withServer(async (base) => {
+      expect((await call(base, 'POST', '/api/admin/rate-review/batches/dec-2026/digest')).status).toBe(400);
+      const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
+      expect(out.status).toBe(200);
+      expect(out.body).toEqual({ ok: true, batchKey: '2026-12', sent: true, stamped: true, skipped: null, subject: 'ACT: Rate review — …' });
+      expect(mockSendBatchEmail).toHaveBeenCalledWith({ batchKey: '2026-12' });
+      expect(mockRunExclusive).toHaveBeenLastCalledWith('rate-review-monthly', expect.any(Function), { recordHealth: false, waitForSlot: false });
+      // no such batch → 404; a fail-closed skip (recipient / unconfigured) is reported, not an error
+      mockSendBatchEmail.mockResolvedValueOnce({ sent: false, skipped: 'no_batch' });
+      expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-11/digest')).status).toBe(404);
+      mockSendBatchEmail.mockResolvedValueOnce({ sent: false, skipped: 'recipient', subject: 'ACT: …' });
+      const skipped = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
+      expect(skipped.status).toBe(200);
+      expect(skipped.body).toMatchObject({ sent: false, skipped: 'recipient' });
+      // already delivered (the one-email marker, read under the lock) → nothing more is sent; a rebuild clears the marker
+      mockBatchEmailed.mockResolvedValueOnce(true);
+      const again = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ ok: true, sent: false, skipped: 'already_sent' });
+      expect(mockBatchEmailed).toHaveBeenLastCalledWith('2026-12');
+      expect(mockSendBatchEmail).toHaveBeenCalledTimes(3); // the three sends above, none for the retry
+      // a held lock → 409; a provider failure → 502 with the status only (the provider body can carry addresses)
+      mockRunExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+      expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest')).status).toBe(409);
+      mockSendBatchEmail.mockRejectedValueOnce(Object.assign(new Error('sendgrid 503: bounced: someone@example.com'), { status: 503 }));
+      const failed = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
+      expect(failed.status).toBe(502);
+      expect(failed.body).toEqual({ error: 'The rate review digest could not be delivered — try again.', reason: 'digest_delivery_failed', digestStatus: 503 });
+    });
+  });
+  test('a build (and its resend) runs under the monthly tick\'s own lock; a held lock answers 409, no connection 503', async () => {
+    await withServer(async (base) => {
+      const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(out.status).toBe(200);
+      expect(mockRunExclusive).toHaveBeenCalledWith('rate-review-monthly', expect.any(Function), { recordHealth: false, waitForSlot: false });
+      mockRunExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+      const held = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(held.status).toBe(409);
+      expect(held.body.reason).toBe('build_in_progress');
+      mockRunExclusive.mockResolvedValueOnce({ skipped: true, reason: 'no_connection' });
+      const noConn = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(noConn.status).toBe(503);
+      expect(noConn.body.reason).toBe('lock_unavailable');
     });
   });
   test('refuses once any row in the batch was sent', async () => {

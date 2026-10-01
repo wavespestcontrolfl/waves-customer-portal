@@ -772,8 +772,8 @@ export class ApiClient {
 
 
   // ---- Feed / Weather ----
-  getBlogPosts() {
-    return this.request('/feed/blog');
+  getBlogPosts(limit = 6) {
+    return this.request(`/feed/blog?limit=${limit}`);
   }
 
   getNewsletterPosts() {
@@ -782,6 +782,11 @@ export class ApiClient {
 
   getWeather() {
     return this.request('/feed/weather');
+  }
+
+  // "Your yard this month" card (GATE_PORTAL_YARD_CALENDAR; gate-off answers available:false)
+  getYardMonth() {
+    return this.request('/feed/yard');
   }
 
   getAlerts() {

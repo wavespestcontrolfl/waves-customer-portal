@@ -5741,7 +5741,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     // for $0 due.
     if (!chargeInPerson && !settledByDepositCredit) {
       try {
-        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true });
+        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true, holdExempt: 'operator' });
       } catch (err) {
         delivery = { ok: false, error: err.message };
         logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);

@@ -211,7 +211,10 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
   const key = productId ? `supplies-consumption-failed:${productId}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
+    await require('./notification-service')._private.openToCloser(db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]), 'supplies').update({
+      ...require('./notification-service')._private.doneColumns({ by: 'supplies', resolution: 'The missed stock deduction was made', keepExisting: true, conn: db }),
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb"),
+    });
     return true;
   } catch (err) {
     logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
@@ -333,7 +336,12 @@ async function retireLookupBellIfSettled(db, result, { scheduledServiceId, servi
   const failed = (message) => result.errors.push({ reason: 'bell_retire_failed', message });
   let open;
   try {
-    open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('read_at').first('id');
+    // A bell a person marked Done counts too: settling the lookup must still
+    // take it over (openToCloser), or their Reopen could bring back an
+    // obsolete manual-deduction instruction.
+    open = await require('./notification-service')._private.openToCloser(
+      db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]), 'supplies',
+    ).first('id');
   } catch (err) {
     logger.warn(`[supplies-consumption] lookup-bell probe failed for visit ${scheduledServiceId}: ${err.message}`);
     return failed(`the visit lookup bell could not be checked: ${err.message}`);

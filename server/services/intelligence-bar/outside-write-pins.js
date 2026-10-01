@@ -44,6 +44,30 @@ function outsideWritePins(toolName, preview) {
         pins._verified_railway_deployment_id = preview.service.latest_deployment_id || null;
       }
       break;
+    case 'set_railway_gate':
+      // Compare-and-swap inputs for the commit path: the portal service and
+      // production environment ids, the gate name, the value to set, and the
+      // prior state (null when unset or non-boolean). A non-boolean prior
+      // rides as a keyed digest only — its value is never pinned.
+      put('_verified_railway_service_id', preview.target?.service_id);
+      put('_verified_railway_environment_id', preview.target?.environment_id);
+      put('_verified_railway_gate_name', preview.gate);
+      put('_verified_railway_gate_value', preview.new_value);
+      put('_verified_railway_gate_prior_kind', preview.prior_kind);
+      pins._verified_railway_gate_prior = preview.prior_value ?? null;
+      pins._verified_railway_gate_prior_digest = preview.prior_value_digest ?? null;
+      break;
+    case 'set_growthbook_feature_environment':
+      put('_verified_growthbook_feature_id', preview.feature);
+      put('_verified_growthbook_environment', preview.environment);
+      put('_verified_growthbook_new_state', preview.new_state);
+      if (typeof preview.prior_enabled === 'boolean') pins._verified_growthbook_prior_enabled = preview.prior_enabled;
+      // The feature's dateUpdated (and live revision), so an edit made
+      // anywhere — including the GrowthBook UI — between card and confirm
+      // makes the commit refuse.
+      pins._verified_growthbook_feature_updated = preview.feature_version ?? null;
+      pins._verified_growthbook_revision = preview.revision_version ?? null;
+      break;
     case 'rerun_failed_github_checks':
       put('_verified_github_pr_number', preview.pr?.number);
       put('_verified_github_head_sha', preview.pr?.head_sha);

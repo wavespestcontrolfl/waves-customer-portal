@@ -183,6 +183,7 @@ async function computeUnreadCount({ adminUserId, role } = {}, trx = null, precom
     try {
       const unreadDashboardAlerts = await (trx || db)('notifications')
         .where({ recipient_type: 'admin', category: 'alert' })
+        .whereNull('done_at')
         .whereNull('read_at');
       const dupes = unreadDashboardAlerts.filter((n) => isLiveDuplicate(n, liveCtx.liveKeys)).length;
       persistedCount = Math.max(0, persistedCount - dupes);

@@ -28,6 +28,7 @@ import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard'
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
+import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
@@ -3037,13 +3038,19 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
               Hello {customer.firstName || 'there'}!
             </h1>
           </div>
-          <button type="button" onClick={() => onSwitchTab?.('billing')} style={{
+          {/* Same glass chip as the quick actions — the opaque #FFF7ED panel
+              read as a peach block over the hero. The amber label carries
+              the "due" signal. */}
+          <button type="button" data-glass="chip" onClick={() => onSwitchTab?.('billing')} style={{
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
-            background: balanceReady ? (hasBalance ? '#FFF7ED' : GLASS_SUBTLE) : GLASS_SUBTLE,
-            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#E7E2D7') : 'rgba(255,255,255,0.65)'}`,
+            background: GLASS_SUBTLE,
+            border: '1px solid rgba(255,255,255,0.65)',
             cursor: 'pointer',
+            // A long-press on iOS selected the label + amount (blue bars).
+            userSelect: 'none',
+            WebkitUserSelect: 'none',
             textAlign: 'left',
             fontFamily: FONTS.body,
           }}>
@@ -4071,13 +4078,6 @@ const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hC
 const VISIT_APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'requestChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
-const APPOINTMENT_CHANNEL_KEYS = [
-  'appointmentConfirmationChannel',
-  'serviceReminder72hChannel',
-  'serviceReminder24hChannel',
-  'enRouteChannel',
-  'techArrivedChannel',
-];
 
 // Gold on/off switch — the ONE toggle idiom for customer notification rows
 // (owner 2026-08-28: keep the gold on/off look; 2026-09-06: switches, never
@@ -4573,34 +4573,6 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, ...Object.fromEntries(lockKeys.map(key => [key, false])) }));
-    }
-  };
-
-  // One-tap shortcut: route every appointment update to the given channel
-  // (used for the "Traveling? Get appointment updates by email" toggle).
-  // Locks EVERY appointment key for the duration (and refuses to start while
-  // any individual update is in flight): an unlocked bulk PUT racing an
-  // individual channel change committed in arbitrary order, leaving the UI
-  // and the stored reminder channel different until reload.
-  const handleAllAppointmentChannels = async (value) => {
-    if (APPOINTMENT_CHANNEL_KEYS.some(k => prefsLocked[k])) return;
-    if (APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === value)) return;
-    const prevById = {};
-    const updates = {};
-    const locks = {};
-    APPOINTMENT_CHANNEL_KEYS.forEach(k => { prevById[k] = prefs[k] || 'sms'; updates[k] = value; locks[k] = true; });
-    setPrefsLocked(prev => ({ ...prev, ...locks }));
-    setPrefs(prev => ({ ...prev, ...updates }));
-    try {
-      await api.updateNotificationPrefs(updates);
-    } catch (err) {
-      setPrefs(prev => ({ ...prev, ...prevById }));
-      showCustomerAlert('Could not update delivery preference. Please try again.');
-      console.error(err);
-    } finally {
-      const unlocks = {};
-      APPOINTMENT_CHANNEL_KEYS.forEach(k => { unlocks[k] = false; });
-      setPrefsLocked(prev => ({ ...prev, ...unlocks }));
     }
   };
 
@@ -5277,42 +5249,12 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Service notifications</div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
-              Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
-            </div>
-            <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
-            <p id="appointment-delivery-note" style={{ margin: '16px 0 0', fontSize: 16, lineHeight: 1.5, color: muted }}>
+            <p id="appointment-delivery-note" style={{ margin: '4px 0 0', fontSize: 16, lineHeight: 1.5, color: muted }}>
               {perPropertyTexts
                 ? 'Delivery methods apply across your account. Turn appointment alerts on or off under Property notifications below.'
                 : 'Choose how you receive each update.'}
             </p>
-            {customer.email ? (() => {
-              const allEmail = APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === 'email');
-              const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
-              return (
-                <button
-                  data-glass-pill=""
-                  onClick={() => handleAllAppointmentChannels(allEmail ? 'sms' : 'email')}
-                  disabled={anySaving}
-                  style={{
-                    marginTop: 12, padding: '8px 14px', borderRadius: 999, minHeight: 44,
-                    border: `1px solid ${allEmail ? B.yellow : '#D8D0C0'}`,
-                    background: allEmail ? B.yellow : '#fff',
-                    color: B.glassNavy,
-                    fontSize: 14, fontWeight: 700, cursor: anySaving ? 'wait' : 'pointer',
-                    opacity: anySaving ? 0.6 : 1,
-                    display: 'inline-flex', alignItems: 'center', gap: 6,
-                  }}
-                >
-                  <Icon name={allEmail ? 'smartphone' : 'mail'} size={14} strokeWidth={2} />
-                  {allEmail ? 'Use text for appointments' : 'Use email for appointments'}
-                </button>
-              );
-            })() : (
-              <div style={{ marginTop: 8, fontSize: 14, color: muted }}>
-                Add an email to your profile to receive notifications by email.
-              </div>
-            )}
+            <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
           </div>
           <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
@@ -5770,9 +5712,11 @@ function sameBillingChannels(left, right) {
 
 function BillingChannelFieldset({ field, channels, available, saving, onToggle, children }) {
   return (
-    <fieldset style={{ margin: '0 0 14px', padding: '14px 16px', background: GLASS_SUBTLE, borderRadius: 8, border: '1px solid #E7E2D7', minWidth: 0 }}>
-      <legend style={{ padding: 0, fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{field.label}</legend>
-      <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.5, marginTop: 2 }}>{field.description}</div>
+    <fieldset style={{ margin: '0 0 14px', padding: '14px 16px', background: GLASS_SUBTLE, borderRadius: 8, border: '1px solid rgba(255,255,255,0.7)', minWidth: 0 }}>
+      {/* float + full width pulls the legend inside the box instead of
+          notching it into the top border (native fieldset rendering). */}
+      <legend style={{ float: 'left', width: '100%', padding: 0, fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{field.label}</legend>
+      <div style={{ clear: 'both', fontSize: 16, color: B.grayDark, lineHeight: 1.5, paddingTop: 2 }}>{field.description}</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 12px', marginTop: 6 }}>
         {[
           { value: 'email', label: 'Email' },
@@ -6786,12 +6730,14 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               Payment methods, auto pay, receipts, and billing preferences.
             </div>
           </div>
-          <div style={{
+          {/* Glass, not a gold tint: 9% gold over the blue scene read as a
+              muddy green wash. The Pay button carries the gold. */}
+          <div data-glass="soft" style={{
             minWidth: compact ? '100%' : 190,
             padding: '14px 16px',
             borderRadius: 8,
-            background: currentBalance > 0 ? `${B.yellow}18` : GLASS_SUBTLE,
-            border: `1px solid ${currentBalance > 0 ? `${B.yellow}88` : '#E7E2D7'}`,
+            background: GLASS_SUBTLE,
+            border: '1px solid rgba(255,255,255,0.65)',
             boxSizing: 'border-box',
           }}>
             <div style={{ fontSize: 14, color: balanceTone, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
@@ -9135,7 +9081,40 @@ const ARTICLES = [
   },
 ];
 
-function WeatherPestWidget({ customer, nextService }) {
+// Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
+// server answers {available:false} off the gate and the existing
+// WeatherPestWidget renders exactly as before; on, the yard-month card takes
+// its place. While the gate answer is pending the widget is already mounted
+// (its reads start at once) but held on its own loading panel, so gate-off
+// pays no extra round trip and gate-on never flashes the old widget.
+function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = null }) {
+  const yard = useYardMonth();
+  // A card the server resolved to another house than this tab shows (the
+  // selected house retired, a stale claim) is withheld: re-read the property
+  // list and show the customer-level widget until the label follows.
+  const scopeStale = !!(scope && yard.status === 'on' && yard.data?.propertyScope
+    && scopeEchoMismatch(yard.data.propertyScope, scope.currentEntry || null, !!scope.savedScope, scope.selectedPropertyId || null));
+  useEffect(() => {
+    if (scopeStale && scope?.onSavedScopeUnavailable) scope.onSavedScopeUnavailable();
+  }, [scopeStale, scope?.onSavedScopeUnavailable]);
+  // Capacitor shell: target=_blank strands the SPA (F-017), so the app opens
+  // the report in the same in-app overlay the Services tab uses.
+  const { preview, openPagePreview, closePreview } = useReportPreview(
+    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
+  );
+  const onOpenReport = isNativeApp()
+    ? (url) => openPagePreview({ id: 'yard-last-lawn-visit', title: 'Lawn service report' }, url)
+    : null;
+  if (yard.status === 'on' && !scopeStale) return <>
+    <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} externalLinks={!isNativeApp()} />
+    {preview && <DocumentPreviewOverlay key="report-preview"
+      preview={preview} onClose={closePreview}
+      onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />}
+  </>;
+  return <WeatherPestWidget customer={customer} nextService={nextService} hold={yard.status === 'loading'} />;
+}
+
+function WeatherPestWidget({ customer, nextService, hold = false }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   // Fungus / chinch / irrigation are lawn advisories — pest-only customers
@@ -9162,7 +9141,7 @@ function WeatherPestWidget({ customer, nextService }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
 
-  if (loading || lawnHealth.loading) return (
+  if (hold || loading || lawnHealth.loading) return (
     <PortalStatePanel
       icon="cloud"
       eyebrow="Local Conditions"
@@ -9173,9 +9152,9 @@ function WeatherPestWidget({ customer, nextService }) {
 
   if (!weather) return null;
 
-  // Localized location label
-  const cityName = customer?.address?.city || '';
-  const localizedLocation = cityName ? `${cityName} Weather` : weather.location;
+  // The server names the place the data is actually for (the customer's own
+  // forecast city, or its fallback) — never label it with a different city.
+  const localizedLocation = weather.location ? `${weather.location.replace(/,\s*FL$/, '')} Weather` : 'Local Weather';
 
   // Build action items per pest pressure indicator
   const getActionItem = (type, level) => {
@@ -9263,7 +9242,7 @@ function WeatherPestWidget({ customer, nextService }) {
             {weather.temp}°
           </div>
           <div style={{ marginTop: compact ? 0 : 4, fontSize: 14, color: muted, textAlign: 'right' }}>
-            Tonight {weather.nightTemp}° · {weather.humidity}% humidity
+            {weather.isDaytime === false ? 'Tonight' : `Tonight ${weather.nightTemp}°`} · {weather.humidity}% humidity
           </div>
         </div>
       </div>
@@ -9545,7 +9524,7 @@ function ContentCard({ post, large, compact }) {
   );
 }
 
-function LearnTab({ customer }) {
+function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
@@ -9562,7 +9541,7 @@ function LearnTab({ customer }) {
 
   useEffect(() => {
     api.getAlerts().then(d => setAlerts(d.alerts || [])).catch(() => {});
-    api.getBlogPosts().then(d => setBlogPosts(d.posts || [])).catch(() => {});
+    api.getBlogPosts(24).then(d => setBlogPosts(d.posts || [])).catch(() => {});
     api.getNewsletterPosts().then(d => setNewsletterPosts(d.posts || [])).catch(() => {});
     api.getExpertPosts().then(d => setExpertPosts(d.posts || [])).catch(() => {});
     api.getLocalNews().then(d => setLocalNews(d.posts || [])).catch(() => {});
@@ -9728,7 +9707,7 @@ function LearnTab({ customer }) {
         }}>
           {[
             // "Recent Posts", not "Blog Posts": the value is the feed's
-            // most-recent slice (capped at 6 by /feed/blog), NOT the size of
+            // most-recent slice (capped at 24 by /feed/blog), NOT the size of
             // the blog library — the old label undersold a 150+ post archive.
             { label: 'Recent Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
             { label: 'Expert Articles', value: expertPosts.length, sub: 'UF/IFAS and references' },
@@ -9773,7 +9752,7 @@ function LearnTab({ customer }) {
         </div>
       </section>
 
-      <WeatherPestWidget customer={customer} nextService={nextService} />
+      <LocalConditionsSlot customer={customer} nextService={nextService} onOpenPhotoId={onOpenPhotoId} scope={scope} />
 
       {alerts.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -15098,7 +15077,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
-      background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
+      // Mobile: full-screen sheet — keep the backdrop clear so the glass
+      // modal frosts the portal scene instead of an opaque tan wash.
+      background: compact ? 'transparent' : 'rgba(15,23,42,0.48)',
       backdropFilter: compact ? 'none' : 'blur(5px)',
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
@@ -15138,7 +15119,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       >
         <header style={{
           flexShrink: 0,
-          background: 'rgba(255,255,255,0.96)',
+          background: 'rgba(255,255,255,0.35)',
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           // Full-screen overlay: keep the header below the iOS status bar / notch.
@@ -15278,8 +15259,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                         style={{
                           minHeight: compact ? 94 : 104,
                           borderRadius: 8,
-                          border: `1px solid ${active ? B.yellow : PORTAL_SHELL.border}`,
-                          background: active ? PORTAL_SHELL.soft : PORTAL_SHELL.surface,
+                          border: `1px solid ${active ? B.yellow : 'rgba(255,255,255,0.7)'}`,
+                          background: active ? 'rgba(255,214,102,0.22)' : GLASS_SUBTLE,
                           color: PORTAL_SHELL.text,
                           cursor: 'pointer',
                           textAlign: 'left',
@@ -15291,7 +15272,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                           boxShadow: active ? '0 0 0 2px rgba(0,156,222,0.12)' : 'none',
                         }}
                       >
-                        <span style={{ ...iconTile, width: 34, height: 34, background: active ? PORTAL_SHELL.surface : PORTAL_SHELL.soft }}>
+                        <span style={{ ...iconTile, width: 34, height: 34, background: active ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.6)' }}>
                           <Icon name={c.icon} size={16} strokeWidth={2} />
                         </span>
                         <span>
@@ -15422,8 +15403,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                             minHeight: 72,
                             borderRadius: 8,
                             cursor: 'pointer',
-                            border: `1px solid ${active ? u.color : '#E7E2D7'}`,
-                            background: active ? u.bg : '#fff',
+                            border: `1px solid ${active ? u.color : 'rgba(255,255,255,0.7)'}`,
+                            background: active ? u.bg : GLASS_SUBTLE,
                             textAlign: 'left',
                             padding: 12,
                             display: 'flex',
@@ -15512,8 +15493,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                             minHeight: 44,
                             padding: '8px 10px',
                             borderRadius: 8,
-                            border: `1px solid ${active ? B.yellow : '#D8D0C0'}`,
-                            background: active ? '#F8FCFE' : '#fff',
+                            border: `1px solid ${active ? B.yellow : 'rgba(255,255,255,0.7)'}`,
+                            background: active ? 'rgba(255,214,102,0.22)' : GLASS_SUBTLE,
                             color: active ? B.glassNavy : B.textBody,
                             cursor: 'pointer',
                             fontSize: 14,
@@ -15558,8 +15539,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                         minHeight: compact ? 64 : 92,
                         borderRadius: 8,
                         cursor: photoProcessing ? 'wait' : 'pointer',
-                        border: '1px dashed #D8D0C0',
-                        background: '#F8FCFE',
+                        border: '1px dashed rgba(4,57,94,0.28)',
+                        background: GLASS_SUBTLE,
                         color: B.glassNavy,
                         display: 'flex',
                         flexDirection: 'column',
@@ -15663,8 +15644,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
             <footer style={{
               flexShrink: 0,
-              borderTop: '1px solid #E7E2D7',
-              background: 'rgba(255,255,255,0.96)',
+              borderTop: '1px solid rgba(255,255,255,0.65)',
+              background: 'rgba(255,255,255,0.35)',
               backdropFilter: 'blur(12px)',
               padding: compact
                 ? '10px calc(14px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))'
@@ -17402,7 +17383,7 @@ export default function PortalPage() {
             wateringPlanCustomerId={wateringPlanCustomerId}
             onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
           />)}
-        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} scope={{ currentEntry: activeProperty, savedScope: portalProperties.some((p) => p.key), selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable: refreshProperties }} />}
         </PortalRefreshArea>
       </main>
 
@@ -17476,4 +17457,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

@@ -243,12 +243,14 @@ function laneForRow(row) {
 
 // ── reads ───────────────────────────────────────────────────────────────
 
-// The plan line's open recurring visits from `fromDate`, classified with the
-// ranking's own line/cadence SQL so the notice targets exactly the visits
-// the snapshot priced. Includes 'rescheduled' rows (a parked reschedule
-// request) so the apply can refuse rather than leave one at the old price.
+// The plan line's open plan-row visits from `fromDate`, classified with the
+// ranking's own line / cadence / plan-row SQL (PLAN_ROW_SQL: recurring,
+// never a callback or an included follow-up) so the notice targets exactly
+// the visits the snapshot priced. Includes 'rescheduled' rows (a parked
+// reschedule request) so the apply can refuse rather than leave one at the
+// old price.
 async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDate }) {
-  const { LINE_SQL, CADENCE_SQL, RECURRING_SQL } = PLAN_LINE_SQL;
+  const { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(`
     SELECT s.id, s.customer_id, s.scheduled_date, s.status, s.estimated_price, s.primary_line_price,
       s.discount_type, s.discount_amount, s.discount_dollars, s.line_discount_id, s.line_discount_dollars,
@@ -258,7 +260,7 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDat
     WHERE s.customer_id = ?
       AND s.scheduled_date >= ?
       AND s.status IN ('pending', 'confirmed', 'rescheduled')
-      AND ${RECURRING_SQL}
+      AND ${PLAN_ROW_SQL}
       AND ${LINE_SQL} = ?
       AND ${CADENCE_SQL} = ?
     ORDER BY s.scheduled_date ASC, s.id ASC
@@ -559,12 +561,17 @@ async function scheduleUnderLock(dbh, { batchKey, plannedSend, today, actorId })
   }
 
   if (result.created > 0) {
+    // Best-effort, on the scheduling transaction: its own SAVEPOINT, so a
+    // failed insert rolls back only itself and never leaves the transaction
+    // aborted under a success summary (waves-db §5b).
     try {
-      await dbh('activity_log').insert({
-        admin_user_id: actorId || null,
-        action: ACTIVITY_SCHEDULED,
-        description: `Rate review ${batchKey}: ${result.created} notice row(s) created as drafts (nothing sent), ${result.held.length} held, ${result.alreadyScheduled} already scheduled; effective ${result.firstEffectiveDate} → ${result.lastEffectiveDate}.`,
-        metadata: JSON.stringify({ batch_key: batchKey, batch_id: result.batchId, planned_send_date: plannedSend, created: result.created, held: result.held.map((h) => ({ rowId: h.rowId, reason: h.reason })) }),
+      await dbh.transaction(async (sp) => {
+        await sp('activity_log').insert({
+          admin_user_id: actorId || null,
+          action: ACTIVITY_SCHEDULED,
+          description: `Rate review ${batchKey}: ${result.created} notice row(s) created as drafts (nothing sent), ${result.held.length} held, ${result.alreadyScheduled} already scheduled; effective ${result.firstEffectiveDate} → ${result.lastEffectiveDate}.`,
+          metadata: JSON.stringify({ batch_key: batchKey, batch_id: result.batchId, planned_send_date: plannedSend, created: result.created, held: result.held.map((h) => ({ rowId: h.rowId, reason: h.reason })) }),
+        });
       });
     } catch (logErr) {
       logger.warn(`[rate-review-apply] activity log failed for ${batchKey}: ${logErr.message}`);
@@ -1052,13 +1059,16 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 // draft-invoice routes) must charge the amount the customer was noticed for
 // THAT term's successor, or say so (acknowledgeNoticedAmount). The
 // predecessor is resolved, never guessed: the customer's terms carrying a
-// noticed amount, in the requested coverage's family (an unlabeled term only
-// when the request names no family either), neither cancelled nor already
-// renewed, whose term_end sits within 60 days either side of the new term's
-// start (a successor starts the day after its predecessor ends); with more
-// than one candidate the one ending nearest the new start is the
-// predecessor. Returns null when nothing applies or the amount matches,
-// else { termId, termEnd, noticedAmount }.
+// noticed amount, neither cancelled nor switched (a Renew DECISION is not a
+// successor — recordDecision marks the term renewed without creating one,
+// so the amount stays enforceable until a successor term actually exists),
+// in the requested coverage's family — by the coverage text, or by the
+// APPLIED rate-review notice that named the term (metadata.term_id) for a
+// legacy unlabeled term the ranking priced for that family — whose term_end
+// sits within 60 days either side of the new term's start; with more than
+// one candidate the one ending nearest the new start is the predecessor.
+// Returns null when nothing applies, a successor already exists, or the
+// amount matches; else { termId, termEnd, noticedAmount }.
 // `lock` (inside the caller's write transaction): the candidate rows are
 // read FOR UPDATE, so a concurrent nightly apply writing
 // next_term_prepay_amount serializes against the renewal that reads it.
@@ -1074,16 +1084,35 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .where({ customer_id: customerId })
     .where('term_end', '>=', addDaysYmd(start, -60))
     .where('term_end', '<=', addDaysYmd(start, 60))
-    .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'renewed', 'switch_plan']);
+    .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'switch_plan']);
   if (lock) query.forUpdate();
-  const terms = await query.select('id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
-  const candidates = terms
-    .filter((t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== '')
-    .filter((t) => !['cancel', 'renew', 'switch_plan'].includes(String(t.renewal_decision || '')))
-    .filter((t) => (family ? familyOfCoverage(t.coverage_service_type) === family : !familyOfCoverage(t.coverage_service_type)))
+  const terms = await query.select('id', 'customer_id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
+  const noticed = terms.filter((t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== ''
+    && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')));
+  if (!noticed.length) return null;
+  // Family attribution through the notice the apply wrote for the term.
+  const applied = await dbh('price_change_notices')
+    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
+    .whereNotNull('applied_at')
+    .select('family_key', 'metadata');
+  const familyByTerm = new Map();
+  for (const n of applied) {
+    const termId = parseMetadata(n.metadata).term_id;
+    if (termId) familyByTerm.set(String(termId), n.family_key);
+  }
+  const candidates = noticed
+    .filter((t) => {
+      const labeled = familyOfCoverage(t.coverage_service_type);
+      const noticedFamily = familyByTerm.get(String(t.id)) || null;
+      if (family) return labeled === family || (!labeled && noticedFamily === family);
+      return !labeled && !noticedFamily;
+    })
     .sort((a, b) => Math.abs(daysBetweenYmd(ymd(a.term_end), start)) - Math.abs(daysBetweenYmd(ymd(b.term_end), start)));
   const term = candidates[0];
   if (!term) return null;
+  // A successor already on the books (whatever its amount) settles the
+  // term: the guard protected the renewal that created it.
+  if (await successorTermExists(dbh, term)) return null;
   const noticedCents = cents(term.next_term_prepay_amount);
   if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
   return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents) };

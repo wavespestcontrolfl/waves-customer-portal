@@ -14,7 +14,7 @@ const TERM = (n) => `20000000-0000-4000-8000-00000000000${n}`;
 // Chainable query stub. Every builder method records its args and returns
 // the chain; awaiting resolves `rows(q)`, first() resolves `first(q)` (or
 // `count(q)` once .count()/.sum()/.max() was called on the chain).
-function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, count = () => ({ n: 0 }), onInsert = null, onDelete = null, onUpdate = null } = {}) {
+function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, count = () => ({ n: 0 }), onInsert = null, onDelete = null, onUpdate = null, updateRows = () => 1 } = {}) {
   const q = { calls: [], customerId: null, whereArgs: [], counted: false };
   const record = (name) => (...args) => {
     q.calls.push([name, args]);
@@ -36,7 +36,7 @@ function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, cou
   q.ignore = record('ignore');
   q.returning = async () => [];
   q.delete = async (...args) => { record('delete')(...args); if (onDelete) onDelete(q); return 1; };
-  q.update = async (...args) => { record('update')(...args); if (onUpdate) onUpdate(args[0], q); return 1; };
+  q.update = async (...args) => { record('update')(...args); if (onUpdate) onUpdate(args[0], q); return updateRows(q); };
   q.first = async (...args) => { record('first')(...args); return q.counted ? count(q) : first(q); };
   q.then = (resolve, reject) => Promise.resolve().then(() => rows(q)).then(resolve, reject);
   q.catch = (fn) => Promise.resolve(rows(q)).catch(fn);
@@ -49,11 +49,13 @@ function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, cou
 // signals { [customerId]: { callbacks, cancellationCases, retentionOffers, holds } }.
 function scriptedDb(scenario) {
   const writes = { snapshotInserts: [], snapshotDeletes: 0, batchUpserts: [], batchUpdates: [] };
+  // every batch row carries its version (buildBatch stamps computed_at; the digest stamp is conditioned on it)
+  const withVersion = (row) => ({ computed_at: new Date('2026-11-01T11:20:00Z'), ...row });
   const signalsFor = (id) => (scenario.signals && scenario.signals[id]) || {};
   const db = jest.fn((table) => {
     switch (table) {
       case 'rate_review_config':
-        return chain({ first: () => scenario.config || null });
+        return chain({ first: () => { if (scenario.configError) throw scenario.configError; return scenario.config || null; } });
       case 'rate_review_snapshots':
       case 'rate_review_snapshots as r':
         return chain({
@@ -66,10 +68,18 @@ function scriptedDb(scenario) {
         });
       case 'rate_review_batches':
         return chain({
-          rows: () => (scenario.batchRow ? [scenario.batchRow] : []),
-          first: () => scenario.batchRow || null,
+          rows: () => (scenario.batchRow ? [withVersion(scenario.batchRow)] : []),
+          // the digest's whole-row read (`.first()`, no columns) sees the row the build just upserted
+          // when the scenario pins none; the column reads (existing window, delivery marker) do not
+          first: (q) => {
+            if (scenario.batchRow) return withVersion(scenario.batchRow);
+            const wholeRow = q.calls.some(([name, args]) => name === 'first' && args.length === 0);
+            return wholeRow && writes.batchUpserts.length ? withVersion(writes.batchUpserts[writes.batchUpserts.length - 1]) : null;
+          },
           onInsert: (row) => writes.batchUpserts.push(row),
           onUpdate: (patch) => writes.batchUpdates.push(patch),
+          // the delivery stamp's row count (0 = the batch was rebuilt between composing and stamping)
+          updateRows: () => (scenario.batchStampRows == null ? 1 : scenario.batchStampRows),
         });
       case 'customers':
         return chain({ rows: () => scenario.customers || [] });
@@ -78,9 +88,9 @@ function scriptedDb(scenario) {
       case 'customer_plan_rates':
         return chain({ rows: () => scenario.ledger || [] });
       case 'cancellation_cases':
-        return chain({ count: (q) => ({ n: signalsFor(q.customerId).cancellationCases || 0 }) });
+        return chain({ rows: (q) => (signalsFor(q.customerId).cancellationCaseScopes || []).map((scope) => ({ scope })) });
       case 'retention_offers':
-        return chain({ count: (q) => ({ n: signalsFor(q.customerId).retentionOffers || 0 }) });
+        return chain({ rows: (q) => (signalsFor(q.customerId).retentionOfferFamilies || []).map((family_key) => ({ family_key })) });
       case 'plan_holds':
         return chain({ rows: (q) => (signalsFor(q.customerId).holds || []).map((family_key) => ({ family_key })) });
       default:
@@ -115,7 +125,7 @@ const NOW = new Date('2026-11-01T11:20:00Z'); // 2026-11-01 06:20 ET — the cro
 function planLine(customerId, familyKey, cadence, medianPrice, extra = {}) {
   return {
     customer_id: customerId, family_key: familyKey, cadence, open_visits: 3, next_visit: '2026-12-10',
-    median_price: medianPrice, priced_visits: medianPrice ? 3 : 0, zero_priced_visits: 0, zero_with_base: false, prepay_linked: false, prepay_term_ids: [], catalog_vpy: null,
+    median_price: medianPrice, priced_visits: medianPrice ? 3 : 0, zero_priced_visits: 0, zero_with_base_visits: 0, prepay_linked: false, prepay_term_ids: [], catalog_vpy: null,
     source_estimate_ids: [], service_keys: [familyKey], account_lines: 1, ...extra,
   };
 }
@@ -129,17 +139,19 @@ function customer(n, overrides = {}) {
 }
 
 // A completed visit: wall minutes via arrived_at → completed_at, the
-// interaction flag, and a paid invoice total.
-function visit(customerId, line, { minutes, interaction = null, revenue = null, date = '2026-06-15', prepay = null } = {}) {
+// interaction flag, a paid invoice total, or a prepay term's settled share.
+function visit(customerId, line, { minutes, interaction = null, revenue = null, date = '2026-06-15', prepay = null, composite = false } = {}) {
   const arrived = new Date(`${date}T14:00:00Z`);
   return {
     id: `${customerId}-${date}-${line}`, customer_id: customerId, scheduled_date: date, line, cadence: 'quarterly',
     service_time_minutes: null, actual_duration_minutes: null, actual_start_time: null, actual_end_time: null, check_in_time: null, check_out_time: null,
     arrived_at: arrived.toISOString(), completed_at: new Date(arrived.getTime() + minutes * 60000).toISOString(),
-    annual_prepay_term_id: prepay ? prepay.id : null, prepaid_amount: null, term_prepay_amount: prepay ? prepay.amount : null, term_visit_count: prepay ? prepay.visits : null,
+    // prepay: { id, settled, visits } — `settled` is the term's prepay invoice net of refunds (null = unpaid / reversed / no invoice)
+    annual_prepay_term_id: prepay ? prepay.id : null, term_settled_amount: prepay && prepay.settled != null ? prepay.settled : null, term_visit_count: prepay ? prepay.visits : null,
     time_entry_minutes: null, time_entry_clock_in: null, time_entry_clock_out: null,
     service_record_started_at: null, service_record_ended_at: null, service_record_structured_notes: null,
     customer_interaction: interaction, paid_revenue: revenue,
+    composite_visit: composite, // add-ons performed in the same stop (scheduled_service_addons)
   };
 }
 
