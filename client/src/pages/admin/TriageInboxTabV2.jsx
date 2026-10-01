@@ -439,6 +439,78 @@ function VerdictBadge({ verdict, wrongFields }) {
   return <Badge tone="alert">Denied{labels ? ` · ${labels}` : ""}</Badge>;
 }
 
+// Word boundaries survive ("1 23rd Ave" is not "12 3rd Ave"). Same normalization the server's
+// address-changed check applies (street-level-hold.js).
+const normAddressLine = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+// What the street-level hold's read-back dialog shows, from the list row. The visit's LIVE address
+// (item.visit_address) and slot (the list refreshes payload.visit_when from the visit) win over what the
+// card captured at booking: a correction or a move (SmartRebooker, an admin) after the card was filed
+// changes them, and the confirm activates the CURRENT visit, so the office must never read back stale
+// scheduling or address context.
+export function holdReadBackView(item) {
+  const payload = parsePayload(item?.payload) || {};
+  const captured = payload.address_on_file || "";
+  const live = item?.visit_address || "";
+  return {
+    address: live || captured || "Address on the visit",
+    // Always show the LIVE address when there is one (it is what the confirm submits), labelled when
+    // it differs from the one captured at booking.
+    showCurrentLabel: !!live && normAddressLine(live) !== normAddressLine(captured),
+    visitWhen: payload.visit_when || "",
+    addressLoaded: !!live,
+  };
+}
+
+function HoldConfirmDialog({ item, readBack, onReadBackChange, actioning, onClose, onConfirm }) {
+  const view = holdReadBackView(item);
+  const busy = !!item && actioning === item.id;
+  return (
+    <Dialog open={!!item} onClose={onClose} size="sm">
+      {item && (
+        <>
+          <DialogHeader>
+            <DialogTitle>Confirm address &amp; book — {callerName(item)}</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <p className="text-13 text-ink-secondary mb-2">
+              Google matched only the street. Read this address back to the customer before confirming the visit:
+            </p>
+            <div className="text-14 font-medium text-zinc-900 mb-1">
+              {view.showCurrentLabel && <span className="block text-11 font-medium text-ink-tertiary">Current visit address</span>}
+              {view.address}
+            </div>
+            {view.visitWhen && <div className="text-13 text-ink-secondary mb-3">Visit: {view.visitWhen}</div>}
+            {!view.addressLoaded && (
+              <div className="text-12 text-alert-fg mb-2">The visit's current address did not load. Reload the inbox before confirming.</div>
+            )}
+            <label className="flex items-start gap-2 text-13 text-zinc-900">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={readBack}
+                onChange={(e) => onReadBackChange(e.target.checked)}
+              />
+              <span>I read this address back to the customer.</span>
+            </label>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!readBack || !view.addressLoaded || busy}
+              onClick={() => onConfirm(item)}
+            >
+              {busy ? "Confirming…" : "Confirm & book"}
+            </Button>
+          </DialogFooter>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
 // `isAdmin` is the server-verified role from the shell's Outlet context
 // (CommunicationsPageV2 passes it; never localStorage). Admin-only actions
 // (confirm-email 403s non-admin staff) hide for everyone else — hidden when
@@ -555,6 +627,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
+
+  const closeHoldDialog = () => { setConfirmHoldFor(null); setHoldReadBack(false); };
 
   // Street-level address hold: the office reads the form address back to the customer, then
   // confirms the linked visit through the EXISTING admin status route (pending -> confirmed),
@@ -1137,62 +1211,14 @@ export default function TriageInboxTabV2({ isAdmin }) {
       </Dialog>
 
       {/* Street-level address hold: read the address back, then confirm the visit */}
-      <Dialog open={!!confirmHoldFor} onClose={() => { setConfirmHoldFor(null); setHoldReadBack(false); }} size="sm">
-        {confirmHoldFor && (
-          <>
-            <DialogHeader>
-              <DialogTitle>Confirm address &amp; book — {callerName(confirmHoldFor)}</DialogTitle>
-            </DialogHeader>
-            <DialogBody>
-              <p className="text-13 text-ink-secondary mb-2">
-                Google matched only the street. Read this address back to the customer before confirming the visit:
-              </p>
-              {(() => {
-                // The visit's LIVE service address (read with the list) wins over the address captured
-                // when the card was filed: corrections after booking change it.
-                const captured = parsePayload(confirmHoldFor.payload)?.address_on_file || "";
-                const live = confirmHoldFor.visit_address || "";
-                // Word boundaries survive ("1 23rd Ave" is not "12 3rd Ave").
-                const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-                const differs = !!live && norm(live) !== norm(captured);
-                // Always show the LIVE address when there is one: it is the address the confirm submits.
-                return (
-                  <div className="text-14 font-medium text-zinc-900 mb-1">
-                    {differs && <span className="block text-11 font-medium text-ink-tertiary">Current visit address</span>}
-                    {live || captured || "Address on the visit"}
-                  </div>
-                );
-              })()}
-              {parsePayload(confirmHoldFor.payload)?.visit_when && (
-                <div className="text-13 text-ink-secondary mb-3">Visit: {parsePayload(confirmHoldFor.payload).visit_when}</div>
-              )}
-              {!confirmHoldFor.visit_address && (
-                <div className="text-12 text-alert-fg mb-2">The visit's current address did not load. Reload the inbox before confirming.</div>
-              )}
-              <label className="flex items-start gap-2 text-13 text-zinc-900">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={holdReadBack}
-                  onChange={(e) => setHoldReadBack(e.target.checked)}
-                />
-                <span>I read this address back to the customer.</span>
-              </label>
-            </DialogBody>
-            <DialogFooter>
-              <Button variant="secondary" size="sm" onClick={() => { setConfirmHoldFor(null); setHoldReadBack(false); }}>Cancel</Button>
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={!holdReadBack || !confirmHoldFor.visit_address || actioning === confirmHoldFor.id}
-                onClick={() => confirmHold(confirmHoldFor)}
-              >
-                {actioning === confirmHoldFor.id ? "Confirming…" : "Confirm & book"}
-              </Button>
-            </DialogFooter>
-          </>
-        )}
-      </Dialog>
+      <HoldConfirmDialog
+        item={confirmHoldFor}
+        readBack={holdReadBack}
+        onReadBackChange={setHoldReadBack}
+        actioning={actioning}
+        onClose={closeHoldDialog}
+        onConfirm={confirmHold}
+      />
 
       {/* Dismiss (triage only) — not actionable, no verdict */}
       <Dialog open={!!dismissFor} onClose={() => setDismissFor(null)} size="sm">

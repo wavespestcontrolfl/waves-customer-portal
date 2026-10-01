@@ -1110,6 +1110,7 @@ router.put('/:id/revise', async (req, res, next) => {
   try {
     const { revisedResponse } = req.body;
     if (!revisedResponse) return res.status(400).json({ error: 'revisedResponse required' });
+    const linkedVisitIds = require('../services/street-level-hold').linkedVisitIdsFrom(req.body?.linkedVisitIds);
     // Same rule as approve — judged before the claim, nothing to release.
     const reviseRefusal = await draftImmediateOnlyLinkRefusal(revisedResponse);
     if (reviseRefusal) return res.status(409).json({ error: reviseRefusal });
@@ -1214,6 +1215,9 @@ router.put('/:id/revise', async (req, res, next) => {
           customerLocationId: campaignGuard.customer?.nearest_location_id || undefined,
           adminUserId: req.technicianId,
           fromNumber,
+          // The visits the revised text's reschedule / appointment links point at (the composer sends them):
+          // the shared send step holds the text while any is a live street-level address hold.
+          ...(linkedVisitIds.length ? { linked_scheduled_service_ids: linkedVisitIds } : {}),
         },
       });
     } catch (sendErr) {

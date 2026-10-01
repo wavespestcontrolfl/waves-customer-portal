@@ -20911,6 +20911,11 @@ router.put('/:id/status', async (req, res, next) => {
         // The hold guard again UNDER the row lock: a concurrent call pass may promote this booking to a
         // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
         if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
+        // The office's approval of an address hold records the address it is for (same transaction, same
+        // row lock), so a later retry of the activation cannot release the hold for a changed address.
+        if (isOfficeReviewConfirm && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+          await require('../services/street-level-hold').recordApprovedAddressWitness(trx, svc.id);
+        }
         // Re-validate technician ownership INSIDE the transaction, row-
         // locked: the predicate on the pre-transaction SELECT alone leaves
         // a window where dispatch reassigns the visit and the former
