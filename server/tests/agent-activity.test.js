@@ -275,6 +275,19 @@ describe('buildActivity digests', () => {
     expect(items[1].finishedAt).toBe('2026-09-12T11:26:00.000Z');
   });
 
+  it('a digest closed today sits in the timeline at its close, above a newer open one', () => {
+    const { items } = buildActivity({
+      digests: [
+        { id: 'open', title: 'Newer open', body: 'x', metadata: { kind: 'ACT', opsKey: 'a' }, created_at: '2026-09-29T10:00:00Z' },
+        { id: 'old', title: 'Old, done today', body: 'x', metadata: { kind: 'FIX', opsKey: 'b' },
+          done_at: '2026-09-30T15:00:00Z', done_by: '7', created_at: '2026-07-01T10:00:00Z' },
+      ],
+    });
+    expect(items.map((i) => i.title)).toEqual(['Old, done today', 'Newer open']);
+    expect(items[0]).toMatchObject({ eventAt: '2026-09-30T15:00:00.000Z', startedAt: '2026-07-01T10:00:00.000Z' });
+    expect(items[1].eventAt).toBe('2026-09-29T10:00:00.000Z');
+  });
+
   it('a digest marked done by hand reads Done: completed (even a FIX), finished at done_at, with its resolution', () => {
     const { items } = buildActivity({
       digests: [

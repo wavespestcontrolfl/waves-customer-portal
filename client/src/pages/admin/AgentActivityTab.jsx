@@ -153,8 +153,8 @@ function ActivityRow({ item, onReview, focused }) {
     <li ref={rowRef} className={cn("border-t border-hairline border-zinc-200 first:border-t-0", focused && "bg-zinc-100")}>
       <div className="flex items-start gap-3 px-3 py-3 md:px-4">
         <div className="w-14 flex-shrink-0 pt-0.5 text-12 text-ink-tertiary u-nums">
-          <div>{fmtTime(item.startedAt)}</div>
-          {fmtDay(item.startedAt) && <div>{fmtDay(item.startedAt)}</div>}
+          <div>{fmtTime(item.eventAt || item.startedAt)}</div>
+          {fmtDay(item.eventAt || item.startedAt) && <div>{fmtDay(item.eventAt || item.startedAt)}</div>}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

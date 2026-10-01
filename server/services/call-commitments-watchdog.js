@@ -231,8 +231,13 @@ async function runInner({ now = new Date() } = {}) {
       const acknowledged = priorAggregate?.read_at && !aggregateMeta?.retired && aggregateMeta?.dedupeKey === `call-commitments-overdue:${today}`
         && aggregateMeta?.overdue_versions?.[r.id] === versions[r.id];
       if (acknowledged || meta?.batchedBy) {
-        await noticeRows().where({ id: notif.id }).update({ read_at: acknowledged ? priorAggregate.read_at : null,
-          metadata: trx.raw("metadata - 'batchedBy'") });
+        // Un-read (a reminder back out of the batch) re-arms it: a Done on the
+        // batched row must not keep a still-overdue promise out of the bell.
+        await noticeRows().where({ id: notif.id }).update({
+          read_at: acknowledged ? priorAggregate.read_at : null,
+          ...(acknowledged ? {} : { done_at: null, done_by: null, resolution: null }),
+          metadata: trx.raw("metadata - 'batchedBy'"),
+        });
       }
       if (!acknowledged) result.alerted += 1;
       await noticeRows().whereNull('read_at').whereNot('id', notif.id)

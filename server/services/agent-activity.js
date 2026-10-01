@@ -14,7 +14,7 @@
 // the route answers { available: false } while the gate is off.
 //
 // Item shape (the client renders exactly this):
-//   { id, kind, agent, title, subtitle, status, startedAt, finishedAt,
+//   { id, kind, agent, title, subtitle, status, startedAt, finishedAt, eventAt?,
 //     durationMs, steps: [{ key, label, status, detail, ms }],
 //     stepsDone, stepsTotal, link, detail }
 // status ∈ running | awaiting_review | blocked | completed | failed | skipped
@@ -340,6 +340,10 @@ function digestItem(row) {
     stepsTotal: 1,
     link: row.link || null,
     doneAt: done ? iso(row.done_at) : null,
+    // A digest closed (done, or cleared by its check) sits in the timeline at
+    // the close, not where it was first raised: the window loads it because
+    // of that close, so an old digest marked done today reads as today's.
+    eventAt: (resolved && meta.resolvedAt) ? iso(meta.resolvedAt) : done ? iso(row.done_at) : iso(row.created_at),
     resolution: row.resolution ? String(row.resolution) : null,
     // The full finding: `detail` (admin-alerts-brevity scope) when the row
     // has one, else the legacy long `body` a pre-scope row still carries —
@@ -392,7 +396,7 @@ function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], dige
     .concat(drafts.map(smsDraftItem))
     .concat(digests.map(digestItem))
     .concat(exceptionJobs.map(jobItem))
-    .sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+    .sort((a, b) => String(b.eventAt || b.startedAt || '').localeCompare(String(a.eventAt || a.startedAt || '')));
   const agents = Array.from(new Set(items.map((i) => i.agent))).sort();
   return { items, agents, summary: summarize(items, jobs.length - exceptionJobs.length) };
 }
