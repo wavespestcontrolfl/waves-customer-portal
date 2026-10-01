@@ -224,7 +224,9 @@ async function syncCampaignsLocked() {
       const removed = await markMissingCampaignsRemoved(rows.map((r) => String(r.id)));
       if (removed > 0) logger.info(`[meta-ads] Marked ${removed} campaign(s) removed (no longer returned by Meta)`);
     } else {
-      logger.warn('[meta-ads] campaigns pagination incomplete — skipping removed-campaign reconcile');
+      // Rows fetched so far are upserted, but the sync is NOT healthy: fail the
+      // job so job_health doesn't advance last_success_at on a partial list.
+      throw new Error(`Meta API campaigns: pagination incomplete after ${results.length} campaigns — skipped removed-campaign reconcile`);
     }
 
     logger.info(`[meta-ads] Synced ${results.length} campaigns`);

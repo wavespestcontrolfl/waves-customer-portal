@@ -283,9 +283,10 @@ describe('syncCampaigns removed-campaign reconcile', () => {
     // Every response advertises another page; the 25-page backstop ends the walk early.
     global.fetch = jest.fn().mockResolvedValue(page([], 'https://graph.facebook.com/more'));
 
-    await MetaAds.syncCampaigns();
-
+    await expect(MetaAds.syncCampaigns()).resolves.toEqual([]);
     expect(global.fetch).toHaveBeenCalledTimes(25);
+    // The scheduler path fails the job instead of recording a healthy partial sync.
+    await expect(MetaAds.syncCampaigns({ throwOnError: true })).rejects.toThrow(/pagination incomplete/);
     expect(whereNotInCalls).toHaveLength(0);
     expect(removedUpdates()).toHaveLength(0);
   });

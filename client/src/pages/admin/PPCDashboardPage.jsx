@@ -87,7 +87,7 @@ function SyncHealthNotice({ loadErrors, syncs }) {
           >
             {l.label} last synced:{" "}
             {l.lastSuccessAt
-              ? new Date(l.lastSuccessAt).toLocaleString()
+              ? new Date(l.lastSuccessAt).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + " ET"
               : "never"}
             {l.failed
               ? ` -- latest sync failed${l.error ? ` (${l.error})` : ""}`
