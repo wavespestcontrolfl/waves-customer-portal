@@ -344,7 +344,7 @@ const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|L
 // real codes count, so "PO 12345" or "NO 12345" is not an address. Any case right after a comma
 // ("Atlanta, ga 30303"). Without a comma, upper or title case ("GA 30303", "Ga 30303"), except
 // codes that are also words or ID labels ("Order ID 12345", "Hi 12345"): those need a comma or
-// a house number shortly before ("99 Palm Terrace Boise ID 83702").
+// a house number shortly before, as does any lowercase code or name.
 const US_STATE_CODES = 'AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|PR|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY';
 const ZIP_TAIL = '\\.?,?\\s+\\d{5}(?:-\\d{4})?\\b';
 const AMBIGUOUS_STATE_CODES = new Set(['ID', 'IN', 'OR', 'OK', 'ME', 'HI', 'OH', 'AL', 'LA', 'MS', 'CO', 'DE', 'PA']);
@@ -359,9 +359,10 @@ const US_STATE_NAMES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California'
   'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'];
 const STATE_NAME_ALTS = US_STATE_NAMES.flatMap((n) => [n, n.toUpperCase()]).map((n) => n.replace(/ /g, '\\s+')).join('|');
 const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|${STATE_NAME_ALTS})${ZIP_TAIL}`); // our own state in any case
-const AMBIGUOUS_ALTS = [...AMBIGUOUS_STATE_CODES].flatMap((c) => [c, c[0] + c[1].toLowerCase()]).join('|');
-// Within 120 characters, not a word count, so long street and city names still count.
-const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s[^;!?]{1,120}?\\s(?:${AMBIGUOUS_ALTS})${ZIP_TAIL}`);
+// A house number shortly before (within 120 characters, not a word count, so long street and
+// city names still count) is address context for any state code or name in any case
+// ("99 palm terrace atlanta ga 30303", "99 Palm Terrace Boise ID 83702").
+const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s[^;!?]{1,120}?\\s(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 

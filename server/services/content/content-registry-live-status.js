@@ -179,23 +179,32 @@ function forwardFinder(lower) {
 // Where an inert region opened at `lt` ends (Infinity = runs to end of document): a comment at
 // "-->", script/style at their raw-text close, a template just past its matching close tag (they nest).
 // Comments and script/style bodies inside a template are skipped whole, so a "</template>"
-// written in one never closes it.
-const TEMPLATE_INNER = [['<template', 9], ['</template', 10], ['<!--', 4], ['<script', 7], ['<style', 6]];
-function inertEnd(find, name, lt, gt) {
+// written in one never closes it. A tag name counts only when a delimiter follows it, as in the
+// HTML tokenizer: "</scripture>" inside a script string does not end the script.
+const TAG_DELIM_RE = /[\s/>]/;
+const tagAt = (lower, find, needle, from) => {
+  let at = find(needle, from);
+  while (at !== Infinity && at + needle.length < lower.length && !TAG_DELIM_RE.test(lower[at + needle.length])) {
+    at = find(needle, at + 1);
+  }
+  return at;
+};
+const TEMPLATE_INNER = ['<template', '</template', '<!--', '<script', '<style'];
+function inertEnd(lower, find, name, lt, gt) {
   if (name === '!--') return find('-->', lt + 4) + 3;
-  if (name !== 'template') return find(`</${name}`, gt + 1);
+  if (name !== 'template') return tagAt(lower, find, `</${name}`, gt + 1);
   let depth = 1;
   let at = gt + 1;
   while (depth > 0 && at !== Infinity) {
-    let [needle, len] = TEMPLATE_INNER[0];
+    let needle = null;
     let hit = Infinity;
-    for (const [n, l] of TEMPLATE_INNER) {
-      const h = find(n, at);
-      if (h < hit) { hit = h; needle = n; len = l; }
+    for (const n of TEMPLATE_INNER) {
+      const h = n === '<!--' ? find(n, at) : tagAt(lower, find, n, at);
+      if (h < hit) { hit = h; needle = n; }
     }
     if (hit === Infinity) return Infinity;
-    if (needle === '<template') { depth += 1; at = hit + len; } else if (needle === '</template') { depth -= 1; at = hit + len; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
-    else at = find(`</${needle.slice(1)}`, hit + len) + 1;
+    if (needle === '<template') { depth += 1; at = hit + needle.length; } else if (needle === '</template') { depth -= 1; at = hit + needle.length; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
+    else at = tagAt(lower, find, `</${needle.slice(1)}`, hit + needle.length) + 1;
   }
   return at === Infinity ? at : find('>', at) + 1; // past the whole closing tag
 }
@@ -218,7 +227,7 @@ function headingTexts(html) {
     const [, closing, name] = tag;
     const gt = name === '!--' ? lt + 3 : find('>', lt);
     if (!closing && INERT_TAGS.has(name)) {
-      const end = inertEnd(find, name, lt, gt);
+      const end = inertEnd(lower, find, name, lt, gt);
       if (open) { open.parts.push(src.slice(open.from, lt)); open.from = end; }
       i = end;
     } else if (!closing && !open && HEADING_TAGS.has(name)) {

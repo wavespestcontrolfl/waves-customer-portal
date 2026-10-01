@@ -612,6 +612,9 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<h1>Page <script>x()</script>not found</h1>')).toBe(true);
     expect(notFoundHeading('<template></template><h1>Page not found</h1>')).toBe(true);
     expect(notFoundHeading('<h1><template></template>Not found</h1>')).toBe(true);
+    expect(notFoundHeading('<script>var s = "</scripture><h1>Page not found</h1>";</script><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<template><scripts></scripts><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<script>x</script\t><h1>Page not found</h1>')).toBe(true);
     expect(notFoundHeading('<h1><template><template></template></template >Not found</h1>')).toBe(true);
     expect(notFoundHeading('<template><!-- </template> --><h1>Not found</h1></template><h1>Waves Pest Control</h1>')).toBe(false);
     expect(notFoundHeading('<template><script>"</template>"</script><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
