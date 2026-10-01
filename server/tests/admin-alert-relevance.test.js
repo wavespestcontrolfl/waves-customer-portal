@@ -253,6 +253,13 @@ describe('class rules', () => {
     // The customer re-authorized under the current text after the bell: settled.
     mockTables.payment_method_consents = [{ customer_id: CUST, consent_text_version: CONSENT_VERSION, latest_created_at: AFTER_BELL }];
     expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: 'Authorization was re-collected' });
+    // An after-visit reauthorization (its own current version label) settles
+    // the bell too; a card-hold consent is not a recurring authorization.
+    const { AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    mockTables.payment_method_consents = [{ customer_id: CUST, consent_text_version: AFTER_VISIT_CONSENT_VERSION, latest_created_at: AFTER_BELL }];
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: 'Authorization was re-collected' });
+    mockTables.payment_method_consents = [{ customer_id: CUST, consent_text_version: 'hold_v1_2026-10-01', latest_created_at: AFTER_BELL }];
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: null });
     // A bell naming no customer is never judged.
     const anonymous = note({ category: 'billing', metadata: { dedupeKey: 'consent_version_stale:pi_2', intentId: 'pi_2' } });
     expect(await reasonFor(anonymous)).toEqual({ cls: 'consent_version_stale', reason: null });

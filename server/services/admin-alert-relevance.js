@@ -160,7 +160,11 @@ async function loadSubjects(rows, conn = db) {
       .select('id', 'deleted_at', 'customer_id', 'estimate_id'));
   }
   // The stale-consent bells' customers: when did each last record a consent
-  // at the CURRENT text version (the only thing that settles that bell)?
+  // at a CURRENT recurring-card text version — the base text or the
+  // after-visit variant's (local max-effort review on #5434: an after-visit
+  // reauthorization lands as AFTER_VISIT_CONSENT_VERSION, and it settles
+  // the bell exactly like the base text does). A card-hold consent is not a
+  // recurring authorization and never settles it.
   // (A customer id is deliberately NOT a subject ref — only this class reads
   // it, straight from its own metadata.)
   const consentCustomerIds = [...new Set(rows
@@ -168,9 +172,9 @@ async function loadSubjects(rows, conn = db) {
     .filter((meta) => String(meta.dedupeKey || '').startsWith(CONSENT_STALE_PREFIX))
     .map((meta) => idTextOrNull(meta.customerId)).filter(Boolean))];
   if (consentCustomerIds.length) {
-    const { CONSENT_VERSION } = require('./payment-method-consent-text');
+    const { CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION } = require('./payment-method-consent-text');
     const recorded = await conn('payment_method_consents').whereIn('customer_id', consentCustomerIds)
-      .where('consent_text_version', CONSENT_VERSION)
+      .whereIn('consent_text_version', [CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION])
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     data.consents = new Map(recorded.map((r) => [String(r.customer_id), r.latest_created_at]));
   }
@@ -288,7 +292,8 @@ function newLeadMovedOn(s) {
 // a deferred capture carried a consent text version that was no longer
 // current, so the authorization was withheld and the office asked to
 // re-collect it. Settled only by the customer re-authorizing — a consent row
-// at the CURRENT text version recorded after the bell; never by the intent
+// at a CURRENT recurring-card text version (base or after-visit) recorded
+// after the bell; never by the intent
 // (its stamp stays stale for good) and never by an older-version row
 // (codex local max-effort review on #5434).
 const CONSENT_STALE_PREFIX = 'consent_version_stale:';
