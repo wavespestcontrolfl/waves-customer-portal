@@ -41,7 +41,7 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 // a score is a finite number. Anything else (a name, an address, a sentence, an
 // option that is not in the package) is dropped, and a confirmed case that
 // cannot produce an in-domain expected answer is not exported at all.
-const { packageFor, packageHash, OUTCOME_SOURCES } = require('../services/typed-decisions/packages');
+const { packageFor, packageHash, OUTCOME_SOURCES, answerInDomain } = require('../services/typed-decisions/packages');
 
 // The row must name a registered package AND carry that package's CURRENT
 // content hash: a syntactically valid digest for different question wording
@@ -55,14 +55,7 @@ function packageAndQuestion(row, capability) {
   const question = pkg.questions[row.question_id];
   return question ? { pkg, question } : null;
 }
-// The question's answer domain: true when `v` is a valid answer for it.
-function inDomain(question, v) {
-  if (!question) return false;
-  if (question.type === 'noul') return typeof v === 'boolean';
-  if (question.type === 'choice') return typeof v === 'string' && Object.prototype.hasOwnProperty.call(question.criteria || {}, v);
-  if (question.type === 'score') return typeof v === 'number' && Number.isFinite(v);
-  return false;
-}
+const inDomain = answerInDomain;
 const isProb = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
 // The normalised Jev answer, rebuilt from its raw measurement with the same
 // rules as services/typed-decisions/jev.js#normaliseAnswer: yes and confident
