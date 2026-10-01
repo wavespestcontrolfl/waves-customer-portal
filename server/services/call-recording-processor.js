@@ -13314,6 +13314,11 @@ const CallRecordingProcessor = {
     // phone: the primary's appointment texts are switched off only once a
     // booking succeeds on THIS call (applied where scheduledServiceId lands).
     let deferPrimaryOptOutCustomerId = null;
+    // Phones (last-10) whose on-site consent THIS call's persistence wrote,
+    // upgraded, or found already on record — the only phones the booking-site
+    // state recovery below may act on (pre-push codex P1: scoped to the
+    // originating call and, by construction, to the persistence gate).
+    const onSiteConsentedPhonesThisCall = new Set();
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
@@ -13413,6 +13418,9 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
+        if (entryConsent && secondaryEntry?.phone && typeof result === 'string' && (result.startsWith('written') || result.startsWith('consent_upgraded') || result.startsWith('skipped_phone_on_record'))) {
+          onSiteConsentedPhonesThisCall.add(String(secondaryEntry.phone).replace(/\D/g, '').slice(-10));
+        }
         if (['written', 'written_consent_withheld', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow) {
           const { dispatchRecipientOptins } = require('./recipient-optin');
           void dispatchRecipientOptins(claimedOptins, claimedCustRow)
@@ -18129,14 +18137,15 @@ const CallRecordingProcessor = {
               // phone is one of THIS call's grounded on-site contacts and the
               // row's consent source is the on-site rule.
               let primaryOptOutFromState = false;
-              if (!deferPrimaryOptOutCustomerId && customerId && callSecondaryContacts.some(onSiteNotifyConsent)) {
+              if (!deferPrimaryOptOutCustomerId && customerId
+                  && process.env.GATE_CALL_SECONDARY_CONTACT === 'true'
+                  && onSiteConsentedPhonesThisCall.size) {
                 try {
                   const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-                  const onSitePhones = new Set(callSecondaryContacts.filter(onSiteNotifyConsent).map((c) => optLast10(c.phone)).filter(Boolean));
                   const row = await db('customers').where({ id: customerId }).first('service_contact_phone', 'service_contacts_consent_source');
                   primaryOptOutFromState = !!row
                     && row.service_contacts_consent_source === 'call_pipeline_onsite_contact'
-                    && onSitePhones.has(optLast10(row.service_contact_phone));
+                    && onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone));
                 } catch (stateErr) {
                   logger.warn(`[call-proc] deferred primary opt-out state read failed for ${maskSid(callSid)}: ${safeErrorToken(stateErr)}`);
                 }
