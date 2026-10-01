@@ -50,6 +50,7 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
+const reserviceOfficeRequest = require('../services/reservice-office-request');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
@@ -8167,6 +8168,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const resolvedIsCallback = isCallback
       || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
+    // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
+    // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
+    // the suggestion the client named — never taken from the client. Only the
+    // primary row below is stamped; null = nothing saved (gate off, not a
+    // pest/lawn re-service, or empty words).
+    const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
+      && resolvedIsCallback
+      && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
+      && req.body.customerRequest && typeof req.body.customerRequest === 'object')
+      ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
+      : null;
+
     // A recurring booking that creates WaveGuard plan coverage IS the
     // membership sale — let the "any member" discount floor see that, since
     // the customer row's tier is only stamped after the series commits.
@@ -8630,6 +8643,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
+      if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
+        insertData.customer_request = officeCustomerRequest.text;
+        insertData.customer_request_source = officeCustomerRequest.source;
+      }
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
@@ -22345,6 +22362,25 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
       enabled: isEnabled('prepayOnBook'),
       switchEnabled: isEnabled('onsitePrepaySwitch'),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/reservice-request-suggestion?customerId= — the
+// New Appointment modal's "Customer's words" suggestion for a pest/lawn
+// re-service (GATE_RESERVICE_OFFICE_REQUEST): this customer's latest inbound
+// text or call note from the last 72 hours, whichever is newer, with its kind
+// and time so the modal can label it ("Text, 3 h ago"). Read-only. Gate off
+// answers {enabled:false, suggestion:null} — the modal renders nothing new.
+// requireAdmin like the booking route the suggestion feeds.
+router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next) => {
+  try {
+    if (!isEnabled('reserviceOfficeRequest')) return res.json({ enabled: false, suggestion: null });
+    const customerId = String(req.query.customerId || '');
+    if (!reserviceOfficeRequest.isUuid(customerId)) {
+      return res.status(400).json({ error: 'customerId required' });
+    }
+    const suggestion = await reserviceOfficeRequest.pickSuggestion(db, customerId);
+    res.json({ enabled: true, suggestion });
   } catch (err) { next(err); }
 });
 

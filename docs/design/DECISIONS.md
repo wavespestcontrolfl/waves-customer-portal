@@ -2919,3 +2919,37 @@ units, footage, percentages, "per visit", other company names, "safe" words,
 "chemical" and active ingredients (a common list plus this visit's catalog
 actives) through the existing retry and provider fallback. Generation-time only:
 the completion-time recheck is unchanged. Kill switch: unset the gate.
+
+## 2026-10-01 — Office-booked re-service: "Customer's words" suggestion (dark)
+
+When the office books a pest or lawn re-service (`pest_re_service` /
+`lawn_re_service`) in the New Appointment modal, a "Customer's words" section
+offers the customer's latest INBOUND text (`sms_log`) or call note
+(`call_log`: the extraction's `pain_points`, else the call summary) from the
+last 72 hours, whichever is newest, labeled with its source and age ("Text,
+3 h ago" / "Call, yesterday") and a "Use this" button, above an editable box
+(400 characters, the call processor's own cap). Optional: an empty box saves
+nothing. The words land in `scheduled_services.customer_request` /
+`customer_request_source` (migration 20260927100000, no new migration) on the
+primary inserted row only, never on recurring children or boosters;
+`customer_request_pests` is untouched.
+
+`GATE_RESERVICE_OFFICE_REQUEST` (registry key `reserviceOfficeRequest`, off
+unless exactly `true`, dark in every environment). Gate off: the suggestion
+route answers `{ enabled: false, suggestion: null }`, the modal shows nothing
+new, and `POST /api/admin/schedule` ignores `customerRequest` — byte-identical
+to before. The modal learns the gate from that route's `enabled` answer, the
+same probe pattern as the annual-prepay and card-link controls, and only asks
+once a re-service line is on the form. Kill switch: unset the gate.
+
+Source rule (owner ruling 2026-09-26: exact words may be quoted, a call
+paraphrase is shown without quotes), decided on the SERVER and never taken
+from the client. The client names the suggestion it filled from
+(`suggestionId` + `suggestionKind`); the server re-reads that row, which must
+belong to this customer, be inbound and sit inside the 72-hour window, and
+keeps `text` / `call` only when the trimmed saved words equal the suggestion
+exactly. Anything typed or edited by staff, a forged, stale, outbound or
+another customer's id, or a failed lookup is `office`, which is never quoted.
+The suggestion skips empty bodies, STOP / HELP / opt-in keywords and
+natural-language opt-outs (the inbound opt-out detector's own rules), and
+spam or voicemail calls. Nothing is sent to a customer.
