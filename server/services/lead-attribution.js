@@ -201,9 +201,8 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // statement as the win so the lineage can never be lost to a crash after it
   // (extracted_data.won_booking_id: booking-preferred-time.js reads it to tell
   // which lead's funnel row replaces a closed preferred-time request's).
-  const wonFacts = {};
-  if (estimateId) wonFacts.won_estimate_id = String(estimateId);
-  if (bookingId) wonFacts.won_booking_id = String(bookingId);
+  const wonFacts = Object.fromEntries([['won_estimate_id', estimateId], ['won_booking_id', bookingId]]
+    .filter(([, id]) => id).map(([key, id]) => [key, String(id)]));
   if (Object.keys(wonFacts).length) updates.extracted_data = db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(wonFacts)]);
 
   // Soft-deleted leads are out of every live mutation path: 0 rows updated

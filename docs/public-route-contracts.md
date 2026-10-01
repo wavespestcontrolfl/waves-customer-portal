@@ -956,10 +956,17 @@ booking: it stays open, as before this change, and converts the way any
 estimate-linked lead does (the estimate's acceptance,
 `markLinkedLeadEstimateAccepted`) or by staff. `handled` means closed, neither
 won nor lost, and is set through
-`closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel row
+`closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel stage
 (`handled` has no funnel mapping, so the `ad_service_attribution` stage stays
-as it is and nothing is uploaded to Google or Meta); the booking's own
-attribution runs exactly as for any other booking. Every other lead surface
+as it is and nothing is uploaded to Google or Meta for the request); the
+booking's own attribution runs exactly as for any other booking. Once the
+booking has its own funnel row, the closed request's row is removed
+(`dropSupersededPreferredFunnelRows`), so the journey counts as one lead. First
+touch keeps the credit (owner ruling 2026-10-01): when the request's row came
+in on a paid click and the booking's own row has no paid click, the booking's
+row first takes the request's touch (source, detail, lead date, click ids,
+UTM campaign/term, `is_paid`; the earliest paid request wins), so the booking
+is credited, and reported, to that ad. Every other lead surface
 treats `handled` as closed: it is out of the open set, out of every prospect
 denominator (conversion, win and lost rates), and never re-attached by a later
 form, call, estimate or email fan-out. The close runs inside the per-(lead,

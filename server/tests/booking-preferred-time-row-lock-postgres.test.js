@@ -35,7 +35,10 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'n-1' }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 const mockStamp = jest.fn();
-jest.mock('../services/lead-funnel-bridge', () => ({ stampLeadFunnelRow: (...a) => mockStamp(...a) }));
+jest.mock('../services/lead-funnel-bridge', () => {
+  const { CLICK_ID_COLUMNS, PAID_CLICK_ID_COLUMNS } = jest.requireActual('../services/lead-funnel-bridge');
+  return { CLICK_ID_COLUMNS, PAID_CLICK_ID_COLUMNS, stampLeadFunnelRow: (...a) => mockStamp(...a) };
+});
 
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
@@ -290,6 +293,41 @@ jest.setTimeout(60000);
       expect(out.attributed).toMatchObject({ attributed: true, repeatPaid: true });
       expect(await requestRow(out.leadId)).toHaveLength(0);
       expect(await bookingRows(out.sbaId)).toHaveLength(1);
+    });
+
+    describe('first touch keeps the credit (owner ruling 2026-10-01, codex #5477 r8)', () => {
+      // a closed request whose row came in on a paid click, and a booking row of its own
+      const setupPaid = async ({ bookingTouch }) => {
+        const cust = randomUUID();
+        await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
+        const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+        await database('ad_service_attribution').insert({
+          lead_id: req.leadId, funnel_stage: 'lead', lead_source: 'google_ads', lead_source_detail: 'brand', lead_date: '2026-09-20',
+          gclid: 'g-first', utm_campaign: 'fall-pest', utm_term: 'pest control', is_paid: true,
+        });
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+        await database('ad_service_attribution').insert({ lead_id: null, self_booked_appointment_id: sba[0].id, funnel_stage: 'booked', lead_date: '2026-10-01', ...bookingTouch });
+        expect(await dropSupersededPreferredFunnelRows(database, { booking: sba[0] })).toBe(1);
+        return { req, sbaId: sba[0].id };
+      };
+
+      test('a paid request and a booking that came back direct: the booking row takes the paid touch, the request row goes (one paid lead)', async () => {
+        const { req, sbaId } = await setupPaid({ bookingTouch: { lead_source: 'website', is_paid: false } });
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+        const rows = await bookingRows(sbaId);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          funnel_stage: 'booked', lead_source: 'google_ads', lead_source_detail: 'brand', gclid: 'g-first', utm_campaign: 'fall-pest', utm_term: 'pest control', is_paid: true,
+        });
+        expect(String(rows[0].lead_date instanceof Date ? rows[0].lead_date.toISOString() : rows[0].lead_date)).toMatch(/^2026-09-20/);
+      });
+
+      test('a booking with a paid click of its own keeps it', async () => {
+        const { sbaId } = await setupPaid({ bookingTouch: { lead_source: 'facebook_ads', fbclid: 'f-own', is_paid: true } });
+        expect((await bookingRows(sbaId))[0]).toMatchObject({ lead_source: 'facebook_ads', fbclid: 'f-own', gclid: null });
+      });
     });
 
     test.each([

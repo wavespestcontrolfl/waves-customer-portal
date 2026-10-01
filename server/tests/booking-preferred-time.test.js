@@ -18,6 +18,7 @@ let mockOpenLeads = [];        // what an awaited leads select() resolves to
 let mockLeadUpdateRows = 1;    // rows a conditional leads UPDATE matches (0 = staff closed it since the lookup)
 let mockRetireError = null;    // makes the booking_intents suppression UPDATE throw
 let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
+let mockLiveCustomer = null;   // the booked customer as the close's share-locked re-read sees it (null = same as mockCustomer)
 let mockVisitDiesBeforeLock = false; // the visit is live on the first read, cancelled by the locked re-read
 let mockDeadVisit = false;      // the booking's only visit is cancelled/skipped/rescheduled (the live-status lookup finds nothing)
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
@@ -42,6 +43,7 @@ function builder(table) {
     whereNot: () => b,
     whereIn: () => b,
     forUpdate: () => { b._forUpdate = true; return b; },
+    forShare: () => { b._forShare = true; return b; },
     whereNotIn: () => { b._liveOnly = true; return b; },
     whereRaw: (sql, vals) => { mockRaws.push({ table, op: 'whereRaw', arg: sql, vals }); if (/<= \?/.test(String(sql))) b._requestedBy = vals && vals[0]; return b; },
     orWhereRaw: () => b,
@@ -61,7 +63,7 @@ function builder(table) {
         // the reconcile's read of the SUBMITTED request's own status: handled once this run closed it
         ? { status: mockStatusRead || (mockOps.some((o) => o.table === 'leads' && o.op === 'update' && o.arg && o.arg.status === 'handled') ? 'handled' : 'new') }
         : table === 'leads' ? (b._forUpdate ? mockLockedLead : mockExistingLead)
-        : table === 'customers' ? mockCustomer
+        : table === 'customers' ? (b._forShare && mockLiveCustomer ? mockLiveCustomer : mockCustomer)
           : table === 'self_booked_appointments as sba' ? mockBookedSince
             : table === 'scheduled_services' && mockVisitDiesBeforeLock && b._forUpdate ? { status: 'cancelled', is_callback: false }
             : table === 'scheduled_services' && mockDeadVisit ? (b._liveOnly ? null : { id: 'ss-dead' })
@@ -210,6 +212,7 @@ beforeEach(() => {
   mockScheduledService = null;
   mockDeadVisit = false;
   mockVisitDiesBeforeLock = false;
+  mockLiveCustomer = null;
   mockOrder.length = 0;
   mockMarkConverted.mockClear();
   mockMarkConverted.mockResolvedValue(true);
@@ -921,6 +924,16 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 1 });
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
     expect(mockNotifyAdmin.mock.calls[1][3]).toMatchObject({ dedupeKey: 'preferred-time-auto-close:lead-1:visit-7' });
+  });
+
+  test.each([
+    ['staff moved the customer to another phone', { phone: '+1 (941) 555-0199' }],
+    ['staff corrected the customer\'s name and email (the request no longer corroborates them)', { first_name: 'Robin', last_name: 'Other', email: 'robin@example.test' }],
+  ])('the booked customer\'s identity is re-read under the close lock (codex #5477 r8): %s -> not closed', async (_label, change) => {
+    mockLiveCustomer = { ...mockCustomer, ...change };
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 0 });
+    expect(closeWrites()).toHaveLength(0);
+    expect(activities()).toHaveLength(0);
   });
 
   test('a visit cancelled between the first read and the close is re-checked under its row lock (codex #5477 r5): nothing closed', async () => {

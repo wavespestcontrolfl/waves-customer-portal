@@ -347,6 +347,8 @@ async function stampLeadFunnelRow(database, lead, { customerId = null, serviceIn
 }
 
 module.exports = {
+  CLICK_ID_COLUMNS,
+  PAID_CLICK_ID_COLUMNS,
   bridgeLeadFunnelStage,
   bridgeLeadsFunnelStage,
   restampMissingPreferredRows,
