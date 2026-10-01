@@ -11,6 +11,7 @@
  * it is never written into decision_reviews. Labeling is the ONLY thing that
  * moves a row, and nothing acts on a Jev answer: this is evidence-gathering.
  */
+const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -90,7 +91,8 @@ async function loadSubjects(rows) {
   const callIds = subjectIds(CALL_SUBJECT);
   try {
     if (smsIds.length) {
-      const texts = await db('sms_log').whereIn('id', smsIds).select('id', 'from_phone', 'to_phone', 'direction', 'message_body', 'created_at');
+      const texts = await db('sms_log').whereIn('id', smsIds).modify(excludeUnresolvedSendReservations)
+        .select('id', 'from_phone', 'to_phone', 'direction', 'message_body', 'created_at');
       await Promise.all(texts.map(async (t) => {
         // The same lookup the shadow used (sms-shadow.readLastOutboundBody):
         // this line's phone pair, successful non-internal sends, the 24h

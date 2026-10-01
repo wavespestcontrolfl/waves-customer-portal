@@ -23,6 +23,7 @@
  * refreshOutcomeEvidence(), which rewrites decision_reviews.outcome_evidence
  * only (never a label column).
  */
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { typedDecisionsLive } = require('../../config/feature-gates');
@@ -215,7 +216,8 @@ async function courtesyEvidence(conn, sms, at, now) {
   const texts = (direction) => {
     const q = conn('sms_log').where({ customer_id: sms.customer_id, direction, ...thread(direction) })
       .where('created_at', '>', at).where('created_at', '<=', until)
-      .whereRaw("COALESCE(message_type, '') <> 'internal_alert'");
+      .whereRaw("COALESCE(message_type, '') <> 'internal_alert'")
+      .modify(excludeUnresolvedSendReservations);
     // An outbound row counts only once it actually went out ('scheduled' and
     // other pre-send rows are not contact); an inbound row is a received text.
     if (direction === 'outbound') q.whereIn('status', ['queued', 'sent', 'delivered']);

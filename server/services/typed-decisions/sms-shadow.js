@@ -12,6 +12,7 @@
  * message or a missing customer returns before any provider call or write.
  * The ledger already files every provider call (askPackage).
  */
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 
 const MAX_TEXT_CHARS = 2000;
@@ -31,6 +32,9 @@ async function readLastOutboundBody({ conn, customerPhone, ourNumber, before }) 
     .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
     .where('created_at', '>', new Date(end.getTime() - 24 * 60 * 60 * 1000))
     .where('created_at', '<', end)
+    // An unresolved send reservation (a synthetic 'sending' row) is not a
+    // text the customer received.
+    .modify(excludeUnresolvedSendReservations)
     .orderBy('created_at', 'desc')
     .first('message_body');
   return row?.message_body || null;
