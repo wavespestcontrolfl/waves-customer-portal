@@ -4066,11 +4066,13 @@ const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpay
 function billingAmountCents(context, { planAware = false } = {}) {
   const billing = context?.billing || {};
   const onPlan = planAware && billing.hasActivePaymentPlan === true;
+  // a cut / unmodeled invoice history makes the AGGREGATE balance a partial sum (Codex round-58 P2): not an owed figure to quote
+  const balanceCut = planAware && billing.hasUnmodeledInvoice === true;
   const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
   const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
   return {
     owed: finiteSet([
-      billing.outstandingBalance > 0 && !onPlan ? centsOf(billing.outstandingBalance) : NaN,
+      billing.outstandingBalance > 0 && !onPlan && !balanceCut ? centsOf(billing.outstandingBalance) : NaN,
       onPlan ? NaN : centsOf(billing.openInvoice?.amountDue),
       ...require('./context-aggregator').authorizedDuesCents(context),
     ]),
@@ -4716,8 +4718,11 @@ function buildFactsBlock(context, extras = {}) {
   // Real answers, ACTIVE PAYMENT PLAN: the invoice balance is not what is due now, so no invoice total / balance / amount due reaches the
   // prompt anywhere (Balance line, Open invoice line, summary, flags) - and billingAmountCents({planAware}) does not authorize them.
   const onPaymentPlan = gateEnvValue('GATE_SMS_REAL_ANSWERS') && context.billing?.hasActivePaymentPlan === true;
+  const balanceUnverifiable = gateEnvValue('GATE_SMS_REAL_ANSWERS') && context.billing?.hasUnmodeledInvoice === true;
   const balance = onPaymentPlan
     ? 'on an ACTIVE PAYMENT PLAN - the invoice total is NOT what is due now: never state a balance, an invoice total or an amount due; say a teammate will confirm the current installment'
+    : balanceUnverifiable && context.billing?.outstandingBalance > 0
+      ? 'not verifiable from the records here (part of the invoice history could not be read) - never state an account balance; say a teammate will confirm the total'
     : context.billing?.outstandingBalance > 0
       ? `$${Number(context.billing.outstandingBalance).toFixed(2)} outstanding`
       : 'Current';

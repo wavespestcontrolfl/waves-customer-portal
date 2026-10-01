@@ -968,3 +968,10 @@ test('a contact-bearing denial is a denial too (and its instruction still an off
   expect(r.zelleClauseTexts(b).denialText).toBe(b);
   expect(r.hasNegativeZelleAvailabilityClaim('You can Zelle us at pay@example.com.')).toBe(false);
 });
+
+// Codex round-58 P2: typographic apostrophes classify like ASCII ones
+test.each(['Zelle isn\u2019t available for your invoice', 'We don\u2019t take cards and Zelle.'])('a denial with a curly apostrophe: %s', (b) => {
+  const r = require('../services/sms-amount-recheck');
+  expect(r.hasNegativeZelleAvailabilityClaim(b)).toBe(true);
+  expect(r.hasAffirmativeZelleMention(b)).toBe(false);
+});

@@ -229,7 +229,8 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   // money the payments table never holds (an estimate deposit has no payments row) makes an absence claim unknowable unless the
   // deposit ledger was read and is empty (local review P1)
   const depositUnknown = billing.hasDepositActivity !== false;
-  const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown) ? null : absenceSentence(billing, rows, todayParts);
+  const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown || !everyRowRenders(billing, rows, todayParts))
+    ? null : absenceSentence(billing, rows, todayParts);
   return absence ? [...out, absence] : out;
 }
 
@@ -259,6 +260,9 @@ function paymentRowSentences(billing, rows, todayParts) {
     .map((p) => paymentSentence(p, todayParts))
     .filter(Boolean);
 }
+// Every retained row states its own status (none dropped as ambiguous, on an unknown boundary day, or in an unmodeled status such as
+// disputed) - only then can the window say what is ABSENT (Codex round-58 P2).
+const everyRowRenders = (billing, rows, todayParts) => paymentRowSentences(billing, rows, todayParts).length === rows.length;
 
 // The newest row is always inside the window (newest first): nothing is dated after it. No rows at all is only "none" when the
 // window cannot be hiding more and no money is in flight. Codex round-46 P2: a future-dated row (a scheduled charge) would put the
@@ -368,6 +372,9 @@ const STATUS_ALTERNATIVES = [
   '(?:your|the|that|this)\\s+(?:cash|che(?:ck|que)s?|zelle|ach|venmo|paypal|wire|bank\\s+transfer|e-?check)\\b(?:\\s+[\\w$.,-]+){0,2}?\\s+(?:is|was|were|are|has|have|came|arrived|got|went|cleared|bounced|posted|landed|showed)\\b',
   // (Codex round-52 P2: cash, and a received / collected / picked-up cash or check, are receipts too)
   '(?:have|has|had|got|gotten|received|collected|picked up)\\s+(?:your|the)\\s+(?:payments?|funds|money|transfer|deposit|che(?:ck|que)s?|zelle|ach|cash)', '(?:got|have|has)\\s+(?:it|that|this|them)',
+  // (Codex round-58 P2: a receipt verb aimed at a pronoun - "We banked it", "we processed that", "it's been deposited")
+  '(?:banked|deposited|cashed|processed|posted|applied|recorded|logged|collected|received|ran|run|cleared|settled)\\s+(?:it|that|this|them)\\b',
+  "(?:it|that|this|they)(?:'s|’s|\\s+(?:is|was|were|are|has|have))\\s+(?:been\\s+)?(?:banked|deposited|cashed|processed|posted|applied|recorded|logged|collected|received|cleared|settled)\\b",
   "(?:don'?t|do not|can'?t|cannot|haven'?t|have not|hasn'?t|has not|didn'?t|did not|not)\\s+(?:\\w+\\s+){0,2}?(?:see|seen|find|found|show|showing|reflect\\w*|there)",
   'no record', 'missing', 'showing', 'shows?', 'reflect(?:ed|s|ing)?', 'recorded', 'logged', 'visible',
   'sorted', 'handled', 'resolved', 'dealt with', 'wrapped up', 'in the clear', 'all done', 'covered',

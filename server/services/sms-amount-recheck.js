@@ -94,12 +94,14 @@ const ZELLE_LIST_NEGATION_RE = new RegExp(
   `\\b${ZELLE_NEGATOR}\\s+(?:(?:currently|really|accept|take|offer|support|use|do|process|allow)\\s+)+(?:(?!\\b(?:but|however|though|although|except|instead|only|yet)\\b)[^.;!?\\n])*?\\bzelle\\b`,
   'i',
 );
+// Codex round-58 P2: typographic apostrophes ("isn’t") read as ASCII before any Zelle classification
+const normApostrophes = (text) => String(text || '').replace(/[\u2018\u2019\u02BC\u2032]/g, "'");
 function zelleClauses(body) {
-  return String(body || '').split(/(?<=[.!?;\n])\s+/).flatMap((sentence) => (
+  return normApostrophes(body).split(/(?<=[.!?;\n])\s+/).flatMap((sentence) => (
     ZELLE_WORD_RE.test(sentence) && ZELLE_LIST_NEGATION_RE.test(sentence) ? [sentence] : sentence.split(CLAUSE_SPLIT_RE)
   ));
 }
-const isNegatedZelleClause = (clause) => ZELLE_NEGATION_RE.test(clause) || ZELLE_LIST_NEGATION_RE.test(clause);
+const isNegatedZelleClause = (clause) => { const t = normApostrophes(clause); return ZELLE_NEGATION_RE.test(t) || ZELLE_LIST_NEGATION_RE.test(t); };
 // "not for invoice #0002", "except invoice 0002", "no longer for that bill" - a negated clause with no subject of its own
 const ZELLE_ELLIPTICAL_NEGATION_RE = /^\s*(?:(?:but|and|though)\s+)?(?:not|no\s+longer|never|except|excluding)\b/i;
 
@@ -107,7 +109,7 @@ const ZELLE_ELLIPTICAL_NEGATION_RE = /^\s*(?:(?:but|and|though)\s+)?(?:not|no\s+
 // is negated; a payment-RECEIPT clause is no longer a separate kind - a received payment is stated only by a rendered
 // sentence, and a rendered sentence never names a manual tender (payment-status-contract.tenderWord), so it never mentions Zelle.
 function classifyZelleClause(clause) {
-  const text = String(clause || '');
+  const text = normApostrophes(clause);
   if (!ZELLE_WORD_RE.test(text)) return null;
   // A clause carrying ANY transfer contact is a live instruction — always checked, negation or not (Codex round-6 pre-push audit P1).
   if (zelleBodyContacts(text).length) return 'offer';

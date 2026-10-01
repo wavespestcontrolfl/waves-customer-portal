@@ -646,3 +646,13 @@ test.each(['Your Zelle is here.', 'Your ACH is here.', 'The Zelle came in.'])('h
 test.each(['Your Zelle payment works fine for this invoice.', 'You can send your Zelle to pay@example.com.'])('how-to-pay, not a status: %s', (b) => {
   expect(c.assertsPaymentStatus(b, { inboundText: 'Can I pay by Zelle?' })).toBe(false);
 });
+
+// Codex round-58 P2: receipt verbs aimed at a pronoun
+test.each(['We banked it.', 'It\u2019s been deposited.', 'We processed that this morning.'])('held: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'Did you get my payment?' })).toBe(true);
+});
+// Codex round-58 P2: no absence sentence while any retained row cannot state its own status (e.g. disputed)
+test('a disputed row in the window suppresses "we don\'t see a payment since"', () => {
+  expect(kinds(billing({ recentPayments: [row()] }))).toContain('no_payment_since');
+  expect(kinds(billing({ recentPayments: [row(), row({ id: 'd', amount: 50, status: 'disputed', payment_date: '2026-09-20' })] }))).not.toContain('no_payment_since');
+});

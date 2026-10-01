@@ -5296,3 +5296,18 @@ describe('#5194 review rounds', () => {
     expect(billingAmountCents(null)).toEqual({ owed: new Set(), paid: new Set() });
   });
 });
+
+// Codex round-58 P2: a cut / unmodeled invoice history makes the aggregate balance a partial sum - never authorized, never shown
+test('an unmodeled invoice history withholds the aggregate balance from the allowlist and the facts', () => {
+  const { billingAmountCents, buildFactsBlock } = require('../services/sms-shadow-drafter');
+  const ctx = { summary: 'T', billing: { outstandingBalance: 412.5, recentPayments: [], hasUnmodeledInvoice: true } };
+  expect(billingAmountCents(ctx, { planAware: true }).owed.has(41250)).toBe(false);
+  expect(billingAmountCents({ billing: { ...ctx.billing, hasUnmodeledInvoice: false } }, { planAware: true }).owed.has(41250)).toBe(true);
+  const prev = process.env.GATE_SMS_REAL_ANSWERS;
+  process.env.GATE_SMS_REAL_ANSWERS = 'true';
+  try {
+    const facts = buildFactsBlock(ctx, { now: new Date('2026-09-29T15:00:00Z') });
+    expect(facts).not.toContain('$412.50 outstanding');
+    expect(facts).toContain('never state an account balance');
+  } finally { if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev; }
+});
