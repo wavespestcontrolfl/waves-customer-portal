@@ -129,7 +129,8 @@ async function main() {
   // way the processor does and match THAT (not a bare `-cat.%` prefix, which
   // would fold stale catalog cohorts into the current gate).
   const { loadBookableCallServices } = require('../services/call-booking-catalog');
-  const liveCatalogNames = (await loadBookableCallServices(db)).map((s) => s.name).filter(Boolean);
+  const bookableCallServices = await loadBookableCallServices(db);
+  const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
   const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
   const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
   const allRouteRows = await baseQuery()
@@ -144,7 +145,7 @@ async function main() {
     // customer_id is no longer selected (Codex #4933 r3 P2): the linked
     // customer is resolved per row via resolveKnownCallerCustomer, which
     // never reads that column (see the comment at its call site below).
-    .select('id', 'twilio_call_sid', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation');
+    .select('id', 'twilio_call_sid', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation', 'duration_seconds', 'recording_duration_seconds');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -348,6 +349,9 @@ async function main() {
       failOpenEnabled: auditFailOpen,
       // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
       unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+      // GATE_CALL_COMMERCIAL_DICTATED_BOOKING's catalog-aware quote check reads the
+      // same bookable catalog the live pass loads (absent = the audit holds the call).
+      bookableServices: bookableCallServices,
     });
     const knownCustomer = failOpenOptions.knownCustomer;
     let routing = canAutoRoute(v2, {

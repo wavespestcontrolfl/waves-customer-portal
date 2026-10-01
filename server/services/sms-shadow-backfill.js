@@ -217,7 +217,7 @@ async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = D
             AND b.created_at < o.created_at
         )
     )`)
-    .select('i.id', 'i.customer_id', 'i.message_body', 'i.to_phone', 'i.created_at')
+    .select('i.id', 'i.customer_id', 'i.message_body', 'i.to_phone', 'i.from_phone', 'i.created_at')
     .orderBy('i.created_at', 'desc')
     .limit(batchSize);
 }
@@ -278,7 +278,7 @@ async function findRedraftCandidates({ batchSize = DEFAULT_BATCH, sinceDays = DE
             AND b.created_at < o.created_at
         )
     )`)
-    .select('i.id', 'i.customer_id', 'i.message_body', 'i.to_phone', 'i.created_at')
+    .select('i.id', 'i.customer_id', 'i.message_body', 'i.to_phone', 'i.from_phone', 'i.created_at')
     .orderBy('i.created_at', 'desc')
     .limit(batchSize);
 }
@@ -305,6 +305,7 @@ async function draftOneBackfill(inbound, customer) {
     client,
     context,
     inboundMessage: inbound.message_body,
+    inboundPhone: inbound.from_phone || null,
     intent,
     schedulingIntent: hasSchedulingIntent(inbound.message_body),
     // Replay traffic must not ride the live lane's dispatch-metrics label —
