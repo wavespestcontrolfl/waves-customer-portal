@@ -1112,31 +1112,30 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(result.success).toBe(true);
   });
 
+  // Codex #5334 P1 (reverses the older "predicate after the guard" placement): the SUPPRESSION gates run AFTER every predicate, so a
+  // hold armed / offer withheld while the predicate was reading is still caught before the SDK.
   test.each([
     ['bare', false],
     ['locked handoff', true],
-  ])('a late final predicate blocks the %s path after the suspended annual guard, before the SDK', async (_label, locked) => {
+  ])('a suppression gate that changes while the final predicate is in flight still blocks the %s path, before the SDK', async (_label, locked) => {
     const events = [];
-    let finishGuard;
-    let announceGuard;
-    let lateCondition = false;
-    const guardStarted = new Promise(resolve => { announceGuard = resolve; });
-    const guardSuspended = new Promise(resolve => { finishGuard = resolve; });
+    let finishFinal;
+    let announceFinal;
+    let lateBlock = false;
+    const finalStarted = new Promise(resolve => { announceFinal = resolve; });
+    const finalSuspended = new Promise(resolve => { finishFinal = resolve; });
     annualHandoffGuard.mockReturnValueOnce(async () => {
-      events.push('guard:start');
-      announceGuard();
-      await guardSuspended;
-      events.push('guard:end');
-      return { blocked: false, reason: null, estimateId: null };
+      events.push('guard');
+      return lateBlock ? { blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' } : { blocked: false, reason: null, estimateId: null };
     });
     const providerPreSendCheck = jest.fn(async () => {
-      events.push('final');
-      return lateCondition
-        ? { ok: false, code: 'GRATITUDE_THREAD_CHANGED', reason: 'thread changed', retryable: false }
-        : { ok: true };
+      events.push('final:start');
+      announceFinal();
+      await finalSuspended;
+      events.push('final:end');
+      return { ok: true };
     });
     const trx = { __isTrx: true };
-
     const resultPromise = TwilioService.sendSMS(TO, 'Reminder body', {
       messageType: 'manual',
       fromNumber: FROM,
@@ -1149,31 +1148,26 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
         },
       } : {}),
     });
-    await guardStarted;
-    expect(providerPreSendCheck).not.toHaveBeenCalled();
+    await finalStarted;
     expect(mockTwilioCreate).not.toHaveBeenCalled();
-    lateCondition = true;
-    finishGuard();
-
+    expect(events).not.toContain('guard'); // the gate has not even started: the predicate is first
+    lateBlock = true;
+    finishFinal();
     const result = await resultPromise;
     expect(events).toEqual(locked
-      ? ['locked', 'guard:start', 'guard:end', 'final']
-      : ['guard:start', 'guard:end', 'final']);
-    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
-    expect(providerPreSendCheck).toHaveBeenCalledWith({
-      channel: 'sms',
-      dbi: locked ? trx : require('../models/db'),
-    });
+      ? ['locked', 'final:start', 'final:end', 'guard']
+      : ['final:start', 'final:end', 'guard']);
+    expect(providerPreSendCheck).toHaveBeenCalledWith({ channel: 'sms', dbi: locked ? trx : require('../models/db') });
     expect(mockTwilioCreate).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      success: false,
-      preSendBlocked: true,
-      code: 'GRATITUDE_THREAD_CHANGED',
-      error: 'thread changed',
-      retryable: false,
-      validator: 'provider_pre_send_check_boundary',
-      deliveryOutcome: 'not_sent',
-    });
+    expect(result).toMatchObject({ success: false, code: 'ANNUAL_OFFER_WITHHELD', deliveryOutcome: 'not_sent' });
+  });
+
+  test('a late-failing final predicate still refuses with its own verdict, never reaching the guard or the SDK', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: false, code: 'GRATITUDE_THREAD_CHANGED', reason: 'thread changed', retryable: false }));
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
+    expect(annualHandoffGuard).not.toHaveBeenCalled();
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'GRATITUDE_THREAD_CHANGED', error: 'thread changed', retryable: false, validator: 'provider_pre_send_check_boundary', deliveryOutcome: 'not_sent' });
   });
 
   test.each([
@@ -1210,7 +1204,7 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
   });
 
-  test('a passing final predicate runs once after the annual guard and before the sync check and SDK', async () => {
+  test('a passing final predicate runs once BEFORE the annual guard (suppression gates last), then the sync check and SDK', async () => {
     const events = [];
     annualHandoffGuard.mockReturnValueOnce(async () => {
       events.push('annual');
@@ -1228,7 +1222,7 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(result).toMatchObject({ success: true, deliveryOutcome: 'accepted' });
     expect(preSendCheck).toHaveBeenCalledTimes(1);
     expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
-    expect(events).toEqual(['annual', 'final', 'sync', 'sdk']);
+    expect(events).toEqual(['final', 'annual', 'sync', 'sdk']);
   });
 
   test('round 8 P1: withheldLinkPolicy "rewrite" strips a withheld estimate link from the body BEFORE the guard check and the SDK call, and the provider is called with the rewritten text', async () => {
@@ -1409,7 +1403,7 @@ describe('providerPreSendCheck placement at the TRUE provider boundary (round 43
     disclaimedNumberBlocksSend.mockResolvedValue(false);
   });
 
-  test('order: annual guard -> disclaimed-number hold -> provider predicate -> sync window check -> SDK', async () => {
+  test('order (Codex #5334 P1): provider predicate -> annual guard -> disclaimed-number hold -> sync window check -> SDK', async () => {
     const events = [];
     annualHandoffGuard.mockReturnValueOnce(async () => { events.push('annual'); return { blocked: false, reason: null, estimateId: null }; });
     disclaimedNumberBlocksSend.mockImplementationOnce(async () => { events.push('disclaimed'); return false; });
@@ -1419,25 +1413,82 @@ describe('providerPreSendCheck placement at the TRUE provider boundary (round 43
     mockTwilioCreate.mockImplementationOnce(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
     const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, preSendCheck, providerPreSendCheck });
     expect(result).toMatchObject({ success: true });
-    expect(events).toEqual(['annual', 'disclaimed', 'final', 'sync', 'sdk']);
+    expect(events).toEqual(['final', 'annual', 'disclaimed', 'sync', 'sdk']);
     expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
   });
 
-  test('state that changes DURING the disclaimed-number await is caught by the predicate (it used to run first)', async () => {
-    let stale = false;
-    disclaimedNumberBlocksSend.mockImplementationOnce(async () => { stale = true; return false; });
-    const providerPreSendCheck = jest.fn(async () => (stale ? { ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'stale', retryable: false } : { ok: true }));
+  test('a hold armed DURING the predicate\'s await is caught: the disclaimed-number gate runs AFTER the predicate (Codex #5334 P1)', async () => {
+    let held = false;
+    const providerPreSendCheck = jest.fn(async () => { held = true; return { ok: true }; });
+    disclaimedNumberBlocksSend.mockImplementationOnce(async () => held);
     const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
     expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, code: 'CALLBACK_NUMBER_HOLD', retryable: true });
+  });
+
+  test('a refused predicate stops first (the hold is never read)', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'stale', retryable: false }));
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
+    expect(disclaimedNumberBlocksSend).not.toHaveBeenCalled();
     expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
   });
 
-  test('a disclaimed-number hold still refuses first (retryable) and the predicate never runs', async () => {
+  test('a disclaimed-number hold refuses (retryable) after a passing predicate', async () => {
     disclaimedNumberBlocksSend.mockResolvedValueOnce(true);
     const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
     const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck });
-    expect(providerPreSendCheck).not.toHaveBeenCalled();
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
     expect(result).toMatchObject({ success: false, code: 'CALLBACK_NUMBER_HOLD', retryable: true });
+  });
+
+  // Codex #5334 P1: with a durable attempt marker, the gates are re-read AFTER the marker write and the repeatable predicate.
+  describe('post-marker: repeatable predicates first, suppression gates last, nothing async before the SDK', () => {
+    test('order: predicate -> annual -> disclaimed -> sync -> marker -> afterMarker -> annual -> disclaimed -> sync -> SDK', async () => {
+      const events = [];
+      annualHandoffGuard.mockReturnValue(async () => { events.push('annual'); return { blocked: false, reason: null, estimateId: null }; });
+      disclaimedNumberBlocksSend.mockImplementation(async () => { events.push('disclaimed'); return false; });
+      const preSendCheck = jest.fn(async () => ({ ok: true }));
+      preSendCheck.isStillValid = jest.fn(() => { events.push('sync'); return true; });
+      const providerPreSendCheck = jest.fn(async () => { events.push('final'); return { ok: true }; });
+      providerPreSendCheck.afterMarker = jest.fn(async () => { events.push('after-marker'); return { ok: true }; });
+      mockTwilioCreate.mockImplementationOnce(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, preSendCheck, providerPreSendCheck, onDispatchStart: jest.fn(async () => { events.push('marker'); }) });
+      expect(result).toMatchObject({ success: true });
+      expect(events).toEqual(['final', 'annual', 'disclaimed', 'sync', 'marker', 'after-marker', 'annual', 'disclaimed', 'sync', 'sdk']);
+    });
+    test('a hold armed while the repeat ran refuses (retryable), undoes the marker, never reaches the SDK', async () => {
+      let held = false;
+      const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+      providerPreSendCheck.afterMarker = jest.fn(async () => { held = true; return { ok: true }; });
+      disclaimedNumberBlocksSend.mockImplementation(async () => held);
+      const onDispatchAbort = jest.fn(async () => {});
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck, onDispatchStart: jest.fn(async () => {}), onDispatchAbort });
+      expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+      expect(mockTwilioCreate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: false, code: 'CALLBACK_NUMBER_HOLD', retryable: true });
+    });
+    test('a send window that closed while the repeat ran refuses (QUIET_HOURS_HOLD), undoes the marker', async () => {
+      let closed = false;
+      const preSendCheck = jest.fn(async () => ({ ok: true }));
+      preSendCheck.isStillValid = jest.fn(() => !closed);
+      const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+      providerPreSendCheck.afterMarker = jest.fn(async () => { closed = true; return { ok: true }; });
+      const onDispatchAbort = jest.fn(async () => {});
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, preSendCheck, providerPreSendCheck, onDispatchStart: jest.fn(async () => {}), onDispatchAbort });
+      expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+      expect(mockTwilioCreate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: false, code: 'QUIET_HOURS_HOLD', retryable: true });
+    });
+    test('an annual-offer withhold that lands after the marker refuses and undoes the marker', async () => {
+      let withheld = false;
+      annualHandoffGuard.mockReturnValue(async () => (withheld ? { blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' } : { blocked: false, reason: null, estimateId: null }));
+      const onDispatchAbort = jest.fn(async () => {});
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, onDispatchStart: jest.fn(async () => { withheld = true; }), onDispatchAbort });
+      expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+      expect(mockTwilioCreate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: false, code: 'ANNUAL_OFFER_WITHHELD' });
+    });
   });
 
   test('a once-only predicate (no afterMarker) is NOT re-run after onDispatchStart', async () => {

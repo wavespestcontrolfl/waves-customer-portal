@@ -104,7 +104,6 @@ async function resolveBouncieFallback({
         speed_mph: loc.speed ?? loc.speed_mph,
         reported_at: lastReportedAt,
         requireBouncieImei: imei,
-        ...(dbh !== db ? { dbh } : {}),
       }), timeoutMs, UNVERIFIED);
     } catch (err) {
       logger.warn(`[${logPrefix}] tech_status fallback write failed: ${err.message}`);

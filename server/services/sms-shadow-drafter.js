@@ -2174,6 +2174,16 @@ function isListMarker(str, index, length) {
 // money, time of day / address / phone token, or a date. Shared by
 // classifyBareEtaNumber and the unclassified-ETA backstop.
 const UNIT_IDENTIFIER_BEFORE_RE = /(?:\b(?:(?:unit|apt|apartment|suite|ste|bldg|building|lot|room|rm)\.?|no\.)\s*#?\s*|#\s*)$/i;
+// A LABELED identifier / count ("invoice 12", "order #15", "account 30", "ticket 20", "zone 2", "Your confirmation code is 123") is a
+// reference number, never minutes (Codex #5334 P2). The label sits immediately before the figure: a document/record noun (optionally
+// "number"/"no."/"id"/"#"/":"), or a code-like noun joined by "is/was/=". Wider window than `before` — the labels run long.
+const LABELED_IDENTIFIER_BEFORE_RE = new RegExp(
+  '(?:\\b(?:invoice|inv|order|account|acct|ticket|confirmation|conf|code|zone|reference|ref|case|estimate|quote|job|policy|claim|id|pin)'
+  + '\\s*(?:(?:number|no\\.?|num|id|code)\\s*)?(?::\\s*)?#?\\s*'
+  + '|\\b(?:code|number|no\\.?|id|pin)\\s*(?:is|was|=)\\s*#?\\s*)$', 'i');
+function isLabeledIdentifier(str, index) {
+  return LABELED_IDENTIFIER_BEFORE_RE.test(str.slice(Math.max(0, index - 40), index));
+}
 function isNonDurationNumber(str, index, length) {
   // A numbered-list marker ("1. Check the invoice", "2) Call us") at the start
   // of a line is structure, never a duration (round-21 P2).
@@ -2187,6 +2197,8 @@ function isNonDurationNumber(str, index, length) {
   // A unit / apartment / suite / building / lot / room identifier ("on the way to unit 12",
   // "apt 4", "Suite 200", "Bldg 3", "#7") is an address number, never minutes (round-44 P2).
   if (UNIT_IDENTIFIER_BEFORE_RE.test(before)) return true;
+  // A labeled identifier ("invoice 12", "zone 2", "confirmation code is 123") likewise (Codex #5334 P2).
+  if (isLabeledIdentifier(str, index)) return true;
   // Money ("$20", "20 dollars").
   if (MONEY_SIGN_BEFORE_RE.test(before) || MONEY_WORD_AFTER_RE.test(after)) return true;
   // Time of day / address / phone-like token — the shared helper above.

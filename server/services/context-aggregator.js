@@ -670,7 +670,10 @@ function pruneLiveEtaMemo(now) {
   }
 }
 
-async function resolveLiveEtaMinutesUncached(row, dest, { dbh } = {}) {
+// `dbh` + `cacheOnly` (Codex #5334 P1/P2): a caller that is INSIDE a provider handoff transaction passes its connection and asks
+// for a READ-ONLY lookup — no Bouncie fallback, so nothing is written to tech_status and nothing is broadcast from within a
+// transaction that may still roll back. A stale/absent cache then reads as "no position" (retryable at the caller).
+async function resolveLiveEtaMinutesUncached(row, dest, { dbh, cacheOnly = false } = {}) {
   try {
     const { lat: destLat, lng: destLng } = dest;
 
@@ -683,8 +686,9 @@ async function resolveLiveEtaMinutesUncached(row, dest, { dbh } = {}) {
       // for the configured device's own position. Shared with the public tracker.
       cachedNotBefore: techMappingCutoff(row.tech_mapping_changed_at),
       logPrefix: 'sms-shadow-live-eta',
-      // Send-time recompute inside a provider handoff: stay on the handoff's connection (Codex #5334 P1).
+      // Send-time recompute inside a provider handoff: stay on the handoff's connection, read-only (Codex #5334 P1/P2).
       ...(dbh ? { dbh } : {}),
+      ...(cacheOnly ? { allowBouncieFallback: false } : {}),
     });
     if (!position) return null;
 

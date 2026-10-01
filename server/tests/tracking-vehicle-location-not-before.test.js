@@ -92,7 +92,7 @@ describe('one statement: current mapping + cache', () => {
     expect(out.source).toBe('bouncie_api');
     expect(svc.getLocationByImei).toHaveBeenCalledWith('DEV-B'); // the CURRENT mapped imei (the function takes no caller IMEI)
   });
-  test('the lookup and the fallback write ride a caller connection when one is passed (Codex #5334 P1), never the root pool', async () => {
+  test('the lookup rides a caller connection when one is passed (Codex #5334 P1); the fallback WRITE stays on its own transaction (never nested in the caller\'s)', async () => {
     const handoff = jest.fn((table) => {
       if (table !== 'technicians as t') throw new Error(`unexpected table ${table}`);
       return { leftJoin: () => ({ where: () => ({ first: async () => ({ bouncie_imei: 'DEV-A', bouncie_imei_changed_at: null, lat: null, lng: null, location_updated_at: null, location_received_at: null }) }) }) };
@@ -103,7 +103,7 @@ describe('one statement: current mapping + cache', () => {
     const out = await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(loc), dbh: handoff });
     expect(out.source).toBe('bouncie_api');
     expect(handoff).toHaveBeenCalledWith('technicians as t');
-    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ dbh: handoff }));
+    expect(pingTechLocation.mock.calls[0][0]).not.toHaveProperty('dbh');
     expect(db).not.toHaveBeenCalled();
   });
   test('fallback write rejected for a NEWER cached fix (Codex #5334 P2): the committed cache point is served, never the older fetched coordinates', async () => {

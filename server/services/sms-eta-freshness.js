@@ -560,8 +560,11 @@ async function recomputedLiveEtaMinutes(entry, dbh) {
     const fact = await require('./context-aggregator').resolveLiveEtaMinutesUncached(
       { technician_id: entry.technicianId, tech_bouncie_imei: tech.bouncie_imei, tech_mapping_changed_at: tech.bouncie_imei_changed_at },
       { lat: Number(dest.lat), lng: Number(dest.lng) },
-      // The recompute's tracker reads/writes ride the caller's connection too (Codex #5334 P1).
-      { dbh },
+      // The recompute rides the caller's connection (Codex #5334 P1). On a NON-root connection (the provider handoff's held
+      // transaction) it is READ-ONLY (P2): the Bouncie fallback would write tech_status and broadcast to dispatch from inside a
+      // transaction that can still roll back, so a stale/absent cache reads as unavailable -> the retryable infrastructure
+      // reason, and the executor's earlier (root-connection) recheck has already warmed the cache through the guarded write.
+      { dbh, cacheOnly: dbh !== db },
     );
     return fact && Number.isFinite(fact.minutes) ? { minutes: fact.minutes } : { unavailable: true };
   } catch (err) {

@@ -1678,6 +1678,24 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
         await etaClaimBlockReason({ liveEtaSnapshot: fSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: handoff });
         expect(resolveLiveEtaMinutesUncached.mock.calls[0][2].dbh).toBe(handoff);
       });
+      test('on a handoff (non-root) connection the recompute is READ-ONLY (cacheOnly: no fallback write / broadcast inside the transaction); on the root connection it is not', async () => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9, fixAtMs: FIX + 30e3 });
+        await etaClaimBlockReason({ liveEtaSnapshot: fSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWithStatus([row()], { location_updated_at: new Date(FIX + 30e3) }) });
+        expect(resolveLiveEtaMinutesUncached.mock.calls[0][2].cacheOnly).toBe(true);
+        // the module's own root connection (the default) keeps the write-through lookup
+        let rootOpts;
+        jest.isolateModules(() => {
+          jest.doMock('../models/db', () => jest.fn());
+          const rootDb = require('../models/db');
+          const agg = require('../services/context-aggregator');
+          agg.resolveLiveEtaMinutesUncached.mockImplementation(async (...args) => { rootOpts = args[2]; return { minutes: 9, fixAtMs: FIX + 30e3 }; });
+          rootDb.mockImplementation(dbWithStatus([row()], { location_updated_at: new Date(FIX + 30e3) }));
+          const fresh = require('../services/sms-eta-freshness');
+          return fresh.etaClaimBlockReason({ liveEtaSnapshot: fSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW }).then(() => {});
+        });
+        await new Promise((r) => setImmediate(r));
+        expect(rootOpts.cacheOnly).toBe(false);
+      });
       test('a newer ping + different recomputed minutes: blocked', async () => {
         resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 14, fixAtMs: FIX + 30e3 });
         expect(await runF({ location_updated_at: new Date(FIX + 30e3) })).toBe('eta_claim_superseded_fix');

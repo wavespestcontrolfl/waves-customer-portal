@@ -329,6 +329,10 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     const handoff = jest.fn();
     await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 }, { dbh: handoff });
     expect(resolveFreshTechPosition.mock.calls.at(-1)[0].dbh).toBe(handoff);
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0]).not.toHaveProperty('allowBouncieFallback');
+    // cacheOnly (a recompute inside a held transaction): read-only, no Bouncie fallback write
+    await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 }, { dbh: handoff, cacheOnly: true });
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].allowBouncieFallback).toBe(false);
     await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_mapping_changed_at: null }, { lat: 27.4, lng: -82.5 });
     expect(resolveFreshTechPosition.mock.calls.at(-1)[0]).not.toHaveProperty('dbh');
   });
@@ -2001,6 +2005,26 @@ describe('round 48 P2: "reached" completed arrivals', () => {
     try {
       expect(validateLiveEtaMinutes({ reply: 'The technician has reached your property.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
     } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
+// Codex #5334 P2: a LABELED identifier is never a bare minutes figure.
+describe('labeled identifiers are not bare ETA figures', () => {
+  const { findGroundedMinutesFigures, bodyHasUnclassifiedArrivalDigit } = require('../services/sms-shadow-drafter');
+  test.each([
+    'Your confirmation code is 123.', 'We treated zone 2.', 'This is for invoice 12.', 'Please see account 30.', 'I opened ticket 20.', 'Your order #15.',
+    'Reference number 45.', 'Your reference no. 45.', 'It is on job 12.', 'The PIN is 150.', 'See policy 60.', 'Your case id is 99.',
+  ])('%p yields no minutes claim', (t) => {
+    expect(findGroundedMinutesFigures(t)).toEqual([]);
+    expect(bodyHasUnclassifiedArrivalDigit(t)).toBe(false);
+  });
+  test.each(['The tech should make it in 20.', 'Your technician is on the way, ETA 20.', 'He will be there in 15.', 'Your tech will be here in about 20.'])(
+    '%p is still a bare ETA claim (the exclusion is scoped to labels)', (t) => {
+      expect(findGroundedMinutesFigures(t).length).toBeGreaterThan(0);
+    });
+  test('a labeled identifier beside a real ETA does not hide the ETA', () => {
+    const minutes = findGroundedMinutesFigures('Order 12 is fine and the tech is 20 minutes away.').map((c) => c.minutes);
+    expect(minutes).toEqual([20]);
   });
 });
 

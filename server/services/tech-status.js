@@ -223,7 +223,7 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
  * @param {number|null}  [args.speed_mph] optional, used for status derivation
  * @param {string|Date|null} [args.reported_at] GPS sample timestamp from provider
  */
-async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at, requireBouncieImei = null, dbh = null }) {
+async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at, requireBouncieImei = null }) {
   if (!tech_id || lat == null || lng == null) {
     throw new Error('pingTechLocation: tech_id, lat, lng are required');
   }
@@ -233,11 +233,8 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
   const derivedStatus = moving ? 'driving' : 'idle';
   const locationUpdatedAt = normalizeProviderTimestamp(reported_at);
 
-  // `dbh`: a caller already inside a provider handoff passes ITS connection (Codex #5334 P1) so this write never waits on a
-  // second pool connection while the handoff holds one; on a held transaction knex nests this as a savepoint.
-  const conn = dbh || db;
   let row;
-  await conn.transaction(async (trx) => {
+  await db.transaction(async (trx) => {
     // Single-statement upsert. Status uses CASE WHEN to preserve
     // semantic states when the row already exists with one set —
     // see header comment for why.
@@ -253,12 +250,12 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
     // later than this point, so the new cutoff excludes it).
     const guarded = requireBouncieImei != null && String(requireBouncieImei).trim() !== '';
     const insertSource = guarded
-      ? `SELECT ?::uuid, ?::text, ?::numeric, ?::numeric, NOW(), ?::timestamptz
+      ? `SELECT ?::uuid, ?::text, ?::numeric, ?::numeric, NOW(), ?::timestamptz, clock_timestamp()
       WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ? FOR SHARE)`
-      : 'VALUES (?, ?, ?, ?, NOW(), ?)';
+      : 'VALUES (?, ?, ?, ?, NOW(), ?, clock_timestamp())';
     const [committed] = await trx.raw(
       `
-      INSERT INTO tech_status (tech_id, status, lat, lng, updated_at, location_updated_at)
+      INSERT INTO tech_status (tech_id, status, lat, lng, updated_at, location_updated_at, location_received_at)
       ${insertSource}
       ON CONFLICT (tech_id) DO UPDATE SET
         lat = CASE
@@ -288,7 +285,7 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
         location_received_at = CASE
           WHEN tech_status.location_updated_at IS NULL
             OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
-            THEN NOW()
+            THEN clock_timestamp()
           ELSE tech_status.location_received_at
         END,
         status = CASE
@@ -326,12 +323,12 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
   if (row && row.current_job_id && (row.status === 'en_route' || row.status === 'driving')) {
     try {
       const { stampedDivergesSql } = require('./stamped-address');
-      const job = await conn('scheduled_services as s')
+      const job = await db('scheduled_services as s')
         .leftJoin('customers as c', 's.customer_id', 'c.id')
         .where('s.id', row.current_job_id)
         .first(
-          conn.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) AS lat`),
-          conn.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng`)
+          db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) AS lat`),
+          db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng`)
         );
       if (job && job.lat != null && job.lng != null) {
         eta_minutes = haversineEtaMinutes(

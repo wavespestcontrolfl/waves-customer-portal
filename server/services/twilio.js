@@ -1227,60 +1227,57 @@ const TwilioService = {
         // which treats an unrecognized error code as retryable:false and
         // would permanently fail an unsent scheduled message over a purely
         // transient DB blip.
-        let verdict;
-        try {
-          verdict = await annualHandoffGuard({
-            db: trx || db, estimateIds: explicitEstimateIds, texts: [body],
-          })();
-        } catch (guardErr) {
-          const err = new Error(`annual offer guard failed: ${guardErr.message}`);
-          err.code = 'ANNUAL_OFFER_GUARD_FAILED';
-          err.annualOfferGuardFailed = true;
-          err.retryable = true;
-          err.cause = guardErr;
-          throw err;
-        }
-        if (verdict.blocked) {
-          const err = new Error('annual_offer_withheld');
-          err.code = 'ANNUAL_OFFER_WITHHELD';
-          err.annualOfferWithheld = true;
-          throw err;
-        }
-        // callback_number_needed — disclaimed-number hold (PR #4807 codex
-        // round 6, structural). The LAST await before messages.create()
-        // for EVERY SMS, on the caller's handoff transaction when there is
-        // one: sendCustomerMessage checks the same predicate earlier (its
-        // audited step 6.45 and providerPreparationCheck), but legacy
-        // callers reach sendSMS directly, and a hold committed during any
-        // await above must still stop the send. Fails CLOSED (an unreadable
-        // hold reads as held). Internal staff alerts are exempt — they only
-        // ever reach known owner/admin phones (the guard above) and are not
-        // texts to a caller. Mapped through the providerPreSendCheckFailed
-        // shape both catch sites below already translate into a retryable,
-        // never-attempted refusal.
-        if (!isInternalAdminAlertType(options.messageType)) {
-          const { disclaimedNumberBlocksSend } = require('./disclaimed-number-holds');
-          if (await disclaimedNumberBlocksSend({ to, conn: trx || db })) {
-            const err = new Error('Caller disclaimed this number (callback_number_needed)');
-            err.code = 'CALLBACK_NUMBER_HOLD';
+        // ORDER (Codex #5334 P1): every caller-owned PREDICATE runs first; the SUPPRESSION gates (annual-offer withhold,
+        // callback_number_needed hold, then the synchronous send-window check) run LAST, with nothing asynchronous between
+        // them and the SDK request — a hold armed or a window closed while a predicate was reading can never be raced past.
+        // The gates are re-run after the durable attempt marker (below) for the same reason.
+        const runAnnualGate = async () => {
+          let verdict;
+          try {
+            verdict = await annualHandoffGuard({
+              db: trx || db, estimateIds: explicitEstimateIds, texts: [body],
+            })();
+          } catch (guardErr) {
+            const err = new Error(`annual offer guard failed: ${guardErr.message}`);
+            err.code = 'ANNUAL_OFFER_GUARD_FAILED';
+            err.annualOfferGuardFailed = true;
             err.retryable = true;
-            err.providerPreSendCheckFailed = true;
+            err.cause = guardErr;
             throw err;
           }
-        }
-        // Codex round-43 P2: the caller-owned provider-boundary predicate now runs AFTER the
-        // disclaimed-number hold's DB read — that await used to sit between the predicate and
-        // the SDK request, so state the predicate guards (a visit arriving, completing or being
-        // cancelled under a live-ETA reply) could change in that gap. It is still exactly once,
-        // still after the annual-offer guard, still before the synchronous send-window check,
-        // the dispatch marker and messages.create(); every registered predicate is an
-        // independent fail-closed state check, so running it after the (also fail-closed)
-        // disclaimed-number check changes no semantics, only tightens the window.
-        // Optional caller-owned predicate for state that must be fresh after
-        // every asynchronous provider preparation step. It is deliberately
-        // separate from preSendCheck: existing opaque callbacks retain their
-        // once-only invocation, while this contract runs exactly once after
-        // the authoritative annual-offer guard and before the SDK request.
+          if (verdict.blocked) {
+            const err = new Error('annual_offer_withheld');
+            err.code = 'ANNUAL_OFFER_WITHHELD';
+            err.annualOfferWithheld = true;
+            throw err;
+          }
+        };
+        const runDisclaimedGate = async () => {
+          // callback_number_needed — disclaimed-number hold (PR #4807 codex
+          // round 6, structural). The LAST await before messages.create()
+          // for EVERY SMS, on the caller's handoff transaction when there is
+          // one: sendCustomerMessage checks the same predicate earlier (its
+          // audited step 6.45 and providerPreparationCheck), but legacy
+          // callers reach sendSMS directly, and a hold committed during any
+          // await above must still stop the send. Fails CLOSED (an unreadable
+          // hold reads as held). Internal staff alerts are exempt — they only
+          // ever reach known owner/admin phones (the guard above) and are not
+          // texts to a caller. Mapped through the providerPreSendCheckFailed
+          // shape both catch sites below already translate into a retryable,
+          // never-attempted refusal.
+          if (!isInternalAdminAlertType(options.messageType)) {
+            const { disclaimedNumberBlocksSend } = require('./disclaimed-number-holds');
+            if (await disclaimedNumberBlocksSend({ to, conn: trx || db })) {
+              const err = new Error('Caller disclaimed this number (callback_number_needed)');
+              err.code = 'CALLBACK_NUMBER_HOLD';
+              err.retryable = true;
+              err.providerPreSendCheckFailed = true;
+              throw err;
+            }
+          }
+        };
+        // The caller-owned provider-boundary predicate runs FIRST (Codex #5334 P1 reverses the round-43 placement: it used to
+        // sit after the disclaimed-number hold; the hold is a suppression gate and now closes the window instead).
         if (typeof options.providerPreSendCheck === 'function') {
           let providerVerdict;
           try {
@@ -1306,6 +1303,8 @@ const TwilioService = {
             throw err;
           }
         }
+        await runAnnualGate();
+        await runDisclaimedGate();
         // Pre-push audit P1 (round 5): the guard above just awaited its own
         // DB reads — real time the send-window boundary re-check (the
         // caller's own preSendCheck, run once, earlier, before this
@@ -1338,50 +1337,51 @@ const TwilioService = {
         // doesn't pass it, byte-identical to before.
         if (typeof options.onDispatchStart === 'function') {
           await options.onDispatchStart();
-          // codex #5018 r15 pre-push P1: that await is a real DB write, real
-          // wall-clock time that can itself carry the send window's own
-          // close boundary — the isStillValid() check above ran BEFORE it,
-          // not after. Only reachable when onDispatchStart actually ran
-          // (every other caller keeps the ORIGINAL single isStillValid()
-          // call, unchanged). The marker is already committed at this
-          // point, so a window-closed refusal here must ALSO let the caller
-          // undo it (onDispatchAbort, the same optional/additive shape) —
-          // otherwise recoverAbandonedClaim would treat a send that never
-          // reached dispatchStarted/messages.create() as ambiguous forever,
-          // when it is provably safe to retry.
+          // The marker is committed from here: EVERY refusal below must undo it (onDispatchAbort, the same optional/additive
+          // shape) — otherwise recoverAbandonedClaim would treat a send that never reached dispatchStarted/messages.create()
+          // as ambiguous forever, when it is provably safe to retry.
+          const abortMarker = async (why) => {
+            if (typeof options.onDispatchAbort === 'function') {
+              try { await options.onDispatchAbort(); } catch (undoErr) { logger.error(`[twilio] onDispatchAbort failed after ${why}: ${undoErr.message}`); }
+            }
+          };
+          // Predicates that declare themselves safe to repeat (`afterMarker`, the live-ETA checks) run ONCE MORE after the
+          // durable attempt marker's await (round-43 P2). Predicates without `afterMarker` keep their once-only contract.
+          if (typeof options.providerPreSendCheck?.afterMarker === 'function') {
+            let repeatVerdict;
+            let repeatError = null;
+            try {
+              repeatVerdict = await options.providerPreSendCheck.afterMarker({ channel: 'sms', dbi: trx || db });
+            } catch (checkErr) {
+              repeatError = checkErr;
+            }
+            if (repeatError || !repeatVerdict || repeatVerdict.ok !== true) {
+              await abortMarker('a post-marker provider pre-send refusal');
+              const err = new Error(repeatError?.message || repeatVerdict?.reason || 'provider pre-send check did not pass');
+              err.code = repeatError?.code || repeatVerdict?.code || 'PROVIDER_PRE_SEND_CHECK_FAILED';
+              err.retryable = (repeatError?.retryable ?? repeatVerdict?.retryable) === true;
+              err.providerPreSendCheckFailed = true;
+              throw err;
+            }
+          }
+          // SUPPRESSION GATES LAST (Codex #5334 P1): the marker write and the repeat above are real awaits, so the annual-offer
+          // withhold and the disclaimed-number hold are read AGAIN after them, then the synchronous send-window check (codex #5018 r15
+          // pre-push P1: the marker write is wall-clock time that can carry the window's close) — the LAST operation before the
+          // SDK request, nothing asynchronous after it. A throw undoes the marker like every other refusal here.
+          try {
+            await runAnnualGate();
+            await runDisclaimedGate();
+          } catch (gateErr) {
+            await abortMarker('a post-marker suppression refusal');
+            throw gateErr;
+          }
           if (typeof options.preSendCheck?.isStillValid === 'function'
               && options.preSendCheck.isStillValid() !== true) {
-            if (typeof options.onDispatchAbort === 'function') {
-              try { await options.onDispatchAbort(); } catch (undoErr) { logger.error(`[twilio] onDispatchAbort failed after a post-marker window close: ${undoErr.message}`); }
-            }
+            await abortMarker('a post-marker window close');
             const err = new Error('send window closed during the provider handoff marker write');
             err.code = 'QUIET_HOURS_HOLD';
             err.sendWindowClosed = true;
             err.retryable = true;
-            throw err;
-          }
-        }
-        // Predicates that declare themselves safe to repeat (`afterMarker`, the live-ETA
-        // checks) run ONCE MORE after the durable attempt marker's await, which is the last
-        // asynchronous step before the SDK request (round-43 P2). A refusal here undoes the
-        // marker exactly like the post-marker send-window refusal above. Predicates without
-        // `afterMarker` keep their once-only contract untouched.
-        if (typeof options.onDispatchStart === 'function' && typeof options.providerPreSendCheck?.afterMarker === 'function') {
-          let repeatVerdict;
-          let repeatError = null;
-          try {
-            repeatVerdict = await options.providerPreSendCheck.afterMarker({ channel: 'sms', dbi: trx || db });
-          } catch (checkErr) {
-            repeatError = checkErr;
-          }
-          if (repeatError || !repeatVerdict || repeatVerdict.ok !== true) {
-            if (typeof options.onDispatchAbort === 'function') {
-              try { await options.onDispatchAbort(); } catch (undoErr) { logger.error(`[twilio] onDispatchAbort failed after a post-marker provider pre-send refusal: ${undoErr.message}`); }
-            }
-            const err = new Error(repeatError?.message || repeatVerdict?.reason || 'provider pre-send check did not pass');
-            err.code = repeatError?.code || repeatVerdict?.code || 'PROVIDER_PRE_SEND_CHECK_FAILED';
-            err.retryable = (repeatError?.retryable ?? repeatVerdict?.retryable) === true;
-            err.providerPreSendCheckFailed = true;
             throw err;
           }
         }
