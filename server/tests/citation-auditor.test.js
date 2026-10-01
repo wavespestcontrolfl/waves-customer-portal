@@ -71,6 +71,19 @@ describe('classifyListing', () => {
     expect(dangling.detail.reason).toBe('address_unconfirmed');
   });
 
+  test('deeply nested JSON-LD is read without exhausting the stack, in linear time', () => {
+    let deep = { name: 'x' };
+    for (let i = 0; i < 20000; i += 1) deep = { subjectOf: deep };
+    const node = { '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142', subjectOf: deep };
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(node)}`), expected);
+    expect(r.status).toBe('mismatched'); // the stated phone is still evidence
+    let chain = { '@type': 'WebPage', name: 'leaf' };
+    for (let i = 0; i < 2000; i += 1) chain = { '@type': 'WebPage', name: `p${i}`, mainEntity: chain };
+    const started = Date.now();
+    classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(chain)}`), expected);
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+
   test('mismatched structured address reports the address seen', () => {
     const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa', postalCode: '33601' } })}`), expected);
     expect(r.status).toBe('mismatched');

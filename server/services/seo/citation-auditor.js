@@ -174,15 +174,36 @@ const fmtPhone = (k) => `(${k.slice(0, 3)}) ${k.slice(3, 6)}-${k.slice(6)}`;
 // fields). Unwrap them all BEFORE any field is read, so a name, telephone or street given that
 // way is judged as its value, not as "[object Object]". Expanded keys are schema.org IRIs
 // ("https://schema.org/telephone"); they are read as the compact property name. A one-entry
-// array (expanded form wraps every value) is read as its entry.
+// array (expanded form wraps every value) is read as its entry. Iterative, one pass per block:
+// a fetched page's nesting depth must never exhaust the stack (a dropped block would hide a
+// stated mismatch) or make the walk quadratic.
 const SCHEMA_IRI_RE = /^(?:https?:\/\/schema\.org\/|schema:)/i;
-function unwrapLd(v) {
-  if (Array.isArray(v)) return v.length === 1 ? unwrapLd(v[0]) : v.map(unwrapLd);
-  if (v && typeof v === 'object') {
-    if ('@value' in v) return unwrapLd(v['@value']);
-    return Object.fromEntries(Object.entries(v).map(([k, val]) => [k.replace(SCHEMA_IRI_RE, ''), unwrapLd(val)]));
+function unwrapLd(input) {
+  const holder = {};
+  const stack = [[input, holder, 'v']];
+  while (stack.length) {
+    const [src, parent, key] = stack.pop();
+    let v = src;
+    for (;;) {
+      if (Array.isArray(v) && v.length === 1) v = v[0];
+      else if (v && typeof v === 'object' && !Array.isArray(v) && '@value' in v) v = v['@value'];
+      else break;
+    }
+    if (Array.isArray(v)) {
+      const out = new Array(v.length);
+      parent[key] = out;
+      v.forEach((x, i) => stack.push([x, out, i]));
+    } else if (v && typeof v === 'object') {
+      const out = {};
+      parent[key] = out;
+      const entries = Object.entries(v).map(([k, val]) => [k.replace(SCHEMA_IRI_RE, ''), val]);
+      for (const [k] of entries) out[k] = undefined; // keep key order
+      for (let i = entries.length - 1; i >= 0; i -= 1) stack.push([entries[i][1], out, entries[i][0]]); // a later duplicate key wins
+    } else {
+      parent[key] = v;
+    }
   }
-  return v;
+  return holder.v;
 }
 
 // A node that only points at another ({"@id": "_:address"}), as flattened JSON-LD writes links.
@@ -196,18 +217,24 @@ const isLdRef = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v) 
 function jsonLdNodes(html) {
   const out = [];
   const byId = new Map();
-  const visit = (raw) => {
-    if (!raw || typeof raw !== 'object') return;
-    if (Array.isArray(raw)) return raw.forEach(visit);
-    const node = unwrapLd(raw);
-    if (!node || typeof node !== 'object') return; // a bare {"@value": ...} is not an entity
-    if (typeof node['@id'] === 'string' && !isLdRef(node)) byId.set(node['@id'], node);
-    if (node.name || node.telephone || node.address) out.push(node);
-    if (node['@graph']) visit(node['@graph']);
-    if (node.mainEntity) visit(node.mainEntity);
+  // Depth-first, in document order (a node, then its @graph, then its mainEntity), on the
+  // block normalized once. A bare {"@value": ...} unwraps to a primitive: not an entity.
+  const visit = (root) => {
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || typeof node !== 'object') continue;
+      if (Array.isArray(node)) { for (let i = node.length - 1; i >= 0; i -= 1) stack.push(node[i]); continue; }
+      if (typeof node['@id'] === 'string' && !isLdRef(node)) byId.set(node['@id'], node);
+      if (node.name || node.telephone || node.address) out.push(node);
+      if (node.mainEntity) stack.push(node.mainEntity);
+      if (node['@graph']) stack.push(node['@graph']);
+    }
   };
   for (const m of String(html).matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
-    try { visit(JSON.parse(m[1])); } catch { /* malformed block: ignore */ }
+    let parsed;
+    try { parsed = JSON.parse(m[1]); } catch { continue; } // malformed block: ignore
+    visit(unwrapLd(parsed));
   }
   const resolve = (v) => (Array.isArray(v) ? v.map(resolve) : (isLdRef(v) && byId.get(v['@id'])) || v);
   return out.map((node) => (node.address ? { ...node, address: resolve(node.address) } : node));
