@@ -131,6 +131,8 @@ async function amountsBlock({ decision, outgoingBody }) {
     // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
     trustOwedAmounts: !realAnswers,
   });
+  // the invoice a Zelle offer was checked against: the provider-boundary check inspects its live PaymentIntent (Codex round-50 P1)
+  if (!amounts.stale) decision.zelle_boundary_invoice_id = amounts.zelleInvoiceId || null;
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
@@ -240,6 +242,7 @@ function amountsProviderPreSendCheck({ decision, getBody }) {
   if (!billingBoundaryJudged(decision, body)) return undefined;
   return require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({
     customerId: decision.customer_id, fingerprint: decision.billing_fingerprint ?? null,
+    zelleInvoiceId: decision.zelle_boundary_invoice_id ?? null, getBody,
   });
 }
 

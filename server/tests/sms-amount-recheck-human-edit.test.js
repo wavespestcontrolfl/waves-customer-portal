@@ -49,7 +49,7 @@ describe('an edited Zelle offer that names another invoice is rechecked against 
     await outgoingAmountsStale({ customerId: 'c1', body: 'You can Zelle invoice WPC-2026-0001 to pay@example.com.', promptVersion: 'house_voice_v11', zelleInvoiceId: 'inv-A', trustOwedAmounts: true, dbh });
     await outgoingAmountsStale({ customerId: 'c1', body: 'You can Zelle us at pay@example.com.', promptVersion: 'house_voice_v11', zelleInvoiceId: 'inv-A', trustOwedAmounts: true, dbh });
     expect(checked).toEqual(['inv-A', 'inv-A']);
-    await expect(run('You can Zelle us at pay@example.com.', 'inv-A')).resolves.toEqual({ stale: false });
+    await expect(run('You can Zelle us at pay@example.com.', 'inv-A')).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-A' });
   });
 });
 
@@ -123,7 +123,7 @@ describe('a Zelle offer AND a denial in one reply are both rechecked', () => {
   });
   test('offer to B is eligible and A is ineligible => the DENIAL about A stands, the reply is fine', async () => {
     visibility = jest.spyOn(pay, 'payPageZelleVisibility').mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-B', reason: 'not_eligible' }));
-    await expect(run()).resolves.toEqual({ stale: false });
+    await expect(run()).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-B' });
     expect(checkedIds.sort()).toEqual(['inv-A', 'inv-B']);
   });
   test('the denial about A is now STALE (A became eligible) — caught even though the offer branch passed', async () => {

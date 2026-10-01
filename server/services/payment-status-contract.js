@@ -369,6 +369,8 @@ const STATUS_ALTERNATIVES = [
   `${PAYMENT_NOUN}\\b(?:\\s+[#\\w-]+){0,2}?\\s+(?:is|are|was|were|has|have|had|will|would|did|didn't|hasn't|haven't|isn't|wasn't|went|came|got|looks?|appears?|seems?|shows?|should|must)\\b(?!\\s+(?:attached|enclosed|ready|below|above|linked|included|available|here|coming|on\\s+its\\s+way))`,
   // a negation aimed at a payment noun ("we don't a payment", "no payment yet", "haven't gotten the transfer")
   `(?:don'?t|do not|didn'?t|did not|haven'?t|have not|hasn'?t|has not|can'?t|cannot|won'?t|no|not|never|nothing)\\b(?:\\s+\\S+){0,4}?\\s+${PAYMENT_NOUN}`,
+  // a card / wallet that "didn't work" is a failure said without any failure word ("your card on file didn't work", "Apple Pay isn't working")
+  "(?:cards?|wallets?|apple pay|google pay)\\b(?:\\s+[\\w#-]+){0,3}?\\s+(?:didn'?t|did not|doesn'?t|does not|isn'?t|is not|wasn'?t|was not|not)\\s+work(?:ed|ing)?",
   // "you're good", "it's fine", "everything is set", "that looks sorted", "the invoice is done" - a completion word said of the account
   "(?:you|it|they|everything|that|this|things|account|invoice|payment)(?:'s|'re|'ve|\\s+(?:is|are|was|were|has|have|been|looks?|seems?))?\\s+(?:all\\s+)?(?:good|fine|ok|okay|set|clear|cleared|done|fixed|complete|completed|finished)",
   // A receipt said with pronouns only ("I see it on our end", "it came in Tuesday", "it's in our system", "it's here", "it's on your

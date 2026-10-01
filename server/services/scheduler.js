@@ -44,10 +44,12 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
   try {
     const decision = pre.decisionLoaded ? pre.decision : await loadDecision();
     const staffEdited = pre.staffEdited || isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
-    const verdict = await recheck.outgoingAmountsStale(
-      scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot: parseInputSnapshot(decision?.input_snapshot), staffEdited }),
-    );
-    return { stale: !!verdict.stale, reason: verdict.stale ? (verdict.reason || 'amount_recheck_failed') : null };
+    const args = scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot: parseInputSnapshot(decision?.input_snapshot), staffEdited });
+    // Codex round-50 P1: the billing fingerprint BEFORE the recheck, so the provider-boundary check refuses if anything changes after it
+    const fingerprint = args.customerId ? await require('./billing-fingerprint').billingFingerprint(args.customerId) : null;
+    const verdict = await recheck.outgoingAmountsStale(args);
+    if (verdict.stale) return { stale: true, reason: verdict.reason || 'amount_recheck_failed' };
+    return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelleInvoiceId: verdict.zelleInvoiceId || null } };
   } catch (err) {
     logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
     return { stale: true, reason: 'amount_recheck_failed' };
@@ -4489,6 +4491,9 @@ function initScheduledJobs() {
               } catch { /* leave undefined — the consent validator fails closed */ }
             }
           }
+          // the billing state the decision-linked amount recheck judged (fingerprint + Zelle invoice), re-checked at the provider boundary
+          // (Codex round-50 P1); null = nothing billing-bearing was rechecked
+          let billingBoundary = null;
           // A decision-linked scheduled reply must clear a fire-time
           // re-check: its anchoring inbound is still the newest on the
           // thread. (The former price-quote fire-time block is RETIRED —
@@ -4541,6 +4546,7 @@ function initScheduledJobs() {
               const amountsVerdict = await recheckScheduledSmsAmounts({ msg, claimMeta });
               amountsStale = amountsVerdict.stale;
               amountsReason = amountsVerdict.reason;
+              billingBoundary = amountsVerdict.boundary || null;
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above
@@ -4989,6 +4995,11 @@ function initScheduledJobs() {
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // BILLING at the same boundary (Codex round-50 P1): the rows the amount recheck judged are unchanged, and a Zelle offer's
+              // invoice has no card / bank payment in flight
+              billingBoundary
+                ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ ...billingBoundary, getBody: () => replayInput.body })
+                : undefined,
             );
           }
           return require('./messaging/deferred-replay-registry')

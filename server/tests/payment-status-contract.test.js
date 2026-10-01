@@ -392,6 +392,22 @@ describe('P1-2: pronoun-only receipts are held, alone and after a copied sentenc
   });
 });
 
+// Codex thread "Do not exempt failed saved-card assertions" (PR #5331): a saved card / wallet that "didn't work" is a failure claim
+// said with no failure word, so it must not slip past the detector (the draft would be judged status-free).
+describe('a card / wallet that "didn\'t work" is a payment-status assertion', () => {
+  test.each([
+    ["Your card on file didn't work."], ['Your saved card did not work.'], ["Your card isn't working."], ["Your Apple Pay didn't work."], ['Your Google Pay was not working.'],
+  ])('held: %s', (t) => {
+    expect(c.assertsPaymentStatus(t, { inboundText: 'Did my payment go through?' })).toBe(true);
+    expect(c.checkPaymentStatusReply({ reply: t, sentences: [], inboundText: 'Hi' }).ok).toBe(false);
+  });
+  test('after a verbatim copy it is still held; an unrelated "work" sentence is not swept up', () => {
+    const S = 'We received your $120.00 card payment on Sep 12, 2026.';
+    expect(c.checkPaymentStatusReply({ reply: `${S} Your card on file didn't work.`, sentences: [S], inboundText: 'Did you get it?' }).ok).toBe(false);
+    expect(c.assertsPaymentStatus("We'll work on your estimate and your card on file is a Visa.", { inboundText: 'How can I pay?' })).toBe(false);
+  });
+});
+
 describe('P1-3: an own invoice the renderer cannot model suppresses "nothing owed" and the absence sentences', () => {
   const unpaid = { invoiceNumber: 'L-1', status: 'unpaid', total: 80, amountDue: 80 };
   test('a legacy unpaid invoice: no "no balance due", no "no payments"', () => {

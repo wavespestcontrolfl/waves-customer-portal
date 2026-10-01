@@ -455,3 +455,26 @@ describe('"#NNNN" shorthand', () => {
     expect(resolve(billing, 'You can Zelle for #0001').invoiceId).toBe('i1');
   });
 });
+
+// Codex round-50 P2: a legacy collectible status the context cannot model never proves "no open invoice"
+describe('an unmodeled own invoice (legacy unpaid) leaves the Zelle target unresolved', () => {
+  const { resolveZelleTargetInvoice: r } = require('../services/zelle-target-invoice');
+  test('no open invoice + an unmodeled one => unmodeled_invoice (a denial cannot stand on it); none at all => no_open_invoice', () => {
+    expect(r({ openInvoices: [], hasUnmodeledInvoice: true }, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'unmodeled_invoice' });
+    expect(r({ openInvoices: [] }, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'no_open_invoice' });
+  });
+  test('the facts neither offer nor deny Zelle for it, and never say "several open invoices"', () => {
+    const GATE = 'GATE_SMS_REAL_ANSWERS';
+    process.env[GATE] = 'true';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    try {
+      const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+      const l = buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleEligible: false, zelleTargetUnknown: true })
+        .split('\n').find((x) => x.startsWith('- Payment options:'));
+      expect(l).toContain('needs the office to confirm');
+      expect(l).not.toContain('or Zelle to');
+      expect(l).not.toContain('is not available');
+      expect(l).not.toContain('SEVERAL');
+    } finally { delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; }
+  });
+});

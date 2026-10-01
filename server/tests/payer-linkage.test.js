@@ -87,18 +87,18 @@ describe('loadLivePayerLinkage is bounded', () => {
   const invoices = (n) => Array.from({ length: n }, (_, i) => ({ id: `i${i}`, customer_id: 'c1', scheduled_service_id: `s${i}`, invoice_number: `WPC-2026-${1000 + i}` }));
   beforeEach(() => liveInvoiceOwnership.mockClear());
 
-  test('reads at most 120 unstamped invoices (limit 121); more history than that is UNVERIFIABLE (failed) and makes no resolver lookup', async () => {
-    const scan = chain([invoices(121)]);
+  test('reads at most 1000 candidate invoices (limit 1001); more history than that is UNVERIFIABLE (failed) and makes no resolver lookup', async () => {
+    const scan = chain([invoices(1001)]);
     const stamped = chain([[]]);
     const dbh = jest.fn().mockReturnValueOnce(stamped).mockReturnValueOnce(scan);
     const out = await loadLivePayerLinkage('c1', dbh);
-    expect(scan.limitedTo).toBe(121);
+    expect(scan.limitedTo).toBe(1001);
     expect(out.failed).toBe(true);
     expect(liveInvoiceOwnership).not.toHaveBeenCalled();
   });
 
   test('within the scan bound the resolver is capped at 30 lookups, and a cap hit is unverifiable (failed)', async () => {
-    const scan = chain([invoices(120)]);
+    const scan = chain([invoices(1000)]);
     const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(scan);
     liveInvoiceOwnership.mockResolvedValueOnce({ ownedIds: new Set(), unverifiable: true });
     const out = await loadLivePayerLinkage('c1', dbh);

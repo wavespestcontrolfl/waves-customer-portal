@@ -4726,6 +4726,8 @@ function buildFactsBlock(context, extras = {}) {
       // the customer NAMED an invoice / amount that is not their open invoice: a target-specific fact, never the
       // "several open invoices" wording (Codex round-27 P2)
       billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; the invoice (number or amount) this customer named does NOT match an open invoice on their account — do not offer Zelle for it and do not say Zelle is unavailable in general; tell them that invoice is not open and that the office can confirm which invoice they mean');
+    } else if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetUnknown) {
+      billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; whether Zelle works for what this customer owes needs the office to confirm — do not offer Zelle and do not say it is unavailable; say a teammate will confirm');
     } else if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetAmbiguous) {
       billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; this customer has SEVERAL open invoices and whether Zelle works depends on WHICH invoice they mean — do not offer Zelle and do not say it is unavailable; ask which invoice they want to pay (its number or amount)');
     } else
@@ -5363,9 +5365,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // GENUINELY ambiguous (which of several?) vs an explicit CONFLICT (the customer named an invoice / amount that
   // is not the open one) — different facts (Codex round-27 P2).
   const ZELLE_CONFLICT_REASONS = ['named_invoice_not_open', 'named_amount_differs', 'reference_conflict'];
+  const ZELLE_UNKNOWN_TARGET_REASONS = ['partially_paid_invoice', 'unmodeled_invoice'];
   const zelleTargetConflict = !presetFactsBlock && !zelleTarget.invoiceId && ZELLE_CONFLICT_REASONS.includes(zelleTarget.reason);
-  const zelleTargetAmbiguous = !presetFactsBlock && !zelleTarget.invoiceId && zelleTarget.reason !== 'no_open_invoice' && !zelleTargetConflict;
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, zelleEligible, zelleTargetAmbiguous, zelleTargetConflict, now: factsAt });
+  // no open invoice the context can describe, but one it cannot (partially paid, a legacy status) may still be payable: neither "several
+  // open invoices" nor "Zelle is unavailable" is true (Codex round-50 P2)
+  const zelleTargetUnknown = !presetFactsBlock && !zelleTarget.invoiceId && ZELLE_UNKNOWN_TARGET_REASONS.includes(zelleTarget.reason);
+  const zelleTargetAmbiguous = !presetFactsBlock && !zelleTarget.invoiceId && zelleTarget.reason !== 'no_open_invoice' && !zelleTargetConflict && !zelleTargetUnknown;
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, zelleEligible, zelleTargetAmbiguous, zelleTargetConflict, zelleTargetUnknown, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.

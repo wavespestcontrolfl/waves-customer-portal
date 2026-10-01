@@ -31,6 +31,8 @@ jest.mock('../models/db', () => {
     if (q && q._failed) return (db.__rows && db.__rows.failedPayments) || [];
     if (q && q._linkage) return q._unstamped ? ((db.__rows && db.__rows.liveScan) || liveScanRows()) : ((db.__rows && db.__rows.payerInvoices) || []);
     if (table === 'scheduled_services') return candidateServices();
+    // the Recent payments read is paged (offset / limit) when db.__rows.pagedPayments is set (Codex round-50 P2 test)
+    if (table === 'payments' && db.__rows && db.__rows.pagedPayments) return db.__rows.pagedPayments.slice(q._offset || 0, (q._offset || 0) + (q._limit || Infinity));
     return (db.__rows && db.__rows[table]) || (table === 'payments' ? windowRows : []);
   };
   const mk = (table) => {
@@ -39,7 +41,10 @@ jest.mock('../models/db', () => {
     q.where = jest.fn(() => q);
     q.whereIn = jest.fn((col, vals) => { if (col === 'status' && Array.isArray(vals) && vals.includes('failed')) q._failed = true; return q; });
     q.whereNull = jest.fn((col) => { if (col === 'payer_statement_id') q._unstamped = true; return q; });
-    for (const m of ['whereNot', 'whereNotNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
+    q.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(q); return q; });
+    q.offset = jest.fn((n) => { q._offset = n; return q; });
+    q.limit = jest.fn((n) => { q._limit = n; return q; });
+    for (const m of ['whereNot', 'whereNotNull', 'whereRaw', 'orWhere', 'orderBy', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
     // the shared payer-linkage lookup (services/payer-linkage.js) is the only invoices query that selects stripe_charge_id
     q.select = jest.fn((...cols) => { if (cols.includes('stripe_charge_id')) q._linkage = true; return q; });
     q.first = jest.fn(async () => {
@@ -223,7 +228,7 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
   // Codex round-46 P1: the payer-LINKAGE scan failing (or hitting its bound) is unknown ownership too - no invoice money leaks into
   // balance / flags / summary, which legacy readers (response-drafter) use without checking billing.unavailable
   test('a payer-linkage live scan past its bound exposes no balance, overdue flag or summary amount', async () => {
-    db.__rows = { invoices: [inv('i1', 'WPC-2026-0456', 'sent', 95)], payments: [], liveScan: Array.from({ length: 121 }, (_, n) => ({ id: `x${n}`, scheduled_service_id: `s${n}` })), failedPayments: [{ id: 'f1', amount: 40, status: 'failed', payment_date: '2026-06-01', metadata: null, stripe_payment_intent_id: 'pi_x', retry_count: 1, next_retry_at: null }] };
+    db.__rows = { invoices: [inv('i1', 'WPC-2026-0456', 'sent', 95)], payments: [], liveScan: Array.from({ length: 1001 }, (_, n) => ({ id: `x${n}`, scheduled_service_id: `s${n}` })), failedPayments: [{ id: 'f1', amount: 40, status: 'failed', payment_date: '2026-06-01', metadata: null, stripe_payment_intent_id: 'pi_x', retry_count: 1, next_retry_at: null }] };
     hasInFlightMoney.mockResolvedValue(false);
     const ctx = await aggregator.getContextForCustomer({ id: 'c1', first_name: 'Test', last_name: 'Customer', phone: '+15555550100' });
     expect(ctx.billing.unavailable).toBe(true);
@@ -266,6 +271,17 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
     expect(billing.unavailable).toBe(false);
     expect(billing.outstandingBalance).toBe(95);
     expect(mockResolveForInvoice).toHaveBeenCalledTimes(1);
+  });
+  // Codex round-50 P2: a full page of AP-owned rows must not hide the homeowner's older payment - the read pages on
+  test('40 payer-owned rows filling the first page: the read pages on until the homeowner window is filled', async () => {
+    const ap = Array.from({ length: 40 }, (_, n) => ({ id: `ap${n}`, amount: 10, status: 'paid', payment_date: '2026-09-25', payer_id: null, metadata: { invoice_id: 'payer-inv' } }));
+    const own = [{ id: 'own1', amount: 120, status: 'paid', payment_date: '2026-09-12', payer_id: null, metadata: null }];
+    db.__rows = { invoices: [], pagedPayments: [...ap, ...own], payerInvoices: [{ id: 'payer-inv', stripe_payment_intent_id: null, stripe_charge_id: null, invoice_number: 'WPC-2026-0500' }] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const billing = await build();
+    expect(billing.recentPayments.map((p) => p.id)).toEqual(['own1']);
+    expect(billing.recentPaymentsTruncated).toBe(false); // the second page came back short: nothing older is hidden
+    expect(sentenceTexts(billing)).toContain('We received your $120.00 payment on Sep 12, 2026.');
   });
   test('a collectible invoice buried BEHIND the status-list cap is still judged (alwaysJudge): an old AP-owned open invoice never counts', async () => {
     mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));

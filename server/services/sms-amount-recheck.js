@@ -394,7 +394,7 @@ async function zelleOfferStale({ customerId, offerText, zelleInvoiceId, inboundM
     }
   }
   const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: target, dbh });
-  return eligibility.eligible ? null : { stale: true, reason: eligibility.reason };
+  return eligibility.eligible ? { target } : { stale: true, reason: eligibility.reason };
 }
 
 // ZELLE CLAIMS - checked unconditionally, ahead of everything else and regardless of prompt version (independent-review P1, finding
@@ -406,10 +406,12 @@ async function zelleClaimsStale({ customerId, text, zelleInvoiceId, inboundMessa
   if (recipient.stale) return recipient;
   const { offerText, denialText } = zelleClauseTexts(text);
   const offer = offerText ? await zelleOfferStale({ customerId, offerText, zelleInvoiceId, inboundMessage, dbh }) : null;
-  if (offer) return offer;
-  if (!denialText) return null;
+  if (offer?.stale) return offer;
+  // the invoice the offer was checked against rides back to the caller (the provider-boundary check inspects its PaymentIntent)
+  const target = offer ? { zelleInvoiceId: offer.target } : null;
+  if (!denialText) return target;
   const denial = await zelleDenialStale({ customerId, dbh, inboundMessage, body: denialText });
-  return denial.stale ? denial : null;
+  return denial.stale ? denial : target;
 }
 
 // OWNED AMOUNTS - the figures outside any copied payment-status sentence. Price grammar the numeric extractor cannot verify ("fifty
@@ -452,7 +454,13 @@ async function outgoingAmountsStale({
 } = {}) {
   const text = String(body || '');
   const zelle = await zelleClaimsStale({ customerId, text, zelleInvoiceId, inboundMessage, dbh });
-  if (zelle) return zelle;
+  if (zelle?.stale) return zelle;
+  const verdict = await statusAndAmountsStale({ customerId, text, promptVersion, inboundMessage, paymentStatusSnapshot, humanEditedBody, trustOwedAmounts, dbh });
+  // a passing verdict names the Zelle invoice the offer was checked against (for the provider-boundary check)
+  return !verdict.stale && zelle?.zelleInvoiceId ? { ...verdict, zelleInvoiceId: zelle.zelleInvoiceId } : verdict;
+}
+
+async function statusAndAmountsStale({ customerId, text, promptVersion, inboundMessage, paymentStatusSnapshot, humanEditedBody, trustOwedAmounts, dbh }) {
   const strict = strictForVersion(promptVersion);
   // PAYMENT STATUS: only a verbatim copy of a snapshotted sentence that is still rendered may state one (owner ruling 2026-10-01).
   const statusReason = strict && humanEditedBody !== true

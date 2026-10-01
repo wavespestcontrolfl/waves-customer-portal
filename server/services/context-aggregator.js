@@ -6,6 +6,7 @@ const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments } = require('./payer
 const { loadFailedPaymentFacts, standaloneFailedTotal, excludeNeverAttemptedDeferrals } = require('./failed-payments');
 // the payments display read over-fetches so payer-linked rows can be dropped without starving the window
 const PAYMENT_OVERFETCH = 40;
+const PAYMENT_MAX_PAGES = 5; // at most 200 rows read for the 5-row homeowner window
 // how many open own invoices the SMS context lists (the target list for Zelle / invoice status); flagged when cut
 const OPEN_INVOICES_CAP = 100;
 const {
@@ -1048,7 +1049,10 @@ class ContextAggregator {
     // live-owned rows are also dropped IN SQL (before the over-fetch cap), and it gates BOTH the recent-payments window and the
     // failed-payment total below. A lookup / resolver failure => `failed` => billing unavailable (fail closed).
     const payerLinkage = await loadLivePayerLinkage(customer.id);
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, failedFacts] = await Promise.all([
+    // One page of the Recent payments read (offset = rows already read). Codex round-50 P2: payer-linked rows are dropped in JS AFTER the
+    // read, so a page can come back full of AP rows - the read continues page by page (below) until the homeowner window is filled.
+    const paymentsPage = (offset) => excludeNeverAttemptedDeferrals(excludeLiveOwnedPayerPayments(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), payerLinkage), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').modify((qb) => { if (offset) qb.offset(offset); }).limit(PAYMENT_OVERFETCH);
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, paymentsFirstPage, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, failedFacts] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
       // #4331 P2): an in-flight, unconfirmed placeholder must not read as a
       // message Waves definitely sent, nor displace a real row out of this
@@ -1068,7 +1072,7 @@ class ContextAggregator {
       // then id break the tie, so the same rows are shown (and hidden) on every read, draft and send.
       // A never-attempted dispute-hold deferral is not a payment the customer made: out of the recent-payments sample
       // (SQL, so it cannot use up one of the 5 rows), consistent with the failed-payment ledger below.
-      excludeNeverAttemptedDeferrals(excludeLiveOwnedPayerPayments(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), payerLinkage), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').limit(PAYMENT_OVERFETCH),
+      paymentsPage(0),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -1182,7 +1186,15 @@ class ContextAggregator {
     // The payments read over-fetches (payer-linked rows are dropped in JS through EVERY linkage billing-v2 knows: metadata
     // invoice_id + aliases, PaymentIntent, charge, the "Invoice <n> —" description and the payer_billed: withdrawal
     // stamp — Codex round-28 P1); the FIRST 5 own rows are the display read, exactly as before.
-    const ownPaymentsAll = payments.filter((p) => !(payerLinkage.isPayerLinked(p) || (paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p)))));
+    const isOwnPayment = (p) => !(payerLinkage.isPayerLinked(p) || (paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p))));
+    let payments = paymentsFirstPage;
+    let paymentsReadCut = payments.length >= PAYMENT_OVERFETCH; // the last page came back full: older rows may exist
+    for (let page = 1; paymentsReadCut && payments.filter(isOwnPayment).length < 5 && page < PAYMENT_MAX_PAGES; page += 1) {
+      const more = await paymentsPage(page * PAYMENT_OVERFETCH);
+      payments = payments.concat(more);
+      paymentsReadCut = more.length >= PAYMENT_OVERFETCH;
+    }
+    const ownPaymentsAll = payments.filter(isOwnPayment);
     const ownPayments = ownPaymentsAll.slice(0, 5);
     const inFlightMoney = await inFlightMoneyPromise;
     const isHistoryRow = (p) => String(p.status || '').toLowerCase() !== 'upcoming';
@@ -1195,7 +1207,7 @@ class ContextAggregator {
       const oldestVisible = visibleDays.size ? Math.min(...visibleDays) : null;
       const lastFetched = ownPaymentsAll.length ? paymentDayKey(ownPaymentsAll[ownPaymentsAll.length - 1]) : null;
       // a FULL over-fetch whose last row is still on (or undatable at) the oldest visible day may hide more of that day
-      const complete = !(payments.length >= PAYMENT_OVERFETCH && (lastFetched == null || (oldestVisible != null && lastFetched >= oldestVisible)));
+      const complete = !(paymentsReadCut && (lastFetched == null || (oldestVisible != null && lastFetched >= oldestVisible)));
       return { rows, complete };
     })();
     // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
@@ -1443,7 +1455,7 @@ class ContextAggregator {
         recentPaymentsLookaheadComplete: lookahead.complete,
         // recentPayments is a 3-row DISPLAY window. recentPaymentsTruncated = the window may hide more history (the 5-row read
         // was full, or own rows exceed 3): the payment-status contract then renders no "no payments" sentence.
-        recentPaymentsTruncated: ownPaymentsAll.length >= 5 || payments.length >= PAYMENT_OVERFETCH
+        recentPaymentsTruncated: ownPaymentsAll.length >= 5 || paymentsReadCut
           || ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').length > 3,
         // Codex round-11 P1: a payment or invoice still PROCESSING is unsettled
         // (the balance above excludes a processing invoice, so "you're paid up"

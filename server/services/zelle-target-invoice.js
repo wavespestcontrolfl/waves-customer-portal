@@ -140,7 +140,12 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   // and its existence means "no open invoice" can never be concluded: the target is unresolved (abstain / ask which invoice), so a
   // denial cannot stand on its absence and an offer cannot be grounded on a figure that is not the invoice's.
   const partialDue = billing?.hasUncountedPartialDue === true;
-  if (open.length === 0) return { invoiceId: null, reason: partialDue ? 'partially_paid_invoice' : 'no_open_invoice' };
+  // Codex round-50 P2: an own invoice the context cannot model (a legacy 'unpaid' status the pay page may still collect and offer Zelle
+  // for) means "no open invoice" can never be concluded either - unresolved, so an account-scoped denial cannot stand on it.
+  if (open.length === 0) {
+    if (partialDue) return { invoiceId: null, reason: 'partially_paid_invoice' };
+    return { invoiceId: null, reason: billing?.hasUnmodeledInvoice === true ? 'unmodeled_invoice' : 'no_open_invoice' };
+  }
   const namedAmounts = invoiceAmountsNamed(inboundMessage);
   const bareAmounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
   return resolveByNumber(open, billing, invoiceNumbersNamed(inboundMessage), namedAmounts)

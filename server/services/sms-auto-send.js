@@ -832,7 +832,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
         // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection)
         billingFingerprint !== undefined
-          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint })
+          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelleInvoiceId: claim.zelleInvoiceId || null, getBody: () => reply })
           : undefined,
         laneFields.providerPreSendCheck,
       );

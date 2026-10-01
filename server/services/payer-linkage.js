@@ -80,7 +80,10 @@ async function loadPayerLinkage(customerId, dbh = db) {
 // LIVE_SCAN_MAX_RESOLUTIONS live resolver lookups are made; an account with more is UNVERIFIABLE (`failed`, callers fail closed).
 // Codex round-47 P2: lookups are memoized per CANDIDATE PAYER (byCandidatePayer), not per visit, so a long monthly history costs two
 // batched reads plus one lookup per distinct payer - the cap now bounds distinct payers, which no ordinary account approaches.
-const LIVE_SCAN_MAX_INVOICES = 120;
+// Codex round-50 P2: a customer with a DEFAULT payer makes every unstamped invoice a candidate; lookups are memoized per candidate
+// payer (byCandidatePayer), so each row costs only its read - the row bound is a sanity bound (1000 ≈ 80 years of monthly visits),
+// and LIVE_SCAN_MAX_RESOLUTIONS bounds the actual resolver lookups (distinct payers).
+const LIVE_SCAN_MAX_INVOICES = 1000;
 const LIVE_CANDIDATE_PAYER_SQL = `(EXISTS (SELECT 1 FROM customers c WHERE c.id = invoices.customer_id AND c.payer_id IS NOT NULL)
   OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = invoices.scheduled_service_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL))`;
 const LIVE_SCAN_MAX_RESOLUTIONS = 30;

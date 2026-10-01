@@ -295,7 +295,7 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({
       customerId: 'c1', body, zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
-    })).resolves.toEqual({ stale: false });
+    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
     // the amount branch is never reached — the Zelle body carries no dollar
     // figure — so the customers/billing lookup never runs.
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
@@ -323,7 +323,7 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
-    })).resolves.toEqual({ stale: false });
+    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
 
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
     await expect(outgoingAmountsStale({
@@ -393,7 +393,7 @@ describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: null, dbh: dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-current', customer_id: 'c1' } }),
-    })).resolves.toEqual({ stale: false });
+    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-current' });
     expect(ContextAggregator.getContextForCustomer).toHaveBeenCalled();
   });
 
@@ -408,7 +408,7 @@ describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: 'inv-drafted', dbh: dbWithTables({ invoices: { id: 'inv-drafted', customer_id: 'c1' } }),
-    })).resolves.toEqual({ stale: false });
+    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-drafted' });
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
 
@@ -641,7 +641,7 @@ describe('several open invoices: the send-time Zelle recheck resolves the same i
   test('a human-typed Zelle offer (no persisted id): the invoice the inbound names is rechecked, not the newest', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?' })).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?' })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
     expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: expect.objectContaining({ id: 'x' }), dbh: expect.any(Function), readOnly: true });
   });
   test('several open and no reference: the offer cannot be tied to one invoice => blocked (unresolved)', async () => {
@@ -651,7 +651,7 @@ describe('several open invoices: the send-time Zelle recheck resolves the same i
   });
   test('a persisted invoice id (from the decision) is used as-is', async () => {
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, zelleInvoiceId: 'inv-1', inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, zelleInvoiceId: 'inv-1', inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
   test('a Zelle DENIAL: unresolvable with several open => UNVERIFIABLE, blocked (the draft asks which invoice); named invoice now eligible => stale', async () => {
