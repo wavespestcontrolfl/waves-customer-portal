@@ -10,9 +10,10 @@ jest.mock('../services/dispatch-alerts', () => ({
 }));
 // The street-level hold recheck (its row-lock transaction needs a database): a controllable stand-in.
 const mockHeld = new Set();
+const mockTrx = { isTrx: true };
 jest.mock('../services/street-level-hold', () => ({
   ...jest.requireActual('../services/street-level-hold'),
-  runUnlessLiveHold: jest.fn(async (id, action) => (mockHeld.has(id) ? { held: true } : { held: false, result: await action() })),
+  runUnlessLiveHold: jest.fn(async (id, action) => (mockHeld.has(id) ? { held: true } : { held: false, result: await action(mockTrx) })),
 }));
 
 jest.mock('../services/no-show-detector', () => ({ enabled: jest.fn(() => false), sweep: jest.fn(), cleanupAfterDisable: jest.fn(async () => ({ resolved: 0, dismissed: 0 })) }));
@@ -86,6 +87,7 @@ describe('tech-late detector tuning', () => {
         window_end: '10:00:00',
         scheduled_date: '2026-05-05',
       },
+      trx: mockTrx,
     });
     expect(createAlert).toHaveBeenNthCalledWith(2, {
       type: 'tech_late',
@@ -98,6 +100,7 @@ describe('tech-late detector tuning', () => {
         window_end: '12:00:00',
         scheduled_date: '2026-05-05',
       },
+      trx: mockTrx,
     });
   });
 
@@ -155,6 +158,7 @@ describe('tech-late detector tuning', () => {
 
     expect(result).toEqual({ created: 1, suppressed: 0, scanned: 2 });
     expect(createAlert).toHaveBeenCalledTimes(1);
-    expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-ok' }));
+    // The alert is written on the guard's own transaction (no second pool checkout while it is held).
+    expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-ok', trx: mockTrx }));
   });
 });

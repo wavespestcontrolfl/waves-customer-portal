@@ -113,16 +113,39 @@ postgres('uncleared street-level holds vs the scan-then-act background scanners 
     expect(await noshows(visitId)).toHaveLength(0);
   });
 
+  test('a ONE-connection pool (the guard holds it) still records a clear candidate: the action runs on the guard\'s transaction', async () => {
+    const { visitId } = await seedVisit();
+    const knexFactory = require('knex');
+    const tight = knexFactory({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [fixture.schema], pool: { min: 0, max: 1, acquireTimeoutMillis: 3000 } });
+    const original = mockKnex;
+    mockKnex = tight;
+    try {
+      await sweep();
+    } finally {
+      mockKnex = original;
+      await tight.destroy();
+    }
+    expect(await noshows(visitId)).toHaveLength(1);
+  });
+
+  test('runUnlessLiveHold passes the action its own transaction', async () => {
+    const { visitId } = await seedVisit();
+    let seen;
+    await hold.runUnlessLiveHold(visitId, async (trx) => { seen = trx; return trx('scheduled_services').where({ id: visitId }).first('id'); });
+    expect(typeof seen).toBe('function');
+    expect(seen.isTransaction).toBe(true);
+  });
+
   test('runUnlessLiveHold: the action runs only while the visit is not held, and a promotion waits behind the lock', async () => {
     const { visitId, card } = await seedVisit();
     const ran = [];
     expect(await hold.runUnlessLiveHold(visitId, async () => { ran.push('clear'); return 7; })).toEqual({ held: false, result: 7 });
 
     // While the action runs, a promoter's FOR UPDATE on the same row must wait for it (and the action's own
-    // FK insert, from its own connection, must not deadlock with the lock the guard holds).
+    // FK insert, on the same transaction, must not conflict with the lock the guard holds).
     let promoterGot = null;
     let promoter;
-    const guarded = hold.runUnlessLiveHold(visitId, async () => {
+    const guarded = hold.runUnlessLiveHold(visitId, async (trx) => {
       promoter = fixture.knex.transaction().then(async (trx) => {
         await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id');
         promoterGot = Date.now();
@@ -130,7 +153,7 @@ postgres('uncleared street-level holds vs the scan-then-act background scanners 
       });
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(promoterGot).toBeNull();                       // still waiting behind the guard's lock
-      await fixture.knex('reschedule_log').insert({ scheduled_service_id: visitId, reason_code: 'customer_noshow' });   // FK insert, own connection
+      await trx('reschedule_log').insert({ scheduled_service_id: visitId, reason_code: 'customer_noshow' });   // FK insert, on the guard's trx
       ran.push('fk-insert');
     });
     await guarded;

@@ -1064,9 +1064,12 @@ async function setHoldActivationPending(conn, callLogId, visitId, pending) {
  * was not the approved one.
  *
  * Crash / failure safety (the reason the lane is otherwise hook-first): a core leg that fails, or a visit
- * cancelled during the legs, UN-STAMPS the visit (the exact stamp this call wrote, by its timestamp) and
- * reopens a review card the legs resolved, restoring the unstamped, office-approved state the lazy /
- * stranded-activation sweep retries (its witness check re-verifies the address first). A process exit
+ * cancelled during the legs, UN-STAMPS the visit (the exact stamp this call wrote, by its timestamp, and only
+ * while it is still 'confirmed' — a visit a technician advanced since keeps its approval and its pending
+ * marker for the sweep) and reopens a review card the legs resolved, restoring the unstamped,
+ * office-approved state the lazy / stranded-activation sweep retries (its witness check re-verifies the
+ * address first). When another activation wins the stamp, the office path still runs the office-only legs
+ * (clearance stamp, card ask) itself. A process exit
  * between the stamp and the legs is covered too: the stamp's own transaction also writes
  * payload.activation_pending on the hold's review card (the legs still owed, durably), and the hourly
  * sweep (resumePendingHoldActivations) re-runs the idempotent legs and clears the marker. Every other
@@ -1080,9 +1083,27 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
   const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt, markActivationPending: mode });
   if (!(stamped > 0)) {
     // Refused (address changed: the card is reopened inside), a rejection took the row, or another activator
-    // stamped it first — then it is activated by that one (the legs are idempotent), as for the other rails.
-    const after = await dbh('scheduled_services').where({ id: svc.id }).first('customer_confirmed');
-    return after?.customer_confirmed === true;
+    // stamped it first.
+    const after = await dbh('scheduled_services').where({ id: svc.id }).first('customer_confirmed', 'status');
+    if (after?.customer_confirmed !== true) return false;
+    // Another activation (typically the stranded-activation sweep, in LAZY mode) won the stamp. The legs it
+    // runs are the shared idempotent ones, but the office-confirm-only work — the call-level clearance stamp
+    // and the card-on-file invitation — is NOT part of a lazy activation and nothing repairs it later (the
+    // pre-visit sweep requires the clearance). The office path owns those legs: it runs the hook in office
+    // mode itself (idempotent: registration dedupes, the card resolve no-ops, the funnel dedupes), under its
+    // own marker so an exit mid-way is resumed in office mode. A lazy activation keeps its own work.
+    if (mode === 'office' && !['cancelled', 'skipped', 'rescheduled'].includes(String(after.status))) {
+      if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, 'office').catch(() => {});
+      let officeOk = false;
+      try {
+        officeOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag, hookOpts);
+      } catch (e) {
+        logger.error(`[${routeTag}] office legs after a lost stamp threw for ${svc.id}: ${e.message}`);
+      }
+      // On a failure the marker stays: the sweep re-runs the legs in office mode.
+      if (officeOk && svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false).catch(() => {});
+    }
+    return true;
   }
   let legsOk = false;
   try {
@@ -1091,14 +1112,23 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
     logger.error(`[${routeTag}] hold activation hook threw for ${svc.id}: ${e.message}`);
   }
   if (!legsOk) {
-    logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — un-stamping so the activation sweep retries it`);
     try {
-      await dbh('scheduled_services')
-        .where({ id: svc.id, customer_confirmed: true })
+      // Take the stamp back ONLY while the visit is still in its pre-dispatch approved state (status
+      // 'confirmed', this call's own stamp). A technician may legitimately have advanced the approved visit
+      // (en_route / on_site / completed) since the stamp committed: un-stamping it would restore a hold the
+      // lazy rail and tech-track both refuse, stranding it. An advanced visit KEEPS its approval and its
+      // activation_pending marker, and the sweep (resumePendingHoldActivations) finishes the legs.
+      const unstamped = await dbh('scheduled_services')
+        .where({ id: svc.id, customer_confirmed: true, status: 'confirmed' })
         .where('confirmed_at', stampedAt)
         .update({ customer_confirmed: false, confirmed_at: null });
-      if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false);
-      await reopenHoldCardForRestoredVisit(svc.id, dbh);
+      if (unstamped > 0) {
+        logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — un-stamped so the activation sweep retries it`);
+        if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false);
+        await reopenHoldCardForRestoredVisit(svc.id, dbh);
+      } else {
+        logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — visit already advanced or taken: approval and pending marker kept for the sweep`);
+      }
     } catch (e) {
       logger.error(`[${routeTag}] un-stamp after a failed hold activation failed for ${svc.id}: ${e.message}`);
     }
@@ -1312,5 +1342,5 @@ module.exports = {
   sweepStrandedLegacyOutboundActivations,
   resumePendingHoldActivations,
   verifyReminderSlotAfterRegistration,
-  _test: { hasRecordedOfficeConfirm, stampCustomerConfirmed },
+  _test: { hasRecordedOfficeConfirm, stampCustomerConfirmed, activateHoldFencedByAddress },
 };

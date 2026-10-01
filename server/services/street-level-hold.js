@@ -65,15 +65,17 @@ async function isStreetLevelHoldVisit(scheduledServiceId, conn = db, { includeCl
 // candidate query. Take the visit row lock, re-read the hold under it, and run `action` only while the visit
 // is not held; the lock stays until `action` finishes, so a promotion waits behind it instead of landing
 // mid-action. The lock is FOR NO KEY UPDATE: it conflicts with the promoter's FOR UPDATE (and every other row
-// writer) but not with the FOR KEY SHARE an action's own foreign-key inserts take on this row from their own
-// connection, so an action that records against the visit cannot deadlock with it. A lookup error answers
-// held (isStreetLevelHoldVisit fails closed): the scanner skips and its next run tries again.
+// writer) but not with the FOR KEY SHARE the action's own foreign-key inserts take on this row. The action
+// receives THIS transaction (`action(trx)`) and runs all its writes on it: one connection for the whole
+// guard, so a pool of two (one already held by the cron's exclusive lock) never waits on a second checkout,
+// and the FK insert sits in the same transaction as the lock. A lookup error answers held
+// (isStreetLevelHoldVisit fails closed): the scanner skips and its next run tries again.
 // Returns { held: true } or { held: false, result }.
 async function runUnlessLiveHold(visitId, action, conn = db) {
   return conn.transaction(async (trx) => {
     await trx('scheduled_services').where({ id: visitId }).forNoKeyUpdate().first('id');
     if (await isStreetLevelHoldVisit(visitId, trx)) return { held: true };
-    return { held: false, result: await action() };
+    return { held: false, result: await action(trx) };
   });
 }
 

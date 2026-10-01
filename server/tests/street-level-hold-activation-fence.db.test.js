@@ -106,6 +106,37 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 0, resumed: 0 });
   });
 
+  test('a failing leg after a technician advanced the visit keeps the approval and the pending marker (never un-stamps an advanced visit); the sweep finishes it', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    const actual = jest.requireActual('../services/appointment-reminders').registerAppointment;
+    reminders.registerAppointment.mockImplementationOnce(async () => {
+      await knex('scheduled_services').where({ id: visitId }).update({ status: 'en_route' });   // the tech moved on mid-legs
+      return null;                                                                              // ...and a core leg failed
+    });
+    expect(await runOfficeConfirmActivation(knex, svc, 'admin-dispatch')).toBe(false);
+    expect(await state(visitId, callId)).toMatchObject({ confirmed: true });
+    expect(await marker(callId)).toBe('office');
+    // The sweep finishes the legs; the visit is never stuck behind a restored hold.
+    reminders.registerAppointment.mockImplementationOnce((...args) => actual(...args));
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
+    expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
+    expect(await marker(callId)).toBeUndefined();
+  });
+
+  test('when a lazy activation wins the stamp, the office path still runs the office-only legs (clearance stamp, card invitation)', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    // The stranded-activation sweep got there first, in lazy mode, and is still mid-legs (hold card open).
+    await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'lazy' });
+    expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).toBeNull();
+
+    // The office path passed its hold check just before the lazy stamp landed: it reaches the fenced
+    // activation, loses the stamp, and must still run the office-only legs itself.
+    expect(await _test.activateHoldFencedByAddress(knex, svc, 'admin-dispatch', {})).toBe(true);
+    expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).not.toBeNull();
+    expect(cardRequest.requestCardForAppointment).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: visitId, trigger: 'outbound_review_confirm' }));
+    expect(await marker(callId)).toBeUndefined();
+  });
+
   test('a LAZY-mode marker resumes without the office clearance: no clearance stamp, the card ask runs delivery-less', async () => {
     const { visitId, callId, svc } = await seedApprovedHold();
     await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'lazy' });

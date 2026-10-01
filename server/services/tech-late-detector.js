@@ -214,7 +214,7 @@ async function runInner() {
     try {
       // A promotion to a street-level hold can land after the scan above: re-read the hold under the visit
       // row lock right before alerting, and raise nothing for a held (never dispatched) visit.
-      const guarded = await runUnlessLiveHold(row.job_id, () => createAlert({
+      const guarded = await runUnlessLiveHold(row.job_id, (trx) => createAlert({
         type: 'tech_late',
         severity,
         techId: row.tech_id,
@@ -225,6 +225,7 @@ async function runInner() {
           window_end: row.window_end,
           scheduled_date: normalizeDateOnly(row.scheduled_date),
         },
+        trx,
       }));
       if (guarded.held) continue;
       created += 1;
