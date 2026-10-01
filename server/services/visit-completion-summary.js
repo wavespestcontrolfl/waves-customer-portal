@@ -381,8 +381,12 @@ async function terminalDeferredSummarySms(meta) {
 //  - the canonical senders' own verdict says no text (billingTextVerdict: consent, billing
 //    channel choice, template kill switch, account credit the queue would apply first).
 // The summary token never reaches billing: the link is the invoice's own /pay or /receipt link.
-// A dispute hold on pay links (collection-hold.js shouldWithholdPayLink, when it lands)
-// belongs in this function beside the payer checks.
+// A collections hold (any active collection_hold: a dispute, or the wrong-number / wrong-party
+// fallback; owner ruling 2026-09-30) forbids a pay link in any automated message, so a pay-link
+// fold answers no while one stands (summaryLinkSendable, asked here, at the locked handoff, on a
+// queued replay and on the recovery recheck). The summary then goes out plain and the invoice
+// takes today's path: scheduled onto the invoice sender, which is hold-aware and sends it
+// the first tick after the hold is released. A receipt link asks for no payment and is not held.
 // The summary text can still carry the link only while its effect is unclaimed or provably
 // unsent: none yet, a retry, or a claim whose lease ran out (with the pre-provider marker
 // still on it, or never marked). Sent, suppressed, queued, ambiguous or live is already decided.
@@ -429,6 +433,11 @@ async function planSummaryBillingLink(packetId, token, database = db) {
 // to: the invoice text's phone (the account holder's) is that number, and billingTextVerdict,
 // the canonical senders' own verdict. Asked at plan time and again at send.
 async function summaryLinkSendable(database, invoice, kind, recipientPhone) {
+  // A pay link waits out ANY active collections hold, a lookup that cannot be answered included
+  // (fail closed). `database` is the caller's connection (the handoff's held transaction at send
+  // time: the read reuses it, never a second root-pool connection). Nothing is exempt: this is
+  // an automated message, not an operator's or the customer's own action.
+  if (kind === 'pay_link' && (await require('./collections/collection-hold').messagingHeldByCollectionHold(invoice.customer_id, database)).held) return false;
   const holder = await database('customers').where({ id: invoice.customer_id }).whereNull('deleted_at').first('phone');
   if (!holder?.phone || !sameSmsDestination(holder.phone, recipientPhone)) return false;
   return (await require('./messaging/billing-text-verdict').billingTextVerdict(kind, invoice, { phone: holder.phone, database })).ok;

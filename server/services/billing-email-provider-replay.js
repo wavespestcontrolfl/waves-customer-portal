@@ -120,6 +120,18 @@ function refusal(block) {
   };
 }
 
+// A row with no replay contract has no producer eligibility to re-run, but the stored notice still
+// waits out a collections hold (the same gate a contracted row gets inside billingEmailReplayEligible;
+// a payment receipt is exempt there). A lookup that cannot answer holds it too.
+async function uncontractedHoldVerdict(context, database) {
+  try {
+    return await require('./messaging/billing-email-replay-eligibility').replayHoldRefusal(context, database)
+      || { eligible: true };
+  } catch {
+    return { eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true };
+  }
+}
+
 async function runBillingEmailProviderReplayHandoff(message, dispatch, {
   recipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
   authorityRecipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
@@ -155,8 +167,13 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
     templateKey: clean(message.template_key),
     preSendCheck: async ({ database, providerBoundary }) => {
       const verdict = await receiptOptOut(context, database)
-        || (contracted ? await billingEmailReplayEligible(context, database) : { eligible: true });
+        || (contracted ? await billingEmailReplayEligible(context, database) : await uncontractedHoldVerdict(context, database));
       if (verdict?.eligible !== true) {
+        // A collections dispute hold: the schedulable hold (retryable + deferred),
+        // so the provider-retry rail waits without spending an attempt.
+        if (verdict?.holdDefer === true) {
+          return { ok: false, ...require('./collections/collection-hold').holdDeferOutcome(verdict.held) };
+        }
         const requote = context.source_entry_point === 'previsit_balance_reminder'
           && PREVISIT_SUPERSEDED_REASONS.has(verdict?.reason);
         return {
