@@ -143,6 +143,10 @@ describe('accept route wiring (source pins)', () => {
     const slots = read('routes/estimate-slots-public.js');
     expect(slots).toMatch(/if \(policy\.afterVisitCard === true\) \{\s*const stamped = await markAfterVisitCaptureIntent\(intent\.setupIntentId\);\s*if \(!stamped\.ok\) \{\s*return res\.status\(503\)/);
     expect(slots.indexOf('markAfterVisitCaptureIntent(intent.setupIntentId)')).toBeLessThan(slots.indexOf('CHECKOUT_KIND.RECURRING_CARD'));
+    // "Use a different payment method": the replacement intent is stamped too —
+    // the stamp runs after BOTH mint branches, on whichever intent is returned.
+    expect(slots.indexOf('intent = replaced.intent;')).toBeLessThan(slots.indexOf('markAfterVisitCaptureIntent(intent.setupIntentId)'));
+    expect(slots.indexOf('intent = await createRecurringCardSetupIntentForEstimate(estimate);')).toBeLessThan(slots.indexOf('markAfterVisitCaptureIntent(intent.setupIntentId)'));
     expect(read('services/stripe.js')).toMatch(/metadata: \{ paf_after_visit: 'true' \}/);
     expect(read('routes/stripe-webhook.js')).toMatch(/if \(live\.metadata\?\.paf_after_visit === 'true'\) \{[\s\S]{0,400}return;/);
   });
