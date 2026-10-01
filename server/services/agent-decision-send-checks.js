@@ -441,12 +441,17 @@ async function commitmentsChanged(conn, refs, customerId) {
   return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));
 }
 // The same question for VISIT STATUS: rebuild the facts for the customer (strict —
-// a failed read throws) and compare their signature with the draft's.
-async function visitStatusChanged(conn, signature, customerId) {
-  if (!customerId) return true;
+// a failed read throws — and with commitments) and compare their signature with
+// the draft's; an open promise or request the draft did not show (recorded since,
+// or unreadable when it was drafted) refuses too, so it goes to review.
+async function visitStatusReason(conn, signature, customerId, refs) {
+  if (!customerId) return 'visit_status_changed';
   const facts = require('./visit-loops-facts');
-  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true });
-  return facts.visitStatusSignature(fresh) !== signature;
+  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true });
+  if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
+  const shown = new Set(refs.map((r) => r.id));
+  const unseen = [...(fresh.weOwe || []), ...(fresh.customerWaiting || [])].some((c) => c && c.id != null && !shown.has(String(c.id)));
+  return unseen ? 'commitment_appeared' : null;
 }
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
 async function openLoopsBlockReason({ decision, customerId = decision?.customer_id, dbh, now = new Date() }) {
@@ -462,8 +467,7 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
   try {
     const conn = dbh || require('../models/db');
     if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
-    if (status && await visitStatusChanged(conn, status.signature || null, customerId)) return 'visit_status_changed';
-    return null;
+    return status ? await visitStatusReason(conn, status.signature || null, customerId, refs) : null;
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);
     return 'open_loops_recheck_failed';

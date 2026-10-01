@@ -674,6 +674,16 @@ describe('open-loop commitments recheck', () => {
       await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
     });
 
+    test('the rebuild includes commitments: an open promise/request the draft did not show refuses (review), a shown one passes', async () => {
+      const d = (ids) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date().toISOString(), visit_loop_commitment_ids: ids, visit_loop_status: { signature: null } }) });
+      openFor({ calls: [{ id: 'cc-1' }] });
+      nowFacts(loops({ weOwe: [{ id: 'cc-1' }] }));
+      await expect(openLoopsBlockReason({ decision: d(['cc-1']) })).resolves.toBeNull();
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true, withCommitments: true }));
+      // drafted with an empty list (recorded since, or the read failed then): refused
+      await expect(openLoopsBlockReason({ decision: d([]) })).resolves.toBe('commitment_appeared');
+    });
+
     test('a real read failure during the rebuild is a retryable recheck failure, not "changed"', async () => {
       await expect(openLoopsBlockReason({ decision: withStatus(), dbh: () => { throw new Error('dispatch_alerts down'); } }))
         .resolves.toBe('open_loops_recheck_failed');
