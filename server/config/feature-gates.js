@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY rider (pest, tree & shrub, termite bait; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id; the rider series extension then keeps riding the lawn dates. Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_KB_SPECIES_QA=true (knowledge Q&A — texting assistant, tech field Q&A, lead agent — also reads the owner-approved species catalog; customer-facing callers get customer copy only, staff also get tech notes; read at call time via kbSpeciesQaLive(), dark by default)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
@@ -83,7 +84,6 @@
  *   GATE_REPORT_PLAN_SUMMARY=true ("Your plan" section on the LIVE report: an active plan member's visit/re-service COUNTS for this year — never prices, owner ruling 2026-09-28; live view only, stripped from PDF/static like nextAppointment; dark = report payload carries no planSummary)
  *   GATE_REPORT_NEAR_YOU=true  ("Near you" line on the LIVE LAWN report only: the lawn pest most often found among other lawn customers in the same city over the last 30 ET days, shown only at/above the NEAR_YOU_MIN_CUSTOMERS distinct-customer floor — owner ruling 2026-09-28, "lawn only"; live view only, stripped from PDF/static like planSummary; dark = report payload carries no nearYou)
  *   GATE_STAMPED_ZERO_FREE=true (a scheduled_services.estimated_price stamped exactly 0 — not NULL, not '' — bills nothing in EVERY billing lane: per-application, per-visit, monthly_membership, legacy-null, annual prepay; owner ruling 2026-09-28, waves-billing skill invariant #8, "$0 means charge nothing", superseding invariant #6's monthly-fallback note while the gate is on. NULL/blank is unchanged — still falls through to per_application_fee / monthly_rate as today. Off = byte-identical to today on every path; canonical CALL-TIME reader stampedZeroFreeLive(). Kill switch: unset or any non-'true' value.)
- *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks + quarterly pest seeds the pest follow-ups on every other lawn visit — same stop, so they group — and links the pest series to the lawn series through scheduled_services.rides_parent_id; the pest series extension then keeps riding the lawn dates. Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
@@ -3807,6 +3807,13 @@ function tsFastCompleteLive() {
   return process.env.GATE_TS_FAST_COMPLETE === 'true';
 }
 
+// GATE_PEST_RIDES_LAWN_AT_ACCEPT read at CALL time — strict `=== 'true'`. Gates
+// the estimate converter's rider seeding (quarterly riders on 6-week / monthly lawn)
+// and the matching extension in admin-schedule.js#extendSeriesOnceLocked.
+function pestRidesLawnAtAcceptLive() {
+  return process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -4297,13 +4304,6 @@ function stampedZeroFreeLive() {
   return process.env.GATE_STAMPED_ZERO_FREE === 'true';
 }
 
-// GATE_PEST_RIDES_LAWN_AT_ACCEPT read at CALL time — strict `=== 'true'`. Gates
-// the estimate converter's rider seeding (lawn every 6 weeks + quarterly pest)
-// and the matching extension in admin-schedule.js#extendSeriesOnceLocked.
-function pestRidesLawnAtAcceptLive() {
-  return process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true';
-}
-
 // GATE_PAY_AFTER_FIRST_VISIT read at CALL time — strict `=== 'true'`, dark in
 // every environment. The canonical reader for estimate-public.js's SSR
 // pay-after-first-visit wording (renderPage opts.payAfterFirstVisitCopy) and
@@ -4596,8 +4596,9 @@ function portalYardCalendarLive() {
   return process.env.GATE_PORTAL_YARD_CALENDAR === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestRidesLawnAtAcceptLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
+module.exports.pestRidesLawnAtAcceptLive = pestRidesLawnAtAcceptLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
