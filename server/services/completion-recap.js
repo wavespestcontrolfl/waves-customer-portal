@@ -376,11 +376,11 @@ function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
 // reject (codex r21/r28/r32-r34 on #3420).
 const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
   'cockroach', 'cockroaches', 'roach', 'roaches', 'termite', 'termites',
-  'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ants',
+  'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ant', 'ants',
   'flea', 'fleas', 'tick', 'ticks', 'spider', 'spiders', 'wasp', 'wasps',
-  'hornet', 'hornets', 'bees', 'mice', 'rats', 'wildlife', 'station',
+  'hornet', 'hornets', 'bee', 'bees', 'mouse', 'mice', 'rat', 'rats', 'wildlife', 'station',
   'stations', 'trap', 'traps', 'perimeter', 'barrier', 'outdoor',
-  'indoor', 'yard', 'granular', 'granules',
+  'indoor', 'yard', 'granular', 'granules', 'gel',
   'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
   'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
   'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
