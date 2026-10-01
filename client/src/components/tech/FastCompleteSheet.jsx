@@ -44,23 +44,22 @@ import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, isOutOfStock, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
-import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
+import { WarningIcon } from './FastCompleteProductPicker';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import {
-  Chip, ChoiceSection, FastCompleteFrame, SavedView, SheetHeader, TipSection, VisitNote,
-  customerNameOf, techTipsOf, useTipLibrary,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
+  SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
+  visitChangedSinceSchedule,
 } from './FastCompleteParts';
 import { Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
-// The amount /complete would receive is above zero (a tsp amount goes as fl oz).
-const hasAmount = (row) => submittedAmount(row.totalAmount, row.amountUnit).totalAmount > 0;
 
 // How the SPRAY products went down. Spot treatment needs no measured area;
 // a perimeter spray records its linear feet (the application record's area
@@ -109,28 +108,6 @@ const ACTIVITY_LEVELS = [
   { value: 'moderate', label: 'Moderate', rating: 3 },
   { value: 'heavy', label: 'Heavy', rating: 5 },
 ];
-const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
-const dayOf = (value) => String(value || '').slice(0, 10);
-// Letters and digits only: the row's address is built in SQL and the live
-// one from fields, so spacing and punctuation may differ, but a different
-// unit never matches ("apt 4" vs "apt 5").
-const addressKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-// Whether the tapped row's property is no longer the live visit's. The row's
-// property id decides: a move to another unit at the same street is another
-// property. A visit never stamped with one (null on both sides) falls back to
-// the whole address, unit included. A row without the fields (an older
-// payload) gives no verdict.
-function propertyMoved(service, visit) {
-  const routedId = service?.routedPropertyId;
-  if (routedId !== undefined) {
-    if (String(routedId ?? '') !== String(visit?.propertyId ?? '')) return true;
-    if (routedId != null) return false;
-  }
-  const live = visit?.address;
-  if (!service?.routedAddress || !live?.line1) return false;
-  return addressKey(service.routedAddress) !== addressKey([live.line1, live.line2, live.city, live.state, live.zip].join(' '));
-}
 
 // Why the live context can't be completed here, or '' when it can: the
 // schedule row the tech tapped may be stale, so the loaded visit must still
@@ -139,23 +116,11 @@ function propertyMoved(service, visit) {
 // project-backed).
 function blockedReasonFor(context, service) {
   const visit = context?.service || {};
-  const movedCustomer = service?.routedCustomerId && visit.customerId
-    && String(service.routedCustomerId) !== String(visit.customerId);
-  const movedDay = service?.routedScheduledDate && visit.scheduledDate
-    && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
-  const movedProperty = propertyMoved(service, visit);
-  if (movedCustomer || movedDay || movedProperty) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  if (visitChangedSinceSchedule(visit, service)) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
   if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
-  if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
+  if (CLOSED_VISIT_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   if (context?.eligible !== true) return 'This visit needs the full form.';
   return '';
-}
-
-function toggleInSet(set, value) {
-  const next = new Set(set);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  return next;
 }
 
 // A row keeps its catalog product: its method comes from the catalog (the
@@ -467,50 +432,6 @@ function useProductRows(ctx, serviceType) {
   return { rows, editingId, setEditingId, updateRow, addProduct, removeRow, clearFollowingRates, applyStock };
 }
 
-// "+ Other product" opens the product picker: a bottom sheet over the form
-// on a phone, a popover under the button at desktop width. With no product
-// list loaded it opens the full completion screen, as it always did.
-function useProductPicker({ ctx, rows, locked, isMobile, onFullForm, onPick }) {
-  const buttonRef = useRef(null);
-  const [open, setOpen] = useState(false);
-  const hasCatalog = ctx.products.length > 0;
-  useEffect(() => { if (locked) setOpen(false); }, [locked]);
-  // The house mix is always on the sheet, so "Used most" lists the rest.
-  const commonProducts = useMemo(() => {
-    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
-    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
-  }, [ctx.rows, ctx.commonProducts]);
-  const onSheetIds = useMemo(() => new Set(rows.map((row) => String(row.productId))), [rows]);
-  const shown = open && !locked;
-  const picker = shown ? (
-    <FastCompleteProductPicker
-      variant={isMobile ? 'sheet' : 'popover'}
-      products={ctx.products}
-      commonProducts={commonProducts}
-      onSheetIds={onSheetIds}
-      anchorRef={buttonRef}
-      onPick={(product) => { setOpen(false); onPick(product); }}
-      onClose={() => setOpen(false)}
-    />
-  ) : null;
-  const onClick = (event) => {
-    if (!hasCatalog) {
-      onFullForm?.();
-      return;
-    }
-    // Safari never focuses a tapped button; the picker hands focus back here.
-    event.currentTarget.focus();
-    setOpen((was) => !was);
-  };
-  return {
-    button: { buttonRef, locked, onClick, hasPicker: hasCatalog, expanded: shown },
-    popover: isMobile ? null : picker,
-    sheet: isMobile ? picker : null,
-    // What the phone sheet covers is out of reach until it closes.
-    coverProps: shown && isMobile ? { 'aria-hidden': true, inert: '' } : {},
-  };
-}
-
 function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile }) {
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct, clearFollowingRates } = products;
@@ -531,8 +452,14 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     setField('method', next);
     clearFollowingRates();
   }, [setField, clearFollowingRates]);
+  // The house mix is always on the sheet, so "Used most" lists the rest.
+  const pickerCommonProducts = useMemo(() => {
+    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
+    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
+  }, [ctx.rows, ctx.commonProducts]);
   const picker = useProductPicker({
-    ctx,
+    products: ctx.products,
+    commonProducts: pickerCommonProducts,
     rows,
     locked: locked || dictationPending,
     isMobile,
@@ -606,27 +533,18 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
-      {/* The reason sits above full-width actions, so neither squeezes the
-          other on a phone or beside "Check stock". */}
-      <footer className="tech-visit-footer tech-visit-footer--stacked" {...picker.coverProps}>
-        {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
-        {missingReason && !submission.failure && (
-          <p className={cn('tech-visit-muted', stockRow && 'tech-visit-status--warn')} role="status">{missingReason}</p>
+      <CompleteFooter
+        submission={submission}
+        missingReason={missingReason}
+        warn={!!stockRow}
+        label="Complete re-service"
+        onSubmit={submit}
+        coverProps={picker.coverProps}
+      >
+        {stockRow && !locked && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
         )}
-        <div className="tech-visit-actions">
-          {stockRow && !locked && (
-            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
-          )}
-          <Button
-            className="tech-visit-action tech-visit-complete tech-visit-wide"
-            onClick={submit}
-            loading={submission.submitting}
-            disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
-          >
-            {submission.retryPending ? 'Retry' : 'Complete re-service'}
-          </Button>
-        </div>
-      </footer>
+      </CompleteFooter>
       {picker.sheet}
     </div>
   );
@@ -751,28 +669,7 @@ function AddedProductEditor({ id, row, method, locked, onChange, onRemove, onDon
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
         <span className="tech-visit-muted">{[categoryLabel(row.product), 'added by you'].filter(Boolean).join(' · ')}</span>
       </div>
-      <div>
-        <label htmlFor={amountId} className="tech-product-editor-label">How much?</label>
-        <div className="tech-product-editor-amount">
-          <Input
-            ref={amountRef}
-            id={amountId}
-            className="tech-visit-control tech-product-amount-input"
-            type="number"
-            inputMode="decimal"
-            min="0"
-            step="any"
-            disabled={locked}
-            value={row.totalAmount ?? ''}
-            onChange={(e) => onChange({ totalAmount: e.target.value })}
-          />
-          <div role="group" aria-label="Unit" className="tech-product-units">
-            {UNIT_CHOICES[row.dimension].map((choice) => (
-              <Chip disabled={locked} key={choice.value} className="tech-product-unit" label={choice.label} pressed={row.amountUnit === choice.value} onClick={() => onChange({ amountUnit: choice.value })} />
-            ))}
-          </div>
-        </div>
-      </div>
+      <AmountEntry id={amountId} inputRef={amountRef} row={row} locked={locked} onChange={onChange} />
       <RowMethodPicker row={row} method={method} locked={locked} onChange={onChange} />
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
@@ -810,25 +707,6 @@ function RowMethodPicker({ row, method, locked, onChange }) {
         ))}
       </div>
       {followsVisitMethod(row) && <p className="tech-visit-muted">Same as the visit&apos;s How</p>}
-    </div>
-  );
-}
-
-function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expanded, popover }) {
-  return (
-    <div className="tech-product-other">
-      <Button
-        ref={buttonRef}
-        type="button"
-        variant="secondary"
-        className="tech-visit-action tech-visit-wide"
-        disabled={locked}
-        onClick={onClick}
-        {...(hasPicker ? { 'aria-haspopup': 'dialog', 'aria-expanded': expanded } : {})}
-      >
-        + Other product
-      </Button>
-      {popover}
     </div>
   );
 }

@@ -13,7 +13,7 @@
 // in. The server's unit list has no tsp, so a tsp amount is sent as fl oz
 // (6 tsp = 1 fl oz) and read back in tsp by formatMeasuredAmount.
 import { formatMeasuredAmount } from "./mix-amount";
-import { TSP_PER_FL_OZ } from "./measure-units";
+import { TSP_PER_FL_OZ, submittedAmount } from "./measure-units";
 import { isDryFormProduct, resolveRatePrefill } from "./product-rate-prefill";
 
 // A gel bait's usual weight reads in grams, the unit it is recorded in.
@@ -168,6 +168,9 @@ export function seededAmount(amount, unit) {
     ? { amount: Number(amount) * TSP_PER_FL_OZ, unit: "tsp" }
     : { amount, unit };
 }
+
+/** The amount /complete would receive is above zero (a tsp amount goes as fl oz). */
+export const hasAmount = (row) => submittedAmount(row.totalAmount, row.amountUnit).totalAmount > 0;
 
 /** An amount the way the truck measures it: "1½ tsp", "4 fl oz", "5 g". */
 export function amountText(amount, unit) {

@@ -4,12 +4,16 @@
 // the dialog frame and header, the saved view, the visit note with its mic,
 // the one-tip picker, and the choice tiles. Each sheet keeps what is its
 // own line's (products, photos, findings) and its completion body. The
-// /complete submit lives in hooks/useFastCompleteSubmit.js.
-import React, { useEffect, useId, useMemo, useState } from 'react';
+// /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
+// "+ Other product" picker wiring, stale-visit check and footer are shared
+// by every sheet that takes products.
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
+import { UNIT_CHOICES } from '../../lib/fast-complete-products';
 import DictationButton from './DictationButton';
-import { UiSurface, Button, Field, Input, Textarea, cn } from '../ui';
+import FastCompleteProductPicker from './FastCompleteProductPicker';
+import { UiSurface, ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Tips shown before the tech searches or opens the whole list.
@@ -18,6 +22,46 @@ const TIP_PREVIEW_COUNT = 4;
 // longer line, never trims it.
 const CUSTOM_TIP_MAX_CHARS = 240;
 const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
+
+export function toggleInSet(set, value) {
+  const next = new Set(set);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
+
+export const CLOSED_VISIT_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+const dayOf = (value) => String(value || '').slice(0, 10);
+// Letters and digits only: the row's address is built in SQL and the live
+// one from fields, so spacing and punctuation may differ, but a different
+// unit never matches ("apt 4" vs "apt 5").
+const addressKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// Whether the tapped row's property is no longer the live visit's. The row's
+// property id decides: a move to another unit at the same street is another
+// property. A visit never stamped with one (null on both sides) falls back to
+// the whole address, unit included. A row without the fields (an older
+// payload) gives no verdict.
+function propertyMoved(service, visit) {
+  const routedId = service?.routedPropertyId;
+  if (routedId !== undefined) {
+    if (String(routedId ?? '') !== String(visit?.propertyId ?? '')) return true;
+    if (routedId != null) return false;
+  }
+  const live = visit?.address;
+  if (!service?.routedAddress || !live?.line1) return false;
+  return addressKey(service.routedAddress) !== addressKey([live.line1, live.line2, live.city, live.state, live.zip].join(' '));
+}
+
+// The schedule row the tech tapped may be stale: the loaded visit must still
+// be that visit (same customer, day and property).
+export function visitChangedSinceSchedule(visit, service) {
+  const movedCustomer = service?.routedCustomerId && visit?.customerId
+    && String(service.routedCustomerId) !== String(visit.customerId);
+  const movedDay = service?.routedScheduledDate && visit?.scheduledDate
+    && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
+  return !!(movedCustomer || movedDay || propertyMoved(service, visit));
+}
 
 // "123 Oak St, Bradenton" from the context's resolved address.
 function liveAddressLine(address) {
@@ -108,6 +152,119 @@ export function Chip({ label, pressed, onClick, className, disabled }) {
     >
       {label}
     </Button>
+  );
+}
+
+// "How much?" and its unit chips: the amount a row records, in the units its
+// measure allows (lib/fast-complete-products.js: never mL).
+export function AmountEntry({ id, row, locked, inputRef, onChange }) {
+  return (
+    <div>
+      <label htmlFor={id} className="tech-product-editor-label">How much?</label>
+      <div className="tech-product-editor-amount">
+        <Input
+          ref={inputRef}
+          id={id}
+          className="tech-visit-control tech-product-amount-input"
+          type="number"
+          inputMode="decimal"
+          min="0"
+          step="any"
+          disabled={locked}
+          value={row.totalAmount ?? ''}
+          onChange={(e) => onChange({ totalAmount: e.target.value })}
+        />
+        <div role="group" aria-label="Unit" className="tech-product-units">
+          {UNIT_CHOICES[row.dimension].map((choice) => (
+            <Chip disabled={locked} key={choice.value} className="tech-product-unit" label={choice.label} pressed={row.amountUnit === choice.value} onClick={() => onChange({ amountUnit: choice.value })} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expanded, popover }) {
+  return (
+    <div className="tech-product-other">
+      <Button
+        ref={buttonRef}
+        type="button"
+        variant="secondary"
+        className="tech-visit-action tech-visit-wide"
+        disabled={locked}
+        onClick={onClick}
+        {...(hasPicker ? { 'aria-haspopup': 'dialog', 'aria-expanded': expanded } : {})}
+      >
+        + Other product
+      </Button>
+      {popover}
+    </div>
+  );
+}
+
+// "+ Other product" opens the product picker: a bottom sheet over the form
+// on a phone, a popover under the button at desktop width. With no product
+// list loaded it opens the full completion screen, as it always did.
+// `commonProducts` is the picker's "Used most" list, already without the
+// products the sheet starts with; `rows` are the products on the sheet.
+export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick }) {
+  const buttonRef = useRef(null);
+  const [open, setOpen] = useState(false);
+  const hasCatalog = products.length > 0;
+  useEffect(() => { if (locked) setOpen(false); }, [locked]);
+  const onSheetIds = useMemo(() => new Set(rows.map((row) => String(row.productId))), [rows]);
+  const shown = open && !locked;
+  const picker = shown ? (
+    <FastCompleteProductPicker
+      variant={isMobile ? 'sheet' : 'popover'}
+      products={products}
+      commonProducts={commonProducts}
+      onSheetIds={onSheetIds}
+      anchorRef={buttonRef}
+      onPick={(product) => { setOpen(false); onPick(product); }}
+      onClose={() => setOpen(false)}
+    />
+  ) : null;
+  const onClick = (event) => {
+    if (!hasCatalog) {
+      onFullForm?.();
+      return;
+    }
+    // Safari never focuses a tapped button; the picker hands focus back here.
+    event.currentTarget.focus();
+    setOpen((was) => !was);
+  };
+  return {
+    button: { buttonRef, locked, onClick, hasPicker: hasCatalog, expanded: shown },
+    popover: isMobile ? null : picker,
+    sheet: isMobile ? picker : null,
+    // What the phone sheet covers is out of reach until it closes.
+    coverProps: shown && isMobile ? { 'aria-hidden': true, inert: '' } : {},
+  };
+}
+
+// The reason sits above full-width actions, so neither squeezes the other on
+// a phone or beside an extra action (`children`, e.g. "Check stock").
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children }) {
+  return (
+    <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
+      {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
+      {missingReason && !submission.failure && (
+        <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
+      )}
+      <div className="tech-visit-actions">
+        {children}
+        <Button
+          className="tech-visit-action tech-visit-complete tech-visit-wide"
+          onClick={onSubmit}
+          loading={submission.submitting}
+          disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
+        >
+          {submission.retryPending ? 'Retry' : label}
+        </Button>
+      </div>
+    </footer>
   );
 }
 
