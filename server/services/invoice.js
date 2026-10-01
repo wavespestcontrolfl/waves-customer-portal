@@ -10605,8 +10605,9 @@ const InvoiceService = {
       if (deferredByPaf) {
         // A deliberately REFUNDED fee stays resolved (no re-bill). A VOIDED
         // invoice collected nothing: the fee is owed again, so put the stamp
-        // back (CAS onto NULL) for the next performed visit to bill — or, when
-        // no visit of the series is left to bill it, hand it to the office now.
+        // back (CAS onto NULL) for the next performed visit to bill. The claim
+        // is KEPT as provenance, so un-voiding the invoice retires this stamp
+        // again (retireRodentSetupObligationForReinstatedInvoice, claim anchor).
         if (String(invoiceRow.status || "").toLowerCase() !== "void" || !claimRecord.scheduled_service_id) {
           logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee stays resolved (refunded; never re-armed)`);
           return null;
@@ -10615,14 +10616,6 @@ const InvoiceService = {
         const restamped = await conn("scheduled_services").where({ id: anchorId }).whereNull("pending_setup_fee")
           .update({ pending_setup_fee: amount, updated_at: new Date() });
         if (restamped !== 1) return null;
-        const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status");
-        const { seriesCanStillConsume } = require("./secure-appointment-plans");
-        if (!(await seriesCanStillConsume(conn, anchorRow))) {
-          await require("./setup-fee-obligation").parkSetupFeeStampForOffice(conn, {
-            parentId: anchorId, rawAmount: amount, customerId: invoiceRow.customer_id,
-            estimateId: claimRecord.estimate_id || null, origin: `voided invoice ${invoiceRow.id}; no visit left to bill it`,
-          });
-        }
         logger.info(`[invoice] voided invoice ${invoiceRow.id}: pay-after-first-visit setup fee ($${amount.toFixed(2)}) owed again on series ${anchorId}`);
         return { scheduledServiceId: anchorId, amount };
       }

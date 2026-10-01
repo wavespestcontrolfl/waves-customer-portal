@@ -328,7 +328,9 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
     // to the office instead, never "deferred, therefore fine".
     // (mintPacketInvoice consumes the queued claim into its draft on this and
     // every other office-required exit.)
-    if (await liveSetupClaim(trx, member)) return office('setup_fee_deferred_claim', member.id);
+    // A non-recurring booster / add-on is not a plan application: it bills its
+    // own work normally and the plan's fee waits for a performed plan visit.
+    if (isPlanApplicationRow(member) && await liveSetupClaim(trx, member)) return office('setup_fee_deferred_claim', member.id);
     // A canceled fee is treated as covered with completing-visit context only
     // because the billed application's prior-invoice lane parks that case.
     // A zero-price member skips that lane, so its canceled fee remains owed.

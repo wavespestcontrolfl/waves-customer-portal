@@ -628,7 +628,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const input = submission();
     input.items[0].body.visitOutcome = 'inspection_only';
     const saved = await saveVisitCompletionPacket(input);
-    expect(saved.body.billing).toMatchObject({ state: 'office_required' });
+    // The booster bills its own work normally (pre-push audit: a non-recurring
+    // add-on is not a plan application, so the plan's queued fee no longer
+    // forces the whole closeout to the office); the plan fee keeps waiting.
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready' });
     expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee)).toBe(99);
     expect(await officeFeeAlertsOf()).toHaveLength(0);
     expect(saved.body.billing.setupFeeParked).toBeUndefined();
