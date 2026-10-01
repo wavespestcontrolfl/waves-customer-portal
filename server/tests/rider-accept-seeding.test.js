@@ -170,7 +170,7 @@ describe('rider context fall-backs', () => {
     } finally { spy.mockRestore(); }
   });
 
-  test('a rider planned on PROJECTED lawn dates is unlinked when the lawn seeds different dates', async () => {
+  test('a rider planned on PROJECTED lawn dates is never linked when the lawn seeds different dates (or nothing)', async () => {
     const updates = [];
     const conn = (table) => ({
       where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
@@ -184,10 +184,11 @@ describe('rider context fall-backs', () => {
     } finally { spy.mockRestore(); }
     expect(rider.projected).toBe(true);
     await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
-    expect(updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
-    // The lawn then seeds nothing (e.g. its series was kept elsewhere).
+    // Not linked yet: the lawn has not seeded.
+    expect(updates).toEqual([]);
+    // The lawn then seeds nothing (e.g. its series was kept elsewhere): still unlinked.
     await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, { insertedRows: [] });
-    expect(updates[1]).toEqual({ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: null } });
+    expect(updates).toEqual([]);
   });
 
   test('a rider planned on projected dates stays linked when the lawn seeds exactly those dates', async () => {
@@ -201,10 +202,11 @@ describe('rider context fall-backs', () => {
       rider = await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
     } finally { spy.mockRestore(); }
     await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
+    expect(updates).toEqual([]);
     await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, {
       insertedRows: lawnDates(8).map((d) => ({ scheduled_date: d })),
     });
-    expect(updates).toHaveLength(1);
+    expect(updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
   });
 });
 

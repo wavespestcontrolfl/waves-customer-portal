@@ -124,31 +124,38 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
     await settleProjectedRiders(ctx, conn);
   }
   if (!rider?.hostParentId) return;
-  if (rider.projected) (ctx.lawn.projectedRiders = ctx.lawn.projectedRiders || []).push({ id: parentRow.id, dates: rider.overrideDates });
+  // Planned on a reserved lawn's PROJECTED dates: link only once that lawn has
+  // really seeded them (settleProjectedRiders). A lawn that never seeds
+  // (kept series, failure) leaves the rider unlinked on valid 84-day dates.
+  if (rider.projected) {
+    (ctx.lawn.projectedRiders = ctx.lawn.projectedRiders || []).push({ id: parentRow.id, dates: rider.overrideDates });
+    return;
+  }
+  await linkRider(conn, parentRow.id, rider.hostParentId);
+}
+
+async function linkRider(conn, riderId, hostParentId) {
   try {
     // One savepoint for the whole optional write: any failure (including a
     // schema without the column) rolls back to it and the accept continues.
-    await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: parentRow.id }).update({ rides_parent_id: rider.hostParentId }));
+    await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: riderId }).update({ rides_parent_id: hostParentId }));
   } catch (err) {
-    logger.warn(`[rider-accept] could not link rider ${parentRow.id} to lawn ${rider.hostParentId}: ${err.message}`);
+    logger.warn(`[rider-accept] could not link rider ${riderId} to lawn ${hostParentId}: ${err.message}`);
   }
 }
 
-// Riders planned from the lawn's PROJECTED dates (a reserved lawn seeds after
-// them): once the lawn has really seeded, any rider whose dates are not all
-// real lawn dates is unlinked — its rows keep their valid 84-day dates, they
-// just are not a ride. Also covers a lawn that seeded nothing.
+// Riders planned on the lawn's PROJECTED dates (a reserved lawn seeds after
+// them) are linked here, once the lawn has really seeded — and only when every
+// rider date is a real lawn date. Otherwise they stay unlinked.
 async function settleProjectedRiders(ctx, conn) {
   const pending = ctx.lawn.projectedRiders || [];
   ctx.lawn.projectedRiders = [];
   const actual = new Set(ctx.lawn.seededDates);
   for (const r of pending) {
-    if (r.dates.every((d) => actual.has(d))) continue;
-    logger.warn(`[rider-accept] lawn ${ctx.lawn.parent.id} did not seed the dates rider ${r.id} planned on — unlinking it`);
-    try {
-      await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: r.id }).update({ rides_parent_id: null }));
-    } catch (err) {
-      logger.warn(`[rider-accept] could not unlink rider ${r.id}: ${err.message}`);
+    if (r.dates.every((d) => actual.has(d))) {
+      await linkRider(conn, r.id, ctx.lawn.parent.id);
+    } else {
+      logger.warn(`[rider-accept] lawn ${ctx.lawn.parent.id} did not seed the dates rider ${r.id} planned on — left unlinked`);
     }
   }
 }
