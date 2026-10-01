@@ -2970,6 +2970,68 @@ describe('Communications review ask serialization', () => {
     });
     expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledWith('cust-A', { staffComposer: true });
   });
+  test.each([
+    ['at_cap', /3 review requests in the last 6 months/],
+    ['already_queued', /already queued/],
+    ['in_flight', /being sent right now/],
+  ])('a pasted review link is refused by the unscheduled-ask gate (%s) with the Quick Links message, and nothing is sent', async (outcome, message) => {
+    reviews.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome });
+    const reservations = wireReservationLedger();
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toMatch(message);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledWith('cust-A', { staffComposer: true });
+    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
+  });
+  test('the pasted-link refusal reads the same as the claimed path\'s', async () => {
+    reviews.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome: 'at_cap' });
+    await withServer(async baseUrl => {
+      const pasted = await (await send(baseUrl)).json();
+      const claimed = await (await send(baseUrl, inline)).json();
+      expect(pasted.error).toBe(claimed.error);
+    });
+  });
+  test('a pasted review link inside the cooldown or an active cadence still sends (the gate is the staff-composer gate)', async () => {
+    // The real gate skips in_cadence and cooldown for staffComposer; a mock
+    // that models that returns allowed.
+    reviews.checkUnscheduledAskGates.mockImplementation(async (_id, opts = {}) => (opts.staffComposer ? { allowed: true } : { allowed: false, outcome: 'cooldown' }));
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl)).status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+  test('a pasted review link fails closed when the unscheduled-ask gate cannot be read', async () => {
+    reviews.checkUnscheduledAskGates.mockRejectedValue(new Error('stats unavailable'));
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(503);
+      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('the pasted-link gate runs inside the review-send lock, before the provider', async () => {
+    reviews.checkUnscheduledAskGates.mockImplementation(async () => { expect(held.has('review-send:cust-A')).toBe(true); return { allowed: true }; });
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl)).status).toBe(200);
+    });
+    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledTimes(1);
+  });
+  test('a claimed link is gated once, at its seam, not again at dispatch', async () => {
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(200);
+    });
+    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledTimes(1);
+  });
+  test('a non-review message never consults the unscheduled-ask gate', async () => {
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, { body: 'Your technician is on the way.' })).status).toBe(200);
+    });
+    expect(reviews.checkUnscheduledAskGates).not.toHaveBeenCalled();
+  });
   test('an unavailable review history does not hold a composer review send', async () => {
     history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
     await withServer(async baseUrl => {
