@@ -4856,6 +4856,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
       // The writer speaks as the VISIT's technician (first name), resolved from the record.
       expect(mockDraftTechVoice.mock.calls[0][0]).toMatchObject({ sequenceStep: 0, channel: 'sms', techName: 'Christopher', serviceRecordId: 'sr-tv-1' });
+      // The pre-push audit: the recovered visit's own service type rides along.
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('pest control');
       const touch = mock.__state.rows.review_requests[0];
       expect(touch.template_key).toBe('day0_ask_tech_voice');
       expect(touch.custom_body).toBe(body);
