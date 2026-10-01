@@ -2906,14 +2906,14 @@ async function visitsLinkedInBody(body) {
   if (!rescheduleKeyed.length && !track.length && !prep.length && !secure.length) return [];
   const found = new Map();
   if (rescheduleKeyed.length || track.length || prep.length) {
-    const rows = await db('scheduled_services')
+    const visitRows = await db('scheduled_services')
       .where((q) => {
         if (rescheduleKeyed.length) q.orWhereIn('reschedule_token', rescheduleKeyed);
         if (track.length) q.orWhereIn('track_view_token', track);
         if (prep.length) q.orWhereIn('prep_token', prep);
       })
       .select('id', 'status', 'reschedule_token');
-    for (const r of rows) {
+    for (const r of visitRows) {
       found.set(String(r.id), { id: String(r.id), status: r.status, rescheduleLink: reschedule.includes(r.reschedule_token) });
     }
   }
