@@ -12520,11 +12520,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             const deferAnchorId = standardConversionResult?.firstScheduledServiceId || null;
             if (deferFeeAmount > 0 && deferAnchorId) {
               const deferAnchor = await trx('scheduled_services').where({ id: deferAnchorId })
-                .first('id', 'recurring_parent_id', 'customer_id', 'source_estimate_id');
+                .first('id', 'recurring_parent_id', 'customer_id', 'source_estimate_id', 'estimated_price');
               const deferSeriesParentId = deferAnchor
                 ? (deferAnchor.recurring_parent_id || deferAnchor.id)
                 : null;
-              if (deferSeriesParentId && String(deferAnchor.customer_id) === String(customerId)) {
+              // The claim is consumed only by a completion MINT, and the mint
+              // gate refuses an unresolved/zero visit amount (a monthly-tier
+              // quote with an unknown visit count converts to an unpriced
+              // row — completion parks it). Deferring onto such a visit would
+              // queue the fee indefinitely, so only a visit with its own
+              // positive price carries the stamp; anything else keeps the
+              // payable setup invoice.
+              const deferAnchorBillable = Number(deferAnchor?.estimated_price) > 0;
+              if (!deferAnchorBillable) {
+                logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — first visit ${deferAnchorId} has no billable price to carry it; minting the payable setup invoice as before`);
+              }
+              if (deferAnchorBillable && deferSeriesParentId && String(deferAnchor.customer_id) === String(customerId)) {
                 // Compare-and-swap from NULL (the same shape invoice.js and
                 // admin-schedule stamp with): never overwrites another claim.
                 const stampedRows = await trx('scheduled_services')

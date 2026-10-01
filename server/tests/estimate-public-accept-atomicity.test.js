@@ -2374,11 +2374,11 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   const savedEnv = {};
   let policySpy;
 
-  function setupOnlyFixture(id, { withAnchor = true, parentId = null } = {}) {
+  function setupOnlyFixture(id, { withAnchor = true, parentId = null, price = 50 } = {}) {
     resetStore(recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }));
     db.__state.tables.scheduled_services = withAnchor ? [
       ...(parentId ? [{ id: parentId, customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null }] : []),
-      { id: `ss-${id}`, customer_id: 'customers-1', recurring_parent_id: parentId, pending_setup_fee: null },
+      { id: `ss-${id}`, customer_id: 'customers-1', recurring_parent_id: parentId, pending_setup_fee: null, estimated_price: price },
     ] : [];
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
@@ -2545,6 +2545,55 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
   });
 
+  // Codex pre-push r3 P1: a monthly-tier quote with an unknown visit count
+  // converts to an UNPRICED visit; the completion mint gate refuses it, so a
+  // stamp there would queue the fee indefinitely.
+  test('gate ON but the first visit has no billable price (unpriced / $0): never deferred — the payable invoice is minted and nothing is stamped', async () => {
+    gateOn();
+    for (const price of [null, 0]) {
+      InvoiceService.create.mockClear();
+      const token = setupOnlyFixture(`paf-unpriced-${price}`, { price });
+      const response = await putAccept(token);
+
+      expect(response.status).toBe(200);
+      expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+      expect(response.data.nextStep).toBe('pay_invoice');
+      expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    }
+  });
+
+  // The visit price on a converted tier row comes from the converter's own
+  // derivation (billing-cadence perApplicationChargeAmount, the figure it
+  // stamps as estimated_price). Feed the REAL derivation through the accept:
+  // a monthly-tier plan whose visit count is unknown resolves no price (the
+  // converter leaves the row unpriced and completion parks it) → never
+  // deferred; a known count resolves one → deferred.
+  test('real converter derivation: unknown-visit-count monthly tier resolves no price and is never deferred; a known count is deferred at that price', async () => {
+    gateOn();
+    const BillingCadence = require('../services/billing-cadence');
+    const cadence = { frequencyKey: 'monthly', amount: 96 };
+    const derive = (visitsPerYear) => BillingCadence.perApplicationChargeAmount({
+      billingCadence: cadence, annualRate: 1152, monthlyRate: 96, visitsPerYear, serviceKey: 'mosquito',
+    });
+    expect(derive(null)).toBeNull();
+    expect(derive(9)).toBe(128);
+
+    const unresolved = setupOnlyFixture('paf-real-unknown', { price: derive(null) });
+    const first = await putAccept(unresolved);
+    expect(first.status).toBe(200);
+    expect(first.data.nextStep).toBe('pay_invoice');
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+
+    InvoiceService.create.mockClear();
+    const resolved = setupOnlyFixture('paf-real-known', { price: derive(9) });
+    const second = await putAccept(resolved);
+    expect(second.status).toBe(200);
+    expect(second.data.setupFeeAfterFirstVisit).toBe(true);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(99);
+  });
+
   test('gate ON but the series already carries a DIFFERENT setup claim: never overwritten — the payable invoice is minted', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-occupied');
@@ -2586,7 +2635,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   test('R9 (route): a multi-program accept with the claim stamped mints no combined invoice, never calls the stamper, and puts the claim on the anchor parent ONLY', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-multi');
-    db.__state.tables.scheduled_services.push({ id: 'ss-member-2', customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null });
+    db.__state.tables.scheduled_services.push({ id: 'ss-member-2', customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null, estimated_price: 40 });
     // Re-arm the converter result with a combined-invoice sibling (setupOnlyFixture queued one already).
     EstimateConverter.convertEstimate.mockReset();
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
