@@ -102,32 +102,36 @@ function annualCostWithProtocolMaterial(track, tier, turfSqft) {
 // annual profit still RISES with frequency at every bracket the caps bind on,
 // which is the invariant that sized the discount; collected margin PERCENTAGE
 // falling on the higher cadences is the expected trade and is report-only.
+//
+// UPDATED 2026-09-30 (lawn field-safety fix, PR #5470): SpeedZone left the
+// St. Augustine April/September visits (label excludes Floratam/Bitterblue) and
+// the 12-0-0 Chelated Iron Plus ($1.52) May micro became the 0-N High Mn Combo
+// ($1.33), so protocol material fell. Three St. Augustine cells (enhanced 20k,
+// premium 10k/12k) now clear 35%; every other margin moved up by cents; no cell
+// got worse and none is new.
 const KNOWN_BELOW_TARGET_EXPOSURE = [
   { track: 'st_augustine', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 371.41, protocolMaterial: 178.91, margin: 0.3415 },
   { track: 'st_augustine', tier: 'standard', turfSqft: 10000, annual: 648, annualCost: 433.64, protocolMaterial: 223.64, margin: 0.3308 },
   { track: 'st_augustine', tier: 'standard', turfSqft: 12000, annual: 744, annualCost: 495.86, protocolMaterial: 268.36, margin: 0.3335 },
   { track: 'st_augustine', tier: 'standard', turfSqft: 15000, annual: 876, annualCost: 589.2, protocolMaterial: 335.45, margin: 0.3274 },
   { track: 'st_augustine', tier: 'standard', turfSqft: 20000, annual: 1092, annualCost: 744.77, protocolMaterial: 447.27, margin: 0.318 },
-  { track: 'st_augustine', tier: 'enhanced', turfSqft: 20000, annual: 1572, annualCost: 1034.16, protocolMaterial: 613.41, margin: 0.3421 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 10000, annual: 1188, annualCost: 777.94, protocolMaterial: 408.94, margin: 0.3452 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 12000, annual: 1368, annualCost: 894.73, protocolMaterial: 490.73, margin: 0.346 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 15000, annual: 1608, annualCost: 1069.91, protocolMaterial: 613.41, margin: 0.3346 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 20000, annual: 2004, annualCost: 1361.88, protocolMaterial: 817.88, margin: 0.3204 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 15000, annual: 1608, annualCost: 1056.74, protocolMaterial: 600.24, margin: 0.3428 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 20000, annual: 2004, annualCost: 1344.32, protocolMaterial: 800.32, margin: 0.3292 },
   { track: 'zoysia', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 404.95, protocolMaterial: 212.45, margin: 0.282 },
   { track: 'zoysia', tier: 'standard', turfSqft: 10000, annual: 672, annualCost: 475.56, protocolMaterial: 265.56, margin: 0.2923 },
   { track: 'zoysia', tier: 'standard', turfSqft: 12000, annual: 756, annualCost: 546.18, protocolMaterial: 318.68, margin: 0.2775 },
   { track: 'zoysia', tier: 'standard', turfSqft: 15000, annual: 900, annualCost: 652.1, protocolMaterial: 398.35, margin: 0.2754 },
   { track: 'zoysia', tier: 'standard', turfSqft: 20000, annual: 1140, annualCost: 828.63, protocolMaterial: 531.13, margin: 0.2731 },
-  { track: 'zoysia', tier: 'enhanced', turfSqft: 8000, annual: 804, annualCost: 541.66, protocolMaterial: 278.41, margin: 0.3263 },
-  { track: 'zoysia', tier: 'enhanced', turfSqft: 10000, annual: 960, annualCost: 637.51, protocolMaterial: 348.01, margin: 0.3359 },
-  { track: 'zoysia', tier: 'enhanced', turfSqft: 12000, annual: 1080, annualCost: 733.36, protocolMaterial: 417.61, margin: 0.321 },
-  { track: 'zoysia', tier: 'enhanced', turfSqft: 15000, annual: 1296, annualCost: 877.14, protocolMaterial: 522.01, margin: 0.3232 },
-  { track: 'zoysia', tier: 'enhanced', turfSqft: 20000, annual: 1632, annualCost: 1116.76, protocolMaterial: 696.01, margin: 0.3157 },
-  { track: 'zoysia', tier: 'premium', turfSqft: 8000, annual: 1032, annualCost: 705.21, protocolMaterial: 371.21, margin: 0.3167 },
-  { track: 'zoysia', tier: 'premium', turfSqft: 10000, annual: 1236, annualCost: 833.01, protocolMaterial: 464.01, margin: 0.326 },
-  { track: 'zoysia', tier: 'premium', turfSqft: 12000, annual: 1380, annualCost: 960.81, protocolMaterial: 556.81, margin: 0.3038 },
-  { track: 'zoysia', tier: 'premium', turfSqft: 15000, annual: 1656, annualCost: 1152.51, protocolMaterial: 696.01, margin: 0.304 },
-  { track: 'zoysia', tier: 'premium', turfSqft: 20000, annual: 2088, annualCost: 1472.02, protocolMaterial: 928.02, margin: 0.295 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 8000, annual: 804, annualCost: 541.54, protocolMaterial: 278.29, margin: 0.3264 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 10000, annual: 960, annualCost: 637.36, protocolMaterial: 347.86, margin: 0.3361 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 12000, annual: 1080, annualCost: 733.19, protocolMaterial: 417.44, margin: 0.3211 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 15000, annual: 1296, annualCost: 876.92, protocolMaterial: 521.8, margin: 0.3234 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 20000, annual: 1632, annualCost: 1116.48, protocolMaterial: 695.73, margin: 0.3159 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 8000, annual: 1032, annualCost: 705.06, protocolMaterial: 371.06, margin: 0.3168 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 10000, annual: 1236, annualCost: 832.82, protocolMaterial: 463.82, margin: 0.3262 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 12000, annual: 1380, annualCost: 960.58, protocolMaterial: 556.58, margin: 0.3039 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 15000, annual: 1656, annualCost: 1152.23, protocolMaterial: 695.73, margin: 0.3042 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 20000, annual: 2088, annualCost: 1471.64, protocolMaterial: 927.64, margin: 0.2952 },
 ];
 
 describe('WaveGuard lawn pricing exposure', () => {
