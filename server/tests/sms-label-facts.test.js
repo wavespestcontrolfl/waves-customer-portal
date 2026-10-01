@@ -419,6 +419,31 @@ describe('label row selection (mock knex)', () => {
     expect(byId.products[0].rainfastMinutes).toBe(90);
   });
 
+  test('r31: a negative / NaN / non-finite frozen re-entry or rainfast figure is unknown (never the until-dry sentinel); null, 0 and positive are unchanged', async () => {
+    const UNTIL_DRY = 'Do not allow people or pets to enter the treated area until sprays have dried.';
+    const line = async (frozenOver) => {
+      const out = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ reentrySummary: UNTIL_DRY, rainfastMinutes: 180, ...frozenOver }) })], rows: [row()] }) });
+      return labelFactsLib.renderLabelFactsSection(out, { formatDate: (d) => d });
+    };
+    // re-entry
+    for (const bad of [-1, -0.5, NaN, 'abc', Infinity, -Infinity]) {
+      const text = await line({ reentryHours: bad });
+      expect([String(bad), /keep people/.test(text)]).toEqual([String(bad), false]); // no re-entry line
+      expect([String(bad), /rain/.test(text)]).toEqual([String(bad), true]); // the rainfast line is untouched
+    }
+    expect(await line({ reentryHours: 0 })).toMatch(/keep people and pets off treated areas until dry/); // 0 + until-dry summary = until dry
+    expect(await line({ reentryHours: null })).toMatch(/keep people and pets off treated areas until dry/); // null + a plain until-dry summary
+    expect(await line({ reentryHours: 4, reentrySummary: 'Keep people and pets off treated areas for 4 hours.' })).toMatch(/4 hours/);
+    // rainfast
+    for (const bad of [-5, NaN, 'abc', Infinity, -Infinity, 0]) {
+      const text = await line({ rainfastMinutes: bad });
+      expect([String(bad), /rain/.test(text)]).toEqual([String(bad), false]); // no rainfast line
+      expect([String(bad), /keep people/.test(text)]).toEqual([String(bad), true]); // the re-entry line is untouched
+    }
+    expect(await line({ rainfastMinutes: 180 })).toMatch(/rain/);
+    expect(await line({ rainfastMinutes: '90' })).toMatch(/1\.5 hours|90 minutes|rain/);
+  });
+
   test('a frozen re-entry of 0 (a catalog NULL is frozen as 0) is "until dry" only when the frozen summary says so', async () => {
     const zero = (reentrySummary) => read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ reentryHours: 0, reentrySummary }) })], rows: [row()] }) });
     expect((await zero('Keep people and pets off treated areas until dry.')).products[0].reiHours).toBe(0);

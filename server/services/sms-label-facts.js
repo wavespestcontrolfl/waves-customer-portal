@@ -165,9 +165,16 @@ function frozenFactsFor(row, snapshot, allSnapshots = [snapshot]) {
 // The snapshot writes rei_hours through Number(), so a catalog NULL (unknown)
 // is frozen as 0, indistinguishable from the residential "0 = until dry"
 // value. Trust a frozen 0 only when the frozen summary itself says a plain until dry.
+// null for no figure; the number for 0 or a finite positive figure; NaN for anything else (negative, NaN, Infinity, non-numeric text):
+// an invalid frozen figure is unknown and must never fall through to a sentinel.
+function validFigure(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : Number.NaN;
+}
 function frozenReiHours(frozen) {
-  const hours = frozen.reentryHours == null ? null : Number(frozen.reentryHours);
-  if (hours !== 0) return hours;
+  const hours = validFigure(frozen.reentryHours);
+  if (hours !== 0) return hours; // (null stays null; an invalid figure stays NaN)
   const parsed = parseReentryText(frozen.reentrySummary);
   return parsed && parsed.kind === 'until_dry' ? 0 : null;
 }
@@ -198,7 +205,8 @@ function productFromRow(row, frozen) {
     additive,
     // A neutral customer-facing type ("an insecticide"), never the brand.
     phrase: (def && def.phrase) || 'a product',
-    rainfastMinutes: f.rainfastMinutes == null ? null : Number(f.rainfastMinutes),
+    // a negative / NaN / non-finite frozen figure is no figure (unknown), never a value to aggregate
+    rainfastMinutes: validFigure(f.rainfastMinutes),
     reiHours: frozenReiHours(f),
     reentrySummary: f.reentrySummary || null,
     reentryText: null,
@@ -384,6 +392,8 @@ function reentryLevelHours(product) {
   if (parsed.includes(null)) return null;
   const figures = parsed.filter((x) => x.kind === 'hours');
   const untilDry = parsed.some((x) => x.kind === 'until_dry');
+  // an invalid frozen figure (negative, NaN, Infinity) is unknown: never the until-dry sentinel
+  if (product.reiHours != null && !(Number.isFinite(product.reiHours) && product.reiHours >= 0)) return null;
   if (Number.isFinite(product.reiHours) && product.reiHours > 0) {
     return !untilDry && figures.every((x) => Math.abs(x.hours - product.reiHours) < 1e-9) ? product.reiHours : null;
   }
