@@ -957,6 +957,18 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
     .orWhere((unsettled) => unsettled.where({ status: 'resent' }).whereRaw(staleClaimSql, [staleCutoff])
       .whereRaw("(metadata->>'dispatch_started_at') IS NULL")
       .whereExists(unsentRecoveryMessage));
+  // Work off retire obligations first (Codex #5459 r6 P2): a late delivery whose alert retirement failed left
+  // metadata.alert_retire_pending on the recovery; retire the key, then clear the flag. A failure leaves the flag.
+  let retired = 0;
+  const retirePending = await db('email_bounce_recoveries')
+    .whereRaw("(metadata->>'alert_retire_pending') = 'true'")
+    .select('id').limit(limit);
+  for (const row of retirePending) {
+    if (!(await retireResendUncertainAlert(row.id))) continue;
+    await db('email_bounce_recoveries').where({ id: row.id })
+      .update({ updated_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - ?::text", [ALERT_RETIRE_PENDING_KEY]) });
+    retired += 1;
+  }
   // Settle the ambiguous rows first: compare-and-swap resent -> resend_uncertain (a second worker's
   // identical swap finds nothing). A late delivery webhook still commits the correction
   // (commitRecoveryOnDelivery resolves the ledger by recovery_message_id, whatever its status).
@@ -988,7 +1000,7 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
       await alertRecoveryResendUncertain(row);
       // A commit can still land between that recheck and the alert: retire the keyed alert then.
       const after = await db('email_bounce_recoveries').where({ id: row.id }).first('status');
-      if (!after || after.status !== RESEND_UNCERTAIN_STATUS) { await retireResendUncertainAlert(row.id); continue; }
+      if (!after || after.status !== RESEND_UNCERTAIN_STATUS) { await retireResendUncertainAlertOrRecordObligation(row.id); continue; }
       await db('email_bounce_recoveries').where({ id: row.id, status: RESEND_UNCERTAIN_STATUS })
         .update({ updated_at: new Date(), metadata: jsonbMerge({ resend_alerted_at: new Date().toISOString() }) });
     } catch (err) {
@@ -1028,18 +1040,30 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
       }
     }
   }
-  return { claimed, uncertain };
+  return { claimed, uncertain, retired };
 }
 
 // Retires the keyed uncertain-resend alert once delivery is confirmed (the emitter owns its key's retirement; see
 // admin-alert-relevance.js): the office must not keep an unread "may not have gone" bell after SendGrid confirms it.
 const resendUncertainAlertKey = (recoveryId) => `bounce-recovery-resend-uncertain:${recoveryId}`;
+const ALERT_RETIRE_PENDING_KEY = 'alert_retire_pending';
+// Returns true when the keyed alert is retired. A failure is NEVER swallowed (Codex #5459 r6 P2): it returns false and
+// the caller records a durable retry obligation (metadata.alert_retire_pending) that the sweep works off.
 async function retireResendUncertainAlert(recoveryId) {
   try {
     await require('./admin-alert-episodes').closeAdminAlertKeys(db, [resendUncertainAlertKey(recoveryId)], 'late_delivery_confirmed');
+    return true;
   } catch (err) {
-    logger.warn(`[bounce-recovery] could not retire the uncertain-resend alert for ${recoveryId}: ${err.message}`);
+    logger.error(`[bounce-recovery] could not retire the uncertain-resend alert for ${recoveryId} (retry obligation recorded): ${err.message}`);
+    return false;
   }
+}
+// Retire now; if that fails, leave the durable obligation on the recovery row. If the obligation cannot be recorded
+// either, throw: the caller aborts this attempt (nothing is committed) rather than commit with a stale alert standing.
+async function retireResendUncertainAlertOrRecordObligation(recoveryId) {
+  if (await retireResendUncertainAlert(recoveryId)) return;
+  await db('email_bounce_recoveries').where({ id: recoveryId })
+    .update({ updated_at: new Date(), metadata: jsonbMerge({ [ALERT_RETIRE_PENDING_KEY]: true }) });
 }
 
 // A recovery re-send reached the provider call and the worker died before its outcome was recorded:
@@ -1168,7 +1192,7 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     if (!rec) return;
     // The re-send was DELIVERED: any standing "may not have gone" alert (a recovery settled resend_uncertain before
     // this late webhook arrived) is now wrong, whether or not the record commit below applies (Codex #5459 r5 P2).
-    await retireResendUncertainAlert(rec.id);
+    await retireResendUncertainAlertOrRecordObligation(rec.id);
     if (rec.record_updated || rec.status === 'committed') return; // already done
 
     const correctedEmail = String(rec.corrected_email || recoveryMessage.recipient_email_snapshot || '').trim().toLowerCase();

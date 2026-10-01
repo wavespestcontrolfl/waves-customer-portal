@@ -256,15 +256,25 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       }
     });
 
-    // Codex #5459 r5 P2: a recordless hand-over (a deferred replay with no service_record_id) has no marker to
-    // persist and runs once per row, so it counts as the first hand-over: an exhausted scheduled invoice is re-armed,
-    // not silently reported settled while the sender never selects it.
-    test('a RECORDLESS hand-over re-arms an exhausted scheduled invoice (never silently settled)', async () => {
+    // Codex #5459 r6 P2: the terminal hook can rerun, so a recordless hand-over persists its one-time grant on the
+    // deferred sms_log row (hold_rearm_granted_at) in the same transaction as the queue write.
+    test('a RECORDLESS hand-over grants the re-arm ONCE (sms_log marker): a rerun after re-exhaustion does not reset attempts; without any marker row nothing is re-armed', async () => {
       const Deferred = require('../services/dispatch-completion-deferred');
       const c = await newCustomer();
+      const [sms] = await db('sms_log').insert({ direction: 'outbound', from_phone: '+15550000001', to_phone: '+15550000002', status: 'blocked', metadata: JSON.stringify({ entry_point: 'synthetic' }) }).returning('id');
       const inv = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000), scheduled_send_attempts: 5 });
-      expect(await Deferred.handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: null })).toMatchObject({ queued: true, rearmed: true });
-      expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
+      expect(await Deferred.handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: null, smsLogId: sms.id })).toMatchObject({ queued: true, rearmed: true });
+      expect((await db('sms_log').where({ id: sms.id }).first()).metadata.hold_rearm_granted_at).toBeTruthy();
+      expect((await invoice(inv)).scheduled_send_attempts).toBe(0);
+      // the sender exhausts the fresh budget again; the hook reruns
+      await db('invoices').where({ id: inv }).update({ scheduled_send_attempts: 5 });
+      expect(await Deferred.handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: null, smsLogId: sms.id })).toMatchObject({ queued: false, settled: true });
+      expect((await invoice(inv)).scheduled_send_attempts).toBe(5);
+      // no record and no sms_log row: nothing durable to record the grant on, never "first"
+      const inv2 = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000), scheduled_send_attempts: 5 });
+      expect(await Deferred.handOverHeldInvoiceToSender({ invoiceId: inv2, serviceRecordId: null })).toMatchObject({ queued: false, settled: true });
+      expect((await invoice(inv2)).scheduled_send_attempts).toBe(5);
+      await db('sms_log').where({ id: sms.id }).del();
     });
 
     test('end to end: a completion hand-over (handOverHeldInvoiceToSender) of an exhausted scheduled invoice records the sender as owner AND the invoice is delivered by the first tick after the release', async () => {
@@ -792,6 +802,37 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
               await db('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'hold-claim-stranded:%'").del();
             }
           });
+        });
+
+        // Codex #5459 r6 P2: a failed hold LOOKUP is not a confirmed hold; the stranded outcome and alert must not tell staff
+        // to wait for a release that may never come.
+        test('a claim stranded after a FAILED hold lookup carries lookupFailed and neutral recovery copy (no "wait for the release")', async () => {
+          const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValueOnce(null).mockResolvedValue({ id: 'synthetic' });
+          try {
+            const c = await newCustomer();
+            const { inv } = await packetInvoiceFor(c);
+            const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async () => {
+              db.__failTables.add('__transaction'); // the claim hand-back fails too
+              return { held: true, reason: 'lookup_failed', error: new Error('db down (synthetic)') };
+            });
+            let out;
+            try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {})); } finally { lookup.mockRestore(); db.__failTables.clear(); }
+            expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_CLAIM_STRANDED', lookupFailed: true, held: false, manualRecovery: true });
+            expect(out.reason).toMatch(/could not be handed back; check whether a hold applies and whether the pay link was delivered/);
+            expect(out.reason).not.toMatch(/wait|released|active collections hold/i);
+            expect((await invoice(inv)).scheduled_send_error).toContain('HOLD_CLAIM_STRANDED:lookup_failed');
+            // the refusal-time alert (answered null) is retried by the sweep with the same neutral copy
+            expect(notify).toHaveBeenCalledTimes(1);
+            await db('invoices').where({ id: inv }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
+            await Invoices.processScheduledSends({ limit: 25 });
+            expect(notify).toHaveBeenCalledTimes(2);
+            for (const call of notify.mock.calls) {
+              const text = `${call[1]} ${call[2]} ${call[3].detail}`;
+              expect(text).toMatch(/could not confirm whether a hold applies/i);
+              expect(text).not.toMatch(/once the hold is released|after the hold ends|active collections hold/i);
+            }
+            expect((await invoice(inv)).status).toBe('scheduled');
+          } finally { notify.mockRestore(); }
         });
 
         test('control: a restore that lands keeps the ordinary retryable hold defer and raises no alert', async () => {

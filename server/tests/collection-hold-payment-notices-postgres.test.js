@@ -833,6 +833,46 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
         } finally { notify.mockRestore(); }
       });
 
+      // Codex #5459 r6 P2: a failed retirement is never swallowed. It leaves metadata.alert_retire_pending on the
+      // recovery; the sweep retires the key, then clears the flag.
+      test('a failed alert retirement after a late delivery leaves a durable obligation that the sweep retries and then clears', async () => {
+        const Recovery = require('../services/email-bounce-recovery');
+        const episodes = require('../services/admin-alert-episodes');
+        const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+        const realClose = episodes.closeAdminAlertKeys;
+        let failClose = true;
+        const close = jest.spyOn(episodes, 'closeAdminAlertKeys').mockImplementation(async (...args) => {
+          if (failClose) throw new Error('alert store down (synthetic)');
+          return realClose(...args);
+        });
+        try {
+          const { rec } = await strandedResent({ withMarker: true });
+          await Recovery.retryHeldRecoveries(); // settles uncertain + alerts
+          const key = `bounce-recovery-resend-uncertain:${rec.id}`;
+          await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Comms - check a re-sent email', body: 'x', metadata: JSON.stringify({ dedupeKey: key }) });
+          const message = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+          await db('email_messages').where({ id: message.id }).update({ provider_message_id: 'sg-late-2', status: 'delivered' });
+          await Recovery.commitRecoveryOnDelivery({ ...message, provider_message_id: 'sg-late-2', status: 'delivered' });
+          let row = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+          expect(row.status).toBe('committed');
+          expect(row.metadata.alert_retire_pending).toBe(true); // the failure left a durable obligation
+          expect((await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).first()).read_at).toBeNull(); // still standing
+          // the sweep retries while the store is still down: the flag stays
+          expect(await Recovery.retryHeldRecoveries()).toMatchObject({ retired: 0 });
+          expect((await db('email_bounce_recoveries').where({ id: rec.id }).first()).metadata.alert_retire_pending).toBe(true);
+          // the store recovers: retired, then the flag clears
+          failClose = false;
+          expect(await Recovery.retryHeldRecoveries()).toMatchObject({ retired: 1 });
+          row = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+          expect(row.metadata.alert_retire_pending).toBeUndefined();
+          const alertRow = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).first();
+          expect(alertRow.read_at).not.toBeNull();
+          expect(alertRow.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'late_delivery_confirmed' });
+          expect(await Recovery.retryHeldRecoveries()).toMatchObject({ retired: 0 });
+          await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).del();
+        } finally { close.mockRestore(); notify.mockRestore(); }
+      });
+
       test('a marked row whose provider outcome WAS recorded (provider id published) is settled: not reclaimed, not alerted', async () => {
         const sendgrid = require('../services/sendgrid-mail');
         const Recovery = require('../services/email-bounce-recovery');

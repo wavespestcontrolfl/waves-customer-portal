@@ -379,6 +379,9 @@ function holdDeferOutcome(held = { reason: 'hold' }) {
     reason: held.reason === 'lookup_failed'
       ? 'The collections dispute-hold lookup failed; delivery deferred'
       : 'Customer has an active collections dispute hold; delivery deferred until it is released',
+    // The hold itself was never confirmed: a caller that cannot hand its claim back must not tell staff to wait for a
+    // release (Codex #5459 r6 P2).
+    ...(held.reason === 'lookup_failed' ? { lookupFailed: true } : {}),
     retryable: true,
     deferred: true,
     deliveryOutcome: 'not_sent',

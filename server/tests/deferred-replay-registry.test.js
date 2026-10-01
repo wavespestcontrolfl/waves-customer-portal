@@ -1409,11 +1409,19 @@ describe('deferred-replay registry', () => {
     const { handOverHeldInvoiceToSender } = require('../services/dispatch-completion-deferred');
     handOverHeldInvoiceToSender.mockClear();
     await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1', service_record_id: 'rec-1' });
-    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-1', serviceRecordId: 'rec-1' });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-1', serviceRecordId: 'rec-1', smsLogId: null });
     // a notice with no completion record hands over with a null record (queue only, no marker to write)
     handOverHeldInvoiceToSender.mockClear();
     await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-2', customer_id: 'cust-1' });
-    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-2', serviceRecordId: null });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-2', serviceRecordId: null, smsLogId: null });
+    // a recordless hand-over names the deferred sms_log row the terminal hook is finishing, which carries the one-time
+    // re-arm grant (Codex #5459 r6 P2)
+    handOverHeldInvoiceToSender.mockClear();
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-3', customer_id: 'cust-1', deferred_sms_log_id: 'sms-9' });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-3', serviceRecordId: null, smsLogId: 'sms-9' });
+    // and the durable terminal-hook runner is what supplies it (every terminal hook run, inline or swept)
+    expect(require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/deferred-replay-registry.js'), 'utf8'))
+      .toMatch(/onTerminalDeferredReplay\(entryPoint, msgId \? \{ \.\.\.claimMeta, deferred_sms_log_id: msgId \} : claimMeta\)/);
     // a hand-over failure is reported as a failed hook (the terminal sweep retries) after the office alert
     handOverHeldInvoiceToSender.mockRejectedValueOnce(new Error('queue down'));
     db.mockReturnValueOnce(firstChain(undefined)); // no open alert yet

@@ -332,16 +332,23 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
 // completion's service record (the marker handOverInvoiceToSender writes), so a terminal
 // report-only replay followed by a retried closeout sees the sender owns the pay link and
 // sends report-only instead of texting a second one.
-// Returns true when this hand-over is the FIRST for the invoice (Codex #5459 r4/r5 P2): the first hand-over alone may
+// Returns true when this hand-over is the FIRST for the invoice (Codex #5459 r4/r5/r6 P2): the first hand-over alone may
 // re-arm an exhausted scheduled invoice (queueHeldInvoiceForSender rearmExhausted), so an idempotent re-run of the
 // same closeout / replay never resets the sender's attempt cap again. With a service record that is "this call newly
 // recorded the ownership marker". A RECORDLESS hand-over (a deferred replay with no service_record_id, e.g. the dead
-// decline notice) has no marker to persist, and its terminal hook runs once per row (the sms_log row transition that
-// guards it is in the same transaction), so it counts as first: silently reporting an exhausted invoice "settled"
-// would leave the sender never selecting it, with no alert.
-async function markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId) {
+// decline notice) persists its one-time grant on the deferred sms_log row's own metadata
+// (hold_rearm_granted_at), compare-and-set inside the SAME transaction as the queue write: the terminal hook can
+// rerun, and only the run that first records the grant may re-arm. No record and no sms_log row = nothing durable to
+// record the grant on, so never "first".
+async function markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId, { smsLogId = null } = {}) {
   if (!invoiceId) return false;
-  if (!serviceRecordId) return true;
+  if (!serviceRecordId) {
+    if (!smsLogId) return false;
+    const granted = await trx('sms_log').where({ id: smsLogId })
+      .whereRaw("metadata->>'hold_rearm_granted_at' IS NULL")
+      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('hold_rearm_granted_at', ?::text)", [new Date().toISOString()]) });
+    return Number(granted) > 0;
+  }
   const newly = await trx('service_records').where({ id: serviceRecordId })
     .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'invoiceSenderOwnsPayLinkFor' IS DISTINCT FROM ?", [String(invoiceId)])
     .forUpdate()
@@ -357,9 +364,9 @@ async function markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId) {
 
 // Queue a held invoice onto the scheduled-invoice sender AND record sender ownership on the
 // service record, atomically (used where no sms_log strip write shares the transaction).
-async function handOverHeldInvoiceToSender({ invoiceId, serviceRecordId = null, database = db }) {
+async function handOverHeldInvoiceToSender({ invoiceId, serviceRecordId = null, smsLogId = null, database = db }) {
   return database.transaction(async (trx) => {
-    const newlyOwned = await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId);
+    const newlyOwned = await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId, { smsLogId });
     return require('./collections/collection-hold').queueHeldInvoiceForSender(invoiceId, trx, { rearmExhausted: newlyOwned });
   });
 }
@@ -375,7 +382,7 @@ async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invo
       updated_at: stampedAt,
     });
     if (changed && reason === 'collections-dispute-hold' && invoiceId) {
-      const newlyOwned = await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId);
+      const newlyOwned = await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId, { smsLogId: msgId });
       await require('./collections/collection-hold').queueHeldInvoiceForSender(invoiceId, trx, { rearmExhausted: newlyOwned });
     }
     return changed;
@@ -398,7 +405,7 @@ async function blockPayLinkOnlyReplay({ msgId, blockedReason, terminalPending = 
       metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text, 'terminal_pending', ?::boolean)", [blockedReason, Boolean(terminalPending)]),
     });
     if (changed && handOver && invoiceId) {
-      const newlyOwned = await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId);
+      const newlyOwned = await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId, { smsLogId: msgId });
       await require('./collections/collection-hold').queueHeldInvoiceForSender(invoiceId, trx, { rearmExhausted: newlyOwned });
     }
     return changed;
