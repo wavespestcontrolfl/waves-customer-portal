@@ -2715,7 +2715,7 @@ describe('Communications review ask serialization', () => {
     expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(true);
   });
 
-  test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch concurrently', async () => {
+  test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {
     let entered, release;
     const providerEntered = new Promise(resolve => { entered = resolve; });
     const providerRelease = new Promise(resolve => { release = resolve; });
@@ -2738,10 +2738,10 @@ describe('Communications review ask serialization', () => {
         expect((await second.json()).code).toBe('REVIEW_SEND_BUSY');
       } finally { release(); }
       expect((await first).status).toBe(200);
-      // Staff composer sends are never held by spacing once the lock is free.
       const afterDelivery = await send(baseUrl);
-      expect(afterDelivery.status).toBe(200);
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      expect(afterDelivery.status).toBe(409);
+      expect((await afterDelivery.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
   });
   test.each(['accepted', 'accepted throw', 'stamp failure', 'tracked stamp failure', 'tracked accepted throw'])('ask retains durable spacing when accepted evidence cannot settle: %s', async mode => {
@@ -2793,8 +2793,9 @@ describe('Communications review ask serialization', () => {
       expect((await send(baseUrl, tracked ? { reviewRequestId: 'rr-1', body: 'wavespest.co/l/abc123' } : {})).status).toBe(mode.includes('throw') ? 500 : 200);
       expect(reserved).toBe(true);
       expect(deleted).not.toHaveBeenCalled();
-      // The automatic sequence's own spacing read still sees this ask.
-      expect(await history.lastManualAskAt('cust-A', {})).toBeInstanceOf(Date);
+      const retry = await send(baseUrl);
+      expect(retry.status).toBe(409);
+      expect((await retry.json()).code).toBe('REVIEW_ASK_SPACING');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
   });
@@ -2829,11 +2830,9 @@ describe('Communications review ask serialization', () => {
     // excludeReservationId: the claimed-link seam reserves before
     // dispatchReviewAsk's own spacing check now, so this attempt's own row
     // must not self-block it (kind !== 'bare' routes through that seam).
-    const ledgerEvidence = async (customerId, opts = {}) => reservations().some(row =>
+    history.lastManualAskAt.mockImplementation(async (customerId, opts = {}) => reservations().some(row =>
       row.customer_id === customerId && row.metadata.review_ask_reservation
-      && row.id !== opts.excludeReservationId) ? new Date() : null;
-    history.lastManualAskAt.mockImplementation(ledgerEvidence);
-    history.lastUnresolvedAskAt.mockImplementation(ledgerEvidence);
+      && row.id !== opts.excludeReservationId) ? new Date() : null);
     // Exercise the actual adapter's classification, including its thrown-error
     // path. The wrapper's post-provider audit failure preserves this outcome.
     require('../services/twilio').sendSMS = jest.fn(async () => {
@@ -2855,13 +2854,8 @@ describe('Communications review ask serialization', () => {
         if (retained) expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
         else expect(reviews.releaseInlineClaim).toHaveBeenCalled();
       }
-      // The automatic sequence's spacing read still sees an uncertain ask,
-      // and a composer retry is held while that outcome is unresolved (it
-      // skips spacing, not the unresolved-send protection).
-      expect(!!(await history.lastManualAskAt('cust-A', {}))).toBe(retained);
       const retry = await send(baseUrl);
       expect(retry.status).toBe(retained ? 409 : 200);
-      if (retained) expect((await retry.json()).code).toBe('REVIEW_SEND_UNRESOLVED');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(retained ? 1 : 2);
     });
   });
@@ -2932,19 +2926,63 @@ describe('Communications review ask serialization', () => {
     });
   });
 
-  test('a composer review send is never held by the 72-hour spacing, and reads no spacing history', async () => {
+  // Pasted/typed review links (no reviewRequestId) keep main's behavior.
+  test('a preceding cadence delivery blocks the bare staff ask', async () => {
     history.lastDeliveredAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('a pasted link inside 72h is refused for a recent manual ask too, and never consults the unscheduled gate or unresolved lookup', async () => {
     history.lastManualAskAt.mockResolvedValue(new Date());
     await withServer(async baseUrl => {
       const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+    });
+    expect(reviews.checkUnscheduledAskGates).not.toHaveBeenCalled();
+    expect(history.lastUnresolvedAskAt).not.toHaveBeenCalled();
+  });
+  test('history failure on a pasted link holds the send with a 503', async () => {
+    history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(503);
+      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('skipSpacing is passed to dispatchReviewAsk only for a claimed Quick Links link', async () => {
+    const dispatchModule = require('../services/review-ask-dispatch');
+    const spy = jest.spyOn(dispatchModule, 'dispatchReviewAsk');
+    try {
+      await withServer(async baseUrl => {
+        expect((await send(baseUrl)).status).toBe(200);
+        expect((await send(baseUrl, inline)).status).toBe(200);
+      });
+      expect(spy.mock.calls[0][2]).toMatchObject({ skipSpacing: false, excludeRequestId: null });
+      expect(spy.mock.calls[1][2]).toMatchObject({ skipSpacing: true, excludeRequestId: 'rr-1' });
+    } finally { spy.mockRestore(); }
+  });
+
+  // Quick Links (claimed reviewRequestId) links skip spacing.
+  test('a Quick Links link is never held by the 72-hour spacing, and reads no spacing history', async () => {
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
+    history.lastManualAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
       expect(response.status).toBe(200);
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
     expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
     expect(history.lastManualAskAt).not.toHaveBeenCalled();
   });
-  test('a composer review send is held while an earlier send to the customer is unresolved, and its claim is released', async () => {
+  test('a Quick Links link is held while an earlier send to the customer is unresolved, and its claim is released', async () => {
     history.lastUnresolvedAskAt.mockResolvedValue(new Date());
+    const reservations = wireReservationLedger();
     await withServer(async baseUrl => {
       const response = await send(baseUrl, inline);
       expect(response.status).toBe(409);
@@ -2954,8 +2992,9 @@ describe('Communications review ask serialization', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', true);
     });
+    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
   });
-  test('the unresolved lookup failing holds the composer send with a 503', async () => {
+  test('the unresolved lookup failing holds a Quick Links send with a 503', async () => {
     history.lastUnresolvedAskAt.mockRejectedValue(new Error('history unavailable'));
     await withServer(async baseUrl => {
       const response = await send(baseUrl, inline);
@@ -2964,67 +3003,21 @@ describe('Communications review ask serialization', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
-  test('the send seam runs the unscheduled-ask gate as the staff composer (cadence and cooldown skipped)', async () => {
+  test('the Quick Links send seam runs the unscheduled-ask gate as the staff composer (cadence and cooldown skipped), once', async () => {
     await withServer(async baseUrl => {
       expect((await send(baseUrl, inline)).status).toBe(200);
     });
+    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledTimes(1);
     expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledWith('cust-A', { staffComposer: true });
   });
-  test.each([
-    ['at_cap', /3 review requests in the last 6 months/],
-    ['already_queued', /already queued/],
-    ['in_flight', /being sent right now/],
-  ])('a pasted review link is refused by the unscheduled-ask gate (%s) with the Quick Links message, and nothing is sent', async (outcome, message) => {
-    reviews.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome });
-    const reservations = wireReservationLedger();
-    await withServer(async baseUrl => {
-      const response = await send(baseUrl);
-      expect(response.status).toBe(409);
-      expect((await response.json()).error).toMatch(message);
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
-    });
-    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledWith('cust-A', { staffComposer: true });
-    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
-  });
-  test('the pasted-link refusal reads the same as the claimed path\'s', async () => {
+  test('a Quick Links link at the cap is still refused by the seam gate', async () => {
     reviews.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome: 'at_cap' });
     await withServer(async baseUrl => {
-      const pasted = await (await send(baseUrl)).json();
-      const claimed = await (await send(baseUrl, inline)).json();
-      expect(pasted.error).toBe(claimed.error);
-    });
-  });
-  test('a pasted review link inside the cooldown or an active cadence still sends (the gate is the staff-composer gate)', async () => {
-    // The real gate skips in_cadence and cooldown for staffComposer; a mock
-    // that models that returns allowed.
-    reviews.checkUnscheduledAskGates.mockImplementation(async (_id, opts = {}) => (opts.staffComposer ? { allowed: true } : { allowed: false, outcome: 'cooldown' }));
-    history.lastDeliveredAskAt.mockResolvedValue(new Date());
-    await withServer(async baseUrl => {
-      expect((await send(baseUrl)).status).toBe(200);
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    });
-  });
-  test('a pasted review link fails closed when the unscheduled-ask gate cannot be read', async () => {
-    reviews.checkUnscheduledAskGates.mockRejectedValue(new Error('stats unavailable'));
-    await withServer(async baseUrl => {
-      const response = await send(baseUrl);
-      expect(response.status).toBe(503);
-      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toMatch(/3 review requests/);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
-  });
-  test('the pasted-link gate runs inside the review-send lock, before the provider', async () => {
-    reviews.checkUnscheduledAskGates.mockImplementation(async () => { expect(held.has('review-send:cust-A')).toBe(true); return { allowed: true }; });
-    await withServer(async baseUrl => {
-      expect((await send(baseUrl)).status).toBe(200);
-    });
-    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledTimes(1);
-  });
-  test('a claimed link is gated once, at its seam, not again at dispatch', async () => {
-    await withServer(async baseUrl => {
-      expect((await send(baseUrl, inline)).status).toBe(200);
-    });
-    expect(reviews.checkUnscheduledAskGates).toHaveBeenCalledTimes(1);
   });
   test('a non-review message never consults the unscheduled-ask gate', async () => {
     await withServer(async baseUrl => {
@@ -3032,19 +3025,12 @@ describe('Communications review ask serialization', () => {
     });
     expect(reviews.checkUnscheduledAskGates).not.toHaveBeenCalled();
   });
-  test('an unavailable review history does not hold a composer review send', async () => {
-    history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
-    await withServer(async baseUrl => {
-      expect((await send(baseUrl, inline)).status).toBe(200);
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    });
-  });
-  test('a composer review send still refuses when another review send holds the customer lock', async () => {
+  test('a Quick Links send still refuses when another review send holds the customer lock', async () => {
     held.add('review-send:cust-A');
     await withServer(async baseUrl => {
-      const response = await send(baseUrl);
+      const response = await send(baseUrl, inline);
       expect(response.status).toBe(409);
-      expect((await response.json()).code).toBe('REVIEW_SEND_BUSY');
+      expect((await response.json()).error).toMatch(/already being sent/);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });

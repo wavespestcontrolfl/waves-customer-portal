@@ -1289,33 +1289,14 @@ router.post('/sms', async (req, res, next) => {
         }
         return result;
       };
-      // A pasted/typed review link has no claimed request, so the claimed
-      // seam's unscheduled-ask gate never ran for it. Run the same gate (staff
-      // composer mode: cadence and 30-day cooldown skipped; the 3-in-180-day
-      // cap and queued/in-flight checks kept) inside the dispatch's
-      // review-send lock hold, before any reservation or provider call. A
-      // refusal returns a blocked result, which the generic path below turns
-      // into the same 409 text the claimed path gives; a gate read error fails
-      // closed. The claimed path already gated at its seam, so it is not
-      // gated twice.
-      const gatedSend = async () => {
-        if (claimedReviewRequestId) return sendAndSettle();
-        let gate;
-        try {
-          gate = await require('../services/review-request').checkUnscheduledAskGates(trustedCustomerId, { staffComposer: true });
-        } catch (gateErr) {
-          logger.warn(`[communications] review ask gate read failed — send held (errType=${gateErr?.name})`);
-          return { sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503,
-            reason: 'Could not verify recent review requests. Try again after review history is available.' };
-        }
-        if (gate.allowed) return sendAndSettle();
-        const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
-        return { sent: false, blocked: true, code: 'REVIEW_ASK_GATED', outcome: gate.outcome, httpStatus: 409,
-          reason: `${REVIEW_GATE_REASONS[gate.outcome] || 'Review request blocked'} — remove the review link before sending.` };
-      };
       return reviewLooking
-        ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, gatedSend,
-          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, skipSpacing: true })
+        // skipSpacing only for a Quick Links tracked link (a claimed request):
+        // that path ran the full seam (consent/review prefs, the staff-composer
+        // unscheduled gate incl. the cap, the click guard) and records the ask
+        // on review_requests. A pasted or typed link has none of that, so it
+        // keeps the 72-hour spacing exactly as on main.
+        ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
+          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, skipSpacing: Boolean(claimedReviewRequestId) })
         : sendAndSettle();
     };
     const result = prepLinkSends
