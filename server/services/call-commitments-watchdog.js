@@ -250,7 +250,8 @@ async function runInner({ now = new Date() } = {}) {
       if (acknowledged || meta?.batchedBy) {
         // Un-read (a reminder back out of the batch) re-arms it: a Done on the
         // batched row must not keep a still-overdue promise out of the bell.
-        // A batch-absorbed row was closed done by this watchdog; taking it back
+        // A batch-absorbed row was closed done by this watchdog (or, absorbed
+        // before the done state existed, by the done backfill); taking it back
         // out of the batch reopens it. A person's own done is never undone.
         // Back out of the batch, the read the absorb added is undone; a staff
         // member's own earlier read (an acknowledgment) stands. A row absorbed
@@ -260,9 +261,9 @@ async function runInner({ now = new Date() } = {}) {
             : trx.raw("CASE WHEN metadata->>'batchedUnread' = 'false' THEN read_at ELSE NULL END"),
           ...(acknowledged
             ? (meta?.batchedBy ? {
-              done_at: trx.raw("CASE WHEN done_by = 'call-commitments-watchdog' THEN NULL ELSE done_at END"),
-              done_by: trx.raw("CASE WHEN done_by = 'call-commitments-watchdog' THEN NULL ELSE done_by END"),
-              resolution: trx.raw("CASE WHEN done_by = 'call-commitments-watchdog' THEN NULL ELSE resolution END"),
+              done_at: trx.raw("CASE WHEN done_by IN ('call-commitments-watchdog', 'backfill') THEN NULL ELSE done_at END"),
+              done_by: trx.raw("CASE WHEN done_by IN ('call-commitments-watchdog', 'backfill') THEN NULL ELSE done_by END"),
+              resolution: trx.raw("CASE WHEN done_by IN ('call-commitments-watchdog', 'backfill') THEN NULL ELSE resolution END"),
             } : {})
             : { done_at: null, done_by: null, resolution: null }),
           metadata: trx.raw("metadata - 'batchedBy' - 'batchedUnread'"),
