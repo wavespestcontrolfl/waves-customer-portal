@@ -1564,9 +1564,15 @@ describe('runDaily reserved citability backfill slots', () => {
 
   test('_claimableBackfillSlots: default 2, never the whole batch, sized by what is claimable, 0 disables', async () => {
     const peek = jest.fn(async ({ limit }) => Array.from({ length: limit }, (_, i) => ({ id: i })));
-    const runner = loadRunnerWith({ queue: { peek } });
+    const recoverStaleClaims = jest.fn(async () => 0);
+    const runner = loadRunnerWith({ queue: { peek, recoverStaleClaims } });
     await expect(runner._claimableBackfillSlots(5)).resolves.toBe(2);
-    expect(peek).toHaveBeenCalledWith({ bucket: 'citability_backfill', limit: 2 });
+    // Stale claims from a crashed batch are recovered before sizing (Codex r1 P2).
+    expect(recoverStaleClaims.mock.invocationCallOrder[0]).toBeLessThan(peek.mock.invocationCallOrder[0]);
+    expect(peek).toHaveBeenCalledWith(expect.objectContaining({ bucket: 'citability_backfill', limit: 2 }));
+    // A failed recovery still sizes from pending rows.
+    recoverStaleClaims.mockRejectedValueOnce(new Error('lock timeout'));
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(2);
     await expect(runner._claimableBackfillSlots(1)).resolves.toBe(0);
     peek.mockResolvedValueOnce([{ id: 1 }]);
     await expect(runner._claimableBackfillSlots(5)).resolves.toBe(1);

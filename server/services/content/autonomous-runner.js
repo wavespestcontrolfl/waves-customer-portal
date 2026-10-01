@@ -1814,7 +1814,13 @@ class AutonomousRunner {
     const wanted = Math.min(envInt('AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS', 2) ?? 0, Math.max(0, batchLimit - 1));
     if (wanted <= 0) return 0;
     try {
-      const rows = await getQueue()?.peek?.({ bucket: CITABILITY_BACKFILL_BUCKET, limit: wanted });
+      const queue = getQueue();
+      // A crashed batch can leave a backfill row stale-claimed, which peek
+      // cannot see; recover first, fail-soft, as the catch-up probe does.
+      await queue?.recoverStaleClaims?.().catch((err) => {
+        logger.warn(`[autonomous-runner] backfill slot stale-claim recovery failed (${err.message}); sizing from pending rows only`);
+      });
+      const rows = await queue?.peek?.({ bucket: CITABILITY_BACKFILL_BUCKET, limit: wanted, minScore: DEFAULT_MIN_SCORE });
       return Math.min(wanted, Array.isArray(rows) ? rows.length : 0);
     } catch (err) {
       logger.warn(`[autonomous-runner] backfill slot peek failed (${err.message}); no slots reserved`);
