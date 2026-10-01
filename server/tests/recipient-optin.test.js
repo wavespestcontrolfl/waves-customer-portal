@@ -135,7 +135,7 @@ describe('recipient double opt-in', () => {
 describe('recipient YES / NO: consent stamp, caller demotion, confirmation replay, review card', () => {
   const KEY = '9415550123';
   const OTHER = '9415550444';
-  function fakeDb({ customer, optinRows, visit = { status: 'scheduled' } }) {
+  function fakeDb({ customer, optinRows, visit = { status: 'scheduled', scheduled_date: new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' } }) {
     const state = { customer: { id: 'c1', service_preferences: {}, ...customer }, optin: optinRows, prefs: [], cards: [], visit };
     const markers = () => state.customer.service_preferences.demote_primary_on_optin || {};
     const dbh = jest.fn((table) => {
@@ -296,6 +296,17 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1']);
   });
 
+  test.each([
+    ['under way', { status: 'en_route', scheduled_date: new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' }],
+    ['in the past but still confirmed', { status: 'confirmed', scheduled_date: new Date(Date.now() - 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' }],
+  ])('a late YES for a visit %s demotes nobody; the entry is dropped', async (_label, visit) => {
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed(), visit });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([]);
+    expect(replays).toEqual([]);
+    expect(entryOf(state, KEY, 's1')).toBeUndefined();
+  });
+
   test('two bookings for the same recipient before the reply: BOTH visits replay', async () => {
     const { dbh } = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: 'x' }, s2: { demote: true, set_at: 'x' } } } } }), optinRows: confirmed() });
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
@@ -387,7 +398,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(sendConfirmationToServiceContact).not.toHaveBeenCalled();
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
-    expect(sendConfirmationToServiceContact).toHaveBeenCalledWith(replay);
+    expect(sendConfirmationToServiceContact).toHaveBeenCalledWith({ ...replay, inReplyToYes: false });
     // Transactional dbh: waits for the commit (executionPromise), never fires on rollback.
     sendConfirmationToServiceContact.mockClear();
     let commit; let rollback;
@@ -428,7 +439,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
 
   test('wired into the transitions: confirm applies (and replays), decline clears, every ask_failed release clears', () => {
     const src = require('fs').readFileSync(require.resolve('../services/recipient-optin'), 'utf8');
-    expect(src).toContain("if (status === 'confirmed') runConfirmationReplays((await applyDemoteMarkersOnConfirm(key, { dbh })).replays, dbh);");
+    expect(src).toContain("if (status === 'confirmed') runConfirmationReplays((await applyDemoteMarkersOnConfirm(key, { dbh })).replays, dbh, { inReplyToYes: true });");
     expect(src).toContain("else if (status === 'declined') await clearDemoteMarkersForPhone(key, { dbh });");
     expect(src.split('await releaseAskFailed(').length - 1).toBe(4);
     expect(src).toContain('async function withSavepoint(dbh, fn)');
@@ -480,7 +491,7 @@ describe('sweepPendingConfirmationReplays: retries unfinished booking-confirmati
     const statusReads = [];
     dbMock.mockImplementation((table) => {
       const q = {};
-      ['whereRaw', 'limit', 'where', 'whereNotNull', 'whereIn', 'forUpdate'].forEach((m) => { q[m] = jest.fn((f) => { if (table === 'recipient_optin' && f && f.phone_key) statusReads.push(f.phone_key); return q; }); });
+      ['whereRaw', 'orderByRaw', 'limit', 'where', 'whereNotNull', 'whereIn', 'forUpdate'].forEach((m) => { q[m] = jest.fn((f) => { if (table === 'recipient_optin' && f && f.phone_key) statusReads.push(f.phone_key); return q; }); });
       q.select = jest.fn(async () => (table === 'customers'
         ? [{ id: 'c1', service_preferences: { demote_primary_on_optin: { 1111111111: { s1: { set_at: fresh } }, 2222222222: { s2: { set_at: old } }, 3333333333: {} } } }]
         : []));

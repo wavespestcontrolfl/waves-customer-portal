@@ -73,7 +73,7 @@ describe('sendConfirmationToServiceContact', () => {
 
   test('sends the confirmation once: service-contact trust, inbound-reply provenance, not customer-initiated', async () => {
     wire();
-    const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+    const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact, inReplyToYes: true });
     expect(res).toEqual({ sent: true });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     const arg = sendCustomerMessage.mock.calls[0][0];
@@ -120,5 +120,11 @@ describe('sendConfirmationToServiceContact', () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'CONSENT_REQUIRED' });
     expect(await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact }))
       .toEqual({ sent: false, reason: 'CONSENT_REQUIRED' });
+  });
+
+  test('a retry or booking-time reconcile (not answering a YES) honors the send window', async () => {
+    wire();
+    await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+    expect(sendCustomerMessage.mock.calls[0][0].conversationalContext).toBe(false);
   });
 });

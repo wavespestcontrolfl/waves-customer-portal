@@ -5852,14 +5852,14 @@ const CONFIRMATION_REPLAY_DEAD_STATUSES = new Set(['cancelled', 'completed', 'sk
 // got, for a visit that is still live and in the future. Used when an on-site
 // recipient answers YES to the opt-in ask AFTER the booking confirmation went
 // out (owner redesign 2026-10-01: the caller and the on-site person both get
-// it). It is a reply to the recipient's own YES, so it rides
-// conversationalContext (never deferred by the send window, like the other
-// inbound-reply senders) with the service-contact trust floor, and renders the
+// it). When it answers the recipient's own YES (inReplyToYes) it rides
+// conversationalContext like the other inbound-reply senders; retries honor
+// the send window with the service-contact trust floor, and renders the
 // SAME `appointment_confirmation` template ladder as deliverConfirmation. The
 // slot, window, reminders and the primary's own confirmation are untouched.
 // Deduped on sms_log: the same phone, message_type 'confirmation' and visit
 // within 24 hours is never re-sent. Returns { sent, reason }.
-async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, contact } = {}) {
+async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, contact, inReplyToYes = false } = {}) {
   if (!customerId || !scheduledServiceId || !contact || !contact.phone) return { sent: false, reason: 'missing_input' };
   try {
     const svc = await db('scheduled_services')
@@ -5914,7 +5914,10 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
       appointmentId: scheduledServiceId,
       renderedSlotMs: apptTime.getTime(),
       identityTrustLevel: 'service_contact_authorized',
-      conversationalContext: true,
+      // Only the immediate answer to the recipient's own YES is a reply; a
+      // sweep retry or a booking-time reconcile honors the send window
+      // (a held send stays retryable).
+      conversationalContext: inReplyToYes === true,
       metadata: {
         original_message_type: 'confirmation',
         appointment_contact_role: contact.role || null,

@@ -61,7 +61,18 @@ async function isOptinRailLive() {
 const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
 // A marker whose booked visit reached one of these is stale: the caller is not
 // demoted for it.
-const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show']);
+// Same set as appointment-reminders' CONFIRMATION_REPLAY_DEAD_STATUSES: a
+// visit that is over, called off or already under way.
+const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show', 'en_route', 'on_site', 'in_progress']);
+// The visit's slot start (ET), as composeScheduledApptTime builds it.
+function visitSlotAt(visit) {
+  const datePart = visit.scheduled_date instanceof Date
+    ? visit.scheduled_date.toISOString().slice(0, 10)
+    : String(visit.scheduled_date || '').slice(0, 10);
+  const timePart = visit.window_start ? String(visit.window_start).slice(0, 8) : null;
+  if (!datePart || !timePart) return null;
+  return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
+}
 // Replay outcomes that end the obligation (anything else is retried by the sweep).
 const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'template_unavailable']);
 // Unanswered or undeliverable entries stop being retried after this.
@@ -166,10 +177,14 @@ async function applyMarkerEntry(h, customer, phoneKey, visits, replays) {
     return;
   }
   for (const [visitId, entry] of Object.entries(visits)) {
-    const visit = await h('scheduled_services').where({ id: visitId, customer_id: customerId }).first('status');
+    const visit = await h('scheduled_services').where({ id: visitId, customer_id: customerId }).first('status', 'scheduled_date', 'window_start');
     const setAt = entry && entry.set_at ? Date.parse(entry.set_at) : NaN;
     const expired = Number.isFinite(setAt) && Date.now() - setAt > MARKER_MAX_AGE_MS;
-    if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()) || expired) {
+    // Same eligibility as the replay itself: a pre-visit status and a slot
+    // still in the future (a visit under way or past demotes nobody).
+    const slotAt = visit ? visitSlotAt(visit) : null;
+    const notFuture = !slotAt || Number.isNaN(slotAt.getTime()) || slotAt.getTime() <= Date.now();
+    if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()) || notFuture || expired) {
       await dropPath(markerPath(phoneKey, visitId));
       continue;
     }
@@ -236,13 +251,13 @@ async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
 // the call booked (still live and in the future; deduped on sms_log inside the
 // helper). Runs AFTER the caller's transaction commits so the consent stamp is
 // visible to the send's own checks. Best-effort: never throws.
-function runConfirmationReplays(replays, dbh) {
+function runConfirmationReplays(replays, dbh, { inReplyToYes = false } = {}) {
   if (!replays || !replays.length) return;
   const run = async () => {
     for (const replay of replays) {
       try {
         const AppointmentReminders = require('./appointment-reminders');
-        const result = await AppointmentReminders.sendConfirmationToServiceContact(replay);
+        const result = await AppointmentReminders.sendConfirmationToServiceContact({ ...replay, inReplyToYes });
         const final = result.sent || REPLAY_TERMINAL_REASONS.has(result.reason);
         if (final && replay.phoneKey) {
           await db('customers').where({ id: replay.customerId })
@@ -297,6 +312,8 @@ async function sweepPendingConfirmationReplays({ limit = 25 } = {}) {
   const rows = await db('customers')
     .whereRaw("jsonb_exists(COALESCE(service_preferences, '{}'::jsonb), 'demote_primary_on_optin')")
     .whereRaw("service_preferences -> 'demote_primary_on_optin' <> '{}'::jsonb")
+    // Random rotation: long-pending entries never starve later customers.
+    .orderByRaw('random()')
     .limit(limit)
     .select('id', 'service_preferences');
   let touched = 0;
@@ -448,7 +465,7 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
       }
     }
     if (updated) {
-      if (status === 'confirmed') runConfirmationReplays((await applyDemoteMarkersOnConfirm(key, { dbh })).replays, dbh);
+      if (status === 'confirmed') runConfirmationReplays((await applyDemoteMarkersOnConfirm(key, { dbh })).replays, dbh, { inReplyToYes: true });
       else if (status === 'declined') await clearDemoteMarkersForPhone(key, { dbh });
       logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
     }
