@@ -804,16 +804,9 @@ export class ApiClient {
     return this.request('/feed/monthly-tip');
   }
 
-  // ---- Satisfaction ----
-  getPendingSatisfaction() {
-    return this.request('/satisfaction/pending');
-  }
-
-  submitSatisfaction(data) {
-    return this.request('/satisfaction', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+  // ---- Google review card (the 1-10 satisfaction rating is retired) ----
+  getGoogleReviewCard() {
+    return this.request('/satisfaction/review-card');
   }
 
   // ---- Property Preferences ----

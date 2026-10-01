@@ -43,7 +43,7 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
       CREATE TEMP TABLE customers AS
         SELECT * FROM public.customers WITH NO DATA;
       CREATE TEMP TABLE notifications AS
-        SELECT recipient_type, category, title, body, metadata, read_at
+        SELECT recipient_type, category, title, body, detail, metadata, read_at
         FROM public.notifications WITH NO DATA;
     `);
     await trx('customers').insert([

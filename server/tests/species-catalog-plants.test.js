@@ -39,7 +39,11 @@ const entriesBySlug = new Map(allEntries.map((e) => [e.slug, e]));
 
 const isPlantKind = (kind) => ['turfgrass', 'weed', 'host_plant'].includes(kind);
 const isConditionKind = (kind) => ['disease', 'disorder'].includes(kind);
-const needsConditionObj = (e) => isConditionKind(e.kind) || e.slug === 'sting-nematode';
+// Nematodes keep kind `organism` but sit in the condition section (a soil assay is
+// the only confirmation), so every entry of the nematodes group carries a condition
+// object, exactly like sting-nematode.
+const isNematode = (e) => e.group === 'nematodes';
+const needsConditionObj = (e) => isConditionKind(e.kind) || isNematode(e);
 
 // ── enums (mirrors ~/photo-id-lawn-plant-build-20260927/validate.js) ───────
 
@@ -58,21 +62,23 @@ const RATE_TOKEN = /\b\d+(\.\d+)?\s?(oz|lb|lbs|gal|ml|g)\b\s?(per|\/)\b/i;
 const FRAC_TOKEN = /\b(FRAC|HRAC|IRAC)\b/i;
 const isHostValid = (h) => HOST_BASE.includes(h) || (entriesBySlug.has(h) && isPlantKind(entriesBySlug.get(h).kind));
 
-describe('L1b catalog size (72 plant + 47 condition + 239 pest = 358)', () => {
+// 358 approved entries (239 pest + 72 plant + 47 condition) plus the 19 draft entries of
+// the 2026-09-30 yard-rotation species set (7 pest + 4 plant + 8 condition) = 377 loaded.
+describe('L1b catalog size (76 plant + 55 condition + 246 pest = 377 loaded, 358 approved)', () => {
   test('section and total counts match the brief', () => {
-    expect(pestSection).toHaveLength(239);
-    expect(plantSection).toHaveLength(72);
-    expect(conditionSection).toHaveLength(47);
-    expect(allEntries).toHaveLength(358);
-    expect(catalog.CATALOG_VERSION).toBe('2026-09-28.1');
+    expect(pestSection).toHaveLength(246);
+    expect(plantSection).toHaveLength(76);
+    expect(conditionSection).toHaveLength(55);
+    expect(allEntries).toHaveLength(377);
+    expect(catalog.CATALOG_VERSION).toBe('2026-09-30.1');
   });
 
-  test('kind <-> section consistency: plant kinds are section plant, condition kinds (+ sting-nematode) are section condition', () => {
+  test('kind <-> section consistency: plant kinds are section plant, condition kinds (+ the nematodes group) are section condition', () => {
     for (const e of plantSection) {
       expect(isPlantKind(e.kind)).toBe(true);
     }
     for (const e of conditionSection) {
-      expect(isConditionKind(e.kind) || e.slug === 'sting-nematode').toBe(true);
+      expect(isConditionKind(e.kind) || isNematode(e)).toBe(true);
     }
     // kind <-> group consistency (BRIEF-PLANTS.md "Kinds and sections" table).
     const KIND_GROUPS = {
@@ -83,16 +89,24 @@ describe('L1b catalog size (72 plant + 47 condition + 239 pest = 358)', () => {
       disorder: ['nutrient-disorders', 'water-and-site', 'cultural-and-chemical'],
     };
     for (const e of l1bEntries) {
-      if (e.slug === 'sting-nematode') { expect(e.group).toBe('nematodes'); continue; }
+      if (e.kind === 'organism') { expect(e.group).toBe('nematodes'); continue; }
       expect(KIND_GROUPS[e.kind]).toContain(e.group);
     }
   });
 
-  test('every entry is owner-approved against its current content (owner decision 2026-09-28)', () => {
-    for (const e of l1bEntries) {
+  // The 119 L1b entries stay owner-approved (owner decision 2026-09-28). The 12
+  // plant/condition entries of the 2026-09-30 yard-rotation set are drafts awaiting the
+  // owner's catalog review, so they must not be approved yet.
+  test('the 119 L1b entries are owner-approved against their current content; the 12 yard-rotation entries are still drafts', () => {
+    const drafts = l1bEntries.filter((e) => e.review.status === 'draft');
+    const approved = l1bEntries.filter((e) => e.review.status !== 'draft');
+    expect(drafts).toHaveLength(12);
+    expect(approved).toHaveLength(119);
+    for (const e of approved) {
       expect(e.review.status).toBe('owner_approved');
       expect(catalog.isApproved(e)).toBe(true);
     }
+    for (const e of drafts) expect(catalog.isApproved(e)).toBe(false);
   });
 });
 
@@ -336,14 +350,18 @@ describe('L1b: copy rules specific to plants (on top of the shared pest Revision
 });
 
 describe('L1b: nematodes are never a photo identity', () => {
-  test('sting-nematode: photo_can_confirm is false everywhere in its condition object', () => {
-    const e = catalog.getEntry('sting-nematode');
+  const nematodes = catalog.listEntries({ group: 'nematodes' });
+
+  test('the nematodes group holds sting, lance and root-knot nematode', () => {
+    expect(nematodes.map((e) => e.slug).sort()).toEqual(['lance-nematode', 'root-knot-nematode-turf', 'sting-nematode']);
+  });
+
+  test.each(nematodes.map((e) => [e.slug, e]))('%s: photo_can_confirm is false everywhere in its condition object', (_slug, e) => {
     expect(e.condition.required_signature.confirmable_by).not.toBe('photo');
     for (const d of e.condition.differentials) expect(d.photo_can_confirm).toBe(false);
   });
 
-  test('sting-nematode sits in the condition section although its kind is organism (Codex #5143 r1)', () => {
-    const e = catalog.getEntry('sting-nematode');
+  test.each(nematodes.map((e) => [e.slug, e]))('%s sits in the condition section although its kind is organism (Codex #5143 r1)', (_slug, e) => {
     expect(e.kind).toBe('organism');
     expect(catalog.sectionOf(e)).toBe('condition');
   });

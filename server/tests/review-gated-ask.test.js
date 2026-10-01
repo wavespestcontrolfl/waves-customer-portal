@@ -55,6 +55,7 @@ jest.mock('../services/customer-contact', () => ({
 const db = require('../models/db');
 db.transaction = async (fn) => fn(db);
 db.raw = (sql) => ({ __raw: sql });
+db.fn = { now: () => new Date() };
 const ReviewService = require('../services/review-request');
 
 const val = (row, col) => row[String(col).split('.').pop()];
@@ -72,6 +73,7 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
     // must pair whereNotIn with a whereNull OR-arm for nullable columns.
     if (op === 'notIn') return l != null && !v.includes(l);
     if (op === '!=') return l !== v;
+    if (op === 'in') return v.includes(l);
     if (l == null) return false;
     return op === '>' ? l > v : op === '<' ? l < v : op === '>=' ? l >= v : op === '<=' ? l <= v : l === v;
   };
@@ -96,6 +98,15 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
     fn.call(sub, sub);
     return (r) => branches.some((b) => b(r));
   }
+
+  const reservedRow = (r) => (state.rows.sms_log || []).some((l) => l.status === 'sending'
+    && l.metadata?.review_ask_reservation === true && String(l.metadata?.review_request_id) === String(r.id));
+  const existsFrom = (fn) => {
+    let from = null;
+    const rec = { select() { return rec; }, from(t) { from = t; return rec; }, whereRaw() { return rec; }, where() { return rec; }, whereNotNull() { return rec; } };
+    fn.call(rec);
+    return from;
+  };
 
   function filtered(q) {
     let rows = [...(state.rows[q.table] || [])];
@@ -125,13 +136,30 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
         this.equals.push([a, op]); return this;
       },
       orWhere() { return this; },
-      whereRaw() { return this; },
-      whereIn() { return this; },
+      // Only the delivered-ask clause livePortalReviewUrlFor relies on is
+      // modeled; every other raw fragment stays a no-op.
+      whereRaw(sql) {
+        if (/sms_sent_at IS NOT NULL OR sent_at IS NOT NULL/.test(String(sql))) this.orGroups.push((r) => r.sms_sent_at != null || r.sent_at != null);
+        return this;
+      },
+      whereIn(c, vals) { this.ops.push([c, 'in', vals]); return this; },
       whereNotIn(c, vals) { this.ops.push([c, 'notIn', vals]); return this; },
       whereNot(c, v) { this.ops.push([c, '!=', v]); return this; },
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; },
+      forUpdate() { return this; },
+      // Only the send-reservation subquery (sms_log 'sending' review_ask_reservation
+      // for this request) is modeled; other EXISTS fragments stay no-ops.
+      whereExists(fn) { if (existsFrom(fn) === 'sms_log') this.orGroups.push(reservedRow); return this; },
+      whereNotExists(fn) { if (existsFrom(fn) === 'sms_log') this.orGroups.push((r) => !reservedRow(r)); return this; },
+      modify(fn) { fn(this); return this; },
+      async pluck(c) { return filtered(this).map((r) => val(r, c)); },
+      async del() {
+        const hit = filtered(this);
+        state.rows[t] = (state.rows[t] || []).filter((r) => !hit.includes(r));
+        return hit.length;
+      },
       // review-ask-history.deliveredAskRows correlates the follow-up delivery
       // subquery with joinRaw; without it the lookup THROWS and dispatch
       // fails closed on REVIEW_HISTORY_UNAVAILABLE (a 503 hold), which reads
@@ -472,5 +500,187 @@ describe('livePortalReviewUrlFor', () => {
     expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBeNull();
     expect(state.rows.review_requests).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+// Portal Google review card + the /go click's stop (owner ruling 2026-09-29).
+// Real ReviewService and real visit-completion-summary. The card offers ONLY a
+// live tracked /go link (never a bare URL: an untracked tap would let an ask
+// enrolled a moment later still text the customer); stopFutureAsks is what a
+// tracked click does about every later-ask path it can reach, and the send-time
+// click guard covers the rest.
+describe('portal review card link + stopFutureAsks (real states)', () => {
+  const { reviewCardLinkFor } = require('../services/portal-review-card');
+  const Summary = require('../services/visit-completion-summary');
+  const GO = (c) => `https://portal.test/api/rate/${c.repeat(64)}/go`;
+  const live = (c, daysBack) => sentAsk({
+    token: c.repeat(64), expires_at: new Date(Date.now() + 86400000), sms_sent_at: daysAgo(daysBack), followup_sent: true,
+  });
+  const queuedOneOff = () => sentAsk({
+    id: 'rr-queued', status: 'pending', sms_sent_at: null, scheduled_for: new Date(Date.now() + 3600000),
+    token: 'q'.repeat(64), expires_at: new Date(Date.now() + 86400000), followup_sent: false,
+  });
+  const seq = (over = {}) => ({ id: 'seq-1', customer_id: 'cust-1', status: 'active', service_record_id: null, ...over });
+  const summaryRows = () => ({
+    service_records: [{ id: 'rec-1', customer_id: 'cust-1', status: 'completed', service_date: new Date().toISOString().slice(0, 10) }],
+    visit_completion_packet_items: [{ packet_id: 'pkt-1', service_record_id: 'rec-1' }],
+    visit_completion_packets: [{ id: 'pkt-1', visit_id: 'v-1' }],
+    service_visits: [{ id: 'v-1', customer_id: 'cust-1' }],
+    visit_effects: [{ visit_id: 'v-1', effect_type: 'completion_email', status: 'unknown_delivery' }],
+  });
+  const seqRow = (state, id = 'seq-1') => state.rows.review_sequences.find((r) => r.id === id);
+
+  describe('the card link is tracked-only', () => {
+    test('a live delivered token: its /go link, whatever else is pending (cooldown / cap / cadence / queued)', async () => {
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5), queuedOneOff()], review_sequences: [seq()] });
+      expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
+    });
+
+    test('no live token: NO link — the bare office URL is never offered, not even when nothing is pending (the completion race)', async () => {
+      installMock({ customers: [CUSTOMER], review_requests: [] });
+      expect(await reviewCardLinkFor('cust-1')).toBeNull();
+      installMock({ customers: [CUSTOMER], review_requests: [queuedOneOff()] });
+      expect(await reviewCardLinkFor('cust-1')).toBeNull();
+    });
+
+    test('review opt-out (notification_prefs.review_request = false) hides the card; SMS-off does not', async () => {
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)], notification_prefs: [{ customer_id: 'cust-1', review_request: false }] });
+      expect(await reviewCardLinkFor('cust-1')).toBeNull();
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)], notification_prefs: [{ customer_id: 'cust-1', review_request: true, sms_enabled: false }] });
+      expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
+    });
+
+    test('a card tap through /go is recorded and suppresses an ask enrolled AFTER it (the late enrollment the bare URL let through)', async () => {
+      const state = installMock({
+        customers: [CUSTOMER], service_records: [{ id: 'rec-1', customer_id: 'cust-1', status: 'completed', service_date: daysAgo(1).toISOString().slice(0, 10) }],
+        review_requests: [live('a', 0)],
+      });
+      const ClickGuard = require('../services/review-click-guard');
+      state.rows.review_requests[0].redirected_at = new Date(); // what /go stamps
+      state.rows.review_requests.push(queuedOneOff());
+      expect(await ClickGuard.askSuppressedByClick({ ...queuedOneOff(), service_record_id: 'rec-1', created_at: new Date() })).toBe(true);
+    });
+
+    test('GATE_REVIEW_DIRECT_LINK off: livePortalReviewUrlFor is the /rate page, the card is still the /go URL', async () => {
+      mockGates.reviewDirectLink = false;
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)] });
+      expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBe(`https://portal.test/rate/${'a'.repeat(64)}`);
+      expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
+    });
+  });
+
+  describe('what a tracked click stops', () => {
+    test.each([
+      ['cooldown + queued', [live('a', 5), queuedOneOff()]],
+      ['at_cap + queued', [live('a', 150), live('b', 120), live('c', 90), queuedOneOff()]],
+    ])('%s: one click supersedes the queued ask', async (_n, rows) => {
+      const state = installMock({ customers: [CUSTOMER], review_requests: rows });
+      expect(await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' })).toEqual({ stopped: true, outstanding: [] });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
+    });
+
+    test('in_cadence + a queued one-off: one click stops the cadence AND the queued ask', async () => {
+      const state = installMock({ customers: [CUSTOMER], review_sequences: [seq()], review_requests: [live('a', 2), queuedOneOff()] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked', next_run_at: null });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
+    });
+
+    test('a /go click stops only cadences whose REMAINING steps are all asks; one with a later private check-in stays active', async () => {
+      const askCheckin = JSON.stringify([{ day: 0, templateKey: 'friendly_ask' }, { day: 3, templateKey: 'resolution_check' }]);
+      const asksOnly = JSON.stringify([{ day: 0, templateKey: 'friendly_ask' }, { day: 3, templateKey: 'soft_reminder' }]);
+      let state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ plan: askCheckin, current_step: 0 })], review_requests: [live('a', 2)] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state)).toMatchObject({ status: 'active' });
+
+      state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ plan: asksOnly, current_step: 0 })], review_requests: [live('a', 2)] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+
+      // Past the check-in only an ask remains: it stops.
+      state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ plan: askCheckin.replace('resolution_check', 'soft_reminder'), current_step: 1 })], review_requests: [live('a', 2)] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state).status).toBe('stopped');
+    });
+
+    test('a parked series final (deferred) is stopped', async () => {
+      const state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ status: 'deferred' })], review_requests: [live('a', 2)] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+    });
+
+    test('a due Day-3 follow-up is marked handled', async () => {
+      const state = installMock({
+        customers: [CUSTOMER],
+        review_requests: [sentAsk({ id: 'rr-legacy', status: 'sent', sms_sent_at: daysAgo(1), followup_sent: false, token: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000) })],
+      });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(state.rows.review_requests[0]).toMatchObject({ followup_sent: true });
+    });
+
+    describe('outreach PARKED for summary recovery (visit_summary_bounced)', () => {
+      const parkedWorld = (extra = {}) => ({
+        customers: [CUSTOMER], ...summaryRows(),
+        review_sequences: [seq({ status: 'active', service_record_id: 'rec-1', current_step: 1, next_run_at: new Date(Date.now() + 3600000) })],
+        review_requests: [live('a', 2)], ...extra,
+      });
+
+      test('park -> card -> click -> resume: the card is the tracked link, and after the click the recovery can neither resume nor re-enroll', async () => {
+        const state = installMock(parkedWorld());
+        expect((await Summary.parkVisitReviewOutreach('pkt-1', db)).parked).toBeGreaterThan(0);
+        expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'visit_summary_bounced' });
+        expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
+
+        await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+        expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+        expect(await Summary.resumeVisitReviewOutreach('pkt-1', db)).toBe(0);
+        expect(await ReviewService._priorSequenceForRecord('rec-1')).toBeTruthy(); // a fresh enrollment is refused
+      });
+
+      test('control: without the click the parked cadence really does resume', async () => {
+        const state = installMock(parkedWorld());
+        await Summary.parkVisitReviewOutreach('pkt-1', db);
+        expect(await Summary.resumeVisitReviewOutreach('pkt-1', db)).toBe(1);
+        expect(seqRow(state).status).toBe('active');
+      });
+    });
+  });
+
+  describe('an ask RESERVED for send (sms_log review_ask_reservation still sending)', () => {
+    const reservedWorld = () => ({
+      customers: [CUSTOMER],
+      review_requests: [live('a', 5), { ...queuedOneOff(), scheduled_for: new Date(Date.now() - 60000) }],
+      sms_log: [{ id: 'sms-1', status: 'sending', metadata: { review_ask_reservation: true, review_request_id: 'rr-queued' } }],
+    });
+
+    test('a click that finds the reservation still active stops everything else but reports NOT stopped', async () => {
+      const state = installMock(reservedWorld());
+      const out = await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(out).toEqual({ stopped: false, outstanding: ['reserved_send'] });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('pending'); // not superseded
+    });
+
+    test('a click DURING the send waits for the dispatcher lock, then (after the send commits) stops the follow-up and reports stopped', async () => {
+      const state = installMock(reservedWorld());
+      lockState.held = true;
+      setTimeout(() => {
+        Object.assign(state.rows.review_requests.find((r) => r.id === 'rr-queued'), { status: 'sent', sms_sent_at: new Date(), followup_sent: false });
+        state.rows.sms_log[0].status = 'sent';
+        lockState.held = false;
+      }, 350);
+      const started = Date.now();
+      const out = await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked', lockWaitMs: 3000 });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+      expect(out).toEqual({ stopped: true, outstanding: [] });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued')).toMatchObject({ status: 'sent', followup_sent: true });
+    });
+
+    test('a lock that never frees fails closed with lock_timeout and changes nothing', async () => {
+      const state = installMock({ ...reservedWorld(), review_sequences: [seq()] });
+      lockState.held = true;
+      const out = await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked', lockWaitMs: 300 });
+      expect(out).toEqual({ stopped: false, outstanding: ['lock_timeout'] });
+      expect(seqRow(state).status).toBe('active');
+    });
   });
 });

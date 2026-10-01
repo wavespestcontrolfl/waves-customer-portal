@@ -935,7 +935,10 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
 
   test('every self-serve caller in this file opts in with selfServeNotice: true', () => {
     const occurrences = src.split('selfServeNotice: true,').length - 1;
-    // GET /availability, POST /find-slots, and the capture-intent revalidation.
-    expect(occurrences).toBe(3);
+    // buildFunnelAvailability — the one builder GET /availability, POST
+    // /find-slots, the capture-intent revalidation and the texting AI's OPEN
+    // TIMES all offer through (booking-capacity-placement-wiring pins each
+    // caller to it).
+    expect(occurrences).toBe(1);
   });
 });

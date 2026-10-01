@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import { adminFetch } from '../../lib/adminFetch';
+import { readCollectionHold } from '../../hooks/useCollectionHold';
+import { HOLD_UNKNOWN_MESSAGE } from '../admin/CollectionHoldNotice';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import WdoSignaturePad from './WdoSignaturePad';
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
@@ -1769,8 +1771,16 @@ export default function CreateProjectModal({
           : quote.coveredByCredit
             ? `Account credit covers the invoice. Card charge: ${total}`
             : `Total charge: ${total}`;
+        // B10: this charge goes past a collections dispute hold, so the
+        // confirm names the hold (or says the check failed) before charging.
+        const hold = await readCollectionHold(customerId);
+        const holdNotice = hold.dispute
+          ? 'BILLING HOLD: this customer disputed a bill on a collections call. This charge goes past the hold.\n\n'
+          : hold.status === 'error'
+            ? `${HOLD_UNKNOWN_MESSAGE}. This charge goes past a billing hold if there is one.\n\n`
+            : '';
         if (!confirm(
-          `Charge ${savedCardLabel} and finish this service?\n\n${pricingDetail}\n\n` +
+          `${holdNotice}Charge ${savedCardLabel} and finish this service?\n\n${pricingDetail}\n\n` +
           `After payment succeeds, the customer receives the ${documentLabel} immediately.`,
         )) return;
 

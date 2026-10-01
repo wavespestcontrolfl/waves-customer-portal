@@ -28,6 +28,13 @@ function nextMillisecondBoundary(date) {
   return new Date(date.getTime() + 1);
 }
 
+// An unknown sender's bell carries no customer id: its link is the bare inbox
+// or, since the bell opens the conversation, ?message=<MessageSid>
+// (notification-triggers.js sms_reply). Both mean "unlinked".
+const UNLINKED_BELL_LINK = '/admin/communications';
+const isUnlinkedBellLink = (qb, column = 'link') => qb.where((b) => b
+  .where(column, UNLINKED_BELL_LINK).orWhere(column, 'like', `${UNLINKED_BELL_LINK}?message=%`));
+
 async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
   if (!phone) return 0;
   try {
@@ -49,8 +56,8 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
         .first('m.twilio_sid');
       // Match the bell's current target and preserve customer-linked bells.
       const bellCutoff = nextMillisecondBoundary(cutoff);
-      const liveBell = () => NotificationService.scopeAdminFeedToRole(trx('notifications'), role)
-        .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
+      const liveBell = () => isUnlinkedBellLink(NotificationService.scopeAdminFeedToRole(trx('notifications'), role)
+        .where({ recipient_type: 'admin', category: 'inbound_sms' }))
         .whereNull('read_at')
         .where('created_at', '<', bellCutoff)
         .whereRaw(
@@ -63,7 +70,12 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
           [phone],
         );
       if (remaining?.twilio_sid) {
-        await liveBell().update({ metadata: trx.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]) });
+        // The link names the message the bell opens, so it follows the target
+        // (a bare-link bell gains ?message=<sid> here).
+        await liveBell().update({
+          link: `${UNLINKED_BELL_LINK}?message=${encodeURIComponent(remaining.twilio_sid)}`,
+          metadata: trx.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]),
+        });
         return 0;
       }
       // Appends take this phone lock too. Recheck in the UPDATE for other
@@ -100,8 +112,8 @@ async function phonesWithLiveUnlinkedBell(candidateRows) {
     })
     .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ANY(?)', [candidatePhones])
     .whereExists(function liveBell() {
-      this.select(1).from('notifications as n')
-        .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms', 'n.link': '/admin/communications' })
+      isUnlinkedBellLink(this.select(1).from('notifications as n')
+        .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }), 'n.link')
         .whereNull('n.read_at')
         .whereRaw("n.metadata->'payload'->>'twilioSid' = m.twilio_sid");
     })
@@ -153,7 +165,7 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
     const custs = await customerIdsInScope(ids, convs);
     if (custs.length) {
       await db('notifications').where({ category: 'inbound_sms' })
-        .whereIn('link', custs.map((cid) => `/admin/communications?thread=${cid}`))
+        .whereRaw("split_part(link, '&message=', 1) = ANY(?)", [custs.map((cid) => `/admin/communications?thread=${cid}`)])
         .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
         .update({ metadata: db.raw("metadata - 'backlog_reset'") });
     }

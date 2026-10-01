@@ -38,3 +38,23 @@ test.each(['admin', undefined])('authorized role=%s retains the full sender-bell
   expect(update).toBeDefined();
   expect(update.sql).not.toContain("metadata->>'triggerKey'");
 });
+// An unknown sender's bell links the bare inbox or ?message=<MessageSid>
+// (notification-triggers sms_reply); both must still be retargeted or cleared.
+test('the sender-bell update matches both unlinked link shapes, never a customer thread link', async () => {
+  mockRemaining = null;
+  await retargetOrClearUnknownSenderBell('+19415550100', new Date(), 'admin');
+  const update = mockQueries.find(query => query.method === 'update');
+  expect(update.bindings).toEqual(expect.arrayContaining(['/admin/communications', '/admin/communications?message=%']));
+  expect(update.bindings.filter(value => String(value).includes('thread='))).toEqual([]);
+});
+
+// The retargeted bell opens the message it now names: the link follows the
+// payload sid (a bare-link bell gains ?message=<sid>).
+test('retargeting to a surviving unread message rewrites the link with the payload sid', async () => {
+  mockRemaining = { twilio_sid: 'SM-unread' };
+  await retargetOrClearUnknownSenderBell('+19415550100', new Date(), 'admin');
+  const update = mockQueries.find(query => query.method === 'update');
+  expect(update.sql).toContain('"link" = ?');
+  expect(update.bindings).toContain('/admin/communications?message=SM-unread');
+  expect(update.bindings).toContain('SM-unread');
+});

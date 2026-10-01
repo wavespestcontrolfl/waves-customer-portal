@@ -567,6 +567,30 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
   // mirror edit + surface a 409 on a unique address-index collision rather than
   // leaving customers.address_* and the property's dedup key desynced.
   await conn('customer_properties').where({ id: primary.id }).update(next);
+  await clearMovedAreaMirrors(conn, customer.id, primary, next.address_key);
+}
+
+// Reviewed property areas (dark GATE_PROPERTY_SERVICE_AREAS) write the
+// primary's bed/lawn mirrors. When the primary address moves, a value that is
+// still exactly what a review of the FORMER address wrote describes the old
+// home: clear it (NULL beats the wrong home's size), with the review. A mirror
+// that no longer equals the review was entered some other way and is kept, as
+// before this feature. No-op before the areas migration or without a review.
+async function clearMovedAreaMirrors(conn, customerId, primary, nextAddressKey) {
+  const saved = primary.service_area_measurements;
+  const areas = saved && typeof saved === 'object' ? saved.areas || {} : {};
+  if (!saved?.addressKey || saved.addressKey === nextAddressKey || saved.addressKey !== addressKey(primary)) return;
+  const bedSqft = areas.beds?.sqft;
+  const lawnSqft = areas.lawn?.sqft;
+  const propertyPatch = { service_area_measurements: {} };
+  if (Number.isInteger(bedSqft) && primary.bed_sqft === bedSqft) propertyPatch.bed_sqft = null;
+  if (Number.isInteger(lawnSqft) && primary.property_sqft === lawnSqft) propertyPatch.property_sqft = null;
+  await conn('customer_properties').where({ id: primary.id }).update(propertyPatch);
+  if (Number.isInteger(bedSqft)) await conn('customers').where({ id: customerId, bed_sqft: bedSqft }).update({ bed_sqft: null });
+  if (Number.isInteger(lawnSqft)) {
+    await conn('customers').where({ id: customerId, property_sqft: lawnSqft }).update({ property_sqft: null });
+    await conn('customer_turf_profiles').where({ customer_id: customerId, lawn_sqft: lawnSqft }).update({ lawn_sqft: null, updated_at: new Date() });
+  }
 }
 
 /**

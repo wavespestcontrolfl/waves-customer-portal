@@ -35,7 +35,7 @@ if (require.main === module) {
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const {
   canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty,
-  dispatchesToOnFileAddress,
+  dispatchesToOnFileAddress, reconstructWaivedAddressValidation,
 } = require('../services/call-triage-flags');
 // Production's own fail-open context builder + V1-conflict demotion, so this
 // audit cannot drift from the live contract (local pre-push audit P1).
@@ -325,7 +325,9 @@ async function main() {
     //
     // Resolved with production's OWN resolver (see contactPhoneForCall above).
     const contactPhone = contactPhoneForCall(r);
-    const storedAv = parseJson(r.ai_address_validation);
+    // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) is stamped
+    // on the persisted row; rebuild the verdict the routing gate saw.
+    const storedAv = reconstructWaivedAddressValidation(parseJson(r.ai_address_validation));
     const effectiveAv = recoveredCallIds.has(r.id)
       ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
       : storedAv;

@@ -161,7 +161,9 @@ describe('FastCompleteSheet recorded dictation', () => {
     await screen.findByRole('button', { name: /Taurus SC/ });
     const fullForm = screen.getByRole('button', { name: 'Full form' });
     const otherProduct = screen.getByRole('button', { name: '+ Other product' });
-    expect(fullForm.disabled).toBe(true);
+    // The mic reports the clip from an effect after the form mounts, so the
+    // hold lands a render later.
+    await waitFor(() => expect(fullForm.disabled).toBe(true));
     expect(otherProduct.disabled).toBe(true);
     fireEvent.click(fullForm);
     fireEvent.click(otherProduct);

@@ -426,17 +426,27 @@ async function recordNoContext(ctx, packet, facts, late = []) {
 function ringNoContextBell(ctx, facts) {
   if (ctx.sandbox === true) return;
   void Promise.resolve()
-    .then(() => require('../notification-service').notifyAdmin(
-      'alert',
-      'Sandy transfer without context',
-      `A caller${facts.from ? ` from ${require('./relay-protocol').maskPhone(facts.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
-      {
-        link: '/admin/communications#tab=calls',
-        dedupeKey: `${NO_CONTEXT_BELL}:${ctx.callSid || 'unknown'}`,
-        bell: true,
-        metadata: { triggerKey: NO_CONTEXT_BELL, callSid: ctx.callSid || null },
-      },
-    ))
+    .then(async () => {
+      // The call's own row, so the bell opens that call (the Calls tab reads
+      // call=<call_log id>). A failed lookup keeps the bare tab.
+      let callLogId = null;
+      try {
+        callLogId = ctx.callSid
+          ? (await require('../../models/db')('call_log').where('twilio_call_sid', ctx.callSid).first('id'))?.id || null
+          : null;
+      } catch { /* bare tab */ }
+      return require('../notification-service').notifyAdmin(
+        'alert',
+        'Sandy transfer without context',
+        `A caller${facts.from ? ` from ${require('./relay-protocol').maskPhone(facts.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
+        {
+          link: `/admin/communications#tab=calls${callLogId ? `&call=${encodeURIComponent(callLogId)}` : ''}`,
+          dedupeKey: `${NO_CONTEXT_BELL}:${ctx.callSid || 'unknown'}`,
+          bell: true,
+          metadata: { triggerKey: NO_CONTEXT_BELL, callSid: ctx.callSid || null },
+        },
+      );
+    })
     .catch((err) => logger.warn(`[voice-relay] ${NO_CONTEXT_BELL} bell failed: ${err.message}`));
 }
 
