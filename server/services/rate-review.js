@@ -837,7 +837,10 @@ function engineItemVisits(item) {
 // `expectedVisits`: the line's own applications per year (seasonal mosquito
 // = 9, not the 12 its monthly pattern suggests); falls back to the cadence
 // table when the caller has none.
-function listRateFromEngineResult(result, line, cadence, { includeRiders = false, expectedVisits = null } = {}) {
+// `riderAllow`: the ledger family keys the current monthly slice actually
+// sums (ledgerSliceForLine(...).family_keys) — a rider priced on the saved
+// estimate but cancelled since has no slice and must not inflate the list.
+function listRateFromEngineResult(result, line, cadence, { includeRiders = false, expectedVisits = null, riderAllow = null } = {}) {
   const keys = ENGINE_SERVICE_KEYS[line] || [];
   const items = result && Array.isArray(result.lineItems) ? result.lineItems : [];
   const item = items.find((i) => keys.includes(i.service));
@@ -849,7 +852,9 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   const cadenceMismatch = !!(expected && Math.round(visits) !== Math.round(expected));
   // Riders (a palm program beside Tree & Shrub) join the MONTHLY figure only,
   // mirroring the ledger slice the monthly current rate was read from.
-  const riderKeys = includeRiders ? (ENGINE_RIDER_KEYS[line] || []) : [];
+  const riderKeys = includeRiders
+    ? (ENGINE_RIDER_KEYS[line] || []).filter((k) => !Array.isArray(riderAllow) || riderAllow.includes(k))
+    : [];
   const riders = items.filter((i) => riderKeys.includes(i.service) && !i.quoteRequired && !i.requiresCustomQuote && !i.requiresMeasurement);
   const riderAnnual = riders.reduce((sum, r) => sum + (positive(r.annualAfterDiscount ?? r.annual) || 0), 0);
   return {
@@ -1393,7 +1398,8 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     if (!customer) continue;
     const familyKey = planLine.family_key;
     const cadence = planLine.cadence;
-    const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice: ledgerSliceForLine(ledger, customer.id, familyKey) });
+    const ledgerSlice = ledgerSliceForLine(ledger, customer.id, familyKey);
+    const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice });
     const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
     const lineVisits = visitsByLine.get(`${customer.id}|${familyKey}`) || [];
     const stats = lineDurationStats(lineVisits, {
@@ -1421,7 +1427,13 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.join(',')}`;
       if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
       const replay = replayCache.get(cacheKey);
-      const rate = replay ? listRateFromEngineResult(replay.result, familyKey, cadence, { includeRiders: current.unit === 'month', expectedVisits: visitsPerYear }) : null;
+      const rate = replay
+        ? listRateFromEngineResult(replay.result, familyKey, cadence, {
+          includeRiders: current.unit === 'month' && current.source === 'ledger_slice',
+          riderAllow: ledgerSlice ? ledgerSlice.family_keys : [],
+          expectedVisits: visitsPerYear,
+        })
+        : null;
       if (!rate) continue;
       // Hand-picked tier evidence compares the estimate's SAVED tier with a
       // replay of the mix it was sold with (no reconciliation) — a tier that

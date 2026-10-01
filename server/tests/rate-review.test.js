@@ -598,6 +598,9 @@ describe('engine replay runs at the line\'s own cadence', () => {
     // a rider that needs a custom quote is left out rather than priced at $0
     const quoteRequired = { lineItems: [result.lineItems[0], { ...result.lineItems[1], quoteRequired: true }], waveGuard: { tier: 'silver' } };
     expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true }).monthlyCents).toBe(3000);
+    // a rider on the saved estimate that the ledger no longer carries (cancelled since) stays out of the list
+    expect(P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub'] })).toMatchObject({ monthlyCents: 3000, riderServices: [] });
+    expect(P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ monthlyCents: 4250, riderServices: ['palm_injection'] });
   });
 });
 
