@@ -5213,6 +5213,30 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(sentBody).toContain('hope the ants stayed gone');
   });
 
+  test('tech voice on: a persisted draft is reused the same ET day, but a retry on a later day drafts afresh (it may say "today")', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const priorDraft = "It's Adam, thanks for waiting on me this morning. A Google review would really help: {review_url}";
+    const fresh = "It's Adam, thanks again for Tuesday. A Google review would really help: {review_url}";
+    mockDraftTechVoice.mockResolvedValue(fresh);
+    const fixture = (id, createdAt) => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
+      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt }],
+    }));
+
+    let mock = fixture('tvd-1', new Date(Date.now() - 2 * 86400000));
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
+
+    mockDraftTechVoice.mockClear();
+    mockSendCustomerMessage.mockClear();
+    mock = fixture('tvd-2', new Date());
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('waiting on me this morning');
+  });
+
   test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {
     const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
     const mock = makeMock(reminderStepFixture('seq-rc', {

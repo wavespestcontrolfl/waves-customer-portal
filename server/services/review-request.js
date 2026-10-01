@@ -4682,7 +4682,12 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          if (prior?.custom_body) persistedBody = prior.custom_body;
+          // A tech-voice draft speaks about its own day ("this morning",
+          // "today"), so it is reused only on the ET calendar day it was
+          // written; a retry that crosses midnight drafts afresh.
+          const { etCalendarDayOf } = require("../utils/datetime-et");
+          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date()));
+          if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
       }
 
@@ -4737,7 +4742,10 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          if (prior?.custom_body) persistedBody = prior.custom_body;
+          // Same-day reuse only under tech voice (see the SMS path above).
+          const { etCalendarDayOf } = require("../utils/datetime-et");
+          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date()));
+          if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
           const Drafter = require("./review-ask-drafter");
