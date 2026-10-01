@@ -149,10 +149,24 @@ async function deferredSetupClaimStillQueued(trx, member) {
 // restores the stamp with it. The office reviews and sends the draft. A NEGATIVE
 // stamp is a single-visit completion mid-mint that will bill the fee itself,
 // left alone. Every member's series is scanned (billed or not), once per series.
+// Only a member whose visit was really PERFORMED as live work can be the first
+// visit the queued fee rides: a declined / inspection-only / incomplete visit,
+// a backfill or an already-invoiced completion, a recap-only record, a callback
+// or always-free work keeps its series' stamp for the visit that is performed
+// (the single-visit completion's own rule).
+function memberPerformedForSetupClaim(member) {
+  const notes = member.record_notes || {};
+  return member.record_status === 'completed'
+    && !notes.backfill && !notes.invoiceAlreadySent && !notes.oneTimeRecapOnly
+    && !['inspection_only', 'customer_declined'].includes(notes.visitOutcome)
+    && !member.is_callback && !isAlwaysFreeServiceType(member.service_type);
+}
+
 async function consumeQueuedSetupClaimsForOffice(trx, members, { packet, visit }) {
   const drafts = [];
   const seen = new Set();
   for (const member of members) {
+    if (!memberPerformedForSetupClaim(member)) continue;
     const claim = await liveSetupClaim(trx, member);
     if (!claim?.queued || seen.has(claim.parentId)) continue;
     seen.add(claim.parentId);
@@ -520,8 +534,12 @@ async function createVisitCompletionInvoice(packetId, database = db) {
       // A hold set before this mint ran (the office, a payer withdrawal) still
       // hands the closeout over: any queued claim on its series is consumed into
       // its draft here too, never left armed behind the manual bill.
-      const heldMembers = await trx('scheduled_services').whereIn('id', itemIds)
-        .orderBy('id').select('id', 'customer_id', 'source_estimate_id', 'recurring_parent_id');
+      const heldMembers = await trx('visit_completion_packet_items as i')
+        .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+        .join('service_records as r', 'r.id', 'i.service_record_id')
+        .where('i.packet_id', packet.id).orderBy('s.id')
+        .select('s.id', 's.customer_id', 's.source_estimate_id', 's.recurring_parent_id', 's.is_callback',
+          's.service_type', 'r.status as record_status', 'r.structured_notes as record_notes');
       const drafts = await consumeQueuedSetupClaimsForOffice(trx, heldMembers, { packet, visit });
       if (drafts.length) {
         await trx('visit_completion_packets').where({ id: packet.id }).update({

@@ -7339,6 +7339,17 @@ ${shellQuestionsBar()}
     return total > 0 ? fmt(total) : 'after completion';
   }
 
+  // GATE_PAF_SETUP_FEE: whether this page is showing "setup fee billed with
+  // your first visit" for the current choice — attested on the accept, which
+  // refuses (SETUP_FEE_TERMS_REFRESH) when it would bill differently.
+  function setupFeePromiseShown() {
+    return PAY_AFTER_SETUP_FEE_COPY
+      && bookingState.serviceMode === 'recurring'
+      && bookingState.pickedPref !== 'prepay_annual'
+      && Number(STANDARD_INVOICE_SETUP_DUE || 0) > 0
+      && !(STANDARD_INVOICE_HAS_FIRST_APPLICATION && currentFirstVisitAmount() > 0);
+  }
+
   function standardPayPerApplicationSummaryBody() {
     const setupDue = Number(STANDARD_INVOICE_SETUP_DUE || 0);
     const hasSetup = setupDue > 0;
@@ -8089,6 +8100,7 @@ ${shellQuestionsBar()}
       if (bookingState.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
         payload.selectedFrequency = DEFAULT_RECURRING_FREQUENCY;
       }
+      if (setupFeePromiseShown()) payload.setupFeeAfterFirstVisitShown = true;
       const r = await fetch(API + '/accept', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -8112,6 +8124,15 @@ ${shellQuestionsBar()}
         toast(data.error || 'This account already has an active annual prepay plan. Please call or text us to adjust your coverage.');
         if (btn) btn.disabled = false;
         setBookingChoiceControlsDisabled(false);
+        return;
+      }
+      if (r.status === 409 && data.code === 'SETUP_FEE_TERMS_REFRESH') {
+        // Billing terms, not a slot conflict: nothing was booked. Reload with
+        // the answer the accept would apply so the page shows those terms.
+        toast(data.error || 'Your billing terms were updated. Please review them and confirm again.');
+        const next = new URL(location.href);
+        if (typeof data.setupFeePromise === 'boolean') next.searchParams.set('setup_fee_terms', data.setupFeePromise ? '1' : '0');
+        setTimeout(() => location.replace(next.toString()), 1200);
         return;
       }
       if (r.status === 409) {
@@ -9072,7 +9093,14 @@ async function handleEstimateView(req, res, next) {
           // The setup-fee promise's lane half (see estimateSetupFeePromiseLaneOk):
           // only looked up when the page could otherwise promise it.
           if (payAfterFirstVisitCopy && require('../config/feature-gates').pafSetupFeeLive()) {
-            setupFeePromiseLaneOk = await estimateSetupFeePromiseLaneOk(estimate);
+            // A SETUP_FEE_TERMS_REFRESH reload carries the answer the accept
+            // would apply (?setup_fee_terms=0|1): the page renders it instead of
+            // the pre-conversion lookup, so it cannot refuse on every confirm.
+            // Copy only — the accept still recomputes and verifies the promise.
+            const refreshAnswer = req.query?.setup_fee_terms;
+            setupFeePromiseLaneOk = refreshAnswer === '0' || refreshAnswer === '1'
+              ? refreshAnswer === '1'
+              : await estimateSetupFeePromiseLaneOk(estimate);
           }
         }
       } catch (payAfterErr) {
@@ -12431,6 +12459,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // keys on THIS, never on the deferral outcome (a fallback to the payable
       // invoice still records what was displayed and agreed to).
       let setupFeeAfterVisitConsentShown = false;
+      // Whether this accept reached the setup-fee promise check below. A tab
+      // that attested the promise on an accept that never evaluates it (bill
+      // by invoice, one-time, prepay or any other branch that mints its own
+      // payable invoice) is refused at the end of the transaction.
+      let setupFeePromiseEvaluated = false;
       if (customerId && !treatAsOneTime && !annualPrepaySelected) {
         const EstimateConverter = require('../services/estimate-converter');
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
@@ -12594,6 +12627,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // flipped, a stale tab) refuses retryably — the whole accept rolls
           // back — so the customer is never billed differently than shown.
           const deferPromisedNow = deferShapeEligible && deferLaneIsPerApplication;
+          setupFeePromiseEvaluated = true;
           if (setupFeeAfterVisitAttested !== deferPromisedNow) {
             logger.warn(`[estimate-accept] setup-fee terms differ for estimate ${estimate.id} (tab rendered the first-visit promise: ${setupFeeAfterVisitAttested}, accept would apply it: ${deferPromisedNow}) — refusing for a refresh`);
             const termsDiffErr = estimateAcceptError(
@@ -12958,6 +12992,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             })],
           ),
         });
+      }
+
+      // One boundary for every acceptance branch (pre-push audit P0): a tab
+      // that rendered "setup fee billed with your first visit" never commits
+      // through a branch that did not apply it. Rolls the whole accept back.
+      if (setupFeeAfterVisitAttested && !setupFeePromiseEvaluated) {
+        logger.warn(`[estimate-accept] estimate ${estimate.id}: tab rendered the first-visit setup-fee promise but this accept's branch never applies it — refusing for a refresh`);
+        const branchErr = estimateAcceptError(
+          'We couldn\u2019t finish setting up your first-visit billing just now \u2014 please reload the page and try again, or call us and we\u2019ll book it for you.',
+          409,
+        );
+        branchErr.code = 'SETUP_FEE_TERMS_REFRESH';
+        branchErr.setupFeePromise = false;
+        throw branchErr;
       }
 
       return {

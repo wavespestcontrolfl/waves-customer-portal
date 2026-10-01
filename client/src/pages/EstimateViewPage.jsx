@@ -8335,8 +8335,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const setupFeeSelectionKey = `${paymentPreference || ''}|${selectedFrequency || ''}|${JSON.stringify(serviceCadences || null)}`;
   setupFeeSelectionKeyRef.current = setupFeeSelectionKey;
   const setupFeeServerAnswer = setupFeePromiseOverride?.key === setupFeeSelectionKey ? setupFeePromiseOverride.value : null;
+  // Every surface that renders the setup-fee promise reads THIS, so the copy,
+  // the payment options and the attestation always agree.
+  const setupFeePromiseEnabled = setupFeeServerAnswer ?? !!data?.recurringCardPolicy?.setupFeeAfterFirstVisit;
   const setupFeeAfterVisitCopy = paymentPreference !== 'prepay_annual' && setupFeeBilledWithFirstVisit({
-    enabled: setupFeeServerAnswer ?? !!data?.recurringCardPolicy?.setupFeeAfterFirstVisit,
+    enabled: setupFeePromiseEnabled,
     serviceMode,
     invoiceMode: !!estimate.billByInvoice,
     siteConfirmationHold: !!estimate.siteConfirmationHold,
@@ -9086,7 +9089,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
-                setupFeeAfterFirstVisit={!!data?.recurringCardPolicy?.setupFeeAfterFirstVisit}
+                setupFeeAfterFirstVisit={setupFeePromiseEnabled}
               />
             </>
           ) : null}
@@ -9430,7 +9433,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
-                setupFeeAfterFirstVisit={!!data?.recurringCardPolicy?.setupFeeAfterFirstVisit}
+                setupFeeAfterFirstVisit={setupFeePromiseEnabled}
               />
             </div>
           ) : null

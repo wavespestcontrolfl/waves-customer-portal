@@ -597,6 +597,20 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(saved.body.billing.setupFeeDrafts[0]).toMatchObject({ invoiceId: drafts[0].id, amount: 99 });
   });
 
+  test('an office-required closeout leaves an UNPERFORMED member\'s stamp queued (inspection only): only a performed visit can carry the fee', async () => {
+    await linkFixtureEstimate();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ pending_setup_fee: 99, recurring_parent_id: null });
+    await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Manual visit bill', quantity: 1, unit_price: 120 }] });
+    const input = submission();
+    input.items[1].body.visitOutcome = 'inspection_only';
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.body.billing).toMatchObject({ state: 'office_required' });
+    expect(await setupDraftsOf()).toHaveLength(0);
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).first('pending_setup_fee')).pending_setup_fee)).toBe(99);
+    expect(saved.body.billing.setupFeeDrafts).toBeUndefined();
+  });
+
   test('the closeout review alert carries the draft setup invoice id + amount', async () => {
     await linkFixtureEstimate();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
