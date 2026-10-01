@@ -183,7 +183,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
         .where({ recipient_type: 'admin' })
         .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
         .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
-        .select('id', 'read_at', 'done_at', 'metadata');
+        .select('id', 'read_at', 'done_at', 'done_by', 'metadata');
       const others = (history || []).map((row) => ({ row, meta: parseMeta(row) })).filter(({ meta }) => String(meta.dedupeKey || '') !== dedupeKey);
       const requestIds = [...new Set([requestId, ...others.map(({ meta }) => rowRequestId(meta))].filter(Boolean).map(String))];
       const openedAt = new Map();
@@ -209,8 +209,12 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
       // compares content — a transient note would reopen an acted-on task).
       if (others.length) superseded = { dated: others.some(({ meta }) => !!meta.retrieveAfter) };
       // A task someone only opened is still open work, so it retires too:
-      // picked by done_at, closed done (read is not done).
-      const retire = others.filter(({ row }) => row.done_at == null);
+      // picked by done_at, closed done (read is not done). A task a PERSON
+      // marked done is taken over as well (openToCloser's rule), so Recently
+      // done can't reopen an obsolete instruction beside its replacement; one
+      // a system already closed is history and stays as it is.
+      const { isPersonDoneBy } = require('./notification-service')._private;
+      const retire = others.filter(({ row }) => row.done_at == null || isPersonDoneBy(row.done_by));
       if (retire.length) {
         await trx('notifications').whereIn('id', retire.map(({ row }) => row.id)).update(
           require('./notification-service')._private.doneColumns({ by: 'cancellation-processor', resolution: 'Replaced by a newer termite station retrieval task', keepExisting: true, conn: trx }),

@@ -11,7 +11,7 @@ const mockNotifyAdmin = jest.fn(async () => ({ id: 'n-1' }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...a) => mockNotifyAdmin(...a),
   // A system retire closes the task done (read is not done).
-  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
+  _private: { isPersonDoneBy: jest.requireActual('../services/notification-service')._private.isPersonDoneBy, openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
 }));
 
 let mockTables;
@@ -174,6 +174,15 @@ test('rows already DONE are never retired (the note still names them), and anoth
   expect(mockTables.notifications[1].done_at).toBeFalsy();
   expect(mockLog.filter((l) => l === 'update:notifications')).toEqual([]);
   expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes an earlier station-retrieval task/);
+});
+
+test('a task a PERSON marked done is taken over by the supersede (so it can no longer be reopened beside its replacement)', async () => {
+  mockTables.notifications = [datedRow('req-0', { })];
+  mockTables.notifications[0].read_at = new Date('2026-01-01');
+  mockTables.notifications[0].done_at = new Date('2026-01-01');
+  mockTables.notifications[0].done_by = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+  expect(mockLog.filter((l) => l === 'update:notifications').length).toBeGreaterThan(0);
 });
 
 test('the supersession note is stable across a routine retry of the same event — an acted-on task is never reopened by content drift (GH r4 P1)', async () => {
