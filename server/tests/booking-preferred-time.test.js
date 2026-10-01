@@ -24,6 +24,7 @@ const mockRaws = [];            // whereRaw calls (query-shape asserts)
 let mockOpenLeadsNewerOnly = false; // every open preferred lead was requested AFTER the booking (the <= cutoff excludes them)
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
+let mockLockedLead = null;     // what the note transaction's leads ... FOR UPDATE re-read returns
 
 function builder(table) {
   const b = {
@@ -36,6 +37,7 @@ function builder(table) {
     whereNotNull: () => b,
     whereNot: () => b,
     whereIn: () => b,
+    forUpdate: () => { b._forUpdate = true; return b; },
     whereNotIn: () => { b._liveOnly = true; return b; },
     whereRaw: (sql, vals) => { mockRaws.push({ table, op: 'whereRaw', arg: sql, vals }); if (/<= \?/.test(String(sql))) b._requestedBy = vals && vals[0]; return b; },
     orWhereRaw: () => b,
@@ -49,7 +51,7 @@ function builder(table) {
           : [],
     ).then(resolve, reject),
     first: (...cols) => Promise.resolve(
-      table === 'leads' ? mockExistingLead
+      table === 'leads' ? (b._forUpdate ? mockLockedLead : mockExistingLead)
         : table === 'customers' ? mockCustomer
           : table === 'self_booked_appointments as sba' ? mockBookedSince
             : table === 'scheduled_services' && mockDeadVisit ? (b._liveOnly ? null : { id: 'ss-dead' })
@@ -177,6 +179,7 @@ beforeEach(() => {
   mockExistingLead = null;
   mockCustomer = null;
   mockOpenLeads = [];
+  mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null };
   mockLeadUpdateRows = 1;
   mockRetireError = null;
   mockBookedSince = null;
@@ -743,6 +746,32 @@ describe('a completed booking only NOTES the customer\'s open preferred-time req
     mockCustomer = { phone: '+1 (941) 555-0100' };
     mockOpenLeads = [{ id: 'lead-1' }];
     mockScheduledService = { id: 'visit-7', self_booking_id: 'sba-1', service_type: 'Lawn Care', scheduled_date: '2026-10-08' };
+    mockLockedLead = { lead_type: 'book_preferred_time', status: 'new', converted_at: null, deleted_at: null, phone: '+19415550100', customer_id: null };
+  });
+
+  test.each([
+    ['its phone was reassigned to someone else', { phone: '+19415559999' }],
+    ['it is now linked to a different customer', { customer_id: 'cust-other' }],
+    ['staff closed it (lost)', { status: 'lost' }],
+    ['it was converted', { converted_at: new Date() }],
+    ['it was deleted', { deleted_at: new Date() }],
+    ['it is no longer a preferred-time lead', { lead_type: 'phone_call' }],
+  ])('revalidated under the row lock (codex #5399 r14): %s -> no note', async (_label, change) => {
+    mockLockedLead = { ...mockLockedLead, ...change };
+    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
+    expect(notes()).toHaveLength(0);
+  });
+
+  test('a lead that vanished between the query and the lock gets no note', async () => {
+    mockLockedLead = null;
+    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 0 });
+    expect(notes()).toHaveLength(0);
+  });
+
+  test('an unchanged lead, or one already linked to THIS customer, is still noted once', async () => {
+    mockLockedLead = { ...mockLockedLead, customer_id: 'cust-1', phone: '(941) 555-0100' };
+    expect(await noteBookingOnPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, noted: 1 });
+    expect(notes()).toHaveLength(1);
   });
 
   test('writes ONE note naming the service, day and visit; no markConverted, no lead status write, no funnel write, nothing sent', async () => {

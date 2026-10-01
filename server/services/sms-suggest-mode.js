@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -658,6 +658,17 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // OPEN TIMES without a live re-fetch at publish time — this is
             // just the snapshot, never a probe.
             ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+            // Codex round-3 P2: the re-service lane(s) this draft's reply
+            // promises (validateReserviceOffer's own resolution, carried
+            // from sms-shadow-drafter.js) — null/omitted for an ordinary
+            // draft with no re-service promise. Read back at send time by
+            // agentDecisionSendBlockReason / the scheduler's queued-send
+            // recheck (reservicePromiseStillEligible) so a promise already
+            // reviewed can still be blocked if the customer's eligibility
+            // changed before it fired.
+            ...(Array.isArray(reserviceLanesSnapshot) && reserviceLanesSnapshot.length ? { reservice_lanes_snapshot: reserviceLanesSnapshot } : {}),
+            // Codex round-18 P2: the booked re-service callback the reply's already-booked fact described.
+            ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
             // Codex r3 P1: the actions this draft promises (payment link,
             // booking, escalation…) must ride the same snapshot a reviewer's
             // card reads — otherwise a card can promise an action the

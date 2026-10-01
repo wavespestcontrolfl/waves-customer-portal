@@ -203,6 +203,7 @@ function emptyInstruction() {
     holdUntilLabel: null,
     holdUntilPlanLabel: null,
     expiresAt: null,
+    completedAt: null,
     waterInBy: null,
     waterInByLabel: null,
     waterInInches: null,
@@ -229,6 +230,9 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
   const resolved = list.map(ruleOf);
   const at = toDate(completedAt);
   if (!at || !list.length) return out;
+  // The visit's completion instant the lines are anchored to ("today",
+  // "tonight"): the watering text checks freshness against it.
+  out.completedAt = at.toISOString();
 
   out.products = list.map((entry, index) => {
     const rule = resolved[index];

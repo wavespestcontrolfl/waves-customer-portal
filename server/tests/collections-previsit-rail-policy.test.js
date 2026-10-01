@@ -44,6 +44,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
+  releaseHeldReservation: jest.fn(async () => true),
 }));
 
 jest.mock('../services/billing-reminder-delivery', () => ({
@@ -214,6 +215,24 @@ test.each([
   expect(ContactLedger.recordContact.mock.calls.map(([input]) => input.channel)).toEqual(['sms', 'email']);
   expect(releaseChain.update).toHaveBeenCalledTimes(released ? 1 : 0);
   if (released) expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+});
+
+// Dispute hold (owner ruling 2026-09-30) placed AFTER the rail-guard consult and the claim: the Text
+// boundary and the email authority refuse both legs. A WAIT - each reservation is released (no failed
+// row), the one-per-appointment claim is given back, and the reminder goes out on the first sweep
+// after the release.
+test('a dispute hold at both send boundaries releases both reservations and the claim (a wait, not a failed reminder)', async () => {
+  const { releaseChain } = armOneVisit();
+  sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
+  AccountMembershipEmail.sendPrevisitBalanceReminder.mockResolvedValueOnce({
+    ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'COLLECTION_HOLD_DEFER',
+  });
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') })).resolves.toMatchObject({ sent: 0, skipped: 1 });
+  expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'billing', entryPoint: 'previsit_balance_reminder' });
+  expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(2);
+  expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+  expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
 });
 
 test.each([

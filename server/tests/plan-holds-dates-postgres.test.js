@@ -159,4 +159,89 @@ maybeDescribe('plan holds read DATE columns as dates (live Postgres)', () => {
     expect(rebooker.reschedule).not.toHaveBeenCalled();
     expect(notifyAdmin).toHaveBeenCalledWith('service', 'Plan hold: restart text not delivered', expect.any(String), expect.objectContaining({ bell: true, dedupeKey: `plan_hold_restart_text_undelivered:${hold.id}` }));
   });
+  // --- Plan-pause follow-ups (#5354 deferred P2s): the races need real row locks. ---
+  const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+  // Runs `work` while `lock` holds a row, so it must wait for the commit; the
+  // holder's change lands BEFORE the lock is released.
+  const whileLocked = async (lock, write, work) => {
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let locked;
+    const gate = new Promise((resolve) => { locked = resolve; });
+    const holder = db.transaction(async (trx) => {
+      await lock(trx);
+      locked();
+      await held;
+      await write(trx);
+    });
+    await gate;
+    const pending = work();
+    await sleep(300);
+    release();
+    await holder;
+    return pending;
+  };
+
+  test('Away Mode takes its prior value under the preference row lock: an accept that committed meanwhile is what a failed one restores', async () => {
+    const c = await customer();
+    const hold = await insert('plan_holds', { customer_id: c.id, family_key: 'lawn_care', starts_on: day(0), resume_on: day(30),
+      status: 'active', moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], acceptCommitted: false }) });
+    await db('property_preferences').insert({ customer_id: c.id, away_mode_until: day(10) });
+    const out = await whileLocked(
+      (trx) => trx('property_preferences').where({ customer_id: c.id }).forUpdate().first('id'),
+      (trx) => trx('property_preferences').where({ customer_id: c.id }).update({ away_mode_until: day(50) }),
+      () => holds.startAwayMode({ customerId: c.id, caseId: null, until: day(30), holdIds: [hold.id] }),
+    );
+    expect(out.previousUntil).toBe(day(50));
+    expect(dateOnlyString((await db('property_preferences').where({ customer_id: c.id }).first()).away_mode_until)).toBe(day(30));
+    const record = (await holdRow(hold.id)).moved_visits;
+    expect((typeof record === 'string' ? JSON.parse(record) : record).awayPairing).toEqual({ previousUntil: day(50), until: day(30) });
+    // The write leaves no staff note; the note is its own call, made once the accept stands.
+    expect(await db('customer_interactions').where({ customer_id: c.id })).toHaveLength(0);
+    await holds.noteAwayMode({ customerId: c.id, caseId: null, until: out.until });
+    expect(await db('customer_interactions').where({ customer_id: c.id })).toHaveLength(1);
+  });
+
+  test('two accepts racing on a customer with no preferences row both succeed and leave one row', async () => {
+    const c = await customer();
+    const results = await Promise.all([
+      holds.startAwayMode({ customerId: c.id, caseId: null, until: day(20) }),
+      holds.startAwayMode({ customerId: c.id, caseId: null, until: day(40) }),
+    ]);
+    expect(results).toHaveLength(2);
+    const rows = await db('property_preferences').where({ customer_id: c.id });
+    expect(rows).toHaveLength(1);
+    expect([day(20), day(40)]).toContain(dateOnlyString(rows[0].away_mode_until));
+    // Whichever wrote second saw the first one's date as its prior value.
+    expect(results.filter((r) => r.previousUntil === null)).toHaveLength(1);
+  });
+
+  test('recording the skips merges into the hold under its lock: a reminder claim committed meanwhile survives', async () => {
+    const { c, hold } = await heldWithVisitBack(30, 40);
+    const claim = { at: new Date().toISOString(), visitId: 'v', delivered: false };
+    await whileLocked(
+      (trx) => trx('plan_holds').where({ id: hold.id }).forUpdate().first('id'),
+      (trx) => trx('plan_holds').where({ id: hold.id }).update({ moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], reminderClaim: claim }) }),
+      () => holds.applyHoldSkips([{ holdId: hold.id, customerId: c.id, familyKey: 'lawn_care', resumeOn: day(30), startsOn: day(0), pendingSkips: [] }]),
+    );
+    const record = (await holdRow(hold.id)).moved_visits;
+    expect(typeof record === 'string' ? JSON.parse(record) : record).toMatchObject({ reminderClaim: claim, skipsFinal: true });
+  });
+
+  test('a visit with no catalog service that was re-typed to another family is not skipped; a tracker-complete one counts as ended', async () => {
+    const c = await customer();
+    const retyped = await lawnVisit(c, day(10));
+    await db('scheduled_services').where({ id: retyped.id }).update({ service_type: 'Mosquito Control' });
+    const done = await lawnVisit(c, day(12));
+    await db('scheduled_services').where({ id: done.id }).update({ track_state: 'complete' });
+    const hold = await insert('plan_holds', { customer_id: c.id, family_key: 'lawn_care', starts_on: day(0), resume_on: day(30), status: 'active',
+      moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: true }) });
+    await holds.applyHoldSkips([{ holdId: hold.id, customerId: c.id, familyKey: 'lawn_care', resumeOn: day(30), startsOn: day(0),
+      pendingSkips: [{ id: retyped.id, status: 'confirmed', from: day(10) }, { id: done.id, status: 'confirmed', from: day(12) }] }]);
+    const rows = await db('scheduled_services').whereIn('id', [retyped.id, done.id]).select('id', 'status');
+    expect(rows.map((r) => r.status)).toEqual(['confirmed', 'confirmed']);
+    const record = (await holdRow(hold.id)).moved_visits;
+    expect(typeof record === 'string' ? JSON.parse(record) : record).toMatchObject({ unresolved: [], skipsFinal: true });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
 });

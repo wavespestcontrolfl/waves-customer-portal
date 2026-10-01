@@ -26,6 +26,9 @@ let mockHealthAlertInserts = [];
 let mockCollectedRow = null;
 // hasUnresolvedSiblingStripeOutcome's read of `stripe_orphan_charges`.
 let mockOrphanRow = null;
+let mockPaymentsInsertFailures = 0;
+let mockBillingDayMatches = true;
+const mockLoggerError = jest.fn();
 
 jest.mock('../models/db', () => {
   function thenableFor(resultFn) {
@@ -45,7 +48,11 @@ jest.mock('../models/db', () => {
     if (table === 'payments') {
       const b = thenableFor(() => []);
       b.first = () => Promise.resolve(mockCollectedRow);
-      b.insert = jest.fn((row) => { mockPaymentsInserts.push(row); return Promise.resolve([1]); });
+      b.insert = jest.fn((row) => {
+        if (mockPaymentsInsertFailures > 0) { mockPaymentsInsertFailures -= 1; return Promise.reject(new Error('db unavailable')); }
+        mockPaymentsInserts.push(row);
+        return Promise.resolve([1]);
+      });
       return b;
     }
     if (table === 'customer_health_alerts') {
@@ -65,7 +72,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-jest.mock('../services/logger', () => ({ info() {}, warn() {}, error() {}, debug() {} }));
+jest.mock('../services/logger', () => ({ info() {}, warn() {}, error: (...a) => mockLoggerError(...a), debug() {} }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSms: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -75,7 +82,7 @@ jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => Promise.resolve('Hi there')) }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({}));
-jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
+jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => mockBillingDayMatches) }));
 jest.mock('../services/stripe', () => ({
   charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
 }));
@@ -107,6 +114,8 @@ beforeEach(() => {
   mockHealthAlertInserts = [];
   mockCollectedRow = null;
   mockOrphanRow = null;
+  mockPaymentsInsertFailures = 0;
+  mockBillingDayMatches = true;
   jest.clearAllMocks();
 });
 
@@ -182,3 +191,55 @@ test('a customer whose collection lock stays held elsewhere ends up with a durab
 
   expect(logAutopay).toHaveBeenCalledWith('cust-locked', 'skipped_lock_contention', expect.any(Object));
 }, 15000);
+
+// Codex #5394 (billing-cron.js): the catch-up marker (pendingHoldDeferrals) is cleared only
+// after a confirmed collection or a DURABLE deferral row. billing_day recurs once a month, so
+// a lock-contention deferral whose insert fails must not drop the month's only recovery.
+describe('a lock-contention deferral that cannot persist keeps the catch-up marker', () => {
+  test('insert fails: counted failed, logged at error, office alert says NOT durably deferred; the next daily run retries and a persisted row then clears the marker', async () => {
+    const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+    mockPaymentsInsertFailures = 1;
+    const first = await BillingCron.processMonthlyBilling();
+
+    expect(first.failed).toBe(1);
+    expect(first.skipped).toBe(0);
+    expect(mockPaymentsInserts).toHaveLength(0);
+    expect(mockLoggerError).toHaveBeenCalledWith(expect.stringMatching(/Could not persist deferred-collection retry row.*NOT durably deferred/));
+    expect(mockHealthAlertInserts).toEqual([expect.objectContaining({
+      customer_id: 'cust-locked', alert_type: 'billing_collection_deferred', severity: 'high',
+      title: expect.stringMatching(/NOT durably deferred/),
+    })]);
+    expect(JSON.parse(mockHealthAlertInserts[0].trigger_data)).toMatchObject({ source: 'billing_monthly_cron_lock_contention_unpersisted' });
+    expect(logAutopay).toHaveBeenCalledWith('cust-locked', 'skipped_lock_contention', expect.objectContaining({ details: expect.objectContaining({ persisted: false }) }));
+
+    // Next daily run: NOT the billing day, DB back. The marker makes the customer due again.
+    mockBillingDayMatches = false;
+    mockHealthAlertInserts.length = 0;
+    const callsBefore = withCustomerBillingLock.mock.calls.length;
+    const second = await BillingCron.processMonthlyBilling();
+    expect(withCustomerBillingLock.mock.calls.length).toBeGreaterThan(callsBefore);
+    expect(second.skipped).toBe(1);
+    expect(mockPaymentsInserts).toHaveLength(1);
+    expect(JSON.parse(mockPaymentsInserts[0].metadata)).toMatchObject({ deferred_reason: 'lock_contention' });
+    expect(mockHealthAlertInserts[0].title).toMatch(/collection deferred/);
+
+    // Durably deferred: the marker is gone, so a third off-day run does nothing.
+    const callsAfter = withCustomerBillingLock.mock.calls.length;
+    await BillingCron.processMonthlyBilling();
+    expect(withCustomerBillingLock.mock.calls.length).toBe(callsAfter);
+  }, 45000);
+
+  test('a marked customer whose month was collected meanwhile has the marker cleared (confirmed collection)', async () => {
+    const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+    mockPaymentsInsertFailures = 1;
+    await BillingCron.processMonthlyBilling();
+    mockBillingDayMatches = false;
+    mockCollectedRow = { id: 'pay-winner', status: 'paid' };
+    const second = await BillingCron.processMonthlyBilling();
+    expect(second.skipped).toBe(1);
+    expect(logAutopay).toHaveBeenCalledWith('cust-locked', 'skipped_already_paid', { paymentId: 'pay-winner' });
+    const calls = withCustomerBillingLock.mock.calls.length;
+    await BillingCron.processMonthlyBilling();
+    expect(withCustomerBillingLock.mock.calls.length).toBe(calls);
+  }, 45000);
+});

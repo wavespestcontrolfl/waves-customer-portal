@@ -11,6 +11,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { customerHasActiveCollectionHoldChecked } = require('./collections/collection-hold');
 
 const VALID_SOURCES = Object.freeze([
   'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
@@ -246,7 +247,7 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -261,6 +262,16 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // An active collections DISPUTE hold (collection-hold.js) stops credit
+    // consumption too — implied by refuseWhenDunningStopped, or asked for
+    // alone via refuseWhenCollectionHold (the completion route's automatic
+    // apply). Customer- and operator-requested applies never pass either.
+    // A lookup failure throws COLLECTION_HOLD_CHECK_FAILED (fail closed —
+    // nothing consumed).
+    if ((refuseWhenDunningStopped || refuseWhenCollectionHold)
+      && await customerHasActiveCollectionHoldChecked(invoice.customer_id, t)) {
+      return { applied: 0, skipped: 'dunning_stopped' };
+    }
     // The customer's opt-in gates every AUTOMATIC apply (owner ruling
     // 2026-08-28). `customerRequested` marks the one non-automatic caller
     // — estimate acceptance, where the customer just accepted a price
@@ -609,7 +620,11 @@ async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system'
   try {
      
     if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return null;
-    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy }, trx);
+    // Every seam here is AUTOMATIC (pay-link send, dun, Terminal handoff), so an
+    // active collections DISPUTE hold refuses it (B10) whatever the
+    // GATE_COLLECTIONS_POLICY rail guard says; customer-requested and admin
+    // applies do not come through this wrapper and stay exempt.
+    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy, refuseWhenCollectionHold: true }, trx);
     // When a seam-time apply FULLY covers the invoice (now prepaid / paid_at), run
     // the same post-payment side effects the manual apply-credit + record-payment
     // paths run — otherwise a credit-covered invoice keeps dunning followups armed

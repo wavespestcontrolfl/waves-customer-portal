@@ -401,6 +401,7 @@ function mapPurposeToMessageType(purpose) {
     case 'tech_en_route':       return 'tech_en_route';
     case 'tech_arrived':        return 'tech_arrived';
     case 'service_completion':  return 'service_complete';
+    case 'lawn_watering_instruction': return 'lawn_watering_instruction';
     case 'billing':             return 'billing_reminder';
     case 'payment_receipt':     return 'receipt';
     case 'payment_failure':     return 'payment_failure';
