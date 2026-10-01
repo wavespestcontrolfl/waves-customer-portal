@@ -1185,7 +1185,7 @@ describe('consent upgrade for a phone already on record (#5467)', () => {
 
   test('the loop claims the opt-in on an upgrade as well as a fresh write', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("(result === 'written' || result === 'consent_upgraded_phone_on_record') && secondaryEntry?.phone && entryConsent");
+    expect(src).toContain("(result === 'written' || result === 'consent_upgraded_phone_on_record') && claimedOptins.length && claimedCustRow");
   });
 });
 
@@ -1257,7 +1257,7 @@ describe('on-site grounding must be pinned to a CALLER quote that is in the tran
     const single = mapSecondaryContactToLegacy(v2Contact, { evidence, counterpart: v2Contact });
     expect(single.wants_appointment_texts_quote).toBe('Yeah.');
     expect(single.on_site_quote).toBe('he will be at the house all day Tuesday');
-    const list = mapSecondaryContactsToLegacy([v2Contact, second], evidence);
+    const list = mapSecondaryContactsToLegacy([v2Contact, second], evidence, v2Contact);
     expect(list[0].on_site_quote).toBe('he will be at the house all day Tuesday');
     expect(list[1].on_site_quote).toBe('she lives in the back unit');
     expect(list[1].wants_appointment_texts_quote).toBeNull();
@@ -1446,5 +1446,55 @@ describe('singleton / entry-0 evidence sharing requires the same person', () => 
     const single = mapOne({ ...spouse, phone_e164: null }, { evidence, counterpart: spouse });
     expect(single.on_site_quote).toBe('he lives there');
     expect(single.wants_appointment_texts_quote).toBe('yeah text him');
+  });
+});
+
+// Pre-push codex P1: the opt-in claim must exist BEFORE the consent stamp is
+// published (a stamped row with a rowless phone reads as grandfathered).
+describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => {
+  const emptyRow = {
+    id: 'cust-1', phone: '+15550100999', email: null,
+    service_contact_name: null, service_contact_phone: null, service_contact_email: null,
+    service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+    service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null,
+  };
+  const spouse = { first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true };
+  const onSite = { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' };
+
+  test('fresh consented write: hook runs with ZERO updates applied, then the stamped slot write lands', async () => {
+    const state = statefulDb(emptyRow);
+    let updatesAtHook = -1;
+    const res = await persistCallSecondaryContact('cust-1', spouse, { ...onSite, beforeStamp: async () => { updatesAtHook = state.updates.length; } });
+    expect(res).toBe('written');
+    expect(updatesAtHook).toBe(0);
+    expect(state.updates.some((u) => u.service_contacts_consent_at)).toBe(true);
+  });
+
+  test('unconsented write: hook is not called', async () => {
+    statefulDb(emptyRow);
+    let called = false;
+    await persistCallSecondaryContact('cust-1', { ...spouse, role: 'lender', phone: '+15550100777' }, { smsConsentExplicit: false, beforeStamp: async () => { called = true; } });
+    expect(called).toBe(false);
+  });
+
+  test('a throwing hook aborts before the stamp — no customers UPDATE at all', async () => {
+    const state = statefulDb(emptyRow);
+    await expect(persistCallSecondaryContact('cust-1', spouse, { ...onSite, beforeStamp: async () => { throw new Error('claim down'); } })).rejects.toThrow('claim down');
+    expect(state.updates).toEqual([]);
+  });
+
+  test('phone-on-record upgrade: hook runs before the stamp UPDATE', async () => {
+    const state = statefulDb({ ...emptyRow, service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contact_role: 'spouse_partner' });
+    let updatesAtHook = -1;
+    const res = await persistCallSecondaryContact('cust-1', spouse, { ...onSite, beforeStamp: async () => { updatesAtHook = state.updates.length; } });
+    expect(res).toBe('consent_upgraded_phone_on_record');
+    expect(updatesAtHook).toBe(0);
+    expect(state.updates[0]).toHaveProperty('service_contacts_consent_at');
+  });
+
+  test('the loop claims the opt-in inside beforeStamp and dispatches only after a committed write', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('beforeStamp: claimOptinBeforeStamp');
+    expect(src).toContain("(result === 'written' || result === 'consent_upgraded_phone_on_record') && claimedOptins.length && claimedCustRow");
   });
 });

@@ -2890,7 +2890,14 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request' } = {}) {
+// `beforeStamp` (async, optional): invoked immediately BEFORE any UPDATE that
+// publishes the consent stamp (fresh slot write with a stamp, or the
+// phone-on-record upgrade). The loop uses it to CLAIM the recipient opt-in
+// row first: once the stamp is visible, every reader (reminder crons,
+// getAppointmentContacts) treats a rowless phone as grandfathered-consented,
+// so the claim must exist before the stamp, never after (pre-push codex P1).
+// A throw aborts the write before the stamp lands (fail closed).
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request', beforeStamp = null } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
@@ -2971,6 +2978,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: smsConsentSource,
       service_contacts_consent_text_version: 'call-2026-07-23',
     };
+    if (typeof beforeStamp === 'function') await beforeStamp();
     const wrote = await upgrade.update(stamp);
     const stampedAt = new Date();
     if (!wrote) return null;
@@ -3150,6 +3158,9 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       }),
     } : {}),
   };
+  if (typeof beforeStamp === 'function' && Object.prototype.hasOwnProperty.call(slotWrite, 'service_contacts_consent_at')) {
+    await beforeStamp();
+  }
   const updated = await write.update(slotWrite);
   // Stamp taken AFTER the UPDATE resolves: if it blocked behind a concurrent
   // locked save, the stamp still lands after that save's lock-held
@@ -13263,10 +13274,60 @@ const CallRecordingProcessor = {
         // which one authorized it.
         const { smsConsentExplicit: entryConsent, smsConsentSource } =
           resolveSecondaryConsent(secondaryEntry, v2SmsConsentExplicit, { doNotContact: v2DoNotContact });
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
-          smsConsentExplicit: entryConsent,
-          smsConsentSource,
-        });
+        // Opt-in claim runs INSIDE the persist, right before the stamp UPDATE
+        // (beforeStamp): a stamped row with a rowless phone reads as
+        // grandfathered to every sender, so the claim must precede the stamp.
+        // Claims are dispatched (Twilio) only after the write is proven
+        // committed; a claim left behind by a 0-row slot race is released by
+        // the opt-in sweep (contact not on a slot → ask_failed).
+        let claimedOptins = [];
+        let claimedCustRow = null;
+        const claimOptinBeforeStamp = async () => {
+          if (!secondaryEntry?.phone || !entryConsent) return;
+          const { claimRecipientOptins } = require('./recipient-optin');
+          claimedCustRow = await db('customers').where({ id: customerId }).first();
+          if (!claimedCustRow) return;
+          const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+          claimedOptins = await claimRecipientOptins({
+            customer: claimedCustRow,
+            contacts: [{
+              name: [secondaryEntry.first_name, secondaryEntry.last_name].filter(Boolean).join(' '),
+              firstName: secondaryEntry.first_name || '',
+              phone: secondaryEntry.phone,
+            }],
+            // The slot being written/upgraded must be ASKED — prior phones
+            // are the OTHER slots only.
+            priorPhones: [claimedCustRow.service_contact_phone, claimedCustRow.service_contact2_phone, claimedCustRow.service_contact3_phone]
+              .filter((ph) => optLast10(ph) !== optLast10(secondaryEntry.phone)),
+            propertyAddress: [claimedCustRow.address_line1, claimedCustRow.city].filter(Boolean).join(', '),
+          });
+        };
+        let result;
+        try {
+          result = await persistCallSecondaryContact(customerId, secondaryEntry, {
+            smsConsentExplicit: entryConsent,
+            smsConsentSource,
+            beforeStamp: claimOptinBeforeStamp,
+          });
+        } catch (persistErr) {
+          // A claim failure aborts BEFORE the stamp (fail closed); the slot is
+          // not written this pass. Leave the durable blocking ask_failed row
+          // so a later save cannot treat the phone as grandfathered.
+          const failedKey = String(secondaryEntry?.phone || '').replace(/\D/g, '').slice(-10);
+          if (failedKey) {
+            optinClaimFailedPhones.add(failedKey);
+            await db('recipient_optin').insert({
+              phone_key: failedKey,
+              phone_e164: String(secondaryEntry.phone || '').trim(),
+              status: 'ask_failed',
+              customer_id: customerId,
+              requested_by: 'call_pipeline',
+              requested_at: new Date(),
+            }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
+          }
+          logger.warn(`[call-proc] secondary contact persist aborted before stamp for ${maskSid(callSid)}: ${persistErr.message}`);
+          continue;
+        }
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         if (result === 'skipped_phone_on_record_consent_withheld') {
           // The call grounded this person's consent but the account-wide stamp
@@ -13290,48 +13351,10 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if ((result === 'written' || result === 'consent_upgraded_phone_on_record') && secondaryEntry?.phone && entryConsent) {
-          try {
-            const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
-            const custRow = await db('customers').where({ id: customerId }).first();
-            if (custRow) {
-              const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-              const claims = await claimRecipientOptins({
-                customer: custRow,
-                contacts: [{
-                  name: [secondaryEntry.first_name, secondaryEntry.last_name].filter(Boolean).join(' '),
-                  firstName: secondaryEntry.first_name || '',
-                  phone: secondaryEntry.phone,
-                }],
-                // The just-written slot must be ASKED — prior phones are the
-                // OTHER slots only.
-                priorPhones: [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
-                  .filter((ph) => optLast10(ph) !== optLast10(secondaryEntry.phone)),
-                propertyAddress: [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
-              });
-              if (claims.length) {
-                void dispatchRecipientOptins(claims, custRow)
-                  .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
-              }
-            }
-          } catch (optErr) {
-            const failedKey = String(secondaryEntry.phone || '').replace(/\D/g, '').slice(-10);
-            optinClaimFailedPhones.add(failedKey);
-            // Durable fail-closed: the slot is already committed, so leave a
-            // BLOCKING ask_failed row (save-retryable) — the in-memory set
-            // only protects this processing run.
-            if (failedKey) {
-              await db('recipient_optin').insert({
-                phone_key: failedKey,
-                phone_e164: String(secondaryEntry.phone || '').trim(),
-                status: 'ask_failed',
-                customer_id: customerId,
-                requested_by: 'call_pipeline',
-                requested_at: new Date(),
-              }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
-            }
-            logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
-          }
+        if ((result === 'written' || result === 'consent_upgraded_phone_on_record') && claimedOptins.length && claimedCustRow) {
+          const { dispatchRecipientOptins } = require('./recipient-optin');
+          void dispatchRecipientOptins(claimedOptins, claimedCustRow)
+            .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
         }
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
