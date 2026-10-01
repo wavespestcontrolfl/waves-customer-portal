@@ -4428,7 +4428,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   // counted, conflicted or quoted by the text, and Quick Move's anchor-only
   // close scope leaves them out like any sibling.
   const carriedPartners = (Array.isArray(result.carriedVisitMembers) ? result.carriedVisitMembers : [])
-    .map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd, forOccurrenceId: k.forOccurrenceId }));
+    .map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
   const reminderOccurrences = [...occurrences, ...carriedPartners];
   const leaseOwner = crypto.randomUUID();
   // Every marker write is fenced on the owner token: only the pass holding
@@ -4703,11 +4703,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // were synced with notifications off and never covered by that text,
     // so a close-only recovery after a failed anchor close must not
     // suppress their still-due reminders (codex r18 P1).
-    // A Quick Move's anchor text speaks for the anchor's STOP, so partners
-    // carried with the anchor occurrence close with it.
     const closeScope = () => (markers.source_surface === 'quick_move'
-      ? ownedOccurrences().filter((occurrence) => String(occurrence.id) === String(serviceId)
-        || String(occurrence.forOccurrenceId || '') === String(serviceId))
+      ? ownedOccurrences().filter((occurrence) => String(occurrence.id) === String(serviceId))
       : ownedOccurrences());
     const closeSeriesReminders = async () => {
       const closeGuards = seriesReminderGuards.length && markers.source_surface !== 'quick_move'

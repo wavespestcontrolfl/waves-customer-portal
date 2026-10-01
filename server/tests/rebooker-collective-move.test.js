@@ -1517,7 +1517,7 @@ describe('caller wiring (source)', () => {
     expect(reb).toContain("['property-preferences', String(service.customer_id)],");
     expect(read('../routes/property.js')).toContain("['property-preferences', String(req.customerId)],");
     expect(fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8')).toContain('&& firstOrigin === expectedById.get(id)) {');
-    expect(rainOut).toContain('await AppointmentReminders.markRescheduleNoticeSent([job.id, ...stopPartnerIds]);');
+    expect(rainOut).toContain('await AppointmentReminders.markRescheduleNoticeSent([job.id]);');
     expect(rainOut).toContain('result: { ...seriesResultForEffects, notifyRequested: false },');
     // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).
     expect(rainOut).toContain("stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))");
@@ -1628,12 +1628,8 @@ describe('caller wiring (source)', () => {
     // passed today", like the anchor's, before its write.
     const fence = reb.slice(reb.indexOf('const fencePartner = async'), reb.indexOf('const recordCarriedPartner = async'));
     expect(fence).toContain('sameDayWindowElapsed(dateStr, pUpdate.window_end || pUpdate.window_start)');
-    // The tech rain-out route skips reminder re-sync for covered (carried)
-    // members, like admin-dispatch's: their mover synced their own slot.
-    const track = read('../routes/tech-track.js');
-    const loop = track.slice(track.indexOf('for (const moved of result.results || []) {'));
-    expect(loop.indexOf('if (moved.coveredByVisit) continue;')).toBeGreaterThan(-1);
-    expect(loop.indexOf('if (moved.coveredByVisit) continue;')).toBeLessThan(loop.indexOf('AppointmentReminders.handleReschedule('));
+    // Quick Move never carries: rain-out's unit-mover fallback owns grouped stops.
+    expect(reb).toContain("if (options.sourceSurface === 'quick_move') return false;");
     // Staff allowlist: automatic/customer initiators never carry.
     expect(reb).toContain("const SERIES_CARRY_STAFF_INITIATORS = new Set(['admin', 'tech']);");
     // The edit modal commits field edits before the series move: under the

@@ -311,6 +311,11 @@ function seriesCarriesVisitFor(initiatedBy, options = {}) {
   // saves other fields before its series move) opts out explicitly: a stop
   // grouped after its preflight is then refused, never carried undisclosed.
   if (options.carryVisit === false) return false;
+  // Quick Move (rain-out) never carries: a grouped anchor's series shift is
+  // refused and rain-out falls back to the unit mover, which moves the whole
+  // stop together for this visit with its own stop-level text and reminder
+  // sync, and parks the series for review — its existing, reviewed path.
+  if (options.sourceSurface === 'quick_move') return false;
   // An explicit STAFF allowlist (the board, edit modal and IB moves run as
   // 'admin'; Quick Move as 'tech' or 'admin'): every automatic or
   // customer-driven initiator — ai_call_pipeline, auto_dispatch, customer* —

@@ -394,6 +394,15 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     }
   });
 
+  test('Quick Move never carries: its series shift keeps the refusal, so rain-out moves the stop alone', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const anchor = f.lawn[0];
+    await expect(rebooker.rescheduleSeries(anchor.id, addDays(dateOnly(anchor.scheduled_date), 1), '09:00-10:00', 'weather_rain', 'tech', {
+      allowLive: true, sourceSurface: 'quick_move', notifyRequested: false, overlapAdvisory: true,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

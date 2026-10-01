@@ -1617,14 +1617,6 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // re-check is the only place it can catch a visit that landed too soon
     // to move online again — including a plain read failure, {failed:true},
     // which also lands rescheduleUrl on null).
-    if (prebuiltSms?.body && prebuiltSms.windowStart && chosen.window?.start
-      && String(prebuiltSms.windowStart).slice(0, 5) !== String(chosen.window.start).slice(0, 5)) {
-      // The pre-move body quotes a stop start that is not where the stop
-      // landed (its members changed between the projection and the move):
-      // never send an arrival time nobody holds. The sheet reports it.
-      logger.warn(`[rain-out] Custom body for ${job.id} quoted ${prebuiltSms.windowStart}, the stop landed at ${chosen.window.start} — not sent`);
-      return { sent: false, reason: 'stop_start_changed' };
-    }
     if (prebuiltSms?.body && rescheduleUrl === prebuiltSms.url) {
       body = prebuiltSms.body;
     } else if (prebuiltSms?.body) {
@@ -1885,27 +1877,6 @@ const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;
 // notice at all (codex round-2 P1 on PR #5308).
 // Returns { ok: false, reason } to refuse the move, or { ok: true,
 // prebuiltSms } — prebuiltSms is null when notifyCustomer is false.
-// The window a grouped stop will START at once `service` moves to `target`:
-// the unit mover's own read-only planner (predictMemberWindows — the same
-// planner the series carry uses) over the visit's open members; the
-// earliest landed start when it is earlier than the anchor's own, else the
-// target window unchanged. Ungrouped rows, or a plan the writer would
-// refuse, keep the target window.
-async function projectedStopWindow(service, target) {
-  if (!service.visit_id || !target.window?.start) return target.window;
-  const vg = require('./visit-groups');
-  const members = await vg.openMembers(db, service.visit_id);
-  if (members.length < 2) return target.window;
-  const visit = await db('service_visits').where({ id: service.visit_id }).first('window_start');
-  const predicted = vg.predictMemberWindows({
-    members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,
-    requestedStart: target.window.start, requestedEnd: target.window.end, newDateStr: String(target.date),
-  });
-  if (!predicted.ok) return target.window;
-  const earliest = predicted.targets.map((t) => t.start).filter(Boolean).map((t) => String(t).slice(0, 5)).sort()[0];
-  return earliest && earliest < String(target.window.start).slice(0, 5) ? { start: earliest, end: null } : target.window;
-}
-
 async function prepareCustomRungSms({ serviceId, service, target, note, notifyCustomer }) {
   if (!notifyCustomer) return { ok: true, prebuiltSms: null };
   let snap;
@@ -2116,16 +2087,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   let prebuiltSms = null;
   if (reasonCode === CUSTOM_REASON) {
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
-    // A grouped stop's text quotes the STOP's landed start (its earliest
-    // member), which can be earlier than the anchor's own slot: render the
-    // pre-move body against that projection, and pin the start so the send
-    // can verify it against what actually landed.
-    const stopWindow = await projectedStopWindow(service, target);
     const prepared = await prepareCustomRungSms({
-      serviceId, service, target: { ...target, window: stopWindow }, note, notifyCustomer,
+      serviceId, service, target, note, notifyCustomer,
     });
     if (!prepared.ok) return prepared;
-    prebuiltSms = prepared.prebuiltSms && { ...prepared.prebuiltSms, windowStart: stopWindow.start || null };
+    prebuiltSms = prepared.prebuiltSms;
   } else if (notifyCustomer && note && service.phone) {
     const prepared = await prepareNoteRungSms({
       serviceId, service, target, note, reasonCode,
@@ -2264,29 +2230,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   const coveredIds = new Set();
   const partialStragglers = new Set();
   const coveredVisitOf = new Map();
-  // Carried partners' own landed slots (a series carry lands each partner
-  // with its occurrence, not on target.date): reported in their covered
-  // result so the sheet and boards show where they actually went.
-  const coveredSlotOf = new Map();
-  const coveredResult = (id, visitId) => {
-    const slot = coveredSlotOf.get(String(id));
-    return {
-      id, ok: true, coveredByVisit: visitId, newDate: slot ? slot.date : target.date,
-      ...(slot && slot.window.start ? { newWindow: slot.window } : {}),
-      smsSent: false, smsReason: 'covered_by_visit',
-    };
-  };
   const coverMoved = (r, job) => {
     const vid = String((r && r.visitMove && r.visitMove.visitId) || (job && job.visit_id) || '') || null;
     for (const id of coveredIdsFrom(r)) { coveredIds.add(id); if (vid) coveredVisitOf.set(id, vid); }
-    // Partners a series shift carried with an occurrence
-    // (GATE_SERIES_MOVE_CARRIES_VISIT) moved with their stop: covered too,
-    // under their own visit.
-    for (const k of (r && Array.isArray(r.carriedVisitMembers) ? r.carriedVisitMembers : [])) {
-      coveredIds.add(String(k.id));
-      if (k.visitId) coveredVisitOf.set(String(k.id), String(k.visitId));
-      coveredSlotOf.set(String(k.id), { date: String(k.date instanceof Date ? k.date.toISOString() : k.date).split('T')[0], window: { start: k.windowStart || null, end: k.windowEnd || null } });
-    }
   };
   for (const job of orderedJobs) {
     // A straggler of a PARTIAL unit move earlier in this batch: skipped
@@ -2294,7 +2240,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // anchor's needsAttention names it for staff repair (codex r27 P1).
     if (partialStragglers.has(String(job.id))) continue;
     if (coveredIds.has(String(job.id))) {
-      results.push(coveredResult(job.id, String(job.visit_id)));
+      results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
       continue;
     }
     let newWindow;
@@ -2396,10 +2342,6 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // siblings (moveVisitAsUnit) — mark the visit covered HERE too, not
           // only on the single fallback (codex #3609 r3).
           coverMoved(seriesResult);
-          // A grouped anchor whose partners rode the sweep: the moved-SMS
-          // quotes the STOP's landed start, as on the unit path.
-          const anchorOcc = (shiftedOccurrences || []).find((o) => String(o.id) === String(job.id));
-          if (anchorOcc?.visitWindowStart) unitVisitStart = String(anchorOcc.visitWindowStart);
           seriesReplayed = seriesResult?.replayed === true;
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
@@ -2639,13 +2581,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             // notified_at NULL, the state the reconciler's close-only
             // branch finishes without re-sending (codex r16 P1).
             const AppointmentReminders = require('./appointment-reminders');
-            // The text speaks for the STOP: partners the series carried
-            // WITH this occurrence (GATE_SERIES_MOVE_CARRIES_VISIT) close
-            // with it; later occurrences' partners stay armed (not covered).
-            const stopPartnerIds = (seriesResultForEffects?.carriedVisitMembers || [])
-              .filter((k) => String(k.forOccurrenceId) === String(job.id))
-              .map((k) => k.id);
-            const closed = await AppointmentReminders.markRescheduleNoticeSent([job.id, ...stopPartnerIds]);
+            const closed = await AppointmentReminders.markRescheduleNoticeSent([job.id]);
             closeOwed = closed === null || closed === undefined;
           }
           if (closeOwed) {
@@ -2698,7 +2634,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   const recorded = new Set(results.map((r) => String(r.id)));
   for (const id of coveredIds) {
     if (recorded.has(id)) continue;
-    results.push(coveredResult(id, coveredVisitOf.get(id) || 'visit'));
+    results.push({ id, ok: true, coveredByVisit: coveredVisitOf.get(id) || 'visit', newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
   }
 
   // Handed to the caller's own qualityDates set so ONE flush after its
