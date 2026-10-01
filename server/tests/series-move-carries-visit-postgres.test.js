@@ -284,6 +284,23 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     expect(result.followUpOccurrences.map((k) => String(k.id))).toContain(String(child.id));
   });
 
+  test('a shortened window that would leave a partner off the stop refuses the whole move', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    // Lawn 09:00-11:00, pest 10:00-11:00: one stop.
+    await db('scheduled_services').whereIn('id', f.lawn.map((r) => r.id)).update({ window_end: '11:00' });
+    await db('scheduled_services').where({ id: f.pest[0].id }).update({ window_start: '10:00', window_end: '11:00' });
+    await db('service_visits').where({ id: f.visits[0].id }).update({ window_end: '11:00' });
+    const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
+    const anchor = f.lawn[0];
+    // Same start, end cut to 09:30: the pest window no longer touches it.
+    await expect(rebooker.rescheduleSeries(anchor.id, addDays(dateOnly(anchor.scheduled_date), 1), '09:00-09:30', 'admin', 'admin', {
+      allowLive: true, sourceSurface: 'dispatch_board', notifyRequested: false, overlapAdvisory: true,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID' });
+    const after = await rowsOf([...before.keys()]);
+    for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

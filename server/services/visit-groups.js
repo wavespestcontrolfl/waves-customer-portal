@@ -2346,6 +2346,12 @@ async function retargetVisitStopInTx(t, { visitId, newDateStr, technicianId, res
   const members = await t('scheduled_services').where({ visit_id: visitId })
     .whereNotIn('status', TERMINAL_ROW_STATUSES)
     .select('window_start', 'window_end');
+  // The landed windows must still be ONE stop (a shortened anchor that keeps
+  // its start can leave a later partner disconnected; the seam would then
+  // split the visit after commit). Refuse inside the transaction instead.
+  if (!windowedMembersConnected(members)) {
+    throw Object.assign(new Error('Cannot move this stop: the new time no longer overlaps a grouped service at this stop — pick a window that covers both, or separate the services first'), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', isOperational: true });
+  }
   const starts = members.map((m) => m.window_start).filter(Boolean).sort();
   const ends = members.map((m) => m.window_end).filter(Boolean).sort();
   const patch = {
