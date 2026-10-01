@@ -197,15 +197,15 @@ function citedPagesByHost(pages) {
 /**
  * citedPagesFor(prospect, byHost) → the cited pages to try, in order: the
  * prospect's own page first when an engine cites it, then the host's other
- * cited lists by rank (at most MAX_CITED_PAGES_TRIED). A subdomain prospect
- * matches only its own host.
+ * cited lists by rank — every one of them, since a skip is final for the
+ * prospect and an untried list would be lost. A subdomain prospect matches
+ * only its own host.
  */
-const MAX_CITED_PAGES_TRIED = 3;
 function citedPagesFor(prospect, byHost) {
   const pages = (byHost && byHost.get(canonicalProspectDomain(prospect.target_domain))) || [];
   const own = prospect.target_url ? pageKey(prospect.target_url) : null;
   const first = own ? pages.filter((p) => p.key === own) : [];
-  return [...first, ...pages.filter((p) => !first.includes(p))].slice(0, MAX_CITED_PAGES_TRIED);
+  return [...first, ...pages.filter((p) => !first.includes(p))];
 }
 
 /**

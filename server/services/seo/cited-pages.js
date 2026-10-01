@@ -267,7 +267,10 @@ async function readCitedPageRows(db, { since }) {
   return db('seo_llm_mentions as m')
     .leftJoin('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
     .where('m.check_date', '>=', since)
-    .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
+    // a managed observation counts only while its query is active AND still
+    // asks this prompt: an edited query's old answers are another question
+    // (the dashboard matches on the current prompt text the same way)
+    .where((b) => b.whereNull('m.query_id').orWhere((c) => c.where('q.active', true).whereRaw('q.query = m.query')))
     .orderBy('m.check_date', 'desc')
     .orderBy('m.created_at', 'desc')
     .select('m.id', 'm.query', 'm.query_id', 'm.llm_platform', 'm.model_version', 'm.check_date', 'm.cited_urls', 'm.waves_mentioned',
@@ -371,6 +374,7 @@ const RECHECK_VERDICTS = Object.freeze([
 
 function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces = null } = {}) {
   const today = etDateString(now);
+  const currentFrom = etDateString(addETDays(now, -(DEFAULT_LOOKBACK_DAYS - 1)));
   // every row, measured or not: a failed newest probe must stay the newest
   // answer for its question and engine; only measured rows are tallied
   const dated = (rows || []).map((r) => {
@@ -396,7 +400,9 @@ function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces
     // failed or could not resolve its sources says nothing either way: it is
     // left out, never replaced by an older one.
     const since = asked.filter((r) => r.date >= liveOn).sort((x, y) => compareStrings(y.date, x.date));
-    const currentIds = currentRowIds(since, currentSurfaces);
+    // current = the dashboard's window too: a retired model's answer from
+    // months ago is history, not the engine's answer now
+    const currentIds = currentRowIds(since.filter((r) => r.date >= currentFrom), currentSurfaces);
     const tallies = {
       before: tallyAnswers(asked.filter((r) => r.measured && r.date < liveOn), cites),
       after: tallyAnswers(since.filter((r) => r.measured), cites),

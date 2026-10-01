@@ -277,6 +277,11 @@ describe('cited-page pitches', () => {
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'drafted', notes: expect.stringContaining(`cited page ${other.url}`) }));
   });
 
+  test('every cited list is tried — a fourth list is reached when the first three already name Waves', () => {
+    const pages = [1, 2, 3, 4].map((n) => citedPage({ key: `floridist.com/best-${n}`, url: `https://floridist.com/best-${n}`, rank: n }));
+    expect(citedPagesFor({ target_domain: 'floridist.com', target_url: 'https://floridist.com/contact' }, citedPagesByHost(pages))).toHaveLength(4);
+  });
+
   test('pickCitedPage: an unreadable candidate makes the prospect retry, never skip', async () => {
     const a = citedPage();
     const b = citedPage({ key: 'floridist.com/b', url: 'https://floridist.com/b' });

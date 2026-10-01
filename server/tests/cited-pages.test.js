@@ -246,6 +246,18 @@ describe('recheckPlacements', () => {
     expect(r.verdict).toBe('not_named_yet');
   });
 
+  test('an answer older than the dashboard window is history, not current', () => {
+    const rows = [
+      row({ query: Q1, date: '2026-07-01', urls: [PAGE] }),
+      row({ query: Q1, platform: 'claude', model: 'claude-old', date: '2026-07-20', urls: [PAGE], named: true }),
+      row({ query: Q1, platform: 'claude', model: 'claude-new', date: '2026-10-18', urls: ['https://www.yelp.com/x'] }),
+    ];
+    const [r] = recheckPlacements([placement({ first_live_at: '2026-07-10T15:00:00Z' })], rows, { now: NOW });
+    expect(r.after.namedWhenCiting).toBe(1);
+    expect(r.current).toEqual({ answers: 1, named: 0, citingPage: 0, namedWhenCiting: 0 });
+    expect(r.verdict).toBe('page_not_cited_now');
+  });
+
   test('a date-only first_live_at (UTC midnight) keeps its calendar day', () => {
     const rows = [row({ query: Q1, date: '2026-09-25', urls: [PAGE] })];
     expect(recheckPlacements([placement({ first_live_at: new Date('2026-10-01T00:00:00.000Z') })], rows, { now: NOW })[0].liveOn).toBe('2026-10-01');
