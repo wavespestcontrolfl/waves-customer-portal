@@ -60,8 +60,8 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     await db('technicians').insert({ id: techId, name: 'Synthetic carry tech', employment_status: 'active', field_dispatchable: true });
     await db('customers').insert({
       id: customerId,
-      first_name: 'Carry',
-      last_name: 'Fixture',
+      first_name: 'Carryzq',
+      last_name: 'Seriesfixturezq',
       email: `${customerId}@example.invalid`,
       phone: `+1941555${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
       address_line1: '100 Test Lane',
@@ -417,7 +417,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
     const f = await build();
     const otherCustomer = randomUUID();
-    await db('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', email: `${otherCustomer}@example.invalid`, phone: '+19415550000', address_line1: '1 Elsewhere', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
+    await db('customers').insert({ id: otherCustomer, first_name: 'Otherzq', last_name: 'Miswiredzq', email: `${otherCustomer}@example.invalid`, phone: `+1941555${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`, address_line1: '1 Elsewhere', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
     await db('scheduled_services').where({ id: f.pest[0].id }).update({ customer_id: otherCustomer });
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
     await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: f.pest[0].id });
@@ -429,7 +429,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
     const f = await build();
     const otherCustomer = randomUUID();
-    await db('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Owner', email: `${otherCustomer}@example.invalid`, phone: '+19415550001', address_line1: '2 Elsewhere', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
+    await db('customers').insert({ id: otherCustomer, first_name: 'Otherzq', last_name: 'Visitholderzq', email: `${otherCustomer}@example.invalid`, phone: `+1941555${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`, address_line1: '2 Elsewhere', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
     // The visit and its pest partner belong to another customer; the lawn row points at it.
     await db('service_visits').where({ id: f.visits[0].id }).update({ customer_id: otherCustomer });
     await db('scheduled_services').where({ id: f.pest[0].id }).update({ customer_id: otherCustomer });
