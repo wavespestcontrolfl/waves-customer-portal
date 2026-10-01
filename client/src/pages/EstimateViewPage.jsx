@@ -55,6 +55,7 @@ import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceSha
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, CONSENT_VERSION, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { FIRST_INVOICE_AT_CONFIRM_COPY, captureTimingProps, resolvePaymentTiming } from '../lib/paymentTiming';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -3240,10 +3241,10 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
               : ((paused || autopayOff)
                 // Paused / explicitly-off Auto Pay: the method is kept on file
                 // but never charged automatically — a pay link follows each visit.
-                ? `Save your ${bankOffered ? 'card or bank account' : 'card'} on file to confirm your plan — nothing is charged today. ${firstInvoiceNow ? 'Your first invoice is sent when you confirm, with a link to pay it. ' : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} send you a pay link after each completed service.`
+                ? `Save your ${bankOffered ? 'card or bank account' : 'card'} on file to confirm your plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} send you a pay link after each completed service.`
                 : (bank
-                  ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
-                  : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`))}
+                  ? `Save your bank account to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.`
+                  : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, your card is charged that service’s amount automatically.`))}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -5783,16 +5784,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // already exists gets an UNATTACHED first invoice, paid by link at accept).
   // A CONSENT_VARIANT_STALE 409 returns that promise; remember it for THIS
   // selection so the next capture renders the base text instead of looping.
-  const [afterVisitDeniedKey, setAfterVisitDeniedKey] = useState(null);
+  // The accept's per-selection timing answer from a refused confirm:
+  // { key, deferred } (lib/paymentTiming.js). Honored for that selection only.
+  const [timingAnswer, setTimingAnswer] = useState(null);
   const afterVisitSelectionKeyRef = useRef('');
   // Whether THIS render shows "billed after your first visit" payment timing;
   // attested on /accept, which refuses (PAYMENT_TIMING_REFRESH) when the
   // standard invoice would actually go out payable at accept.
   const afterVisitTimingShownRef = useRef(false);
-  // The converse answer (PAYMENT_TIMING_REFRESH afterVisitDeferred:true): the
-  // server WILL defer this selection's first invoice, so the page shows and
-  // attests the after-visit timing for it.
-  const [afterVisitForcedKey, setAfterVisitForcedKey] = useState(null);
   const noteRenderedRecurringConsent = useCallback((tender) => {
     const t = tender === 'us_bank_account' ? 'us_bank_account' : 'card';
     const cur = afterVisitRenderedRef.current;
@@ -7360,12 +7359,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // The server bills this selection now (afterVisitDeferred false) or
             // after the visit (true): show that timing for it, drop the
             // captured intent (its checkbox was for the other terms) and refetch.
-            if (body.afterVisitDeferred === true) {
-              setAfterVisitForcedKey(afterVisitSelectionKeyRef.current);
-              setAfterVisitDeniedKey(null);
-            } else {
-              setAfterVisitDeniedKey(afterVisitSelectionKeyRef.current);
-            }
+            setTimingAnswer({ key: afterVisitSelectionKeyRef.current, deferred: body.afterVisitDeferred === true });
             recurringCardSetupIntentIdRef.current = null;
             setInlineCardIntent(null);
             await loadEstimate({ preserveSelection: true });
@@ -7382,7 +7376,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               throw new Error(body.error || 'Your payment terms were updated — reloading the page.');
             }
             if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise?.tender === 'card') {
-              setAfterVisitDeniedKey(body.collectionPromise.variant ? null : afterVisitSelectionKeyRef.current);
+              setTimingAnswer(body.collectionPromise.variant ? null : { key: afterVisitSelectionKeyRef.current, deferred: false });
             }
             // The card-authorization text (or the account's billing cohort) moved
             // since this tab loaded — refetch so the capture UI renders exactly
@@ -8420,20 +8414,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   });
   const afterVisitSelectionKey = `${paymentPreference || ''}|${selectedFrequency || ''}|${JSON.stringify(serviceCadences || null)}`;
   afterVisitSelectionKeyRef.current = afterVisitSelectionKey;
-  const afterVisitRendered = paymentPreference !== 'prepay_annual'
-    && data?.recurringCardPolicy?.afterVisitConsent === true
-    && !afterVisitInvoiceShape.setupOnly
-    && afterVisitDeniedKey !== afterVisitSelectionKey;
-  // The payment-timing copy reads the SAME server answer as the capture text.
-  const afterVisitForced = afterVisitForcedKey === afterVisitSelectionKey;
-  // This selection's first invoice goes out when the customer confirms
-  // (setup-only shape, or the accept denied after-visit timing for it).
-  const firstInvoiceNow = data?.recurringCardPolicy?.afterVisitExisting === true && paymentPreference !== 'prepay_annual'
-    && (afterVisitDeniedKey === afterVisitSelectionKey || afterVisitInvoiceShape.setupOnly) && !afterVisitForced;
-  const payAfterFirstVisitEffective = (data?.recurringCardPolicy?.afterVisitExisting === true || afterVisitForced)
-    && afterVisitDeniedKey !== afterVisitSelectionKey;
-  afterVisitTimingShownRef.current = payAfterFirstVisitEffective && serviceMode !== 'one_time'
-    && (afterVisitInvoiceShape.hasFirstVisitInvoice || afterVisitForced);
+  // The ONE payment-timing answer every surface below renders from.
+  const paymentTiming = resolvePaymentTiming({
+    policy: data?.recurringCardPolicy,
+    paymentPreference,
+    serviceMode,
+    invoiceShape: afterVisitInvoiceShape,
+    selectionKey: afterVisitSelectionKey,
+    timingAnswer,
+  });
+  const captureTiming = captureTimingProps(paymentTiming);
+  const afterVisitRendered = captureTiming.afterVisit;
+  afterVisitTimingShownRef.current = paymentTiming?.attestTiming === true;
   afterVisitRenderedRef.current = {
     afterVisit: afterVisitRendered,
     // The version of the text THIS BUNDLE renders (AFTER_VISIT_CARD_CONSENT_TEXT
@@ -9182,10 +9174,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
-                payAfterFirstVisit={payAfterFirstVisitEffective}
-                paymentTimingDenied={afterVisitDeniedKey === afterVisitSelectionKey}
-                autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
-                autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
+                paymentTiming={paymentTiming}
               />
             </>
           ) : null}
@@ -9341,11 +9330,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                       ? (inlineCardState.methodType === 'us_bank_account'
                         ? 'Bank transfers have no added card surcharge.'
                         : CARD_SURCHARGE_DISCLOSURE)
-                      : (data?.recurringCardPolicy?.afterVisitPaused === true
-                        ? `Nothing is charged today. ${firstInvoiceNow ? 'Your first invoice is sent when you confirm, with a link to pay it. ' : ''}Your Auto Pay is paused, so we keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`
-                        : data?.recurringCardPolicy?.afterVisitAutopayOff === true
-                        ? `Nothing is charged today. ${firstInvoiceNow ? 'Your first invoice is sent when you confirm, with a link to pay it. ' : ''}We keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`
-                        : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`)))
+                      : (() => {
+                        // Read from the one timing answer (null outside the
+                        // existing-customer cohort: today's sentence).
+                        const firstNow = paymentTiming?.firstInvoice === 'at_confirm' ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : '';
+                        if (paymentTiming?.held === 'paused') return `Nothing is charged today. ${firstNow}Your Auto Pay is paused, so we keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
+                        if (paymentTiming?.held === 'off') return `Nothing is charged today. ${firstNow}We keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
+                        return `Nothing is charged today. ${firstNow}Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`;
+                      })()))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
               <InlineAutoPayCapture
@@ -9363,10 +9355,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onStateChange={handleInlineCardState}
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
-                afterVisit={afterVisitRendered}
-                paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
-                autopayOff={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitAutopayOff === true}
-                firstInvoiceNow={firstInvoiceNow}
+                {...captureTiming}
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
@@ -9462,10 +9451,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               onCancel={handleRecurringCardCancel}
               onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
-              afterVisit={afterVisitRendered}
-              paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
-              autopayOff={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitAutopayOff === true}
-                firstInvoiceNow={firstInvoiceNow}
+              {...captureTiming}
             />
           ) : null}
           {websiteMode ? null : aiPanelBlock}
@@ -9537,10 +9523,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
-                payAfterFirstVisit={payAfterFirstVisitEffective}
-                paymentTimingDenied={afterVisitDeniedKey === afterVisitSelectionKey}
-                autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
-                autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
+                paymentTiming={paymentTiming}
               />
             </div>
           ) : null

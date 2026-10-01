@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceShape } from './PaymentPreferenceButtons';
+import { resolvePaymentTiming } from '../../lib/paymentTiming';
 import {
   CARD_CONSENT_TEXT as CLIENT_CARD_CONSENT_TEXT,
   CONSENT_VERSION as CLIENT_CONSENT_VERSION,
@@ -331,16 +332,32 @@ describe('PaymentPreferenceButtons', () => {
   // so the "we send the invoice after you approve" copy must not render.
   describe('pay-after-first-visit (existing customer on the card rail)', () => {
     const FREQ = { key: 'quarterly', billingFrequencyKey: 'quarterly', perVisit: 89, monthly: 30 };
-    const renderButtons = (extra = {}) => render(
-      <PaymentPreferenceButtons
-        onSelect={vi.fn()}
-        disabled={false}
-        serviceMode="recurring"
-        setupFee={null}
-        selectedFrequency={FREQ}
-        {...extra}
-      />,
-    );
+    // The component reads ONE timing answer (lib/paymentTiming.js). The cases
+    // below are written in the server's cohort terms (payAfterFirstVisit /
+    // autopayPaused / autopayOff, and paymentTimingDenied for a refused
+    // confirm); this builds the answer from them through the real resolver,
+    // exactly as EstimateViewPage does.
+    const renderButtons = (extra = {}) => {
+      const {
+        payAfterFirstVisit = false, autopayPaused = false, autopayOff = false, paymentTimingDenied = false, ...rest
+      } = extra;
+      const props = { onSelect: vi.fn(), disabled: false, serviceMode: 'recurring', setupFee: null, selectedFrequency: FREQ, ...rest };
+      const paymentTiming = resolvePaymentTiming({
+        policy: payAfterFirstVisit ? {
+          afterVisitExisting: true,
+          afterVisitConsent: props.prepayCardCapture === true && !autopayPaused && !autopayOff,
+          ...(autopayPaused ? { afterVisitPaused: true } : {}),
+          ...(autopayOff ? { afterVisitAutopayOff: true } : {}),
+        } : {},
+        serviceMode: props.serviceMode,
+        invoiceShape: standardInvoiceShape({
+          setupFee: props.setupFee, extraInvoiceRows: props.extraInvoiceRows, selectedFrequency: props.selectedFrequency,
+        }),
+        selectionKey: 'sel',
+        timingAnswer: paymentTimingDenied ? { key: 'sel', deferred: false } : null,
+      });
+      return render(<PaymentPreferenceButtons {...props} paymentTiming={paymentTiming} />);
+    };
 
     it('gate off (flag absent): today\'s invoice-after-approval copy, byte for byte', () => {
       renderButtons();
@@ -421,7 +438,7 @@ describe('PaymentPreferenceButtons', () => {
       });
 
       it('r6: after the server denied after-visit timing for this selection, the capture customer sees no deferred-payment claim', () => {
-        const props = { payAfterFirstVisit: false, prepayCardCapture: true };
+        const props = { payAfterFirstVisit: true, prepayCardCapture: true };
         const { unmount } = renderButtons(props);
         expect(screen.getByText(AUTO_PAY_LINE)).toBeInTheDocument();
         unmount();

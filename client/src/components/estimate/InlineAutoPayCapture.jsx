@@ -1,5 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { FIRST_INVOICE_AT_CONFIRM_COPY } from '../../lib/paymentTiming';
 
 /**
  * Inline Auto Pay capture for the single-screen booking review (owner ask
@@ -290,8 +291,8 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
             ? 'When you confirm, we show your exact 12-month total and debit this bank account. Bank transfers have no added card surcharge.'
             : 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
           : (held
-            ? `${firstInvoiceNow ? 'Your first invoice is sent when you confirm, with a link to pay it. ' : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} keep this ${bankOffered ? 'payment method' : 'card'} on file and send you a pay link after each completed service.`
-            : (firstInvoiceNow ? 'Your first invoice is sent when you confirm, with a link to pay it. ' : '') + (bank
+            ? `${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} keep this ${bankOffered ? 'payment method' : 'card'} on file and send you a pay link after each completed service.`
+            : (firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : '') + (bank
               ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
               : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`))}
       </div>

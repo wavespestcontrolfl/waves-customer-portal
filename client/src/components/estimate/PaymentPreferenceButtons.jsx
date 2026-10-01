@@ -137,21 +137,14 @@ export default function PaymentPreferenceButtons({
   // a BANK account, is charged directly with no save step, so the copy must
   // stay tender-neutral and not instruct a card save (Codex #3492 r10).
   prepayCardCapture = false,
-  // The accept told this page (PAYMENT_TIMING_REFRESH) that this selection's
-  // first invoice goes out payable at accept: no deferred-payment claim.
-  paymentTimingDenied = false,
-  // GATE_PAF_EXISTING_CUSTOMERS (server /data recurringCardPolicy
-  // .afterVisitExisting): an existing customer on the pay-after-first-visit
-  // card rail — the accept sends NO invoice or pay link, the card on file is
-  // billed after the first visit, so the "we send the invoice after you
-  // approve" copy below must not render.
-  payAfterFirstVisit = false,
-  // ...and their Auto Pay is paused (server afterVisitPaused): the card is
-  // kept but never auto-charged, so the copy says a pay link follows the visit.
-  autopayPaused = false,
-  // ...or they explicitly turned Auto Pay off (server afterVisitAutopayOff):
-  // same held shape, neutral wording.
-  autopayOff = false,
+  // GATE_PAF_EXISTING_CUSTOMERS: the ONE payment-timing answer for this
+  // selection (lib/paymentTiming.js resolvePaymentTiming), null outside the
+  // existing-customer cohort. Every timing sentence below reads it, never a
+  // flag of its own: `firstInvoice` 'after_visit' (no invoice or pay link at
+  // accept, billed after the first visit), 'at_confirm' (the first invoice goes
+  // out when the customer confirms) or 'none'; `held` 'paused' | 'off' (the
+  // method is kept but never auto-charged; a pay link follows the visit).
+  paymentTiming = null,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -274,11 +267,11 @@ export default function PaymentPreferenceButtons({
         : heldRecurring
           ? 'No payment now — we confirm your exact price on a quick site visit, then bill each application after service.'
           : invoiceRows.length > 0
-            ? (payAfterFirstVisit && hasFirstVisitInvoice
+            ? (paymentTiming?.firstInvoice === 'after_visit'
               // Only a first-application invoice rides the card rail: a
               // setup-only invoice is unattached and its pay link goes out at
               // accept, so it keeps the existing disclosure.
-              ? (autopayPaused || autopayOff
+              ? (paymentTiming.held
                 // The invoice box above carries the held cohort's pay-link
                 // sentence (and survives the prepay-offered layout, which hides
                 // this line) — don't repeat it here.
@@ -286,30 +279,24 @@ export default function PaymentPreferenceButtons({
                 : 'Choose pay per application. Nothing is charged today — your saved payment method is billed for your first visit after it is completed.')
               : `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`)
             : 'Choose pay per application. Your first service visit will be billed after completion.';
-  // The invoice box's when-money-moves sentence. Held cohorts (Auto Pay paused or
-  // explicitly off) are never auto-charged, so "Auto Pay bills your card" must
-  // not render for them (GitHub Codex #5481 r1 P1) — they are told a pay link
-  // follows the visit, here in the box so it also shows in the prepay-offered
-  // layout where the combined fineprint below is hidden. Only a first-
-  // application invoice rides the rail: a setup-only invoice's pay link goes out
-  // at accept, so a held customer gets no "nothing due" claim for it.
-  const afterVisitHeld = payAfterFirstVisit && (autopayPaused || autopayOff);
-  const invoiceBoxNote = afterVisitHeld
-    ? (hasFirstVisitInvoice
-      ? (autopayPaused
+  // The invoice box's when-money-moves sentence (it also survives the
+  // prepay-offered layout, where the combined fineprint above is hidden). For
+  // the existing-customer cohort it is read from the one timing answer: held
+  // customers are told a pay link follows the visit, a saved method or a fresh
+  // card capture is billed after the first application, and a first invoice
+  // that goes out at confirm gets no "nothing due" claim. Outside the cohort
+  // the new-customer card lane keeps its line exactly.
+  const invoiceBoxNote = paymentTiming
+    ? (paymentTiming.firstInvoice !== 'after_visit'
+      ? ''
+      : (paymentTiming.held === 'paused'
         ? 'Nothing due today. Your Auto Pay is paused, so we send you a pay link after your first visit.'
-        : 'Nothing due today. We send you a link to pay after your first visit.')
-      : '')
-    // Same first-visit-invoice predicate (GitHub Codex #5481 r5 P1): a
-    // setup-only invoice goes out with a pay link at accept, so "nothing due
-    // today" would be the opposite timing.
-    : (hasFirstVisitInvoice && !paymentTimingDenied
-      ? (prepayCardCapture
-        ? 'Nothing due today — Auto Pay bills your card after your first application.'
-        // A saved consented method satisfies the after-visit rail (no fresh
-        // capture): say when it is charged (GitHub Codex #5481 r7).
-        : (payAfterFirstVisit ? 'Nothing due today — your saved payment method is charged after your first application.' : ''))
-      : '');
+        : paymentTiming.held === 'off'
+          ? 'Nothing due today. We send you a link to pay after your first visit.'
+          : (prepayCardCapture
+            ? 'Nothing due today — Auto Pay bills your card after your first application.'
+            : 'Nothing due today — your saved payment method is charged after your first application.')))
+    : (prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
     : invoiceRows.length > 0

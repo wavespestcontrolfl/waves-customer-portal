@@ -38,33 +38,27 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/afterVisitRenderedRef\.current = \{[\s\S]{0,400}version: AFTER_VISIT_CONSENT_VERSION,/);
   });
 
-  it('the capture surfaces render from the SAME promise flag the attestation reads (server best case AND a setup-only invoice is not the after-visit promise)', () => {
-    expect(src).toMatch(/const afterVisitRendered = paymentPreference !== 'prepay_annual'\s*&& data\?\.recurringCardPolicy\?\.afterVisitConsent === true\s*&& !afterVisitInvoiceShape\.setupOnly\s*&& afterVisitDeniedKey !== afterVisitSelectionKey;/);
-    // A CONSENT_VARIANT_STALE 409 carries the promise the server would record;
-    // a card promise without the after-visit variant is remembered for THIS
-    // selection so the reloaded capture renders the base text (no 409 loop).
-    expect(src).toMatch(/body\.code === 'CONSENT_VARIANT_STALE' && body\.collectionPromise\?\.tender === 'card'\) \{\s*setAfterVisitDeniedKey\(body\.collectionPromise\.variant \? null : afterVisitSelectionKeyRef\.current\);/);
+  it('ONE timing answer (owner 2026-10-01): every surface and the attestation read resolvePaymentTiming, never flags of their own', () => {
+    expect(src).toMatch(/const paymentTiming = resolvePaymentTiming\(\{\s*policy: data\?\.recurringCardPolicy,\s*paymentPreference,\s*serviceMode,\s*invoiceShape: afterVisitInvoiceShape,\s*selectionKey: afterVisitSelectionKey,\s*timingAnswer,\s*\}\);/);
+    expect(src).toMatch(/const captureTiming = captureTimingProps\(paymentTiming\);\s*const afterVisitRendered = captureTiming\.afterVisit;\s*afterVisitTimingShownRef\.current = paymentTiming\?\.attestTiming === true;/);
+    // Both payment-option renders and both capture surfaces take the one answer.
+    expect(src.match(/paymentTiming=\{paymentTiming\}/g)).toHaveLength(2);
+    expect(src.match(/\{\.\.\.captureTiming\}/g)).toHaveLength(2);
+    // No surface reads the cohort flags directly any more.
+    expect(src).not.toMatch(/afterVisitDeniedKey|afterVisitForcedKey|payAfterFirstVisitEffective|paymentTimingDenied=/);
+    expect(src).not.toMatch(/(?:paused|autopayOff|autopayPaused)=\{[^}]*recurringCardPolicy/);
+    // The accept's refusals record ONE per-selection answer.
+    expect(src).toMatch(/setTimingAnswer\(\{ key: afterVisitSelectionKeyRef\.current, deferred: body\.afterVisitDeferred === true \}\);/);
+    expect(src).toMatch(/body\.code === 'CONSENT_VARIANT_STALE' && body\.collectionPromise\?\.tender === 'card'\) \{\s*setTimingAnswer\(body\.collectionPromise\.variant \? null : \{ key: afterVisitSelectionKeyRef\.current, deferred: false \}\);/);
+    expect(src).toMatch(/afterVisitTimingShown: \(paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef\.current\) \? true : undefined,/);
     expect(src).toMatch(/afterVisitRenderedRef\.current = \{\s*afterVisit: afterVisitRendered,/);
-    const renders = src.match(/afterVisit=\{afterVisitRendered\}/g) || [];
-    expect(renders.length).toBe(2);
     // Both capture surfaces report the tender the consent was rendered for.
     expect(src.match(/onSuccess\([^)]*, bank \? 'us_bank_account' : 'card'\);/g).length).toBe(3);
   });
 
-  it('r5 audit: the payment-timing copy reads the same server answer as the capture text, is attested, and a PAYMENT_TIMING_REFRESH 409 records the answer for this selection', () => {
-    expect(src).toMatch(/const payAfterFirstVisitEffective = \(data\?\.recurringCardPolicy\?\.afterVisitExisting === true \|\| afterVisitForced\)\s*&& afterVisitDeniedKey !== afterVisitSelectionKey;/);
-    // r7: a deferred:true refresh forces the after-visit timing for the selection.
-    expect(src).toMatch(/if \(body\.afterVisitDeferred === true\) \{\s*setAfterVisitForcedKey\(afterVisitSelectionKeyRef\.current\);/);
-    expect(src.match(/payAfterFirstVisit=\{payAfterFirstVisitEffective\}\s*paymentTimingDenied=\{afterVisitDeniedKey === afterVisitSelectionKey\}/g)).toHaveLength(2);
-    expect(src).toMatch(/afterVisitTimingShownRef\.current = payAfterFirstVisitEffective && serviceMode !== 'one_time'\s*&& \(afterVisitInvoiceShape\.hasFirstVisitInvoice \|\| afterVisitForced\);/);
-    expect(src).toMatch(/afterVisitTimingShown: \(paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef\.current\) \? true : undefined,/);
-    expect(src).toMatch(/if \(body\.code === 'PAYMENT_TIMING_REFRESH'\) \{[\s\S]{0,600}setAfterVisitDeniedKey\(afterVisitSelectionKeyRef\.current\);/);
-  });
-
-  it('r7: the capture surfaces and the review line disclose a first invoice sent at confirm', () => {
-    expect(src).toMatch(/const firstInvoiceNow = data\?\.recurringCardPolicy\?\.afterVisitExisting === true && paymentPreference !== 'prepay_annual'\s*&& \(afterVisitDeniedKey === afterVisitSelectionKey \|\| afterVisitInvoiceShape\.setupOnly\) && !afterVisitForced;/);
-    expect(src.match(/firstInvoiceNow=\{firstInvoiceNow\}/g)).toHaveLength(2);
-    expect(src.match(/\$\{firstInvoiceNow \? 'Your first invoice is sent when you confirm, with a link to pay it\. ' : ''\}/g).length).toBeGreaterThanOrEqual(3);
+  it('the review line and every non-prepay capture-modal branch disclose a first invoice sent at confirm', () => {
+    expect(src).toMatch(/const firstNow = paymentTiming\?\.firstInvoice === 'at_confirm' \? `\$\{FIRST_INVOICE_AT_CONFIRM_COPY\} ` : '';/);
+    expect(src.match(/\$\{firstInvoiceNow \? `\$\{FIRST_INVOICE_AT_CONFIRM_COPY\} ` : ''\}/g)).toHaveLength(3);
   });
 
   it('r3 P2: the held cohorts (Auto Pay paused / explicitly off) get a save-only modal title, not "Set up Auto Pay"', () => {
@@ -77,7 +71,4 @@ describe('EstimateViewPage accept consent attestation', () => {
     );
   });
 
-  it('the Auto-Pay-off cohort reaches the capture UI and the review copy', () => {
-    expect(src.match(/afterVisitAutopayOff === true/g).length).toBeGreaterThanOrEqual(5);
-  });
 });
