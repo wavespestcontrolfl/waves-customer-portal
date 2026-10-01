@@ -775,6 +775,23 @@ async function reconcileStreetLevelHoldAfterStamp(dbh, svc) {
   }
 }
 
+// True when the visit has a recorded pending -> confirmed transition BY A USER (the
+// office confirm route's transitionJobStatus row). Fails closed (false) on a lookup error.
+async function hasRecordedOfficeConfirm(dbh, serviceId) {
+  try {
+    const row = await dbh('job_status_history')
+      .where({ job_id: serviceId, from_status: 'pending', to_status: 'confirmed' })
+      // SmartRebooker records its own pending -> confirmed on a move with transitioned_by NULL;
+      // the office confirm route records the acting user. Only the latter is an approval.
+      .whereNotNull('transitioned_by')
+      .first('job_id');
+    return !!row;
+  } catch (e) {
+    logger.warn(`[street-level-hold] confirm-history lookup failed for ${serviceId}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
 /**
  * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
  * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
@@ -807,11 +824,18 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       return false;
     }    // A street-level address hold is released ONLY by the office's explicit confirm: no writer
     // that merely moves the visit (SmartRebooker, admin-schedule update-details, the bulk
-    // paths, the sweep) may activate it. A hold whose status the office already flipped to
-    // 'confirmed' (its hook failed before the stamp) stays on the retry rail. Fails closed.
-    if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && row.status !== 'confirmed' && await isStreetLevelHoldVisit(serviceId, db)) {
-      logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
-      return false;
+    // paths, the sweep) may activate it. Status 'confirmed' is NOT proof of that approval
+    // (SmartRebooker writes it on a move); the proof is the recorded pending -> confirmed
+    // transition BY A USER (job_status_history.transitioned_by set; SmartRebooker's own row
+    // has it NULL), which a hold only gets from the office confirm route (tech taps on a
+    // hold are refused). A hold the office confirmed whose hook then
+    // failed before the stamp stays on the retry rail. Fails closed.
+    if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db)) {
+      const approved = row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId);
+      if (!approved) {
+        logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
+        return false;
+      }
     }
     // Rejected rows are not activated — a cancelled/skipped legacy review
     // booking was the office declining it. Completed/no_show rows DO

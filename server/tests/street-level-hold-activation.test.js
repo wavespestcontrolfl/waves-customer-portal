@@ -16,12 +16,13 @@ const { autoConfirmOutboundReviewBooking, respondToTransitionConflict } = trackR
 beforeEach(() => { jest.clearAllMocks(); });
 
 // A fake knex handle. `held` answers the live-hold lookup (`scheduled_services as ss`).
-const makeHandle = ({ visit, held, calls }) => {
+const makeHandle = ({ visit, held, calls, history = false }) => {
   const h = (table) => {
     const q = {};
-    ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'whereExists', 'orderBy', 'forUpdate', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+    ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'whereExists', 'orderBy', 'forUpdate', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.first = jest.fn(async () => {
       if (table === 'scheduled_services as ss') { calls.hold += 1; return held ? { id: visit.id } : undefined; }
+      if (table === 'job_status_history') { calls.history = (calls.history || 0) + 1; return history ? { job_id: visit.id } : undefined; }
       if (table === 'scheduled_services') return { ...visit };
       return null;
     });
@@ -105,11 +106,30 @@ describe('activateLegacyOutboundReviewRowIfNeeded: a schedule move never release
     }
   });
 
-  test('a hold the office already flipped to confirmed (hook failed before the stamp) stays on the retry rail: the guard is not consulted', async () => {
+  test('SmartRebooker writes status confirmed on a move: that is NOT approval, so the moved hold is still skipped (the reschedule-to-activation sequence)', async () => {
+    // rescheduleOnce: status 'confirmed' + a new date, then activateLegacyOutboundReviewRowIfNeeded(db, id, 'rebooker-reschedule').
     const calls = { hold: 0, updates: [] };
-    const handle = makeHandle({ visit: baseVisit({ status: 'confirmed' }), held: true, calls });
+    const handle = makeHandle({ visit: baseVisit({ status: 'confirmed', scheduled_date: '2026-10-12' }), held: true, history: false, calls });
+    const out = await activateLegacyOutboundReviewRowIfNeeded(handle, 'v1', 'rebooker-reschedule');
+    expect(out).toBe(false);
+    expect(calls.history).toBe(1);                 // looked for a recorded office confirm; none
+    expect(calls.updates).toHaveLength(0);         // no stamp, no hook
+    // SmartRebooker records its move's pending -> confirmed with transitioned_by NULL, so the proof
+    // requires a user-recorded transition.
+    const src = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
+    expect(src).toContain(".whereNotNull('transitioned_by')");
+    const rb = fs.readFileSync(require.resolve('../services/rebooker.js'), 'utf8');
+    expect(rb).toContain('transitioned_by: null,');
+    expect(rb).toContain("activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule')");
+  });
+
+  test('a hold the office confirmed through the route (a recorded pending -> confirmed) whose hook failed stays on the retry rail', async () => {
+    const calls = { hold: 0, updates: [] };
+    const handle = makeHandle({ visit: baseVisit({ status: 'confirmed' }), held: true, history: true, calls });
     await activateLegacyOutboundReviewRowIfNeeded(handle, 'v1', 'legacy-activation-sweep').catch(() => {});
-    expect(calls.hold).toBe(0);
+    expect(calls.history).toBe(1);
+    // It proceeded past the guard (the hook legs / stamp are attempted, not skipped).
+    expect(calls.updates.length + (calls.hold || 0)).toBeGreaterThan(0);
   });
 
   test('a plain voice-agent or outbound-review row is untouched by the guard (no hold lookup for non-voice rows)', async () => {
