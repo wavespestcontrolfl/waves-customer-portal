@@ -118,7 +118,7 @@ describe('route wiring', () => {
     expect(block).toMatch(/db\.raw\(TRIAGE_REPLACE_EXTRACTED_SQL, /);
     const sql = require('../routes/lead-webhook')._test.TRIAGE_REPLACE_EXTRACTED_SQL;
     expect(sql).toContain("'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host'");
-    expect(sql.endsWith(')) || ?::jsonb')).toBe(true);
+    expect(sql).toContain(")) || (?::jsonb - 'attribution') || ");
   });
 
   test('both Customer 360 notes carry the sign-host line', () => {

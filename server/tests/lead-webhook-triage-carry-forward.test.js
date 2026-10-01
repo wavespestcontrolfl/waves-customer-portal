@@ -48,8 +48,19 @@ describeDb('AI triage extracted_data replace', () => {
   });
 
   test('an intake with no page URLs adds no attribution key at all', async () => {
+    // webhookStageBase stores missing URLs as empty strings
+    expect(await replace({ stage: 'lead_webhook_received', attribution: { pageUrl: '', landingUrl: ' ', utm: { source: 'x' } } }, { summary: 's' }))
+      .toEqual({ stage: 'lead_webhook_received', summary: 's' });
     expect(await replace({ stage: 'lead_webhook_received', attribution: { utm: { source: 'x' } } }, { summary: 's' }))
       .toEqual({ stage: 'lead_webhook_received', summary: 's' });
     expect(await replace(null, { summary: 's' })).toEqual({ summary: 's' });
+  });
+
+  test('an attribution key in the triage output never replaces (or adds) one', async () => {
+    const intake = { attribution: { pageUrl: 'https://wavespestcontrol.com/ants', landingUrl: '' } };
+    expect(await replace(intake, { summary: 's', attribution: { pageUrl: 'https://chatgpt.com/' } }))
+      .toEqual({ summary: 's', attribution: { pageUrl: 'https://wavespestcontrol.com/ants' } });
+    expect(await replace({}, { summary: 's', attribution: { pageUrl: 'https://chatgpt.com/' } }))
+      .toEqual({ summary: 's' });
   });
 });

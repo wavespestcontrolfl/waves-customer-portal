@@ -1671,21 +1671,24 @@ function sanitizeHeardAboutPrompt(value, heardAbout) {
 // The AI triage's extracted_data REPLACES the intake snapshot on a fresh form
 // lead. These keys from intake are carried forward (jsonb_strip_nulls drops a
 // key the row never had); the triage snapshot's own keys win on overlap.
-// attribution keeps ONLY the submission's page URLs (pageUrl / landingUrl):
-// the lead funnel's landing-page view reads them, and the Lead Response Agent
-// is already given the page URL directly, so it sees nothing new. The rest of
-// intake attribution (UTMs, click ids, lead source) is not carried; it lives
-// on the funnel row and the customer.
+// attribution is the exception: it keeps ONLY the submission's page URLs
+// (pageUrl / landingUrl, blank = absent) and is applied LAST, after any
+// attribution key the model returned is removed, so triage output can never
+// replace the captured page. The lead funnel's landing-page view reads them;
+// the Lead Response Agent is already given the page URL directly, so it sees
+// nothing new. The rest of intake attribution (UTMs, click ids, lead source)
+// is not carried; it lives on the funnel row and the customer.
 const TRIAGE_REPLACE_EXTRACTED_SQL = "jsonb_strip_nulls(jsonb_build_object("
   + "'stage', COALESCE(extracted_data, '{}'::jsonb)->'stage', "
   + "'address', COALESCE(extracted_data, '{}'::jsonb)->'address', "
   + "'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', "
   + "'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', "
-  + "'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host', "
+  + "'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host'"
+  + ")) || (?::jsonb - 'attribution') || jsonb_strip_nulls(jsonb_build_object("
   + "'attribution', NULLIF(jsonb_strip_nulls(jsonb_build_object("
-  + "'pageUrl', COALESCE(extracted_data, '{}'::jsonb)->'attribution'->'pageUrl', "
-  + "'landingUrl', COALESCE(extracted_data, '{}'::jsonb)->'attribution'->'landingUrl')), '{}'::jsonb)"
-  + ")) || ?::jsonb";
+  + "'pageUrl', NULLIF(btrim(COALESCE(extracted_data, '{}'::jsonb)->'attribution'->>'pageUrl'), ''), "
+  + "'landingUrl', NULLIF(btrim(COALESCE(extracted_data, '{}'::jsonb)->'attribution'->>'landingUrl'), '')"
+  + ")), '{}'::jsonb)))";
 
 function buildLeadWebhookIntake(body = {}) {
   // Map raw form field names (garbled -> clean)
