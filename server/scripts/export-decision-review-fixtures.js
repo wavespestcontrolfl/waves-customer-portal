@@ -22,7 +22,7 @@ const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'qu
 // than the CHECKs: a real sha256 hex hash, and for confirmed rows a label of the
 // review route's shape ({ verdict: jev_right | jev_wrong | unclear, correct_value
 // required for jev_wrong }) with a non-blank reviewer and a timestamp.
-const LABEL_OK = "(label IS NOT NULL AND jsonb_typeof(label) = 'object' AND label->>'verdict' IN ('jev_right','jev_wrong','unclear') AND (label->>'verdict' <> 'jev_wrong' OR label ? 'correct_value'))";
+const LABEL_OK = "(label IS NOT NULL AND jsonb_typeof(label) = 'object' AND label->>'verdict' IS NOT NULL AND label->>'verdict' IN ('jev_right','jev_wrong','unclear') AND (label->>'verdict' <> 'jev_wrong' OR jsonb_exists(label, 'correct_value')))";
 const PROVENANCE_OK = "(labeled_by IS NOT NULL AND btrim(labeled_by) <> '' AND labeled_at IS NOT NULL)";
 const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NOT IN ('confirmed_error','confirmed_correct') OR (${LABEL_OK} AND ${PROVENANCE_OK}))`;
 
