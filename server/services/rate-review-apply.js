@@ -419,7 +419,11 @@ async function scheduleRow(dbh, row, { batch, customer, lane, accountLines, toda
   if (!customer) throw hold('lane_unknown', 'customer missing');
   if (!lane) throw hold('lane_cleanup', { billingLane: row.billing_lane });
   if (row.family_key === 'termite') throw hold('termite_program');
-  const occurrence = anniversaryInWindow(ymd(row.anniversary_date), ymd(batch.window_from), ymd(batch.window_to));
+  // The ranking's own review date (rate_review_snapshots.review_date —
+  // the anniversary's occurrence in the batch window, or the earlier
+  // batch's for a carried-forward row); re-derived only for a row written
+  // before that column existed.
+  const occurrence = ymd(row.review_date) || anniversaryInWindow(ymd(row.anniversary_date), ymd(batch.window_from), ymd(batch.window_to));
   const floor = occurrence && occurrence > noticeFloor ? occurrence : noticeFloor;
   const metadata = {
     source: NOTICE_METADATA_SOURCE, batch_key: batchKey, planned_send_date: plannedSend, anniversary_occurrence: occurrence,

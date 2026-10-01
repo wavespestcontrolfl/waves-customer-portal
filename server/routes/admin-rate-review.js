@@ -26,12 +26,12 @@ const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { rateReviewLive } = require('../config/feature-gates');
+const { validCalendarDate } = require('../utils/datetime-et');
 const logger = require('../services/logger');
 const rateReview = require('../services/rate-review');
 const rateReviewApply = require('../services/rate-review-apply');
 
-const BATCH_KEY_RE = /^\d{4}-\d{2}$/;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const BATCH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/; // a real month, never 2026-13
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -43,7 +43,7 @@ router.use((req, res, next) => {
 function validBatchKey(req, res) {
   const key = String(req.params.key || '');
   if (!BATCH_KEY_RE.test(key)) {
-    res.status(400).json({ error: 'batch key must be YYYY-MM' });
+    res.status(400).json({ error: 'batch key must be YYYY-MM with a real month' });
     return null;
   }
   return key;
@@ -72,10 +72,13 @@ router.get('/batches/:key', async (req, res) => {
 router.post('/batches/:key/build', async (req, res) => {
   const key = validBatchKey(req, res);
   if (!key) return;
+  // Optional window; both absent → the service's standing window (anniversaries
+  // 35–65 days out from today). A shape-only check is not enough: 2026-02-31
+  // would reach the DATE write, so each value must be a real calendar date.
   const from = req.body && req.body.anniversaryFrom != null ? String(req.body.anniversaryFrom) : null;
   const to = req.body && req.body.anniversaryTo != null ? String(req.body.anniversaryTo) : null;
-  if ((from && !DATE_RE.test(from)) || (to && !DATE_RE.test(to))) {
-    return res.status(400).json({ error: 'anniversaryFrom / anniversaryTo must be YYYY-MM-DD' });
+  if ((from && !validCalendarDate(from)) || (to && !validCalendarDate(to))) {
+    return res.status(400).json({ error: 'anniversaryFrom / anniversaryTo must be real calendar dates, YYYY-MM-DD' });
   }
   try {
     const result = await rateReview.buildBatch({ batchKey: key, anniversaryFrom: from, anniversaryTo: to });
@@ -100,8 +103,8 @@ router.post('/batches/:key/schedule', async (req, res) => {
   const key = validBatchKey(req, res);
   if (!key) return;
   const plannedSendDate = req.body && req.body.plannedSendDate != null ? String(req.body.plannedSendDate) : null;
-  if (plannedSendDate && !DATE_RE.test(plannedSendDate)) {
-    return res.status(400).json({ error: 'plannedSendDate must be YYYY-MM-DD' });
+  if (plannedSendDate && !validCalendarDate(plannedSendDate)) {
+    return res.status(400).json({ error: 'plannedSendDate must be a real calendar date, YYYY-MM-DD' });
   }
   try {
     const result = await rateReviewApply.scheduleNoticeRows(key, { plannedSendDate, actorId: req.technicianId || null });

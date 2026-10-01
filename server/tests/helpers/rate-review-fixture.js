@@ -45,8 +45,8 @@ function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, cou
 
 // Build the scripted db for a scenario. `scenario` keys: config, planLines,
 // customers, firstVisits, completedVisits, estimates, terms, ledger,
-// priorReviews, sentRowCount, batchRow, signals { [customerId]: { callbacks,
-// cancellationCases, retentionOffers, holds } }.
+// priorReviews, latestSnapshots, sentRowCount, batchRow, settledDues,
+// signals { [customerId]: { callbacks, cancellationCases, retentionOffers, holds } }.
 function scriptedDb(scenario) {
   const writes = { snapshotInserts: [], snapshotDeletes: 0, batchUpserts: [], batchUpdates: [] };
   const signalsFor = (id) => (scenario.signals && scenario.signals[id]) || {};
@@ -57,7 +57,9 @@ function scriptedDb(scenario) {
       case 'rate_review_snapshots':
       case 'rate_review_snapshots as r':
         return chain({
-          rows: () => scenario.priorReviews || [],
+          // three reads share this table: prior reviews (customer_id, family_key),
+          // latest snapshots (… status, review_date …) and the batch page (r.*)
+          rows: (q) => (q.calls.some(([name, args]) => name === 'select' && args.includes('review_date')) ? (scenario.latestSnapshots || []) : (scenario.priorReviews || [])),
           count: () => ({ n: scenario.sentRowCount || 0 }),
           onInsert: (rows) => writes.snapshotInserts.push(...(Array.isArray(rows) ? rows : [rows])),
           onDelete: () => { writes.snapshotDeletes += 1; },
