@@ -12366,6 +12366,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // unattached invoice — the first PERFORMED completion bills it on the
       // same invoice as the visit and charges the saved card once.
       let setupFeeDeferredToFirstVisit = false;
+      // The accept's shape is the one the capture UI rendered the
+      // after_visit_card authorization for (setup-only on the card rail with
+      // GATE_PAF_SETUP_FEE live) — whether or not the stamp then landed. The
+      // consent snapshot of record must be the text the customer saw, so it
+      // keys on THIS, never on the deferral outcome (a fallback to the payable
+      // invoice still records what was displayed and agreed to).
+      let setupFeeAfterVisitConsentShown = false;
       if (customerId && !treatAsOneTime && !annualPrepaySelected) {
         const EstimateConverter = require('../services/estimate-converter');
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
@@ -12508,6 +12515,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             && !(acceptedRodentSetupAmount > 0)
             && require('../config/feature-gates').pafSetupFeeLive()
             && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicy)) {
+            setupFeeAfterVisitConsentShown = true;
             const deferFeeAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
             const deferAnchorId = standardConversionResult?.firstScheduledServiceId || null;
             if (deferFeeAmount > 0 && deferAnchorId) {
@@ -12838,6 +12846,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardInvoiceMinted,
         standardInvoiceAttached,
         setupFeeDeferredToFirstVisit,
+        setupFeeAfterVisitConsentShown,
       };
     }).catch((txErr) => {
       // PG 40P01 (deadlock_detected): Postgres aborted this transaction to
@@ -13008,10 +13017,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           consentVariant: annualPrepaySelected && recurringCardLaneActive
             && RecurringCards.isPrepayCardAndChargeEnabled()
             ? 'prepay_card'
-            // Setup fee deferred to the first visit (GATE_PAF_SETUP_FEE): the
+            // Setup-only shape on the card rail (GATE_PAF_SETUP_FEE): the
             // capture UI rendered the after-first-visit authorization, so that
-            // is the snapshot of record (recorded under the v12 label).
-            : (txResult.setupFeeDeferredToFirstVisit === true ? 'after_visit_card' : null),
+            // is the snapshot of record (v12 label) — even when the stamp could
+            // not land and the accept fell back to the payable invoice.
+            : (txResult.setupFeeAfterVisitConsentShown === true ? 'after_visit_card' : null),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'

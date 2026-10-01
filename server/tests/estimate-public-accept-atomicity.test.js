@@ -2489,6 +2489,51 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 
+  // Codex pre-push r2 P1: the consent snapshot of record is the text the UI
+  // displayed, so it must not depend on whether the stamp landed.
+  test('gate ON, capture-required, stamp CANNOT land (no first visit / occupied claim): the payable invoice is minted but the displayed after_visit_card consent is still the one recorded', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_fb', paymentMethodId: 'pm_paf_fb', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+
+    const noAnchor = setupOnlyFixture('paf-consent-noanchor', { withAnchor: false });
+    const first = await putAccept(noAnchor, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    expect(first.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(first.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(enroll.mock.calls[0][0].consentVariant).toBe('after_visit_card');
+
+    InvoiceService.create.mockClear();
+    enroll.mockClear();
+    const occupied = setupOnlyFixture('paf-consent-occupied');
+    db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
+    const second = await putAccept(occupied, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    expect(second.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(enroll.mock.calls[0][0].consentVariant).toBe('after_visit_card');
+  });
+
+  test('gate ON but not on the setup-only shape (first-application line present): base consent, no after_visit_card', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    EstimateConverter.resolveFirstApplicationAmount.mockReturnValue(40);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_fa', paymentMethodId: 'pm_paf_fa', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-consent-firstapp');
+    const response = await putAccept(token, { recurringCardSetupIntentId: 'seti_paf_fa' });
+    expect(response.status).toBe(200);
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
   test('gate ON but no first visit exists to carry the stamp: falls back to today\'s payable invoice — a fee is never dropped', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-noanchor', { withAnchor: false });
