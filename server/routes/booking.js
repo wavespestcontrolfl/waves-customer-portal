@@ -23,7 +23,8 @@ const {
   validatePreferredTimeRequest,
   recordPreferredTimeRequest,
   hasRecentPreferredTimeRequest,
-  noteBookingOnPreferredLeads,
+  closeBookedPreferredLeads,
+  dropSupersededPreferredFunnelRows,
 } = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -5837,6 +5838,9 @@ async function createSelfBooking(payload = {}) {
     }
 
     if (txResult.existing) {
+      // The genuine lead(s) this replay's own conversion converted (lineage for the
+      // closed preferred-time request's funnel-row cleanup).
+      let replayConvertedLeadIds = [];
       await markBookingIntentsConverted(txResult.existing.id);
       // Replay heal (codex #3282 audit P1): if the original request crashed
       // between the booking commit and its promotion savepoint, the retry
@@ -5975,11 +5979,14 @@ async function createSelfBooking(payload = {}) {
           if (replaySeriesActivated) {
             try {
               const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-              await convertLeadFromEvent({
+              const replayConversion = await convertLeadFromEvent({
                 source: 'recurring_service_booked',
                 customerId: custId,
                 enforceOriginating: true,
+                excludeCallbackRequests: true,
+                bookingId: txResult.existing.id,
               });
+              if (replayConversion?.converted) replayConvertedLeadIds = replayConversion.leadIds || [];
             } catch (leadErr) {
               logger.warn(`[booking:confirm] replay lead conversion failed for ${txResult.existing.id} (non-blocking): ${leadErr.message}`);
             }
@@ -6049,11 +6056,14 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
-      // A first attempt that committed but died before its post-commit note
-      // step leaves the customer's preferred-time request without its "customer
-      // booked" note: write it (idempotent per lead + visit; never converts).
+      // A first attempt that committed but died before its post-commit close
+      // step leaves the customer's preferred-time request open: close it
+      // (idempotent per lead + visit; closes as 'handled', never converts).
       if (!callbackVisit) {
-        await noteBookingOnPreferredLeads(db, { customerId: custId, booking: txResult.existing });
+        await closeBookedPreferredLeads(db, { customerId: custId, booking: txResult.existing, convertedLeadIds: replayConvertedLeadIds });
+        // The first attempt's own attribution row may already exist: if so, the
+        // request this booking closed no longer needs its funnel row.
+        await dropSupersededPreferredFunnelRows(db, { booking: txResult.existing, convertedLeadIds: replayConvertedLeadIds });
       }
       return { ok: true, body: {
         booking: txResult.existing,
@@ -6437,6 +6447,10 @@ async function createSelfBooking(payload = {}) {
           source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
           customerId: custId,
           enforceOriginating: true,
+          bookingId: booking?.id || null,
+          // The customer's own /book booking closes a preferred-time request as
+          // 'handled' (closeBookedPreferredLeads below) — never wins it here.
+          excludeCallbackRequests: true,
         });
       } catch (err) {
         logger.warn(`[lead-trigger] self-booking conversion failed for customer=${custId}: ${err.message}`);
@@ -6444,13 +6458,17 @@ async function createSelfBooking(payload = {}) {
     }
 
     // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
-    // customer is moot once they have booked, but a booking never closes it
-    // (owner ruling 2026-09-30): the customer's open request(s) get one system
-    // note naming this visit, and staff close them. No lead is won, no funnel
-    // row touched. Best-effort; runs whatever the gate reads (a request already
-    // filed still gets the note). The replay branch does the same.
+    // customer is moot once they have booked, so the booking closes it (owner
+    // ruling 2026-10-01): the customer's open request(s) move to the terminal
+    // status 'handled' with one audit row and one admin FYI. No lead is won or
+    // lost, no funnel row touched. Best-effort; runs whatever the gate reads (a
+    // request already filed still closes). The replay branch does the same.
+    // The genuine lead(s) this booking's own conversion converted: the lineage the
+    // closed request's funnel-row cleanup needs when attributeSelfBooking writes
+    // no row of its own (persisted on the close's audit row, and passed to the cleanup).
+    const convertedLeadIds = leadConversion?.converted ? (leadConversion.leadIds || []) : [];
     if (!callbackVisit) {
-      await noteBookingOnPreferredLeads(db, { customerId: custId, booking });
+      await closeBookedPreferredLeads(db, { customerId: custId, booking, convertedLeadIds });
     }
 
     // Persist an ad-tracked self-booking's click id onto a won lead so the
@@ -6471,7 +6489,7 @@ async function createSelfBooking(payload = {}) {
     if (!callbackVisit) {
       try {
         const { attributeSelfBooking } = require('../services/lead-estimate-link');
-        await attributeSelfBooking({
+        const selfAttribution = await attributeSelfBooking({
           customerId: custId,
           attribution,
           serviceInterest: resolvedServiceType,
@@ -6482,6 +6500,11 @@ async function createSelfBooking(payload = {}) {
           bookingSource: source || null,
           leadConverted: !!leadConversion?.converted,
         });
+        // The booking now has its own funnel row, so the funnel row of a request
+        // this booking closed (here or in the submit's reconcile) is a duplicate of
+        // the same journey: drop it (resolved from the close audit rows, verified
+        // against the booking's row in the same statement; kept when none).
+        if (selfAttribution?.attributed || convertedLeadIds.length) await dropSupersededPreferredFunnelRows(db, { booking, convertedLeadIds });
       } catch (err) {
         logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
       }

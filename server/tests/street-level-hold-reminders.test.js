@@ -117,6 +117,6 @@ describe('the office confirm arms the reminders', () => {
     expect(src).toContain('AppointmentReminders.registerAppointment(');
     expect(src).toContain('sendConfirmation: false');
     // The hold lasts only while customer_confirmed is false; the hook's stamp releases it.
-    expect(src).toContain('.update({ customer_confirmed: true, confirmed_at: new Date() })');
+    expect(src).toContain('.update({ customer_confirmed: true, confirmed_at: stampedAt })');   // the guarded stamp (stampCustomerConfirmed)
   });
 });
