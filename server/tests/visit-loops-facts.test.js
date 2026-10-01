@@ -7,6 +7,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn() }));
 jest.mock('../services/sms-operational-actions', () => ({ smsCommitmentsEnabled: jest.fn(), listSmsCommitments: jest.fn() }));
+// the customer tracker's own stop count (read-only) is the only source of a number
+jest.mock('../services/stops-ahead', () => ({ computeStopsAhead: jest.fn(async () => ({ stopsAhead: 2, yourStop: 3, totalStops: 6 })) }));
+const { computeStopsAhead } = require('../services/stops-ahead');
 
 const logger = require('../services/logger');
 const featureGates = require('../config/feature-gates');
@@ -95,6 +98,9 @@ describe('loadVisitLoops basics', () => {
     expect(visitStatusSignature({ techPosition: { ...tp, techId: 't2' } })).not.toBe(base);
     expect(visitStatusSignature({ techPosition: { ...tp, windowStart: '13:00:00' } })).not.toBe(base);
     expect(visitStatusSignature({ techPosition: { ...tp, windowDisplay: '9:00 AM–11:00 AM' } })).toBe(base);
+    // a staff correction of the service the line names
+    expect(visitStatusSignature({ techPosition: { ...tp, visitType: 'Lawn Care' } })).not.toBe(visitStatusSignature({ techPosition: { ...tp, visitType: 'Pest Control' } }));
+    expect(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00', type: 'Lawn' } })).not.toBe(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00', type: 'Pest' } }));
     expect(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00' } })).not.toBe(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '10:00:00' } }));
   });
 
@@ -110,27 +116,27 @@ describe('techPosition', () => {
   const handlers = (extra = {}) => ({
     scheduled_services: (ops, kind) => {
       if (hasOp(ops, 'leftJoin')) return [todayRow(extra.visit)];
-      if (hasOp(ops, 'where', (a) => a[0] === 'route_order')) return { count: extra.ahead ?? '2' };
       return kind === 'first' ? null : [];
     },
     tech_status: () => ('status' in extra ? extra.status : { status: 'en_route', current_job_id: 'other', location_updated_at: minutesAgo(2) }),
   });
 
-  test('fresh position: status, minutes, stops ahead (terminal/rescheduled excluded in SQL), first name only', async () => {
+  test('fresh position: status, minutes, the tracker\'s stop count (read-only), first name only', async () => {
     const conn = fakeConn(handlers());
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn, deriveWindow });
     expect(out.techPosition).toEqual({
       techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
       visitId: 'visit-1', techId: 'tech-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
     });
-    const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'where', (a) => a[0] === 'route_order'));
-    // stops, not rows: a visit group counts once
-    expect(hasOp(count.ops, 'first', (a) => /COUNT\(DISTINCT COALESCE\(visit_id, id\)\)/.test(a[0]?.raw))).toBe(true);
-    expect(hasOp(count.ops, 'whereNotIn', (a) => a[0] === 'status' && ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].every((s) => a[1].includes(s)))).toBe(true);
-    expect(hasOp(count.ops, 'where', (a) => a[0] === 'route_order' && a[1] === '<' && a[2] === 3)).toBe(true);
-    // finished-but-unclosed stops (tracker complete / service record) are not ahead
-    expect(hasOp(count.ops, 'where', (a) => typeof a[0] === 'function')).toBe(true);
-    expect(hasOp(count.ops, 'whereNotExists')).toBe(true);
+    expect(computeStopsAhead).toHaveBeenCalledWith(conn, 'visit-1', { readOnly: true, today: '2026-10-01' });
+  });
+
+  test('no tracker count (gate off, over the cap, not yet the durable floor): no number', async () => {
+    for (const result of [null, { pending: true }]) {
+      computeStopsAhead.mockResolvedValueOnce(result);
+      const out = await loadVisitLoops({ customerId: 'c1', now: NOW, conn: fakeConn(handlers()) });
+      expect(out.techPosition.stopsAhead).toBeNull();
+    }
   });
 
   test('atThisVisit when the tech status points at this visit', async () => {
@@ -145,18 +151,25 @@ describe('techPosition', () => {
     expect(out.techPosition).toMatchObject({ status: 'en_route', atThisVisit: false });
   });
 
+  test('yesterday\'s 23:00 visit stays in today\'s facts until its window ends at 01:00 ET', async () => {
+    const late = todayRow({ id: 'v-late', scheduled_date: '2026-09-30', window_start: '23:00:00', window_end: '23:45:00' });
+    const at = (iso) => loadVisitLoops({ customerId: 'c1', now: new Date(iso), conn: fakeConn({ ...handlers(), scheduled_services: (ops) => (hasOp(ops, 'leftJoin') ? [late] : []) }) });
+    expect((await at('2026-10-01T04:30:00Z')).techPosition).toMatchObject({ visitId: 'v-late' }); // 00:30 ET
+    expect((await at('2026-10-01T05:30:00Z')).techPosition).toBeNull(); // 01:30 ET: no longer live
+  });
+
   test('a fresh tech_status whose current job is this visit means no stop count, even with a lagging confirmed row', async () => {
     const conn = fakeConn(handlers({ status: { status: 'on_site', current_job_id: 'visit-1', location_updated_at: minutesAgo(1) } }));
     const out = await loadVisitLoops({ customerId: 'c1', now: NOW, conn });
     expect(out.techPosition).toMatchObject({ atThisVisit: true, stopsAhead: null });
   });
 
-  test('a started visit (status or tracker) carries no stop count and runs no count query', async () => {
+  test('a started visit (status or tracker) carries no stop count and never asks the tracker', async () => {
     for (const visit of [{ status: 'en_route' }, { status: 'on_site' }, { status: 'confirmed', track_state: 'on_property' }]) {
-      const conn = fakeConn(handlers({ visit }));
-      const out = await loadVisitLoops({ customerId: 'c1', now: NOW, conn });
+      computeStopsAhead.mockClear();
+      const out = await loadVisitLoops({ customerId: 'c1', now: NOW, conn: fakeConn(handlers({ visit })) });
       expect(out.techPosition.stopsAhead).toBeNull();
-      expect(conn.calls.some((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'where', (a) => a[0] === 'route_order'))).toBe(false);
+      expect(computeStopsAhead).not.toHaveBeenCalled();
     }
   });
 
@@ -178,13 +191,6 @@ describe('techPosition', () => {
     const conn = fakeConn(handlers({ status: null }));
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
     expect(out.techPosition).toMatchObject({ status: 'stale', minutesSinceUpdate: null, atThisVisit: false });
-  });
-
-  test('unknown route_order: stopsAhead null and no count query', async () => {
-    const conn = fakeConn(handlers({ visit: { route_order: null } }));
-    const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
-    expect(out.techPosition.stopsAhead).toBeNull();
-    expect(conn.calls.some((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'where', (a) => a[0] === 'route_order'))).toBe(false);
   });
 
   test('no assigned tech: null', async () => {
@@ -377,6 +383,16 @@ describe('missedVisit', () => {
     const stub = { where: (...a) => { seen.push(['where', ...a]); return stub; }, whereNot: (...a) => { seen.push(['whereNot', ...a]); return stub; } };
     probe.ops.filter((o) => o.op === 'modify').forEach((o) => o.args[0](stub));
     expect(seen).toEqual(expect.arrayContaining([['where', 'property_id', 'prop-A'], ['whereNot', 'id', 'v9']]));
+  });
+
+  test('a same-day visit counts as the follow-up only when it starts AFTER the missed slot', async () => {
+    const noshow = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '13:00:00-14:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
+    const at = (later) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : later), reschedule_log: () => [noshow] }) });
+    // a morning pest visit that day preceded the 1 PM no-show: not a replacement
+    expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '09:00:00' }])).missedVisit).toMatchObject({ reason: 'customer_noshow' });
+    // a 4 PM visit that day, or any later day: a replacement
+    expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '16:00:00' }])).missedVisit).toBeNull();
+    expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-10-02', window_start: '09:00:00' }])).missedVisit).toBeNull();
   });
 
   test('a rebooked newest no-show does not hide an older open one', async () => {

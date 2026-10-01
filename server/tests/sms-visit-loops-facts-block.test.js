@@ -272,12 +272,12 @@ describe('visitLoopStatus', () => {
   test('facts with the section: the visit-status signature when a time-sensitive line shows; otherwise null', () => {
     const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', techId: 't1', windowStart: '09:00:00', atThisVisit: false };
     expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull();
-    expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, WITH)).toEqual({ signature: 'pos:v1@09:00:00:t1:en_route:false:2' });
+    expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, WITH)).toEqual({ signature: 'pos:v1@09:00:00::t1:en_route:false:2' });
     expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } }, WITH)).toBeNull();
     expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } } }, WITH))
       .toEqual({ signature: 'missed:Lawn:2026-09-30@09:00:00:not_completed' });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))
-      .toEqual({ signature: 'late:v1@09:00:00:tech_late:false|past:v1@09:00:00' });
+      .toEqual({ signature: 'late:v1@09:00:00::tech_late:false|past:v1@09:00:00:' });
     expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } }, WITH)).toBeNull(); // commitments have their own recheck
     expect(visitLoopStatus({}, WITH)).toBeNull();
   });

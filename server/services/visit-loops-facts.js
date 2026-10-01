@@ -32,7 +32,7 @@ const logger = require('./logger');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { calendarDay } = require('./live-eta-destination');
-const { JOIN_INELIGIBLE_STATUSES, UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
 const { gateEnvValue } = require('../config/feature-gates');
 const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('./customer-tracking-eta');
 
@@ -132,40 +132,37 @@ function windowLabel(row, deriveWindow) {
 // ALL of the customer's live visits today (ET), earliest first — not the
 // aggregator's upcoming list, which caps at three rows (a four-service day exists).
 async function loadTodayRows(customerId, { conn, now }) {
+  const today = etDateString(now);
+  const yesterday = etDateString(addETDays(now, -1));
   const rows = await conn('scheduled_services as ss')
     .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
     .where('ss.customer_id', customerId)
-    .where('ss.scheduled_date', etDateString(now))
+    .whereIn('ss.scheduled_date', [today, yesterday])
     .whereIn('ss.status', UPCOMING_SERVICE_STATUSES)
     .orderByRaw('ss.window_start ASC NULLS LAST, ss.route_order ASC NULLS LAST, ss.id ASC')
     .select('ss.id', 'ss.visit_id', 'ss.technician_id', 'ss.route_order', 'ss.scheduled_date', 'ss.status', 'ss.track_state',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name');
-  return rows || [];
+  // yesterday's rows only while their arrival window still runs past midnight
+  // (a 23:00 visit is live until 01:00) — the same rule that keeps them out of
+  // missed visits until then
+  const nowMin = nowEtMinutes(now);
+  return (rows || []).filter((r) => calendarDay(r.scheduled_date) === today || crossesIntoNow(r, nowMin));
+}
+// A visit dated yesterday whose customer-facing window rolls past midnight and has
+// not yet ended at nowMin (ET minutes of today).
+function crossesIntoNow(row, nowMin) {
+  const end = customerWindowEndMinutes(row);
+  return end != null && end > 1440 && nowMin < end - 1440;
 }
 
-// Live STOPS on the tech's route today before this visit; null with no route order.
-// A stop is a visit group (scheduled_services.visit_id — a pest + lawn stop is one
-// stop, as the tech route groups it) or an ungrouped row; this visit's own group
-// siblings are never "before" it.
-async function countStopsAhead(conn, visit, now) {
-  const routeOrder = visit.route_order == null ? null : Number(visit.route_order);
-  if (!Number.isFinite(routeOrder)) return null;
-  const result = await conn('scheduled_services')
-    .where({ technician_id: visit.technician_id, scheduled_date: etDateString(now) })
-    .where('route_order', '<', routeOrder)
-    .modify((b) => {
-      if (visit.visit_id) b.where((w) => w.whereNull('visit_id').orWhereNot('visit_id', visit.visit_id));
-    })
-    .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
-    // performed-but-not-closed stops are not ahead of anyone (same completion
-    // evidence findPastWindow and loadMissedVisit honor)
-    .where((b) => b.whereNull('track_state').orWhereNot('track_state', 'complete'))
-    .whereNotExists(function serviceRecorded() {
-      this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
-    })
-    .first(conn.raw('COUNT(DISTINCT COALESCE(visit_id, id)) AS count'));
-  const n = Number(result?.count);
-  return Number.isFinite(n) ? n : null;
+// Stops before this visit: ONLY the customer tracker's own count (stops-ahead.js
+// computeStopsAhead — dispatch sort order, sibling state, GATE_STOPS_AWAY, the
+// three-stop cap, the never-increase floor), read-only: a number is used only when
+// it is already the durable floor the tracker shows; otherwise none. An SMS never
+// states a count the tracker would not, and this module never writes.
+async function trackerStopsAhead(conn, visit, now) {
+  const result = await require('./stops-ahead').computeStopsAhead(conn, String(visit.id), { readOnly: true, today: etDateString(now) });
+  return Number.isInteger(result?.stopsAhead) ? result.stopsAhead : null;
 }
 
 async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
@@ -186,7 +183,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
   const currentJob = fresh && String(status?.current_job_id ?? '') === String(visit.id);
   const notStarted = NOT_STARTED_STATUSES.includes(visit.status) && !currentJob
     && !LIVE_TRACK_STATES.includes(visit.track_state) && visit.track_state !== 'complete';
-  const stopsAhead = notStarted ? await countStopsAhead(conn, visit, now) : null;
+  const stopsAhead = notStarted ? await trackerStopsAhead(conn, visit, now) : null;
   return {
     techName: firstName(visit.technician_name),
     status: fresh ? String(status.status) : 'stale',
@@ -313,8 +310,7 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
   // still open, not missed, until that window ends.
   const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
-  const stillOpen = (row) => calendarDay(row.scheduled_date) === yesterday
-    && (customerWindowEndMinutes(row) ?? 0) > 1440 && nowMin < customerWindowEndMinutes(row) - 1440;
+  const stillOpen = (row) => calendarDay(row.scheduled_date) === yesterday && crossesIntoNow(row, nowMin);
   const unfinished = (unfinishedRows || []).find((row) => !stillOpen(row));
   if (unfinished) {
     candidates.push({
@@ -350,9 +346,14 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
           // the same property: another address's visit does not resolve this miss
           if (noshow.property_id) b.where('property_id', noshow.property_id);
         })
-        .select('service_type')
+        .select('service_type', 'scheduled_date', 'window_start')
       : [];
-    const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family);
+    // A same-day visit counts only when its window starts AFTER the missed slot (an
+    // earlier visit that day preceded the no-show); unknown starts do not count.
+    const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
+    const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
+      || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
+    const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family && afterMiss(r));
     if (!followedUp) {
       candidates.push({
         type: noshow.service_type || null, date, windowStart: missedWindowStart(noshow.original_window),
@@ -494,7 +495,8 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 // The time-sensitive VISIT STATUS facts a reply can restate, as one comparable
 // string (null when none): a fresh tech position (its visit, window, tech, status,
 // at-this-visit, stop count), a delay or tracking gap (its visit, window and kind),
-// a passed window (its visit and window), a missed visit (type, day, reason). Raw
+// a passed window (its visit and window), a missed visit (type, day, reason) — each
+// with the service name the line renders, so a staff correction shows up too. Raw
 // window_start, never the display label (the rebuild has no deriveWindow). The send boundary rebuilds the facts
 // for the customer and refuses when this changed — a reschedule, a completion, a
 // resolved alert or a moved route all show up here, with no recheck per fact.
@@ -502,9 +504,9 @@ function visitStatusSignature(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const tp = v.techPosition && v.techPosition.status !== 'stale' ? v.techPosition : null;
   const parts = [
-    tp && `pos:${tp.visitId}@${tp.windowStart ?? ''}:${tp.techId}:${tp.status}:${tp.atThisVisit === true}:${tp.stopsAhead ?? ''}`,
-    v.lateAlert && `late:${v.lateAlert.visitId}@${v.lateAlert.windowStart ?? ''}:${v.lateAlert.type}:${v.lateAlert.missingTracking === true}`,
-    v.pastWindow && `past:${v.pastWindow.visitId}@${v.pastWindow.windowStart ?? ''}`,
+    tp && `pos:${tp.visitId}@${tp.windowStart ?? ''}:${tp.visitType ?? ''}:${tp.techId}:${tp.status}:${tp.atThisVisit === true}:${tp.stopsAhead ?? ''}`,
+    v.lateAlert && `late:${v.lateAlert.visitId}@${v.lateAlert.windowStart ?? ''}:${v.lateAlert.visitType ?? ''}:${v.lateAlert.type}:${v.lateAlert.missingTracking === true}`,
+    v.pastWindow && `past:${v.pastWindow.visitId}@${v.pastWindow.windowStart ?? ''}:${v.pastWindow.type ?? ''}`,
     v.missedVisit && `missed:${v.missedVisit.type}:${v.missedVisit.date}@${v.missedVisit.windowStart ?? ''}:${v.missedVisit.reason}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
