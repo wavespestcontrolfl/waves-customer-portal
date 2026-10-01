@@ -5141,12 +5141,12 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       setupIntentId: setupIntent.id,
       estimateId: estimate.id,
       // The consent variant the accept rendered and recorded (estimate_data
-      // acceptedRecurringCardConsentVariant: PR-B's after_visit_card, PR-C's
-      // setup fee, the prepay variants): recovery records that same text rather
-      // than the base card consent. Only the accepted intent carries it, and
-      // only a known variant is honored.
-      ...(boundToAccept && ['after_visit_card', 'after_visit_prepay', 'prepay_card'].includes(estimateData?.acceptedRecurringCardConsentVariant)
-        ? { consentVariant: estimateData.acceptedRecurringCardConsentVariant }
+      // acceptedRecurringCardConsentVariant: the one collection promise's
+      // after_visit_card, PR-B's cohort or PR-C's deferred setup fee):
+      // recovery records that same text rather than the base card consent.
+      // Only the accepted intent carries it, and only that variant is honored.
+      ...(boundToAccept && estimateData?.acceptedRecurringCardConsentVariant === 'after_visit_card'
+        ? { consentVariant: 'after_visit_card' }
         : {}),
       // PR-B: the accept stamped an explicit Auto Pay opt-out — recovery keeps
       // the card (saved + consent) but must not enroll it either.
