@@ -1102,3 +1102,29 @@ describe('approximators: "around 350 total" is a price, "around 2 PM" is a time 
     expect(run('That runs $350, or around 400 with the garage.').ok).toBe(false);
   });
 });
+
+// ONE clock-shape rule for every time preposition (codex #5377 r15 P1).
+describe('after at/by/before/until/around/about a number is a time only when clock-shaped (codex #5377 r15 P1)', () => {
+  const run = (offerTalk, { between = [] } = {}) => grounded(extraction({
+    priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', 'The service is $150'), PRICE_EVIDENCE[1]],
+  }), [OPENING, `Agent: ${offerTalk || 'The service is $150.'}`, ...between, `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n'));
+
+  test('a staff correction after a time preposition is caught, digits or words', () => {
+    for (const said of ['Actually, we\'re at 250.', 'Actually, by 300.', 'Actually, before 400.', 'Actually, until 300.', 'Actually, after 250.',
+      'Actually, we are at two hundred fifty.', 'Actually, by three hundred.', 'Actually, around 400.', 'Actually, about $400.']) {
+      expect([said, run('', { between: [`Agent: ${said}`] }).ok]).toEqual([said, false]);
+    }
+  });
+
+  test('a clock-shaped number after them is a time and is ignored', () => {
+    for (const said of ['We can come at 2.', 'We can come at 2:30.', 'We can come by 3 PM.', 'We can come at two.', 'We can come before 10.',
+      'We can come around 2 PM.', 'We can come about 2:30.', 'We can come until 5.', 'We can come at 12 noon.']) {
+      expect([said, run('', { between: [`Agent: ${said}`] }).ok]).toEqual([said, true]);
+    }
+  });
+
+  test('the same holds inside the offer turn itself', () => {
+    expect(run('The service is $150 and we are at 250 for the garage.').ok).toBe(false);
+    expect(run('The service is $150 and we come at 2.').ok).toBe(true);
+  });
+});

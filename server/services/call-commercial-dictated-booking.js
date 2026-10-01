@@ -69,12 +69,13 @@ const MONTHS = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)
 const MONTH_RE = new RegExp(`^${MONTHS}$`, 'i');
 const DOLLAR_WORDS = new Set(['dollar', 'dollars', 'buck', 'bucks', 'usd']);
 const TIME_AFTER = new Set(['am', 'pm', 'oclock', 'clock', 'morning', 'afternoon', 'evening', 'noon', 'tonight']);
-const TIME_BEFORE = new Set(['at', 'by', 'until', 'till', 'before', 'after']);
-// "around / about / approximately / roughly" qualify prices as often as clock times
-// ("that runs around 350 total"): they make a number TIME context only when it is
-// clock-shaped (a time word follows: handled by TIME_AFTER) or a bare hour 1-12 with
-// no money word. A number at or above the $20 floor after them is a price.
-const APPROXIMATORS = new Set(['around', 'about', 'approximately', 'roughly']);
+// Words that put a number in TIME context ("at 2", "by 3", "around 2", "before 10"),
+// and ALSO qualify prices ("we're at 250", "that runs around 350", "by 300"): ONE rule
+// for all of them. After one of these a number is a time only when it is clock-shaped:
+// an integer hour 1-12, or one a time word / colon time follows (handled by TIME_AFTER
+// and the colon check). Anything else ("at 250", "by 300", "around 350") counts as a
+// possible price (codex #5377 r14 + r15).
+const TIME_BEFORE = new Set(['at', 'by', 'until', 'till', 'before', 'after', 'around', 'about', 'approximately', 'roughly']);
 const QUANTITY_AFTER = new Set(['visit', 'visits', 'time', 'times', 'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
   'minute', 'minutes', 'hour', 'hours', 'treatment', 'treatments', 'unit', 'units', 'bedroom', 'bedrooms', 'bathroom', 'bathrooms',
   'building', 'buildings', 'property', 'properties', 'location', 'locations', 'room', 'rooms', 'story', 'stories', 'floor', 'floors',
@@ -86,8 +87,7 @@ function nonPriceContext(prev, next, value) {
   const n0 = next[0];
   if (TIME_AFTER.has(n0)) return true;
   if (n0 === 'in' && ['the', 'a'].includes(next[1]) && TIME_AFTER.has(next[2])) return true;
-  if (TIME_BEFORE.has(prev[prev.length - 1])) return true;
-  if (APPROXIMATORS.has(prev[prev.length - 1]) && Number.isInteger(value) && value >= 1 && value <= 12) return true;
+  if (TIME_BEFORE.has(prev[prev.length - 1]) && Number.isInteger(value) && value >= 1 && value <= 12) return true;
   if (['st', 'nd', 'rd', 'th'].includes(n0)) return true;
   if (MONTH_RE.test(prev[prev.length - 1] || '') || MONTH_RE.test(n0 || '')) return true;
   if (prev[prev.length - 1] === 'of' && MONTH_RE.test(next[0] || '')) return true;
