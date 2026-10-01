@@ -5425,6 +5425,18 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           throw saveErr;
         }
       }
+      // The consent-version rule runs BEFORE any state moves (codex #5434 r2
+      // P1): a stale or absent stamp — an intent minted under older copy,
+      // verified after a copy change — must not clear the customer-level
+      // needs_verification block below, or the next collection would retry
+      // the previously failed bank once the pointer is honored again. The
+      // pending row stays pending and unconsented; the office is asked to
+      // re-collect. Same rule as POST /cards (which refuses before any save).
+      const needsEnrollmentScopedConsent = !(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId));
+      if (needsEnrollmentScopedConsent
+        && !(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) {
+        return;
+      }
       // Verification cleared — a pending bank row becomes chargeable.
       if (isBankMethodType(saved.method_type) && saved.ach_status !== 'verified') {
         await db('payment_methods').where({ id: saved.id }).update({ ach_status: 'verified' });
@@ -5451,14 +5463,8 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // exists (backstop re-runs stay deduped), and enrollment stays
       // consent-gated: the row below is the authority, never SI metadata
       // (Codex #2507 P1).
-      if (!(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId))) {
-        // Same rule as POST /cards: the stamp /cards/setup-intent made from
-        // the rendering tab's attestation must be this server's current
-        // consent text version, or nothing is recorded or enrolled (codex
-        // #5434 r1 P1). The verified row above stays saved but inert.
-        if (!(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) {
-          return;
-        }
+      if (needsEnrollmentScopedConsent) {
+        // The stamp was judged current above, before any state moved.
         await ConsentService.recordConsent({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,

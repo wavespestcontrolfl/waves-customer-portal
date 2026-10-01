@@ -236,6 +236,39 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
   });
 
+  // codex #5434 r2 P1: a frozen (accepted / declined) document keeps the
+  // terms the customer saw — the disclosure rides only when the recorded
+  // acceptance carried the sentence.
+  test('an ACCEPTED pest proposal prints the disclosure only when its acceptance record carried it; a declined one never does', async () => {
+    const { RATE_REVIEW_SENTENCE } = require('../services/acceptance-terms-text');
+    const base = {
+      id: 'frozen-pest',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 55 }],
+        result: { recurringServices: [{ service: 'pest_control', name: 'Pest Control' }] },
+      },
+    };
+    // Accepted before the disclosure existed (an older acceptance snapshot, or none): frozen on the old terms.
+    const oldAcceptance = { termsText: 'Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract.', termsVersion: 'v2026-09', acceptedAt: '2026-09-01T15:00:00Z' };
+    let text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted' }, { billsPerApplication: false, acceptance: oldAcceptance }));
+    expect(text).toContain('Pest Control');
+    expect(text).not.toContain('Rate reviewed yearly');
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted' }, { billsPerApplication: false, acceptance: null }));
+    expect(text).not.toContain('Rate reviewed yearly');
+    // Accepted under the 'plan' drawer: the record proves the customer read it.
+    const planAcceptance = { ...oldAcceptance, termsText: `${oldAcceptance.termsText} ${RATE_REVIEW_SENTENCE}`, termsVersion: 'v2026-10' };
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted' }, { billsPerApplication: false, acceptance: planAcceptance }));
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
+    // Declined: historical, never restated.
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'declined' }, { billsPerApplication: false }));
+    expect(text).not.toContain('Rate reviewed yearly');
+  });
+
   test('a synthesized lawn proposal carries the rate-review disclosure without the pest-only callback line', async () => {
     const lawn = {
       id: 'ordinary-current-lawn',

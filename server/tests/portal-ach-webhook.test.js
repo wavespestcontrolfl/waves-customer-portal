@@ -168,8 +168,11 @@ test.each([
   mockHasEnrollmentScopedConsent.mockResolvedValue(false);
   await handleSetupIntentSucceeded(setupIntent({ metadata }));
   expect(mockDeferredCaptureConsentVersionCurrent).toHaveBeenCalledWith(expect.objectContaining({ id: 'si_1' }), expect.objectContaining({ customerId: 'cust-1' }));
-  // The bank still verifies — the method is saved, just inert.
-  expect(updatesFor('payment_methods').map((u) => u.patch)).toContainEqual({ ach_status: 'verified' });
+  // Nothing moves (codex r2 P1): the pending row stays pending and the
+  // customer-level needs_verification block stays — a stale completion
+  // must not re-open the charge walk to the previously failed bank.
+  expect(updatesFor('payment_methods')).toHaveLength(0);
+  expect(updatesFor('customers')).toHaveLength(0);
   expect(mockRecordConsent).not.toHaveBeenCalled();
   expect(mockEnroll).not.toHaveBeenCalled();
 });

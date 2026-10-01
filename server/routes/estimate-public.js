@@ -27671,6 +27671,18 @@ async function composeEstimateDataPayload(estimate, {
     // pricing table is normalizeProposal's lines, exactly what the pdfkit
     // generator prints today; it must not depend on the page-side commercial
     // gate. On-page renders keep the authored-proposal + gate condition.
+    // Acceptance record for the document: an accepted estimate whose
+    // terms_version proves a record was committed. Deliberately NOT gated —
+    // the gate controls what is shown and written from now on; evidence
+    // already recorded stays on the accepted estimate even after the kill
+    // switch (pre-push Codex P1). The customer-facing shape masks the IP to
+    // its first two octets and reduces the user-agent to a family label —
+    // enough to say "this device, this moment" without printing raw
+    // telemetry on a PDF. Read BEFORE the proposal projection: a frozen
+    // document's rate-review line keys on it (codex #5434 r2 P1). Strict on
+    // the headless document pass: the rendered PDF must carry the record or
+    // fail the render (which then fails the pdfkit fallback too).
+    const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
     let proposalPublicView = null;
     if ((isPdfRenderPass && featureGates.isEnabled('estimateDocPdf'))
       || (commercialGlassEnabled && estimateDataForIntelligence?.proposal?.enabled === true)) {
@@ -27698,7 +27710,7 @@ async function composeEstimateDataPayload(estimate, {
           // own narrower taxonomy (codex #5434 r1 P1 — a "Weed Control"
           // row is lawn here and was unclassifiable there). Explicit
           // boolean, like noGuaranteeClaims.
-          rateReviewTermsEligible: proposalRateReviewTermsEligible(proposalForView, estimate.id),
+          rateReviewTermsEligible: proposalRateReviewTermsEligible(proposalForView, estimate.id, { estimate, acceptance: acceptanceRecord }),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
           pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),
@@ -27798,14 +27810,6 @@ async function composeEstimateDataPayload(estimate, {
       catch (_) { addStampBlockedByMembership = true; }
     }
 
-    // Acceptance record for the document: an accepted estimate whose
-    // terms_version proves a record was committed. Deliberately NOT gated —
-    // the gate controls what is shown and written from now on; evidence
-    // already recorded stays on the accepted estimate even after the kill
-    // switch (pre-push Codex P1). The customer-facing shape masks the IP to
-    // its first two octets and reduces the user-agent to a family label —
-    // enough to say "this device, this moment" without printing raw
-    // telemetry on a PDF.
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
     // The scope the served drawer carries (codex #5434 r1 P0): 'plan' only
@@ -27817,9 +27821,6 @@ async function composeEstimateDataPayload(estimate, {
     const acceptanceTermsScope = acceptanceTermsServed
       ? acceptanceTermsScopeFor(estimate, estimateDataForIntelligence, pricingBundle)
       : null;
-    // Strict on the headless document pass: the rendered PDF must carry the
-    // record or fail the render (which then fails the pdfkit fallback too).
-    const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
     // Referral card (GATE_ESTIMATE_SUCCESS_REFERRAL): accepted estimates only;
     // include-when-present so every other response stays byte-identical.
     const successReferral = await estimateReferralCardFor(estimate);

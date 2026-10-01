@@ -123,16 +123,36 @@ function proposalCallbackTermsEligible(proposal, estimateId = null) {
   });
 }
 
+// Frozen documents keep their original terms (codex #5434 r2 P1): an
+// accepted or declined estimate's document describes the proposal the
+// customer actually saw (estimateIsPriceLocked, the line this module already
+// draws between "committed" and "still selling"), so the rate review
+// disclosure prints on a frozen document ONLY when the recorded acceptance
+// proves the customer accepted under terms that carried the sentence — the
+// 'plan' acceptance snapshot (estimate_acceptances.terms_text). A document
+// frozen before this disclosure existed, one accepted under the 'base'
+// drawer (rodent, one-time toggle), or a declined one never acquires it. An
+// open estimate is being sold under the current terms and prints it.
+function documentCarriesRateReviewTerms(estimate, acceptance = null) {
+  if (!estimateIsPriceLocked(estimate)) return true;
+  const { RATE_REVIEW_SENTENCE } = require('./acceptance-terms-text');
+  const text = acceptance?.termsText ?? acceptance?.terms_text ?? '';
+  return typeof text === 'string' && text.includes(RATE_REVIEW_SENTENCE);
+}
+
 // Whether the annual rate review disclosure prints beside the pdfkit
 // document's terms (owner ruling 2026-09-30): the SAME plan-terms scope the
 // money-back guarantee keys on — every row residential pest, lawn, mosquito
 // or tree & shrub (proposalCarriesPlanTerms: never termite, rodent,
 // commercial or an authored proposal) — plus at least one recurring line,
-// because a one-time-only document has no rate to review. Parity with
-// EstimateProposalDocument.jsx rateReviewEligible.
-function proposalRateReviewTermsEligible(proposal, estimateId = null) {
+// because a one-time-only document has no rate to review — and, given the
+// estimate row (+ its acceptance record), the frozen-document rule above.
+// Projected to the browser document by /data, so the two renderers read ONE
+// decision (EstimateProposalDocument.jsx rateReviewEligible).
+function proposalRateReviewTermsEligible(proposal, estimateId = null, { estimate = null, acceptance = null } = {}) {
   if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
-  return proposalHasRecurringVisit(proposal);
+  if (!proposalHasRecurringVisit(proposal)) return false;
+  return estimate ? documentCarriesRateReviewTerms(estimate, acceptance) : true;
 }
 
 // An estimate with no customer_id still links at accept through the SAME
@@ -331,6 +351,7 @@ module.exports = {
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
   proposalRateReviewTermsEligible,
+  documentCarriesRateReviewTerms,
   proposalRowTermsScope,
   resolveLivePricing,
   resolveProposalBillingContext,

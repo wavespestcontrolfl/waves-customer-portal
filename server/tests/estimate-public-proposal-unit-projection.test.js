@@ -201,6 +201,41 @@ describe('GET /:token/data — proposal line projection', () => {
     });
   });
 
+  // codex #5434 r2 P1: a frozen (accepted) document keeps the terms the
+  // customer saw — the projected decision is true only when the recorded
+  // acceptance carried the sentence.
+  test.each([
+    ['no acceptance snapshot carrying the sentence', 'Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract.', false],
+    ['a plan acceptance snapshot carrying the sentence', `Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract. ${require('../services/acceptance-terms-text').RATE_REVIEW_SENTENCE}`, true],
+  ])('an ACCEPTED pest plan with %s projects rateReviewTermsEligible=%s', async (_name, termsText, expected) => {
+    dbRows.estimates = {
+      ...estimateRow(),
+      id: 'est-accepted-pest',
+      status: 'accepted',
+      terms_version: 'v2026-10',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 55 }],
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
+        proposal: {
+          enabled: false,
+          buildings: [{ name: 'Service location', lineItems: [{ description: 'Pest Control', unitPrice: 55, frequency: 'monthly', taxable: false }] }],
+        },
+      },
+    };
+    dbRows.estimate_acceptances = { id: 'acc-1', estimate_id: 'est-accepted-pest', terms_version: 'v2026-10', terms_text: termsText, accepted_at: '2026-09-30T20:00:00Z', ip: '203.0.113.9', user_agent: 'jest' };
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.proposal.rateReviewTermsEligible).toBe(expected);
+      expect(body.acceptance?.termsText).toBe(termsText);
+    });
+  });
+
   test('a one-time-only document never carries the rate-review decision as true', async () => {
     dbRows.estimates = {
       ...estimateRow(),

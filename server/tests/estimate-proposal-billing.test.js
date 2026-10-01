@@ -36,6 +36,7 @@ const {
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
   proposalRateReviewTermsEligible,
+  documentCarriesRateReviewTerms,
   proposalRowTermsScope,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
@@ -199,6 +200,39 @@ describe('proposalRateReviewTermsEligible (annual rate review disclosure, owner 
   it('never prints where the proposal makes no guarantee claim (termite / unclassifiable work)', () => {
     mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
     expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(false);
+  });
+
+  // codex #5434 r2 P1: frozen documents keep their original terms.
+  describe('frozen documents (accepted / declined) keep the terms the customer saw', () => {
+    const { RATE_REVIEW_SENTENCE } = require('../services/acceptance-terms-text');
+    const plan = { enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] };
+    const planAcceptance = { termsText: `Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract. ${RATE_REVIEW_SENTENCE}` };
+    const baseAcceptance = { termsText: 'Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract.' };
+    beforeEach(() => mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false));
+    afterEach(() => mockEstimateMakesNoGuaranteeClaim.mockReset());
+
+    it('an open estimate prints (it is being sold under the current terms)', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'sent' } })).toBe(true);
+      expect(documentCarriesRateReviewTerms({ status: 'viewed', price_locked_at: null })).toBe(true);
+    });
+
+    it('an accepted estimate prints ONLY when its recorded acceptance carried the sentence', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted' }, acceptance: planAcceptance })).toBe(true);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted' }, acceptance: baseAcceptance })).toBe(false);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted' }, acceptance: null })).toBe(false);
+      // price_locked_at alone freezes too (both accept flows stamp it).
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'sent', price_locked_at: '2026-09-01T00:00:00Z' } })).toBe(false);
+      // The raw ledger column shape is accepted as well.
+      expect(documentCarriesRateReviewTerms({ status: 'accepted' }, { terms_text: planAcceptance.termsText })).toBe(true);
+    });
+
+    it('a declined estimate never acquires it', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'declined' } })).toBe(false);
+    });
+
+    it('without the estimate row the plan-terms decision stands alone (legacy callers)', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1')).toBe(true);
+    });
   });
 });
 

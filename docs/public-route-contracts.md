@@ -3034,7 +3034,12 @@ one-time-only estimate. The document's decision is the server's alone:
 beside `proposal.noGuaranteeClaims`, and the browser document prints by it
 rather than re-classifying row descriptions with its own narrower service
 taxonomy (a row the server classifies as lawn or tree & shrub work may carry
-no "lawn"/"tree" word).
+no "lawn"/"tree" word). Frozen documents keep their original terms: on an
+accepted or declined estimate (`estimateIsPriceLocked`) the disclosure prints
+only when the recorded acceptance's verbatim snapshot carried the sentence
+(the 'plan' drawer below) — a document accepted before this disclosure
+existed, accepted under the 'base' drawer, or declined never acquires it; an
+open estimate is sold under the current terms and prints it.
 The acceptance terms (`acceptanceTerms`, GATE_ESTIMATE_ACCEPTANCE_TERMS)
 carry the same rule as a SCOPE on one version: `scope: 'plan'` — the
 Services drawer line ends with the rate review sentence ("Rates are reviewed

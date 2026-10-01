@@ -605,7 +605,9 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     suppressPlanTotals: proposal.enabled !== true && quotesPerApplication(proposal),
     noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposal, estimate?.id),
     callbackTermsEligible: proposalCallbackTermsEligible(proposal, estimate?.id),
-    rateReviewTermsEligible: proposalRateReviewTermsEligible(proposal, estimate?.id),
+    // Frozen (accepted/declined) documents keep their original terms: the
+    // disclosure rides only when the recorded acceptance carried it.
+    rateReviewTermsEligible: proposalRateReviewTermsEligible(proposal, estimate?.id, { estimate, acceptance: billing?.acceptance || null }),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 
