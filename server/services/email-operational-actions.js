@@ -421,7 +421,7 @@ async function refreshEmailCommitment(conn, row, now, verify) {
     }
     if (verdict.verdict === 'fulfilled') {
       await trx('call_commitments').where({ id: row.id }).update({ status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now });
-      await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({ read_at: now });
+      await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update(require('./notification-service')._private.doneColumns({ by: 'email-commitments', resolution: 'The email follow-up was done', at: now, keepExisting: true, conn: trx }));
       closed = true;
       return;
     }

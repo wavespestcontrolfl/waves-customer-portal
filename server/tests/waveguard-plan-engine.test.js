@@ -1075,3 +1075,104 @@ test.each(['unknown', 'mixed'])('explicit %s turf never falls back to legacy St.
   const { selectProtocolVisit } = require('../services/waveguard-plan-engine');
   expect(selectProtocolVisit({ grass_type }, new Date('2026-09-05T12:00:00Z'), 'St. Augustine').trackKey).toBeNull();
 });
+
+describe('ordinance jurisdiction for a profile with no county', () => {
+  const { getApplicableOrdinances } = require('../services/waveguard-plan-engine');
+  const { actualProductBlackoutBlocks } = require('../services/complete-scheduled-service');
+  const window = (name, extra) => ({
+    jurisdiction_name: name, active: true, restricted_nitrogen: true, restricted_phosphorus: true,
+    restricted_start_month: 6, restricted_start_day: 1, restricted_end_month: 9, restricted_end_day: 30, ...extra,
+  });
+  const ORDINANCE_ROWS = [
+    window('Manatee County', { jurisdiction_type: 'county', county: 'Manatee', city: null }),
+    window('Sarasota County', { jurisdiction_type: 'county', county: 'Sarasota', city: null }),
+    window('Charlotte County', { jurisdiction_type: 'county', county: 'Charlotte', city: null }),
+    window('North Port', { jurisdiction_type: 'city', county: 'Sarasota', city: 'North Port', restricted_start_month: 4 }),
+  ];
+  // Evaluates the knex where/orWhere/whereILike calls the resolvers issue
+  // against in-memory rows.
+  const rowMatcher = (calls) => (row) => calls.every(([kind, ...args]) => (
+    kind === 'where' ? Object.entries(args[0]).every(([k, v]) => row[k] === v)
+      : String(row[args[0]] || '').toLowerCase() === String(args[1]).toLowerCase()));
+  const ordinanceQuery = () => {
+    const groups = [];
+    const query = {
+      where(arg) {
+        if (typeof arg !== 'function') return query;
+        arg.call({
+          orWhere(fn) {
+            const calls = [];
+            const sub = { where: (o) => { calls.push(['where', o]); return sub; }, whereILike: (c, v) => { calls.push(['ilike', c, v]); return sub; } };
+            fn.call(sub);
+            groups.push(rowMatcher(calls));
+          },
+        });
+        return query;
+      },
+      then: (resolve, reject) => Promise.resolve(ORDINANCE_ROWS.filter((row) => row.active && groups.some((g) => g(row)))).then(resolve, reject),
+    };
+    return query;
+  };
+  const knex = () => ordinanceQuery();
+  const names = async (profile, cities) => (await getApplicableOrdinances(knex, profile, cities)).map((r) => r.jurisdiction_name).sort();
+  const noCounty = { county: null, municipality: null };
+
+  test('no profile county + Parrish ZIP resolves the Manatee window, which restricts N in July', async () => {
+    const rows = await getApplicableOrdinances(knex, noCounty, { customerCity: 'Parrish', customerZip: '34219' });
+    expect(rows.map((r) => r.jurisdiction_name)).toEqual(['Manatee County']);
+    const july = summarizeOrdinanceStatus({
+      date: new Date('2026-07-15T12:00:00'), ordinances: rows,
+      candidateItems: [{ product: { name: 'LESCO Chelated Iron Plus', analysis_n: 12, analysis_p: 0 } }],
+    });
+    expect(july.activeWindows).toHaveLength(1);
+    expect(july.blocks.map((b) => b.code)).toEqual(['nitrogen_blackout']);
+  });
+
+  test('North Port still resolves its own Apr 1 city row', async () => {
+    const rows = await getApplicableOrdinances(knex, noCounty, { customerCity: 'North Port', customerZip: '34286' });
+    const northPort = rows.find((r) => r.jurisdiction_name === 'North Port');
+    expect(northPort.restricted_start_month).toBe(4);
+    expect(summarizeOrdinanceStatus({
+      date: new Date('2026-04-10T12:00:00'), ordinances: rows,
+      candidateItems: [{ product: { name: 'N', analysis_n: 12, analysis_p: 0 } }],
+    }).blocks.map((b) => b.code)).toEqual(['nitrogen_blackout']);
+  });
+
+  test('a profile county still wins over the address', async () => {
+    expect(await names({ county: 'Charlotte', municipality: null }, { customerCity: 'Parrish', customerZip: '34219' }))
+      .toEqual(['Charlotte County']);
+  });
+
+  test('a stamped address in a different county uses the stamped county, not the profile or customer county', async () => {
+    expect(await names(
+      { county: 'Manatee', municipality: 'Parrish' },
+      { stampedCity: 'Port Charlotte', stampedZip: '33948', customerCity: 'Parrish', customerZip: '34219' },
+    )).toEqual(['Charlotte County']);
+    expect(await names(
+      noCounty,
+      { stampedCity: 'Venice', stampedZip: '34285', customerCity: 'Parrish', customerZip: '34219' },
+    )).toEqual(['Sarasota County']);
+  });
+
+  test('an unresolvable or straddling ZIP leaves no county window (unchanged)', async () => {
+    expect(await names(noCounty, { customerCity: 'Nowhere', customerZip: '99999' })).toEqual([]);
+    expect(await names(noCounty, { customerCity: '', customerZip: '34228' })).toEqual([]);
+  });
+
+  test('the completion path derives the same county for actual N/P products', async () => {
+    const db = (table) => {
+      const query = {};
+      query.where = (arg) => { if (typeof arg === 'function') query.fn = arg; return query; };
+      query.whereIn = () => query;
+      query.select = () => Promise.resolve([{ id: 'p1', name: 'LESCO Chelated Iron Plus', analysis_n: 12, analysis_p: 0 }]);
+      query.first = () => Promise.resolve({ customer_id: 'c1', county: null, municipality: null });
+      if (table === 'municipality_ordinances') return ordinanceQuery();
+      return query;
+    };
+    const svc = (extra) => ({ customer_id: 'c1', scheduled_date: '2026-07-15', city: 'Parrish', customer_zip: '34219', ...extra });
+    const blocks = await actualProductBlackoutBlocks(svc(), [{ productId: 'p1' }], db);
+    expect(blocks.map((b) => b.code)).toEqual(['actual_nitrogen_blackout']);
+    expect(blocks[0].message).toMatch(/Manatee County/);
+    expect(await actualProductBlackoutBlocks(svc({ city: 'Nowhere', customer_zip: '99999' }), [{ productId: 'p1' }], db)).toEqual([]);
+  });
+});
