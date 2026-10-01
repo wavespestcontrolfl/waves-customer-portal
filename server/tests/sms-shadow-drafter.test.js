@@ -138,6 +138,29 @@ describe('sms shadow drafter — response parsing', () => {
       // ...but the raw-derived safety flag still refuses auto-send.
       expect(parsed.auto_send_safe).toBe(false);
     });
+
+    // Codex round-3 P2 (send-time re-service revalidation): confirms the
+    // premise the fix relies on — a re-service-offer reply NEVER reaches
+    // maybeAutoSend/claimAutoSend, so reservicePromiseStillEligible only
+    // needs to guard the reviewed-card and scheduled-send paths, not the
+    // auto-send executor.
+    describe('a re-service-offer reply is NEVER auto_send_safe (confirms it never reaches the auto-send executor)', () => {
+      test('with the required send_reservice_link escalate action present (a well-formed promise)', () => {
+        const parsed = parseShadowResponse(JSON.stringify({
+          reply: "Good news — we'll send your free re-service link now.",
+          intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }],
+        }));
+        expect(parsed.auto_send_safe).toBe(false);
+      });
+
+      test('with an empty action list (a broken promise) — the extra reservice-promise check forces it false too', () => {
+        const parsed = parseShadowResponse(JSON.stringify({
+          reply: "Good news — we'll send your free re-service link now.",
+          intended_actions: [],
+        }));
+        expect(parsed.auto_send_safe).toBe(false);
+      });
+    });
   });
 
   test('parses a fenced code block', () => {

@@ -39,6 +39,8 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
       table.text('source').notNullable(); table.jsonb('metadata');
     });
+    // The replay eligibility reads the collections hold (any active collection_hold waits): the real table's shape.
+    await mockPg.raw('CREATE TABLE collections_flags (LIKE public.collections_flags INCLUDING ALL)');
     await mockPg.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
       table.text('status'); table.date('scheduled_date'); table.text('service_type');

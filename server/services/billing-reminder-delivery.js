@@ -75,10 +75,16 @@ async function persistPolicyWaivers(rowIds, waived) {
   }
 }
 
-async function reminderProgress(customerId, source, channels) {
+// `repair: false` is a read-only view for a caller that must not write (the
+// customer-dunning shadow run): accepted Email evidence still counts as
+// delivered in the returned events, but no reservation is stamped, resolved or
+// released. Every existing caller keeps the default (repair).
+async function reminderProgress(customerId, source, channels, { repair = true } = {}) {
   const rows = await db('collections_contact_ledger').where({ customer_id: customerId, source })
     .where('occurred_at', '>', new Date(Date.now() - 90 * 86400000));
-  const repaired = await BillingEmailReservation.repairAcceptedBillingEmailReservations(rows, db);
+  const repaired = await BillingEmailReservation.repairAcceptedBillingEmailReservations(
+    rows, db, repair ? undefined : { readOnly: true },
+  );
   const events = new Map();
   for (const row of rows) {
     const metadata = metadataOf(row);
@@ -97,6 +103,66 @@ async function reminderProgress(customerId, source, channels) {
   return [...events.values()].map((event) => ({ ...event,
     complete: legsSettled(channels, event.delivered, event.resolved, event.waived),
   }));
+}
+
+// The invoices and time a delivered reservation recorded, read straight from
+// its row. A delivery restored from a reservation older than reminderProgress'
+// 90-day window has no event to name them, and a caller that completes debt on
+// the strength of it (a final notice) must never substitute today's membership.
+// null fields = unreadable.
+async function restoredDelivery(entry, channel) {
+  try {
+    const row = await db('collections_contact_ledger').where({ id: entry.id }).first('invoice_ids', 'occurred_at');
+    let ids = row?.invoice_ids;
+    if (typeof ids === 'string') ids = JSON.parse(ids);
+    return {
+      channel,
+      invoiceIds: Array.isArray(ids) && ids.length ? ids.map(String) : null,
+      deliveredAt: row?.occurred_at || null,
+    };
+  } catch {
+    return { channel, invoiceIds: null, deliveredAt: null };
+  }
+}
+
+// The keyed reservation of one leg of an episode: the ONE formula recordContact's idempotency key uses.
+function reminderReservationKey(customerId, eventKey, channel) {
+  const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
+  return `billing-reminder:${digest}:${channel}`;
+}
+
+// The standing row of a leg's keyed reservation, read by that key with no time window (reminderProgress
+// drops rows older than 90 days; recordContact / claimAttempt do not). A READ: the customer-dunning shadow
+// run asks it to judge a leg exactly as the live claim will. null = no reservation yet.
+async function findReminderReservation(customerId, eventKey, channel) {
+  const row = await db('collections_contact_ledger')
+    .where({ idempotency_key: reminderReservationKey(customerId, eventKey, channel) })
+    .first('id', 'metadata');
+  if (!row) return null;
+  let metadata = row.metadata;
+  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
+  return { id: row.id, metadata: metadata || {} };
+}
+
+// The legs an episode still owes, and the collections-policy verdict for each. Both
+// are READS (collectionsChannelPermitted consults the contact policy and writes
+// nothing), shared with the customer-dunning shadow run so it judges a send by
+// exactly what the live attempt will.
+function pendingReminderChannels(channels, delivered, resolved) {
+  return ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
+    && !delivered.has(channel) && !resolved.has(channel));
+}
+
+function reminderPolicyVerdicts({
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries, holdExempt = null,
+}, pending) {
+  return Promise.all(pending.map((channel) => collectionsChannelPermitted({
+    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
+    invoiceIds: policyInvoiceIds ?? invoiceIds,
+    detail: true,
+    // A deliberate operator send only (the rail guard skips a plain dispute hold for it; a fallback hold never).
+    ...(holdExempt ? { holdExempt } : {}),
+  })));
 }
 
 // `send` receives the leg's reservation so a producer can hand its ledger id
@@ -126,6 +192,14 @@ async function recordLegOutcome(entry, channel, result, results) {
   }
   if (result?.held === true || result?.deliveryHeld === true) return null;
   if (result?.deliveryOutcome === 'uncertain') return null;
+  // A dispute hold that landed after the rail-guard consult refused this leg at the send boundary
+  // (the ONE retryable COLLECTION_HOLD_DEFER outcome): a WAIT. Nothing reached the customer, so
+  // the reservation is released rather than stamped failed or resolved; the episode stays
+  // incomplete and the leg is re-reserved and sent on the first run after the release.
+  if (require('./collections/collection-hold').isHoldSuppression(result)) {
+    await ContactLedger.releaseHeldReservation(entry);
+    return null;
+  }
   const terminal = channel === 'email' && isTerminalEmailRefusal(result);
   const stamped = await ContactLedger.markSendFailed(entry, {
     code: result?.code || result?.reason || 'not_sent',
@@ -152,8 +226,17 @@ function ledgerInvoiceIds(invoiceId, invoiceIds) {
 // policyInvoiceIds pins a frozen collectible aggregate. It is separate from
 // ledger invoiceIds: annual-prepay can record a draft invoice while the policy
 // deliberately evaluates its amount as off-ledger debt.
+// A leg whose keyed reservation is already settled (found by its key, past the progress window): delivered
+// is restored with what the reservation recorded; a terminal resolution (a suppression refusal) is settled and
+// never owed again - the per-invoice sender treats claim.resolved the same way.
+async function restoreSettledLeg(claim, entry, channel, { delivered, resolved, restored }) {
+  if (claim.delivered) { delivered.add(channel); restored.push(await restoredDelivery(entry, channel)); return true; }
+  if (claim.resolved) { resolved.add(channel); return true; }
+  return false;
+}
+
 async function sendReminderChannels({
-  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents,
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents, holdExempt,
 }) {
   const progress = await reminderProgress(customerId, source, channels);
   // A missing episode has the same shape as restored progress. These sets
@@ -162,23 +245,20 @@ async function sendReminderChannels({
     .find((event) => event.metadata.notificationEventKey === eventKey)
     || { entries: [], delivered: new Set(), resolved: new Set(), waived: new Set() };
   const deliveredNow = [];
+  const restored = []; // legs found already delivered by the keyed reservation, with what it recorded
   const results = {};
-  const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
-    && !delivered.has(channel) && !resolved.has(channel));
-  const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
-    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
-    invoiceIds: policyInvoiceIds ?? invoiceIds,
-    detail: true,
-  })));
+  const pending = pendingReminderChannels(channels, delivered, resolved);
+  const permitted = await reminderPolicyVerdicts({
+    customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries, holdExempt,
+  }, pending);
   // Partial debt evidence cannot authorize a leg or settle a restored waiver.
   // Keep the entire pending episode retryable before any delivery mutation.
   if (permitted.some((verdict) => verdict?.balanceIncomplete)) {
     for (const channel of pending) {
       results[channel] = { sent: false, deliveryHeld: true, retryable: true, code: 'COLLECTIONS_POLICY' };
     }
-    return { complete: false, deliveredNow, results };
+    return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
-  const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   // Only a durable denial waives its leg; a spacing window keeps it owed.
   // A later allowance revokes the old waiver. Persist that deletion before
   // retrying: claimAttempt refreshes reservation metadata with a JSON merge,
@@ -196,7 +276,7 @@ async function sendReminderChannels({
         results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_WAIVER_REFRESH_FAILED' };
       }
     }
-    return { complete: false, deliveredNow, results };
+    return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
@@ -207,12 +287,12 @@ async function sendReminderChannels({
     };
     const entry = await ContactLedger.recordContact({
       customerId, channel, purpose, invoiceIds: reservation.invoiceIds, source,
-      idempotencyKey: `billing-reminder:${digest}:${channel}`, metadata: reservation.metadata,
+      idempotencyKey: reminderReservationKey(customerId, eventKey, channel), metadata: reservation.metadata,
     });
     episodeRowIds.add(entry?.id);
     // A retry under the same key re-quotes: its claim refreshes the debt snapshot.
     const claim = await ContactLedger.claimAttempt(entry, reservation);
-    if (claim.delivered) { delivered.add(channel); continue; }
+    if (await restoreSettledLeg(claim, entry, channel, { delivered, resolved, restored })) continue;
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
     const result = await sendLeg(send, channel, entry);
     results[channel] = result;
@@ -224,7 +304,7 @@ async function sendReminderChannels({
     }
   }
   const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);
-  return { complete, deliveredNow, results };
+  return { complete, deliveredNow, results, delivered: [...delivered], restored };
 }
 
 // A waiver only settles the episode once it is durable: a reused row keeps
@@ -240,4 +320,5 @@ async function settleEpisode(channels, { delivered, resolved, waived }, rowIds) 
 
 module.exports = {
   reminderProgress, sendReminderChannels, isTerminalEmailRefusal, verdictAllows, verdictDurablyDenied,
+  pendingReminderChannels, reminderPolicyVerdicts, reminderReservationKey, findReminderReservation,
 };

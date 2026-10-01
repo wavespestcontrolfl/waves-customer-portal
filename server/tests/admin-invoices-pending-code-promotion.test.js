@@ -29,6 +29,12 @@ jest.mock('../services/estimate-deposits', () => ({
 jest.mock('../services/customer-credit', () => ({
   autoApplyAccountCreditIfEnabled: jest.fn(async () => null),
 }));
+// The direct sender's messaging-hold read is covered by the dispute-hold suites; this file's bespoke
+// `db` double cannot answer it (an unanswerable read fails closed), so here no customer is held.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 // services/invoice is REAL here — only its own deep provider dispatch
 // (sendViaSMS) is spied away below, per test.
 

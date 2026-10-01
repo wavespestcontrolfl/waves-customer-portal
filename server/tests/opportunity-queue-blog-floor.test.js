@@ -106,6 +106,27 @@ describe('claimNext action-aware floor', () => {
     expect(bindings[4]).toBe(THRESHOLDS.minScoreToAct);
   });
 
+  test('a bucket scope adds one bound bucket filter after the action filter (reserved backfill slots)', async () => {
+    db.mockImplementation(() => chainResolving([]));
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({ actionType: 'refresh_existing_page', bucket: 'citability_backfill', excludeIds: ['x'] });
+
+    const [sql, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
+    expect(sql).toMatch(/AND bucket = \?/);
+    // [claimed_at, maxAttempts, blogFloor, rewriteFloor, minScore, actionType, bucket, excludeIds]
+    expect(bindings.slice(5)).toEqual(['refresh_existing_page', 'citability_backfill', ['x']]);
+    expect((sql.match(/\?/g) || []).length).toBeGreaterThanOrEqual(bindings.length);
+  });
+
+  test('no bucket scope leaves the claim unfiltered by bucket', async () => {
+    db.mockImplementation(() => chainResolving([]));
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
+    expect(sql).not.toMatch(/AND bucket = \?/);
+  });
+
   test('an explicitly LOWER caller minScore applies to every action type', async () => {
     db.mockImplementation(() => chainResolving([]));
     db.raw.mockResolvedValue({ rows: [] });

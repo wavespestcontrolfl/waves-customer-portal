@@ -35,6 +35,16 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 // module's vocabulary changed and rows must be interpretable by version.
 const CONSENT_VERSION = 'v11_2026-08-25';
 
+// v12 (GATE_PAY_AFTER_FIRST_VISIT, owner ruling 2026-09-30): the AFTER-VISIT
+// variants below authorize the first charge AFTER the first visit is
+// completed instead of at approval. They carry their own label and do NOT
+// bump CONSENT_VERSION: the base card/ACH/prepay texts are unchanged, so
+// gate-off behavior and every existing consent row stay byte-identical.
+// Label length is capped by payment_method_consents.consent_text_version
+// (varchar 20). v12 clears the v8+ enrollment bar
+// (consentVersionQualifiesForEnrollment).
+const AFTER_VISIT_CONSENT_VERSION = 'v12_2026-09-30';
+
 const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this card and charge it for future service visits and invoices as',
@@ -96,6 +106,58 @@ const PREPAY_ACH_CONSENT_TEXT = [
   'card surcharge.',
 ].join(' ');
 
+// Pay-after-first-visit card capture (GATE_PAY_AFTER_FIRST_VISIT): nothing is
+// charged at approval; the saved card is charged for the first visit's
+// invoice (incl. any one-time setup fee) once that visit is completed, and
+// for future invoices as agreed.
+const AFTER_VISIT_CARD_CONSENT_TEXT = [
+  'By checking this box, I authorize Waves Pest Control, LLC to save',
+  'this card and charge it after my first service visit is completed for',
+  'that visit\'s invoice (including any one-time setup fee), and for future',
+  'service visits and invoices as agreed, until I revoke authorization.',
+  'Nothing is charged today. I can revoke anytime — email',
+  `billing@wavespestcontrol.com, call ${WAVES_SUPPORT_PHONE_DISPLAY}, or remove the`,
+  'card in the Waves app or my customer portal. A credit card surcharge',
+  'of up to 2.9% may apply; the exact surcharge and total will be shown',
+  'before payment. Debit cards, prepaid cards, and bank transfers have',
+  'no added card surcharge.',
+].join(' ');
+
+// Annual prepay, card, charged after the first visit. The amount is the
+// exact total shown at approval, or LOWER if account credit applies by then
+// — never higher.
+const AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT = [
+  'By checking this box, I authorize Waves Pest Control, LLC to save',
+  'this card and, after my first service visit is completed, charge it for',
+  'my 12-month annual prepay invoice at the exact total shown before I',
+  'confirm (or a lower amount if account credit applies, never a higher',
+  'amount), and charge it for future invoices as agreed (including plan',
+  'renewals), until I revoke authorization. Nothing is charged today. I',
+  'can revoke anytime — email billing@wavespestcontrol.com, call',
+  `${WAVES_SUPPORT_PHONE_DISPLAY}, or remove the card in the Waves app or my customer`,
+  'portal. A credit card surcharge of up to 2.9% may apply; the exact',
+  'surcharge and total will be shown before payment. Debit cards, prepaid',
+  'cards, and bank transfers have no added card surcharge.',
+].join(' ');
+
+// Annual prepay, saved BANK method, debited after the first visit.
+const AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT = [
+  'By checking this box, I authorize Waves Pest Control, LLC to',
+  'initiate an electronic ACH debit from my saved bank account after my',
+  'first service visit is completed for my 12-month annual prepay invoice',
+  'at the exact total shown before I confirm (or a lower amount if',
+  'account credit applies, never a higher amount), and to initiate',
+  'electronic ACH debits from that account for future invoices as agreed',
+  '(including plan renewals), each in the amount of that invoice, until I',
+  'revoke this authorization. Nothing is debited today. I may revoke by',
+  `writing to billing@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY}`,
+  'at least 3 business days before the next scheduled debit. I may',
+  'request a copy of this authorization at any time by contacting Waves',
+  'at the email or phone above. I can manage or remove saved payment',
+  'methods anytime in my customer portal. Bank transfers have no added',
+  'card surcharge.',
+].join(' ');
+
 // Back-compat alias. Anything that imports CONSENT_TEXT without knowing
 // the method type defaults to the card variant — keeps onboarding and
 // contract code working without a forced refactor in this PR.
@@ -109,10 +171,30 @@ function getConsentText(methodType, { variant = null } = {}) {
     // r11): an auto-satisfy prepay accept can debit a saved bank method
     // immediately, and that authorization must be the snapshot of record.
     if (variant === 'prepay_card') return PREPAY_ACH_CONSENT_TEXT;
+    // after_visit_prepay: annual prepay debited after the first visit.
+    if (variant === 'after_visit_prepay') return AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT;
+    // after_visit_card has no bank-specific copy: the base ACH text already
+    // authorizes a debit "for each invoice ... on or after its due date",
+    // which is exactly a first-visit invoice charged after the visit.
     return ACH_CONSENT_TEXT;
   }
   if (variant === 'prepay_card') return PREPAY_CARD_CONSENT_TEXT;
+  if (variant === 'after_visit_prepay') return AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT;
+  if (variant === 'after_visit_card') return AFTER_VISIT_CARD_CONSENT_TEXT;
   return CARD_CONSENT_TEXT;
+}
+
+// The consent_text_version label a variant's snapshot is recorded under.
+// The after-visit variants carry v12; every other variant (including null)
+// keeps the global CONSENT_VERSION. An after-visit variant on a bank method
+// with no bank-specific copy (after_visit_card) records the base ACH text,
+// so it is labelled with the global version too.
+const AFTER_VISIT_VARIANTS = new Set(['after_visit_prepay', 'after_visit_card']);
+function consentVersionForVariant(variant, methodType = 'card') {
+  if (!AFTER_VISIT_VARIANTS.has(variant)) return CONSENT_VERSION;
+  const isBank = methodType === 'us_bank_account' || methodType === 'ach';
+  if (isBank && variant === 'after_visit_card') return CONSENT_VERSION;
+  return AFTER_VISIT_CONSENT_VERSION;
 }
 
 module.exports = {
@@ -121,6 +203,11 @@ module.exports = {
   ACH_CONSENT_TEXT,
   PREPAY_CARD_CONSENT_TEXT,
   PREPAY_ACH_CONSENT_TEXT,
+  AFTER_VISIT_CARD_CONSENT_TEXT,
+  AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT,
+  AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT,
   CONSENT_VERSION,
+  AFTER_VISIT_CONSENT_VERSION,
   getConsentText,
+  consentVersionForVariant,
 };

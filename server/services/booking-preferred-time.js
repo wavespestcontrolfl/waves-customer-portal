@@ -463,6 +463,19 @@ async function noteBookingOnPreferredLeads(db, { customerId, booking = null } = 
           .whereRaw("metadata->>'reason' = 'booking_on_preferred_request' AND metadata->>'visit_id' = ?", [String(visit.id)])
           .first('id');
         if (seen) return false;
+        // Re-read the lead under a row lock (codex #5399 r14): staff may have
+        // reassigned its phone, linked it to another customer or closed it since
+        // the open-lead query above. The advisory lock only orders note writers,
+        // so the lead's own state and phone identity are re-proven right here.
+        const current = await trx('leads').where({ id: lead.id }).forUpdate().first('lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id');
+        const stillOurs = current
+          && current.lead_type === LEAD_TYPE
+          && OPEN_LEAD_STATUSES.includes(current.status)
+          && !current.converted_at
+          && !current.deleted_at
+          && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
+          && (!current.customer_id || String(current.customer_id) === String(customerId));
+        if (!stillOurs) return false;
         await trx('lead_activities').insert({
           lead_id: lead.id,
           activity_type: 'note',

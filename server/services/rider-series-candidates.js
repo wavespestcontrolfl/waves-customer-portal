@@ -8,7 +8,7 @@
  * SELECTs on the caller's connection. Optional `customerId` narrows the root
  * scan to one customer (the per-customer grouping is unchanged).
  */
-const { resolveSeriesPropertyScope, seriesPropertyVerdict } = require('./rider-series-preview');
+const { resolveSeriesPropertyScope, seriesPropertyVerdict, withComparableKeys } = require('./rider-series-preview');
 const { familyOfServiceRow } = require('./cancellation-processor');
 const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
 const { EXCLUDED_ROOT_STATUSES } = require('./recurring-appointment-seeder');
@@ -98,6 +98,10 @@ async function pairsForCustomer(trx, group, customerId) {
   // rejects concurrent queries on one client (deprecated now, an error in pg 9).
   const scoped = [];
   for (const c of group) scoped.push({ ...c, scope: await resolveSeriesPropertyScope(trx, c.row) });
+  // An unstamped root (address-key scope) and an id-stamped one at the same
+  // property are one property: resolve ids to keys, fail closed, one batch.
+  const comparable = await withComparableKeys(trx, scoped.map((c) => c.scope));
+  scoped.forEach((c, i) => { c.scope = comparable[i]; });
   const byId = (a, b) => String(a.row.id).localeCompare(String(b.row.id));
   const lawns = scoped.filter((c) => c.family === 'lawn_care').sort(byId);
   const pests = scoped.filter((c) => c.family === 'pest_control').sort(byId);

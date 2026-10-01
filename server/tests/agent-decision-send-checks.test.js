@@ -7,6 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/sms-shadow-drafter', () => ({
   planOpenTimesRecheck: jest.fn(),
   openTimesStillOffered: jest.fn(),
+  reservicePromiseStillEligible: jest.fn(),
 }));
 // slaDraftedAt is kept REAL (only followupPromiseBlockReason is mocked) so
 // this suite proves the actual facts_generated_at → created_at fallback the
@@ -29,6 +30,7 @@ beforeEach(() => {
   drafter.openTimesStillOffered.mockReset().mockResolvedValue({ ok: true });
   followupPromiseBlockReason.mockReset().mockReturnValue(null);
   outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
+  drafter.reservicePromiseStillEligible.mockReset().mockResolvedValue(null);
 });
 
 test('parseInputSnapshot: string, object, malformed, absent', () => {
@@ -120,4 +122,53 @@ test('no snapshot → no availability call; an older-prompt decision skips the a
   await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
+});
+
+// Codex round-3 P2: a reviewed card can promise a free re-service and then
+// sit long enough for the customer's eligibility to change before it fires
+// — reservicePromiseStillEligible revalidates against LIVE eligibility,
+// keyed on the lane(s) recorded at draft time.
+describe('re-service promise revalidation (Codex round-3 P2)', () => {
+  const reserviceSnapshot = { reservice_lanes_snapshot: ['pest'] };
+
+  test('a reservice-eligible send passes the recorded lane(s) + customer through to the live check', async () => {
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, ...reserviceSnapshot }) }),
+      outgoingBody: "Good news — we'll send your free re-service link now.",
+    })).resolves.toBeNull();
+    expect(drafter.reservicePromiseStillEligible).toHaveBeenCalledWith({
+      outgoingBody: "Good news — we'll send your free re-service link now.",
+      customerId: 'c1',
+      promisedLanes: ['pest'],
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
+    });
+  });
+
+  test('no longer eligible → refuses with the reason', async () => {
+    drafter.reservicePromiseStillEligible.mockResolvedValue('no longer eligible for a free pest re-service');
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, ...reserviceSnapshot }) }),
+      outgoingBody: "Good news — we'll send your free re-service link now.",
+    })).resolves.toBe('re-service promise unsendable (no longer eligible for a free pest re-service)');
+  });
+
+  test('runs only after open-times/follow-up/amounts already passed (fail-fast ordering)', async () => {
+    drafter.openTimesStillOffered.mockResolvedValue({ ok: false, reason: 'open_times_no_longer_offered' });
+    drafter.reservicePromiseStillEligible.mockResolvedValue('no longer eligible for a free pest re-service');
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, ...reserviceSnapshot }) }),
+      outgoingBody: 'x',
+    })).resolves.toBe('open-times stale (open_times_no_longer_offered)');
+    expect(drafter.reservicePromiseStillEligible).not.toHaveBeenCalled();
+  });
+
+  test('an ordinary body with no re-service promise and no snapshot still resolves the live check (no-op) with promisedLanes null', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
+    expect(drafter.reservicePromiseStillEligible).toHaveBeenCalledWith({
+      outgoingBody: 'You owe $5.',
+      customerId: 'c1',
+      promisedLanes: null,
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
+    });
+  });
 });
