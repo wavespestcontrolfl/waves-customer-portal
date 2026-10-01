@@ -549,6 +549,14 @@ function buildWhatToExpect({ products = [] } = {}) {
   return lines.length ? { lines } : null;
 }
 
+// The classes behind buildWhatToExpect's lines, in the same priority order
+// and cap. The report writer (GATE_REPORT_WRITER_RULES) turns the longest
+// stated window among them into a reach-out date.
+function whatToExpectClasses({ products = [] } = {}) {
+  const classes = new Set((products || []).map(classifyProductExpectation).filter(Boolean));
+  return EXPECTATION_PRIORITY.filter((cls) => classes.has(cls)).slice(0, 3);
+}
+
 // Canonical product shape for expectations classification
 // ({ name, activeIngredient, category, moaGroup, rainfastMinutes }) — the
 // ONE normalizer SHARED by every caller (owner-flagged P1 2026-09-28: the
@@ -630,6 +638,7 @@ module.exports = {
   buildRainExpectation,
   buildSpiderExpectation,
   buildWhatToExpect,
+  whatToExpectClasses,
   buildPestExpectations,
   toExpectationProduct,
   isExteriorApplicationArea,

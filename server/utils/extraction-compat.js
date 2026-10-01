@@ -127,7 +127,7 @@ function flatView(extraction) {
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
     secondary_contact: secondary,
     secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
-    // Flat mirrors of the first other party's on-site flags (schema 1.21.0) so
+    // Flat mirrors of the first other party's on-site flags (schema 1.22.0) so
     // replay variance watches them (FIELD_GROUPS high — they decide whether the
     // recipient gets the opt-in ask). False when absent, like
     // agent_committed_booking.
@@ -161,6 +161,13 @@ function flatView(extraction) {
     relative_date_used: typeof sched.relative_date_used === 'boolean' ? sched.relative_date_used : null,
     moved_appointment_relative_date_used: typeof sched.moved_appointment_relative_date_used === 'boolean'
       ? sched.moved_appointment_relative_date_used : null,
+    // Commercial dictated booking judgements (schema 1.21.0): tri-state, null =
+    // not judged, which the path fails closed on.
+    price_offered_by_staff: typeof svc.price_offered_by_staff === 'boolean' ? svc.price_offered_by_staff : null,
+    price_accepted_by_caller: typeof svc.price_accepted_by_caller === 'boolean' ? svc.price_accepted_by_caller : null,
+    price_is_final: typeof svc.price_is_final === 'boolean' ? svc.price_is_final : null,
+    staff_accepted_proposed_slot: typeof sched.staff_accepted_proposed_slot === 'boolean' ? sched.staff_accepted_proposed_slot : null,
+    selected_day_words: typeof sched.selected_day_words === 'string' ? sched.selected_day_words : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
     follow_up_date_time: sched.follow_up_start_at || null,
 
@@ -287,7 +294,7 @@ function mapSecondaryContactToLegacy(contact) {
     email: contact.email || null,
     role: contact.role || 'unknown',
     wants_notifications: contact.wants_notifications === true,
-    // On-site flags (schema 1.21.0): strict booleans, false when the extraction
+    // On-site flags (schema 1.22.0): strict booleans, false when the extraction
     // lacks them (older V2 rows). They only trigger the recipient opt-in ASK
     // (call-recording-processor onSiteOptinAskTrigger); consent is the
     // recipient's own YES.

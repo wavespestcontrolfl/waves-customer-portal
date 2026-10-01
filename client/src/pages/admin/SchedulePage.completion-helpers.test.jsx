@@ -4,6 +4,9 @@ import {
   buildPhotoRecoveryOutcome,
   buildPhotoRetryFormBody,
   completionAutoCloseDelay,
+  reportShapedNotes,
+  shouldCaptureHandwrittenNotes,
+  completionReportRulesPrompt,
 } from "./SchedulePage";
 
 const photo = (n, extra = {}) => ({ data: `data:image/jpeg;base64,${"QUJD".repeat(n)}`, name: `p${n}.jpg`, ...extra });
@@ -85,5 +88,47 @@ describe("buildPhotoRetryFormBody", () => {
     expect(form.get("sortOrder")).toBe("3");
     expect(form.get("caption")).toBeNull();
     expect(form.get("aiTags")).toBeNull();
+  });
+});
+
+describe("reportShapedNotes", () => {
+  it("recognizes the two-section and four-section reports, titles alone or inline", () => {
+    expect(reportShapedNotes("WHAT WE DID\nWe treated.\nWHAT WE FOUND\nLight activity.")).toBe(true);
+    expect(reportShapedNotes("WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\nBait.\nWHAT TO EXPECT\nA few days.\nWHAT'S NEXT\nCall us.")).toBe(true);
+    expect(reportShapedNotes("WHAT WE FOUND: Ants by the sink.\nWHAT WE DID AND WHY: We placed bait.\nWHAT TO EXPECT: A few days.\nWHAT'S NEXT: Call us.")).toBe(true);
+  });
+
+  it("leaves handwritten notes alone", () => {
+    expect(reportShapedNotes("Ants by the sink. Baited the cabinet base.")).toBe(false);
+    expect(reportShapedNotes("What we found: ants\nwhat we did: bait")).toBe(false);
+    expect(reportShapedNotes("WHAT WE DIDN'T GET TO\nWHAT WE FOUND\nAnts.")).toBe(false);
+  });
+});
+
+describe("shouldCaptureHandwrittenNotes", () => {
+  const draft = "WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\nBait.\nWHAT TO EXPECT\nA few days.\nWHAT'S NEXT\nCall us.";
+  it("saves notes typed under the report headings before any draft was installed", () => {
+    expect(shouldCaptureHandwrittenNotes({ notes: draft, installedText: null, draftInstalled: false })).toBe(true);
+  });
+  it("never saves the untouched installed draft or an edited one", () => {
+    expect(shouldCaptureHandwrittenNotes({ notes: draft, installedText: draft, draftInstalled: true })).toBe(false);
+    expect(shouldCaptureHandwrittenNotes({ notes: draft.replace("Bait.", "Bait at the sink."), installedText: null, draftInstalled: true })).toBe(false);
+  });
+  it("saves plain handwritten notes", () => {
+    expect(shouldCaptureHandwrittenNotes({ notes: "Ants by the sink.", installedText: draft, draftInstalled: true })).toBe(true);
+  });
+});
+
+describe("completionReportRulesPrompt", () => {
+  it("turns the edit heads-up into a send-as-is / edit choice", () => {
+    const text = completionReportRulesPrompt({ code: "report_rules_review", message: 'An amount or measurement: "We applied 2 gallons."' });
+    expect(text).toContain("Heads-up on your edits");
+    expect(text).toContain('An amount or measurement: "We applied 2 gallons."');
+    expect(text).toContain("OK — send as is.");
+    expect(text).toContain("Cancel — go back and edit the report.");
+  });
+  it("ignores every other error", () => {
+    expect(completionReportRulesPrompt({ code: "report_reconcile", message: "x" })).toBeNull();
+    expect(completionReportRulesPrompt(null)).toBeNull();
   });
 });

@@ -59,9 +59,10 @@
             "1.18.0",
             "1.19.0",
             "1.20.0",
-            "1.21.0"
+            "1.21.0",
+            "1.22.0"
           ],
-          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs); 1.15.0 is additive (caller.relationship_to_property gains home_buyer — owner ruling 2026-09-26: a buyer under contract ordering their own WDO inspection); 1.16.0 is additive (scheduling.caller_accepted_slot, scheduling.moved_appointment_date — the call's reschedule agreement and the appointment it moves); 1.17.0 is additive (scheduling.agreed_slot_words, scheduling.moved_appointment_words — owner decision 2026-09-27: the agreed slot and moved-appointment date are recorded as verbatim words so the reschedule applier checks quotes instead of parsing speech); 1.18.0 is additive (caller.relationship_to_property gains family_member — owner ruling 2026-09-28: a relative of the homeowner/resident arranging service at that relative's home, e.g. \"my grandfather's house\", is authorized when staff confirmed a time on the call; live miss, call f5a54dbd); 1.19.0 is additive (consent.sms_declined — codex P1 on #5292: sms_consent_given=false conflated \"never asked\" with an explicit refusal, so the booking-link text lane started texting callers who said no; sms_declined is the dedicated explicit-refusal field, optional/nullable in both schemas per AGENTS.md's additive-only rule, so a pre-1.19 persisted row — which never has it — still validates; the booking-link staging check fails closed on that shape instead); 1.20.0 is additive (scheduling.definite_commitment, scheduling.relative_date_used, scheduling.moved_appointment_relative_date_used — the extraction judges whether the agent definitely committed and whether a relative date was used; the reschedule applier only verifies them); 1.21.0 is additive (secondary_contact(s).wants_appointment_texts, .on_site — owner ruling 2026-09-30 \"on-site person is the contact point\": wants_notifications is channel-neutral, so the call pipeline needs grounded appointment-text intent and on-site presence, each evidence-quoted, before stamping SMS consent for a spouse/buyer/tenant/family member; optional in both schemas, never `required`) — older payloads remain valid."
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs); 1.15.0 is additive (caller.relationship_to_property gains home_buyer — owner ruling 2026-09-26: a buyer under contract ordering their own WDO inspection); 1.16.0 is additive (scheduling.caller_accepted_slot, scheduling.moved_appointment_date — the call's reschedule agreement and the appointment it moves); 1.17.0 is additive (scheduling.agreed_slot_words, scheduling.moved_appointment_words — owner decision 2026-09-27: the agreed slot and moved-appointment date are recorded as verbatim words so the reschedule applier checks quotes instead of parsing speech); 1.18.0 is additive (caller.relationship_to_property gains family_member — owner ruling 2026-09-28: a relative of the homeowner/resident arranging service at that relative's home, e.g. \"my grandfather's house\", is authorized when staff confirmed a time on the call; live miss, call f5a54dbd); 1.19.0 is additive (consent.sms_declined — codex P1 on #5292: sms_consent_given=false conflated \"never asked\" with an explicit refusal, so the booking-link text lane started texting callers who said no; sms_declined is the dedicated explicit-refusal field, optional/nullable in both schemas per AGENTS.md's additive-only rule, so a pre-1.19 persisted row — which never has it — still validates; the booking-link staging check fails closed on that shape instead); 1.20.0 is additive (scheduling.definite_commitment, scheduling.relative_date_used, scheduling.moved_appointment_relative_date_used — the extraction judges whether the agent definitely committed and whether a relative date was used; the reschedule applier only verifies them); 1.21.0 is additive (service_request.price_offered_by_staff, price_accepted_by_caller, price_is_final; scheduling.staff_accepted_proposed_slot, scheduling.selected_day_words — owner direction 2026-09-30: the extraction judges the language the commercial dictated booking path needs (staff offered the price, the caller accepted it, it was final, staff accepted the caller's proposed slot as a whole, which day the caller selected); the path only verifies the pinned quotes); 1.22.0 is additive (secondary_contact(s).wants_appointment_texts, .on_site — owner ruling 2026-09-30 \"on-site person is the contact point\", redesigned 2026-10-01: the call pipeline uses them only to decide whether a spouse/buyer/seller/tenant/family member is sent the recipient opt-in ask; consent is that person's own YES; optional in both schemas, never `required`) — older payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
@@ -298,11 +299,11 @@
         },
         "wants_appointment_texts": {
           "type": "boolean",
-          "description": "1.21.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
+          "description": "1.22.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
         },
         "on_site": {
           "type": "boolean",
-          "description": "1.21.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
+          "description": "1.22.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
         },
         "is_billing_party": {
           "type": "boolean",
@@ -391,11 +392,11 @@
           },
           "wants_appointment_texts": {
             "type": "boolean",
-            "description": "1.21.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
+            "description": "1.22.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
           },
           "on_site": {
             "type": "boolean",
-            "description": "1.21.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
+            "description": "1.22.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
           },
           "is_billing_party": {
             "type": "boolean",
@@ -945,6 +946,27 @@
             "null"
           ]
         },
+        "price_offered_by_staff": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when a Waves staff member (speaker \"agent\") OFFERED the amount in service_request.quoted_price_usd as Waves' OWN quote for this service: a statement of the price (\"that runs $150\", \"it's $150 a visit\"), never a question about a price (\"did another company quote you $150?\"), never a competitor's or the caller's number, never a hypothetical or a range. Pin the staff's price sentence to /service_request/price_offered_by_staff with speaker \"agent\"; the amount must appear in that quote exactly as spoken, digits or words (\"$149\" or \"one hundred forty-nine dollars\"); never rewrite words as digits. false when the amount was not offered that way; null when no price was discussed."
+        },
+        "price_accepted_by_caller": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when the CALLER, in their own words, accepted THAT staff-offered price: agreement with the amount itself (\"yes, that works\", \"okay, $150 is fine\", \"let's do it\"). false when the caller objected, negotiated, asked a question instead, agreed to something else (a time, a different service), or accepted only part of it (\"that works for the price, but ...\" the price part counts only if the rest does not take it back). The acceptance must come AFTER the staff's offer. Pin the caller's acceptance to /service_request/price_accepted_by_caller with speaker \"caller\". null when no price was discussed."
+        },
+        "price_is_final": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when the accepted amount was the LAST price staff stated for this service on the call: with nothing added to it: no later correction, revision, different number or ADDED CHARGE, in any amount and any phrasing, before the call ended (\"actually, correction, it's $250\", \"plus ten dollars for the garage\", \"that is before the trip fee\"). false when staff or the caller changed the price or a charge was added between the offer and the acceptance OR after it, even a small one. When in doubt, false. null when no price was discussed."
+        },
         "quote_requested": {
           "type": [
             "boolean",
@@ -1299,6 +1321,21 @@
             "null"
           ],
           "description": "1.20.0, additive/optional (never `required`): true when the EXISTING appointment's day (moved_appointment_date) was expressed relative to the call or to another date rather than as a plain weekday, calendar date, today, tomorrow or \"this <weekday>\": next week, the following Thursday, the Thursday after this one, a week from Thursday, eight days from now / away / out, in two weeks. Resolve it against the call date so moved_appointment_date carries the true absolute date, record only the bare weekday in moved_appointment_words when a weekday was said (otherwise the exact relative phrase, same closed forms), and pin the whole clause holding the relative expression to /scheduling/moved_appointment_relative_date_used. Prefer true when unsure. false when the day was a plain weekday/date/today/tomorrow. null when no slot was agreed."
+        },
+        "staff_accepted_proposed_slot": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): for a booking whose slot was PROPOSED by the caller (one exact day and on-the-hour time in the caller's turn, e.g. \"Can you come Thursday at 2?\"), true ONLY when the very next turn is staff's reply that accepts that whole proposal as stated (\"Sure, that works.\"): not partially (\"that works for the price, but the time is bad\"), not with a change, condition or question, not a refusal. Pin the ENTIRE staff reply turn, verbatim, to /scheduling/staff_accepted_proposed_slot with speaker \"agent\" (also pin it as /scheduling/agent_committed_booking), and pin the caller's proposal turn as /scheduling/confirmed_start_at and /scheduling/caller_accepted_slot with speaker \"caller\". false when the reply did anything else; null when the caller did not propose the slot."
+        },
+        "selected_day_words": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "1.21.0, additive/optional (never `required`): for a NEW booking whose final time turn does not repeat the day (agreed_slot_words.day is null), the verbatim words naming the day the CALLER SELECTED as the final agreed day (\"Thursday\", \"October 24th\", \"tomorrow\"), copied exactly from a CALLER turn and pinned to /scheduling/selected_day_words with speaker \"caller\". Only a day the caller chose or agreed to: never a day the caller rejected, called impossible, or offered as one option among several, and never a relative day (\"next Thursday\"). null when agreed_slot_words.day is set or no day was selected."
         },
         "requested_date_range_start": {
           "type": [

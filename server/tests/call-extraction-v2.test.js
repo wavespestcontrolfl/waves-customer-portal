@@ -367,6 +367,38 @@ describe('schema validation', () => {
       expect(validatePersisted(current).valid).toBe(true);
     });
 
+    // Commercial dictated booking judgements (schema 1.21.0, owner direction
+    // 2026-09-30): optional in BOTH schemas, so older rows still validate and
+    // the path fails closed on the absent judgement.
+    test('1.21.0: the commercial dictated booking judgements are optional and typed; older rows still validate', () => {
+      const out = validModelOutput();
+      for (const f of ['price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final']) delete out.service_request[f];
+      for (const f of ['staff_accepted_proposed_slot', 'selected_day_words']) delete out.scheduling[f];
+      expect(validateModelOutput(out).valid).toBe(true);
+      for (const value of [true, false, null]) {
+        for (const f of ['price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final']) out.service_request[f] = value;
+        out.scheduling.staff_accepted_proposed_slot = value;
+        expect(validateModelOutput(out).valid).toBe(true);
+      }
+      out.scheduling.selected_day_words = 'Thursday';
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.scheduling.selected_day_words = null;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.scheduling.selected_day_words = '';
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.selected_day_words = null;
+      out.service_request.price_is_final = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
+      const old = validPersisted();
+      old.meta.schema_version = '1.20.0';
+      expect(validatePersisted(old).valid).toBe(true);
+      const current = validPersisted();
+      current.service_request.price_offered_by_staff = true;
+      current.scheduling.staff_accepted_proposed_slot = false;
+      current.scheduling.selected_day_words = 'Thursday';
+      expect(validatePersisted(current).valid).toBe(true);
+    });
+
     test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {
       // A dropped TLD ("brandon@gmail") used to fail format:"email" here,
       // which under CALL_EXTRACTION_V2_DRIVES_ROUTING fail-closed the entire
@@ -1343,7 +1375,7 @@ describe('extraction compat adapter', () => {
     expect(flatView(v2).definite_commitment).toBeNull();
   });
 
-  test('flatView secondary_contacts_consent_signature is keyed on phone identity and covers every entry and the singleton (schema 1.21.0)', () => {
+  test('flatView secondary_contacts_consent_signature is keyed on phone identity and covers every entry and the singleton (schema 1.22.0)', () => {
     const v2 = validPersisted();
     expect(flatView(v2).secondary_contacts_consent_signature).toBe('');
     const entry = (role, texts, onSite, name, phone = null, email = null) => ({
@@ -1396,6 +1428,18 @@ describe('extraction compat adapter', () => {
     expect(flat).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });
     expect(flat).not.toHaveProperty('secondary_on_site_evidence');
     expect(flat).not.toHaveProperty('secondary_on_site_grounded');
+  test('flatView maps the commercial dictated booking judgements (schema 1.21.0), null when not judged', () => {
+    const v2 = validPersisted();
+    const empty = flatView(v2);
+    expect([empty.price_offered_by_staff, empty.price_accepted_by_caller, empty.price_is_final, empty.staff_accepted_proposed_slot, empty.selected_day_words])
+      .toEqual([null, null, null, null, null]);
+    v2.service_request.price_offered_by_staff = true;
+    v2.service_request.price_accepted_by_caller = false;
+    v2.scheduling.staff_accepted_proposed_slot = true;
+    v2.scheduling.selected_day_words = 'Thursday';
+    const flat = flatView(v2);
+    expect([flat.price_offered_by_staff, flat.price_accepted_by_caller, flat.staff_accepted_proposed_slot, flat.selected_day_words])
+      .toEqual([true, false, true, 'Thursday']);
   });
 
   test('flatView preserves _v2 reference', () => {

@@ -319,7 +319,7 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     expect(validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: lenderContact, secondary_contacts: [lenderContact] }, '1.7.0')).valid).toBe(true);
   });
 
-  test('1.21.0: wants_appointment_texts / on_site are optional booleans in both schemas, non-boolean rejected', () => {
+  test('1.22.0: wants_appointment_texts / on_site are optional booleans in both schemas, non-boolean rejected', () => {
     const base = { ...secondaryContact };
     // Absent (older payloads) still validates.
     expect(validateModelOutput({ ...validModelOutput(), secondary_contact: base }).valid).toBe(true);

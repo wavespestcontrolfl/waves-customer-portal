@@ -5108,6 +5108,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // Fast Complete sheet instead of ServiceRecapModal. Same "ride the
       // schedule payload, no new endpoint" pattern as inspectionCreditAvailable above.
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
+      // the Fast Complete sheet sends the customer completion text instead
+      // of pinning the send flags off. Only read while the gate above is on.
+      fastCompleteRecapEnabled: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -6228,6 +6232,8 @@ router.get('/', async (req, res, next) => {
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
         // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+        // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
+        fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6817,6 +6823,7 @@ router.get('/week', async (req, res, next) => {
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
           // Same field as the day view above (PR C).
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+          fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -23891,6 +23898,11 @@ async function generateReportCopyWithFallback({
   // the visit's own product records — codex r4). Returning a truthy reason
   // rejects the copy and drives the same retry/cross-provider machinery.
   extraRejection = null,
+  // The four-section report (writer rules) runs longer than the paragraph.
+  maxTokens = 800,
+  // Under the writer rules only the four-section report is accepted; the
+  // deterministic fallback keeps the two-section shape.
+  requireSections = false,
   providers = [
     {
       name: MODELS.TEXT_POLICIES.report.primary.provider,
@@ -23934,7 +23946,7 @@ async function generateReportCopyWithFallback({
           system: systemPrompt,
           text: userMessage,
           jsonMode: false,
-          maxTokens: 800,
+          maxTokens,
           timeoutMs: Math.min(remainingMs, REPORT_CALL_TIMEOUT_MS),
         });
       } catch (err) {
@@ -23958,8 +23970,9 @@ async function generateReportCopyWithFallback({
       // response can still trip its parser-only screens (bare 'infestation',
       // 'safe', …), which return { body: null }. Only parser-approved copy
       // may replace the notes (AGENTS.md report egress; codex r15).
+      const parsed = technicianReportCustomerCopy(report);
       const rejection = reportCopyRejection(report)
-        || (technicianReportCustomerCopy(report)?.body ? null : 'malformed_shape')
+        || (parsed?.body && (!requireSections || parsed.sections) ? null : 'malformed_shape')
         || (typeof extraRejection === 'function' ? extraRejection(report) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
@@ -24259,10 +24272,15 @@ const TYPED_SCORE_WORDS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4
 // (correctly) rejects any "N/5" as numeric_rating. The prompt block keeps the
 // number: it is model INPUT, and the system prompt already orders ratings to
 // be worded, never quoted.
-function typedActivityLine(findingsType, score, { words = false } = {}) {
+function typedActivityLine(findingsType, score, { words = false, gauge = false } = {}) {
   if (!Number.isInteger(score) || score < 0 || score > 5) return null;
   const indicator = ActivityIndicators.ACTIVITY_INDICATORS[findingsType];
   const label = indicator?.label || 'Recorded activity';
+  // Under the writer rules the form's score is a gauge the report prints,
+  // set from the recorded answers, not a severity the technician chose
+  // (outside review 2026-10-01: "active termites present" read as "rated
+  // high" beside "light feeding").
+  if (gauge) return `${label} gauge on the report, set by the form from the recorded answers (never restate it, and never call it high or low): ${score}/5`;
   return words
     ? `${label}: ${TYPED_SCORE_WORDS[score]}`
     : `${label}: ${score}/5 (${TYPED_SCORE_WORDS[score]})`;
@@ -24327,11 +24345,12 @@ function copyActivityScore(type, values, submitted) {
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, companionFindings = [],
   allowedCompanionTypes = [], activityScore = null, withholdProductRecord = false,
+  activityGauge = false,
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
     : { work: [], observations: [], products: [], advice: [], customer: [] };
-  const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
+  const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore, { gauge: activityGauge }) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
   const primaryParts = renderTypedGroupLines(primarySections, { withholdProductRecord });
   const allowed = new Set(allowedCompanionTypes);
@@ -24351,7 +24370,7 @@ function buildTypedFindingsPromptBlock({
       const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
         ? entry.values : {};
       const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
-      const activityLine = typedActivityLine(entry.type, entry?.activityScore);
+      const activityLine = typedActivityLine(entry.type, entry?.activityScore, { gauge: activityGauge });
       if (activityLine) sections.observations.push(activityLine);
       const parts = renderTypedGroupLines(sections, { withholdProductRecord });
       if (!parts.length) return null;
@@ -24838,7 +24857,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
         // (codex P2 r2).
-        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
+        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => 'lookup_failed');
       // A transient service-row lookup failure on a typed request would leave
       // typedFindingsBlock empty while primaryTypedInput still opens the
@@ -24936,6 +24955,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
             companions = [],
           } = completionProfile || {};
           const synthesizedGeneric = completionProfile?.synthesized === true && !serviceKey;
+          // 'one_time' is the explicit not-a-series marker (visit-prep.js),
+          // never recurring lineage (Codex #5500).
+          const recurringPattern = svc.recurring_pattern && svc.recurring_pattern !== 'one_time' ? svc.recurring_pattern : null;
           reportPromptContext = profileResolutionFailed
             ? { requireCanonical: false }
             : {
@@ -24945,6 +24967,22 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               serviceModel,
               isCallback: svc.is_callback === true,
               isBundled: customerFacingCompanionTypes(companions).length > 0,
+              // Writer rules: a re-service or callback, a one-time service
+              // (one-time billing and no recurring lineage), or a recurring
+              // plan visit. Decides the reach-out date (owner 2026-10-01:
+              // one-time services and re-services).
+              // Recurring only on positive evidence (a recurring billing
+              // type or recurring lineage); an unresolved or synthesized
+              // profile stays unknown (Codex #5500).
+              serviceKind: (serviceKey === 'pest_re_service' || svc.is_callback === true)
+                ? 're_service'
+                : (String(serviceModel || '').toLowerCase() === 'one_time'
+                  && svc.is_recurring !== true && !svc.recurring_parent_id && !recurringPattern)
+                  ? 'one_time'
+                  : (String(serviceModel || '').toLowerCase() === 'recurring'
+                    || svc.is_recurring === true || Boolean(svc.recurring_parent_id) || Boolean(recurringPattern))
+                    ? 'recurring'
+                    : null,
             };
           if (completionProfile) {
             fallbackServiceType = serviceName || (serviceKey ? 'scheduled service' : groundingServiceType);
@@ -25019,6 +25057,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               allowedCompanionTypes,
               activityScore: typedActivityScoreNum,
               withholdProductRecord: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
+              activityGauge: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
@@ -25103,6 +25142,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let contextText = '';
     let contextSignals = {};
     let deterministicApplications = [];
+    let writerAllowedPhrases = [];
+    let writerAllowedDates = [];
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -25122,8 +25163,12 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
         writerRules: writerRulesOn,
+        findingsType: reportPromptContext.findingsType || null,
+        serviceKind: reportPromptContext.serviceKind || null,
       });
       contextText = ctx.contextText || '';
+      writerAllowedPhrases = Array.isArray(ctx.writerAllowedPhrases) ? ctx.writerAllowedPhrases : [];
+      writerAllowedDates = Array.isArray(ctx.writerAllowedDates) ? ctx.writerAllowedDates : [];
       contextSignals = ctx.signals || {};
       deterministicApplications = Array.isArray(ctx.deterministicApplications)
         ? ctx.deterministicApplications : [];
@@ -25356,12 +25401,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
     }
     const writerRulesScreen = (text) => (writerRulesOn
-      ? writerRulesRejection(text, { activeIngredients: visitActiveIngredients })
+      ? writerRulesRejection(text, {
+        activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
+      })
       : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
+      ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic

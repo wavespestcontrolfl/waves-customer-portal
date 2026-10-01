@@ -2046,6 +2046,11 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // processor forces the Waves Assessment row for an ambiguous demotion and
   // demotes an already-open blocking card for each (reprocess).
   const unclearServiceDemotedFlags = [];
+  // EVERY flag a gated demotion took out of the blocking set (this gate's and
+  // GATE_CALL_COMMERCIAL_DICTATED_BOOKING's), gate-agnostic: the processor
+  // demotes an already-open blocking card for each on a reprocess, whichever
+  // gate waived it (codex #5377 r4 P1). Empty with every gate off.
+  const gateDemotedFlags = [];
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -2087,7 +2092,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       // one). Anything less keeps the hold. The service resolver's own vetoes
       // (unsupported / administrative-only) still run downstream and are not
       // touched here.
-      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); return false; }
+      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); gateDemotedFlags.push(f); return false; }
       return true;
     });
   }
@@ -2158,6 +2163,42 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // confirmed $100 commercial booking fell to the lead-response flow.
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_not_authorized' || f === 'commercial_requires_quote') { failedOpenFlags.push(f); return false; }
+      return true;
+    });
+  }
+
+  // Commercial dictated booking (opts.commercialDictatedBooking ←
+  // GATE_CALL_COMMERCIAL_DICTATED_BOOKING, owner ruling 2026-09-30): a SECOND
+  // path beside the agent-commitment block above — that block and
+  // hasAgentCommittedEvidence are untouched. The PROCESSOR decides where it
+  // may run: inbound calls only (outbound speaker labels have swapped) and
+  // only with GATE_CALL_AGENT_COMMIT_BOOKING on. Clears ONLY
+  // commercial_requires_quote, and only when the staff commitment quote AND the
+  // caller's acceptance quote each ground word for word in a turn of their own
+  // speaker (the reschedule module's grounding) with a price agreed and
+  // grounded on the call — see services/call-commercial-dictated-booking.js. A
+  // missing/swapped speaker label fails closed there. Like the block above it
+  // needs trusted labels, a confirmed start and an on-the-hour start; the
+  // address, unit, capacity and every other hold below still apply. The flag
+  // rides in failedOpenFlags so the office still gets the advisory card.
+  // Required lazily: that module requires this one.
+  if (opts.commercialDictatedBooking === true && opts.transcriptLabelsTrusted === true
+      && confirmedWithStart
+      && commitStartOnTheHour
+      && appointmentBlockingFlags.includes('commercial_requires_quote')
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT waived ambiguous_pest_or_service
+      // above, so the booking is FORCED to the Waves Assessment row and its
+      // treatment price is cleared (forcedAssessmentBooking): a quote validated
+      // against the originally resolved service would never reach the visit.
+      // Fail closed — the call holds on commercial_requires_quote for the office
+      // (codex #5377 r10 P1).
+      && !unclearServiceDemotedFlags.includes('ambiguous_pest_or_service')
+      && require('./call-commercial-dictated-booking').commercialDictatedBookingGrounded({
+        v2: extraction, transcript: opts.transcript, callStartedAt: opts.callStartedAt,
+        quoteBookable: opts.commercialQuoteBookable,
+      }).ok) {
+    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
+      if (f === 'commercial_requires_quote') { failedOpenFlags.push(f); gateDemotedFlags.push(f); return false; }
       return true;
     });
   }
@@ -2281,6 +2322,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // book the Waves Assessment row, never a service the resolver or a model
     // field happened to pick (the flag said the service is unclear), and the
     // resolver's unsupported-call veto must read the full transcript.
+    ...(gateDemotedFlags.length ? { gateDemotedFlags } : {}),
     ...(unclearServiceDemotedFlags.length ? {
       // Set whenever this gate admitted the call by waiving EITHER flag: the
       // processor's full-transcript unsupported-call veto rides this signal, not
