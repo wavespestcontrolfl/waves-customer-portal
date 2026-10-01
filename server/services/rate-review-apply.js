@@ -98,9 +98,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { rateReviewLive, isEnabled } = require('../config/feature-gates');
-const { MIN_NOTICE_DAYS } = require('./price-change-notices');
+const { MIN_NOTICE_DAYS, lockNoticeEvent } = require('./price-change-notices');
 const PlanRateLedger = require('./plan-rate-ledger');
-const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+const { hasAuthoritativeZeroPrice, resolveBillingLane } = require('./billing-lane');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   PLAN_LINE_SQL, LEDGER_FAMILIES_FOR_LINE, anniversaryInWindow, familyOfCoverage, matchPrepayTerm, visitsPerYearFor, lockBatch,
@@ -382,9 +382,10 @@ function termRenewalNoticed(term) {
 async function resolveLiveLane(dbh, { customer, familyKey, cadence = null, today }) {
   const found = await resolvePrepayTerm(dbh, { customerId: customer.id, familyKey, cadence, today });
   if (found.term || found.reason === 'prepay_term_ambiguous') return LANE_PREPAY;
-  if (customer.billing_mode === LANE_MONTHLY) return LANE_MONTHLY;
-  if (customer.billing_mode === LANE_PER_APPLICATION) return LANE_PER_APPLICATION;
-  return customer.billing_mode || null;
+  // The canonical lane (billing-lane.js — the ranking's own resolver): an
+  // explicit mode, else the legacy inference (a real tier + positive dues
+  // is monthly_membership).
+  return resolveBillingLane(customer).mode;
 }
 
 // The per-customer annual-prepay advisory lock every renewal writer takes
@@ -511,8 +512,10 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     // One notice per change EVENT: a legacy notice with the same customer,
     // date and amounts is the same event; another rate-review notice is
     // only when it is the same plan line (two lines can share date and
-    // amounts and are two changes). Checked here under the batch lock; the
-    // partial unique indexes of migration 20261001190000 are the belt.
+    // amounts and are two changes). Checked under the shared per-event lock
+    // the legacy send path also takes; the partial unique indexes of
+    // migration 20261001190000 are the belt.
+    await lockNoticeEvent(sp, { customerId: row.customer_id, effectiveDate, currentCents: noticedCurrent, newCents: noticedNew });
     const sameEvent = await sp('price_change_notices')
       .where({ customer_id: row.customer_id, effective_date: effectiveDate, current_amount_cents: noticedCurrent, new_amount_cents: noticedNew })
       .where(function legacyOrSameLine() { this.whereNull('rate_review_row_id').orWhere('family_key', row.family_key); })
@@ -539,7 +542,7 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
         apply_attempts: 0,
       }).returning(['id', 'effective_date']);
     } catch (err) {
-      // a concurrent insert of the same event won past the check above
+      // the belt: a unique index caught what the event lock + check missed
       if (err && err.code === '23505') throw hold('notice_event_collision', { effectiveDate });
       throw err;
     }
@@ -996,6 +999,14 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       if (!customer || customer.deleted_at) throw hold('rate_moved_since_notice', 'customer gone');
       const notice = await trx('price_change_notices').where({ id: noticeRow.id }).forUpdate().first();
       if (!notice || notice.applied_at || !wasDelivered(notice)) { outcomeBox.skipped = true; return; }
+      // A merge undo can repoint the notice after the due scan: the locks
+      // above are the scanned owner's, so never write under them — the next
+      // run reads the live owner.
+      if (String(notice.customer_id) !== String(customer.id)) {
+        logger.warn(`[rate-review-apply] notice ${notice.id} changed owner since the due scan; retried next run`);
+        outcomeBox.skipped = true;
+        return;
+      }
       if (!LANES.includes(notice.billing_lane)) throw hold('lane_unknown', { lane: notice.billing_lane });
       // The 30-day rule is measured from the DELIVERY the customer actually
       // got, never from the day the owner planned to send.

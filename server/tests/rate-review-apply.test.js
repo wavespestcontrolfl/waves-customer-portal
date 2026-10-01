@@ -33,7 +33,10 @@ jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn(async (trx, customerId) => { mockDb.log.push(['commsLock', customerId]); }),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
-jest.mock('../services/price-change-notices', () => ({ MIN_NOTICE_DAYS: 30 }));
+jest.mock('../services/price-change-notices', () => ({
+  MIN_NOTICE_DAYS: 30,
+  lockNoticeEvent: jest.fn(async (conn, event) => { mockDb.log.push(['noticeEventLock', event]); }),
+}));
 const mockCloseAlertKeys = jest.fn(async () => 0);
 jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...args) => mockCloseAlertKeys(...args) }));
 jest.mock('../services/annual-prepay-renewals', () => ({
@@ -266,6 +269,13 @@ describe('scheduleNoticeRows — per_application effective date', () => {
     await scheduleBook(pestBook());
     const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
     expect(again).toMatchObject({ ok: true, created: 0, alreadyScheduled: 1 });
+    expect(notices()).toHaveLength(1);
+  });
+  test('scheduling takes the shared notice-event lock (the legacy send path takes the same one) before its collision check and insert', async () => {
+    await scheduleBook(pestBook());
+    const lockAt = mockDb.log.findIndex((e) => e[0] === 'noticeEventLock');
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(mockDb.log[lockAt][1]).toEqual({ customerId: CUSTOMER(1), effectiveDate: '2026-12-10', currentCents: 11700, newCents: 12100 });
     expect(notices()).toHaveLength(1);
   });
   test('two plan lines of one customer with the same date and amounts are two changes: each gets its own notice (the event is per plan line)', async () => {
@@ -579,6 +589,18 @@ describe('applyDueRateChanges — per_application', () => {
     expect(notices()[0].apply_hold_reason).toBe('series_guard_refused');
     expect(JSON.parse(notices()[0].metadata).last_hold.detail).toMatch(/already has an invoice/);
   });
+  test('a notice repointed to another customer after the due scan (a merge undo) is never applied under the stale owner: skipped, nothing written, retried next run', async () => {
+    const book = sentBook();
+    book.customers.push(fixture.customerRow(2));
+    mockDb.reset(book);
+    const commsLock = require('../utils/customer-comms-lock').lockCustomerComms;
+    commsLock.mockImplementationOnce(async () => { mockDb.store.price_change_notices[0].customer_id = CUSTOMER(2); });
+    const out = await apply.applyDueRateChanges({ asOf: ASOF, now: ASOF });
+    expect(out).toMatchObject({ applied: 0, held: 0, skipped: 1 });
+    expect(visits()[1].estimated_price).toBe('117.00');
+    expect(customer1().per_application_fee).toBe('117.00');
+    expect(notices()[0].applied_at == null).toBe(true);
+  });
   test('a busy series (maintenance lock held elsewhere) → retried tonight, never waited on', async () => {
     mockSchedule.seriesLockBusy = true;
     const out = await runApply(sentBook());
@@ -805,6 +827,11 @@ describe('applyDueRateChanges — monthly_membership', () => {
     expect(mockDb.store.audit_log.some((a) => a.action === PlanRateLedger.MANUAL_RATE_AUDIT_ACTION)).toBe(false);
     expect(notices()[0].applied_at).toEqual(JAN);
     expect(snapshots()[0].status).toBe('applied');
+  });
+  test('a legacy NULL billing_mode member (real tier + positive dues) is on the monthly lane by the canonical resolver — applied, never held as a lane change', async () => {
+    const out = await runApply(monthlyBook({ customer: { billing_mode: null, waveguard_tier: 'Gold' } }), JAN);
+    expect(out).toMatchObject({ due: 1, applied: 1, held: 0 });
+    expect(customer1().monthly_rate).toBe(36.33);
   });
   test('a rider slice keeps its own row; the sum of slices still equals the scalar', async () => {
     const book = monthlyBook({ ledger: [
@@ -1223,7 +1250,7 @@ describe('wiring', () => {
   });
   test('the 30-day minimum is the notice workflow\'s own constant, not a second copy', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/rate-review-apply.js'), 'utf8');
-    expect(src).toMatch(/const \{ MIN_NOTICE_DAYS \} = require\('\.\/price-change-notices'\)/);
+    expect(src).toMatch(/const \{ MIN_NOTICE_DAYS, lockNoticeEvent \} = require\('\.\/price-change-notices'\)/);
     expect(src).not.toMatch(/MIN_NOTICE_DAYS\s*=\s*\d/);
   });
   test('the apply lane never writes a manual-override audit action or a manual ledger source', () => {
