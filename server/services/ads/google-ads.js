@@ -301,6 +301,9 @@ async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
   }
 }
 
+// system_settings key holding the last successful search-term sync time.
+const SEARCH_TERMS_SYNCED_KEY = 'ads.search_terms.last_synced_at';
+
 // ---------------------------------------------------------------------------
 // syncSearchTerms — pull search term report for last N days
 // ---------------------------------------------------------------------------
@@ -378,6 +381,13 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
       await trx('ad_search_terms')
         .where('updated_at', '<', syncedAt)
         .update({ impressions: 0, clicks: 0, cost: 0, conversions: 0, conversion_value: 0, updated_at: syncedAt });
+
+      // Run-level success record: a run that returned zero terms is still a
+      // valid snapshot, which row stamps alone can't show.
+      await trx('system_settings')
+        .insert({ key: SEARCH_TERMS_SYNCED_KEY, value: syncedAt.toISOString(), category: 'ads', description: 'Last successful Google Ads search-term sync' })
+        .onConflict('key')
+        .merge({ value: syncedAt.toISOString(), updated_at: syncedAt });
     });
 
     logger.info(`[google-ads] Synced ${results.length} search terms`);
@@ -570,6 +580,7 @@ module.exports = {
   syncCampaigns,
   syncDailyPerformance,
   syncSearchTerms,
+  SEARCH_TERMS_SYNCED_KEY,
   fetchCallViews,
   pauseCampaign,
   enableCampaign,

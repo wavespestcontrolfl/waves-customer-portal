@@ -40,6 +40,7 @@ const mockBudgetRow = (i, budgetTo = 8) => ({
 });
 let mockBudgetLog = [];
 let mockSearchTerms = SEARCH_TERMS;
+let mockFirstRows = {};
 const mockLimits = [];
 jest.mock('../models/db', () => jest.fn((table) => {
   const rowsFor = {
@@ -48,9 +49,9 @@ jest.mock('../models/db', () => jest.fn((table) => {
     ad_budget_log: mockBudgetLog,
   };
   const b = {
-    where: (...args) => { mockWhereCalls.push({ table, args }); return b; }, orderBy: () => b, select: () => b,
+    where: (...args) => { mockWhereCalls.push({ table, args }); return b; }, orderBy: () => b, select: () => b, distinct: () => b,
     limit: (n) => { mockLimits.push([table, n]); return b; },
-    first: () => Promise.resolve(null),
+    first: () => Promise.resolve(mockFirstRows[table] || null),
     insert: (row) => mockInsert(table, row),
     then: (r, j) => Promise.resolve(rowsFor[table] || []).then(r, j),
   };
@@ -201,7 +202,7 @@ describe('Codex r4 on #5486', () => {
 });
 
 describe('search-term truncation (Codex r6 on #5486)', () => {
-  afterEach(() => { mockSearchTerms = SEARCH_TERMS; });
+  afterEach(() => { mockSearchTerms = SEARCH_TERMS; mockFirstRows = {}; });
   const term = (i) => ({ search_term: `synthetic term ${i}`, clicks: 1, cost: String(200 - i), conversions: '0', conversion_value: '0', roas: '0' });
 
   test('101 spend rows: the prompt lists 100 and says the list is TRUNCATED', async () => {
@@ -220,6 +221,23 @@ describe('search-term truncation (Codex r6 on #5486)', () => {
     await advisor.generateDailyAdvice();
     const { text } = mockDispatch.mock.calls[0][1];
     expect(text).toMatch(/UNAVAILABLE: no search-term sync in the last 48 hours/);
+  });
+
+  test('a recent successful sync with zero terms is a valid empty snapshot, not UNAVAILABLE (Codex r9)', async () => {
+    mockSearchTerms = [];
+    mockFirstRows = { system_settings: { key: 'ads.search_terms.last_synced_at', value: new Date(Date.now() - 3600 * 1000).toISOString() } };
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/UNAVAILABLE: no search-term/);
+    expect(mockWhereCalls.some((c) => c.table === 'system_settings' && c.args[0].key === 'ads.search_terms.last_synced_at')).toBe(true);
+  });
+
+  test('a sync record older than 48 hours still reads as UNAVAILABLE', async () => {
+    mockSearchTerms = [];
+    mockFirstRows = { system_settings: { key: 'ads.search_terms.last_synced_at', value: new Date(Date.now() - 72 * 3600 * 1000).toISOString() } };
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockDispatch.mock.calls[0][1].text).toMatch(/UNAVAILABLE: no search-term/);
   });
 
   test('fresh rows present: no UNAVAILABLE note', async () => {
@@ -303,5 +321,31 @@ describe('empty recommendations', () => {
     expect(fb.grade).toBe('N/A');
     // Not an AI-shaped answer: it never passes the leg validator.
     expect(advisor.isUsableAdsReport(fb)).toBe(false);
+  });
+});
+
+describe('no Apply on campaigns changed in the last 7 days (Codex r9 on #5486)', () => {
+  test('a budget rec for a recently changed campaign is stored advisory-only', async () => {
+    mockBudgetLog = [{ ...mockBudgetRow(1), campaign_id: CAMPAIGN.id, campaign_name: CAMPAIGN.campaign_name }];
+    mockDispatch.mockResolvedValue({ ok: true, provider: 'anthropic', model: 'm', json: {
+      ...EMPTY_REPORT,
+      recommendations: [{
+        priority: 'high', action: 'Raise the daily budget', campaign: 'Synthetic Search', campaign_id: CAMPAIGN.id,
+        reasoning: 'Lost 40% impression share to budget at $5/day.', estimated_impact: '+2 clicks/day',
+        apply_action: 'increase_budget', apply_value: 8,
+      }],
+    } });
+    const advice = await advisor.generateDailyAdvice();
+    const rec = advice.recommendations[0];
+    expect(rec.apply_action).toBeUndefined();
+    expect(rec.manual_action).toBe('increase_budget');
+    expect(rec.action).toBe('Raise the daily budget');
+  });
+
+  test('the same rec on an unchanged campaign keeps its Apply action', () => {
+    const out = advisor.normalizeRecommendations({ recommendations: [{
+      campaign: 'Synthetic Search', apply_action: 'increase_budget', apply_value: 8,
+    }] }, [CAMPAIGN], new Set(['some-other-campaign']));
+    expect(out.recommendations[0].apply_action).toBe('increase_budget');
   });
 });

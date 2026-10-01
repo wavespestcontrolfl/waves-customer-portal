@@ -133,6 +133,8 @@ function normalizeAdsReport(advice) {
 const ADVISOR_MAX_BUDGET_CHANGES = 200;
 // Search-term rows not refreshed within this window fell out of the latest sync.
 const ADVISOR_SEARCH_TERM_FRESH_MS = 48 * 60 * 60 * 1000;
+// Written by google-ads.syncSearchTerms (same key, exported there as SEARCH_TERMS_SYNCED_KEY).
+const SEARCH_TERMS_SYNCED_KEY = 'ads.search_terms.last_synced_at';
 
 // Secondary lists an SMS summary falls back to when there are no recommendations.
 const SUMMARY_SECONDARY_LISTS = [
@@ -339,7 +341,7 @@ class CampaignAdvisor {
       );
       const advice = normalizeAdsReport(res.json);
       this.stampProvenance(advice, res, now);
-      this.normalizeRecommendations(advice, campaigns);
+      this.normalizeRecommendations(advice, campaigns, inputs.recentlyChangedIds);
       await this.storeReport(advice);
       await this.sendSummary(advice);
 
@@ -371,10 +373,14 @@ class CampaignAdvisor {
       .where('cost', '>', 0)
       .orderBy('cost', 'desc')
       .limit(ADVISOR_MAX_SEARCH_TERMS + 1);
-    // An empty list is only "no spend" if a recent sync actually ran.
-    const searchTermsAvailable = searchTerms.length > 0 || Boolean(await db('ad_search_terms')
-      .where('updated_at', '>=', new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS))
-      .first('updated_at'));
+    // An empty list is only "no spend" if a recent sync actually ran. The
+    // sync records each successful run (even one with zero terms); a recently
+    // stamped row also counts, for rows written before that record existed.
+    const freshCutoff = new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS);
+    const syncMark = await db('system_settings').where({ key: SEARCH_TERMS_SYNCED_KEY }).first();
+    const searchTermsAvailable = searchTerms.length > 0
+      || (syncMark?.value && new Date(syncMark.value) >= freshCutoff)
+      || Boolean(await db('ad_search_terms').where('updated_at', '>=', freshCutoff).first('updated_at'));
 
     const serviceAttribution = await db('ad_service_attribution')
       .where('lead_date', '>=', d30);
@@ -389,12 +395,19 @@ class CampaignAdvisor {
       .where('created_at', '>=', new Date(now - 7 * 86400000))
       .orderBy('created_at', 'desc')
       .limit(ADVISOR_MAX_BUDGET_CHANGES + 1);
+    // Every campaign changed in the window, uncapped: Apply is withheld on
+    // these so a model that ignores the no-repeat rule can't put a one-click
+    // repeat or reversal on the page.
+    const recentlyChangedIds = new Set((await db('ad_budget_log')
+      .where('created_at', '>=', new Date(now - 7 * 86400000))
+      .distinct('campaign_id'))
+      .map((r) => String(r.campaign_id)));
 
     // GSC/SEO data for combined analysis, then GBP data
     const gscSummary = await loadGscSummary();
     const gbpSummary = await loadGbpSummary(d30);
 
-    return { last7days, last30days, searchTerms, searchTermsAvailable, serviceAttribution, capacity, targets, techCount, budgetLog, gscSummary, gbpSummary };
+    return { last7days, last30days, searchTerms, searchTermsAvailable, serviceAttribution, capacity, targets, techCount, budgetLog, recentlyChangedIds, gscSummary, gbpSummary };
   }
 
   // Aggregate per campaign
@@ -501,7 +514,7 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
   // shows the "Manual action" hint instead of a button that
   // deterministically 422s. The resolved row's id is stamped back on as the
   // stable campaign_id the route prefers.
-  normalizeRecommendations(advice, campaigns) {
+  normalizeRecommendations(advice, campaigns, recentlyChangedIds = new Set()) {
     if (!advice || !Array.isArray(advice.recommendations)) return advice;
     const AUTO = new Set(['increase_budget', 'decrease_budget', 'change_mode']);
     const adsConfigured = adsClientConfigured();
@@ -525,6 +538,8 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
         || byName.get(String(rec.campaign || '').toLowerCase())
         || null;
       if (!campaign || campaign.platform !== 'google_ads' || campaign.status !== 'active') { strip(); continue; }
+      // Changed in the last 7 days: advice text stays, the one-click button doesn't.
+      if (recentlyChangedIds.has(String(campaign.id))) { strip(); continue; }
       // A linked campaign needs a live push the unconfigured client can't run.
       if (campaign.platform_campaign_id && !adsConfigured) { strip(); continue; }
       // An id resolving to a different campaign than the displayed name is

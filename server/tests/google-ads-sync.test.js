@@ -1,6 +1,6 @@
 const mockQueryFirst = jest.fn();
 const mockInsertReturning = jest.fn();
-const mockInsert = jest.fn(() => ({ returning: mockInsertReturning }));
+const mockInsert = jest.fn(() => ({ returning: mockInsertReturning, onConflict: () => ({ merge: () => Promise.resolve() }) }));
 const mockUpdate = jest.fn();
 // syncCampaigns' removed-campaign reconcile is where(platform).whereNotIn(ids)
 // .whereNot(status).where(updated_at < fence).update(...) — kept on its own
@@ -331,6 +331,15 @@ describe('syncSearchTerms retires terms missing from the latest snapshot (Codex 
     expect(mockUpdate).toHaveBeenCalledWith({
       impressions: 0, clicks: 0, cost: 0, conversions: 0, conversion_value: 0, updated_at: runAt,
     });
+  });
+
+  test('records a run-level success, even for an empty snapshot (Codex r9)', async () => {
+    mockCustomerQuery.mockResolvedValue([]);
+    await GoogleAds.syncSearchTerms(30, { throwOnError: true });
+    expect(GoogleAds.SEARCH_TERMS_SYNCED_KEY).toBe('ads.search_terms.last_synced_at');
+    const mark = mockInsert.mock.calls.find((c) => c[0]?.key === GoogleAds.SEARCH_TERMS_SYNCED_KEY);
+    expect(mark).toBeTruthy();
+    expect(new Date(mark[0].value).toString()).not.toBe('Invalid Date');
   });
 });
 
