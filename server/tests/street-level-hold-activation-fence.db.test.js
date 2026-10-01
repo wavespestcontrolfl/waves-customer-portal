@@ -137,6 +137,23 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect(await marker(callId)).toBeUndefined();
   });
 
+  test('a lazy activation finishing never clears an office upgrade of the marker (the office legs stay owed)', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    const actual = jest.requireActual('../services/appointment-reminders').registerAppointment;
+    // The lazy activation stamps and is mid-legs when the office path (which lost the stamp) upgrades the marker.
+    reminders.registerAppointment.mockImplementationOnce(async (...args) => {
+      await knex('triage_items').where({ call_log_id: callId }).update({ payload: knex.raw("payload || '{\"activation_pending\": \"office\"}'::jsonb") });
+      return actual(...args);
+    });
+    expect(await _test.activateHoldFencedByAddress(knex, svc, 'legacy-activation-sweep', { suppressCardAskWithoutClearance: true })).toBe(true);
+    // The lazy one finished and cleared only ITS mode: the office upgrade is still owed.
+    expect(await marker(callId)).toBe('office');
+    reminders.registerAppointment.mockImplementationOnce((...args) => actual(...args));
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
+    expect(await marker(callId)).toBeUndefined();
+    expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).not.toBeNull();
+  });
+
   test('a LAZY-mode marker resumes without the office clearance: no clearance stamp, the card ask runs delivery-less', async () => {
     const { visitId, callId, svc } = await seedApprovedHold();
     await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'lazy' });

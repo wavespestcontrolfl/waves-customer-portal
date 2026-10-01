@@ -1032,10 +1032,14 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt
 // route: it also writes the call-level clearance stamp and may text the card-on-file ask) or 'lazy' (the
 // retry rail: the ask only on an existing clearance). Written with the stamp, cleared when the legs are done
 // (or the stamp is taken back). pending = false clears it.
-async function setHoldActivationPending(conn, callLogId, visitId, pending) {
+// `onlyIfMode` (clearing only): clear the marker just when it still carries THIS activation's mode — a lazy
+// activation finishing must not wipe an 'office' upgrade written by the office path that lost the stamp.
+async function setHoldActivationPending(conn, callLogId, visitId, pending, onlyIfMode = null) {
   const card = await findStreetLevelHoldCard(conn, { callLogId, visitId });
   if (!card) return false;
-  await conn('triage_items').where({ id: card.id }).update({
+  await conn('triage_items').where({ id: card.id }).modify((q) => {
+    if (!pending && onlyIfMode) q.whereRaw("payload->>'activation_pending' = ?", [onlyIfMode]);
+  }).update({
     payload: pending
       ? conn.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('activation_pending', ?::text)", [String(pending)])
       : conn.raw("COALESCE(payload, '{}'::jsonb) - 'activation_pending'"),
@@ -1101,7 +1105,7 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
         logger.error(`[${routeTag}] office legs after a lost stamp threw for ${svc.id}: ${e.message}`);
       }
       // On a failure the marker stays: the sweep re-runs the legs in office mode.
-      if (officeOk && svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false).catch(() => {});
+      if (officeOk && svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false, 'office').catch(() => {});
     }
     return true;
   }
@@ -1124,7 +1128,7 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
         .update({ customer_confirmed: false, confirmed_at: null });
       if (unstamped > 0) {
         logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — un-stamped so the activation sweep retries it`);
-        if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false);
+        if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false, mode);
         await reopenHoldCardForRestoredVisit(svc.id, dbh);
       } else {
         logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — visit already advanced or taken: approval and pending marker kept for the sweep`);
@@ -1134,7 +1138,8 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
     }
     return false;
   }
-  if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false).catch(() => {});
+  // Only this activation's own marker: a lazy one never clears an office upgrade.
+  if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false, mode).catch(() => {});
   await reconcileStreetLevelHoldAfterStamp(dbh, svc);
   return true;
 }
