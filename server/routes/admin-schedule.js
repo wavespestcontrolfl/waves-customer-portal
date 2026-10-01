@@ -9,7 +9,8 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -5083,8 +5084,12 @@ async function loadLinkedProjectsByServiceId(serviceIds) {
   }
 }
 
-async function loadProjectCompletionContextByServiceId(services) {
+async function loadProjectCompletionContextByServiceId(services, { userId = null } = {}) {
   const rows = Array.isArray(services) ? services : [];
+  // GATE_TS_FAST_COMPLETE + the requesting user's `ts_fast_complete` flag:
+  // one read per request, not per service. A flag-read failure is "off".
+  const treeShrubFastCompleteEnabled = tsFastCompleteLive()
+    && await isUserFeatureEnabled(userId, 'ts_fast_complete').catch(() => false);
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
@@ -5108,6 +5113,8 @@ async function loadProjectCompletionContextByServiceId(services) {
       // Fast Complete sheet instead of ServiceRecapModal. Same "ride the
       // schedule payload, no new endpoint" pattern as inspectionCreditAvailable above.
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      // Tree & Shrub Fast Complete: gate AND the requesting tech's user flag.
+      treeShrubFastCompleteEnabled,
       // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
@@ -5838,7 +5845,7 @@ router.get('/', async (req, res, next) => {
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
-    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services, { userId: req.technicianId });
 
     // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
     // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
@@ -6232,6 +6239,7 @@ router.get('/', async (req, res, next) => {
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
         // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+        treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
@@ -6538,7 +6546,7 @@ router.get('/week', async (req, res, next) => {
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
-      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services, { userId: req.technicianId });
       // Same trace-eligibility flag the day feed carries (codex P2 r2):
       // the mobile Week view opens the shared CompletionPanel straight off
       // these rows, so the tracer-gating verdict must ride here too. The
@@ -6823,6 +6831,7 @@ router.get('/week', async (req, res, next) => {
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
           // Same field as the day view above (PR C).
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+          treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
@@ -27004,3 +27013,6 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 // address resolver, so "same property" can never mean something different
 // in the duplicate guard than it does in the pest-rides-lawn preview.
 module.exports.topUpScopeInput = topUpScopeInput;
+// Test surface for the per-service completion payload fields (the T&S Fast
+// Complete flag needs the gate AND the requesting user's flag).
+module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;
