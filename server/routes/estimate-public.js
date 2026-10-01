@@ -12905,7 +12905,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // whose series already exists gets an UNATTACHED first invoice (pay
           // link at accept) that /data cannot predict, and without this the
           // customer would 409 on every confirm.
-          err.collectionPromise = { variant: expectedPromise.variant, tender: expectedPromise.tender, version: expectedPromise.version };
+          err.collectionPromise = {
+            variant: expectedPromise.variant,
+            tender: expectedPromise.tender,
+            version: expectedPromise.version,
+            // Whether this selection's first invoice is deferred to the visit:
+            // a base-consent answer (e.g. Auto Pay paused since the capture) is
+            // NOT by itself a "billed at confirm" answer.
+            deferred: !delivery.collectsAtAccept,
+          };
           throw err;
         }
         acceptedCollectionPromise = {

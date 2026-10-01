@@ -3917,7 +3917,7 @@ export function ContactGapFields({
   );
 }
 
-export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
+export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3959,7 +3959,13 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
         : 'No payment needed now. Your account manager confirms the exact price on a quick site visit, then sends your first invoice.')
     : usingExistingAppointment
       ? recurringPayPerApplication
-        ? `${existingApptLede} Next step creates your invoice and makes secure payment available.`
+        // The one payment-timing answer (lib/paymentTiming.js): an after-visit
+        // first invoice is neither created nor payable at this step.
+        ? (paymentTiming?.firstInvoice === 'after_visit'
+          ? `${existingApptLede} Nothing is charged today — ${paymentTiming.held
+            ? 'we send you a pay link after your first visit.'
+            : 'your payment method on file is billed for your first visit after it is completed.'}`
+          : `${existingApptLede} Next step creates your invoice and makes secure payment available.`)
         : paymentPreference === 'prepay_annual'
           ? (prepayInLane
             // Tender-accurate (Codex #3492 r10): the auto-satisfy lane
@@ -7376,7 +7382,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               throw new Error(body.error || 'Your payment terms were updated — reloading the page.');
             }
             if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise?.tender === 'card') {
-              setTimingAnswer(body.collectionPromise.variant ? null : { key: afterVisitSelectionKeyRef.current, deferred: false });
+              // Only an explicit "first invoice goes out now" changes the
+              // timing; a base-consent answer alone (e.g. Auto Pay paused since
+              // the capture) keeps it.
+              if (body.collectionPromise.deferred === false) {
+                setTimingAnswer({ key: afterVisitSelectionKeyRef.current, deferred: false });
+              }
             }
             // The card-authorization text (or the account's billing cohort) moved
             // since this tab loaded — refetch so the capture UI renders exactly
@@ -9279,6 +9290,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           })() : null}
           <ReviewPhase
             website={websiteMode}
+            paymentTiming={paymentTiming}
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
             existingAppointment={existingAppointment}

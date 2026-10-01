@@ -42,14 +42,17 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/const paymentTiming = resolvePaymentTiming\(\{\s*policy: data\?\.recurringCardPolicy,\s*paymentPreference,\s*serviceMode,\s*invoiceShape: afterVisitInvoiceShape,\s*selectionKey: afterVisitSelectionKey,\s*timingAnswer,\s*\}\);/);
     expect(src).toMatch(/const captureTiming = captureTimingProps\(paymentTiming\);\s*const afterVisitRendered = captureTiming\.afterVisit;\s*afterVisitTimingShownRef\.current = paymentTiming\?\.attestTiming === true;/);
     // Both payment-option renders and both capture surfaces take the one answer.
-    expect(src.match(/paymentTiming=\{paymentTiming\}/g)).toHaveLength(2);
+    // Both payment-option renders and the review confirm summary.
+    expect(src.match(/paymentTiming=\{paymentTiming\}/g)).toHaveLength(3);
     expect(src.match(/\{\.\.\.captureTiming\}/g)).toHaveLength(2);
     // No surface reads the cohort flags directly any more.
     expect(src).not.toMatch(/afterVisitDeniedKey|afterVisitForcedKey|payAfterFirstVisitEffective|paymentTimingDenied=/);
     expect(src).not.toMatch(/(?:paused|autopayOff|autopayPaused)=\{[^}]*recurringCardPolicy/);
     // The accept's refusals record ONE per-selection answer.
     expect(src).toMatch(/setTimingAnswer\(\{ key: afterVisitSelectionKeyRef\.current, deferred: body\.afterVisitDeferred === true \}\);/);
-    expect(src).toMatch(/body\.code === 'CONSENT_VARIANT_STALE' && body\.collectionPromise\?\.tender === 'card'\) \{\s*setTimingAnswer\(body\.collectionPromise\.variant \? null : \{ key: afterVisitSelectionKeyRef\.current, deferred: false \}\);/);
+    // A consent refresh changes the timing only on an explicit "not deferred".
+    expect(src).toMatch(/if \(body\.collectionPromise\.deferred === false\) \{\s*setTimingAnswer\(\{ key: afterVisitSelectionKeyRef\.current, deferred: false \}\);/);
+    expect(src).toMatch(/\? \(paymentTiming\?\.firstInvoice === 'after_visit'\s*\? `\$\{existingApptLede\} Nothing is charged today/);
     expect(src).toMatch(/afterVisitTimingShown: \(paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef\.current\) \? true : undefined,/);
     expect(src).toMatch(/afterVisitRenderedRef\.current = \{\s*afterVisit: afterVisitRendered,/);
     // Both capture surfaces report the tender the consent was rendered for.

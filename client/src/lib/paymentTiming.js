@@ -15,32 +15,35 @@
 
 export const FIRST_INVOICE_AT_CONFIRM_COPY = 'Your first invoice is sent when you confirm, with a link to pay it.';
 
+// The held cohorts, in precedence order (a customer can be both paused and
+// opted out; the paused copy wins).
+const HELD_FLAGS = [['afterVisitPaused', 'paused'], ['afterVisitAutopayOff', 'off']];
+
+// When the first standard invoice goes out, first matching rule wins: at
+// confirm (the accept said so, or a setup-only invoice, minted unattached with
+// its pay link), after the first visit (the accept said so, or a
+// first-application invoice attached to it), else there is none to describe.
+const FIRST_INVOICE_RULES = [
+  [(answer, shape) => answer === false || (answer === null && shape.setupOnly === true), 'at_confirm'],
+  [(answer, shape) => answer === true || shape.hasFirstVisitInvoice === true, 'after_visit'],
+];
+
 export function resolvePaymentTiming({
-  policy = null,
-  paymentPreference = null,
-  serviceMode = null,
-  invoiceShape = null,
-  selectionKey = '',
-  timingAnswer = null,
+  policy, paymentPreference, serviceMode, invoiceShape, selectionKey = '', timingAnswer,
 } = {}) {
   if (paymentPreference === 'prepay_annual' || serviceMode === 'one_time') return null;
-  const answer = timingAnswer && timingAnswer.key === selectionKey ? timingAnswer.deferred === true : null;
-  if (!(policy?.afterVisitExisting === true || answer === true)) return null;
-  const held = policy?.afterVisitPaused === true ? 'paused' : (policy?.afterVisitAutopayOff === true ? 'off' : null);
-  // When the first standard invoice goes out: at confirm (the server said so,
-  // or a setup-only invoice, which is minted unattached with its pay link),
-  // after the first visit (a first-application invoice attached to it), or
-  // there is none to describe.
-  let firstInvoice = 'none';
-  if (answer === false || (answer !== true && invoiceShape?.setupOnly === true)) firstInvoice = 'at_confirm';
-  else if (answer === true || invoiceShape?.hasFirstVisitInvoice === true) firstInvoice = 'after_visit';
+  const flags = policy || {};
+  const answer = timingAnswer?.key === selectionKey ? timingAnswer.deferred === true : null;
+  if (flags.afterVisitExisting !== true && answer !== true) return null;
+  const held = HELD_FLAGS.find(([flag]) => flags[flag] === true)?.[1] || null;
+  const firstInvoice = FIRST_INVOICE_RULES.find(([applies]) => applies(answer, invoiceShape || {}))?.[1] || 'none';
   return {
     held,
     firstInvoice,
     // The "charged after your first visit" card authorization: only a fresh
     // card capture the server offered it for, never a held cohort, never when
     // the first invoice goes out at confirm.
-    consentVariant: !held && firstInvoice !== 'at_confirm' && policy?.afterVisitConsent === true
+    consentVariant: !held && firstInvoice !== 'at_confirm' && flags.afterVisitConsent === true
       ? 'after_visit_card' : null,
     // The accept verifies this attestation against the invoice it really
     // defers (PAYMENT_TIMING_REFRESH on any difference).

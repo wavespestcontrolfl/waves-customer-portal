@@ -2653,7 +2653,8 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
       // The promise the server would record rides the 409 so the reloaded tab
       // renders the base text for this selection instead of looping.
-      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'card', version: require('../services/payment-method-consent-text').CONSENT_VERSION });
+      // deferred:false — the unattached first invoice goes out at accept.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'card', version: require('../services/payment-method-consent-text').CONSENT_VERSION, deferred: false });
     });
 
     test('the same unattached shape accepts when the tab rendered (and attests) the base text — recorded variant is base', async () => {
@@ -2720,7 +2721,8 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: 'v10_2026-01-01', afterVisitTimingShown: true });
       expect(res.status).toBe(409);
       expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
-      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'us_bank_account', version: BASE_VERSION });
+      // The attached first invoice is still deferred: a version refresh is not a timing change.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'us_bank_account', version: BASE_VERSION, deferred: true });
       expect(storedEstimate().status).toBe('sent');
     });
 
