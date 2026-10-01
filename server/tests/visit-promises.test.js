@@ -448,6 +448,17 @@ describe('marks reach the office list after the save', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`mark not applied for promise ${ID(1)}`));
   });
 
+  test("a failed write logs the promise and an error code, never the database's message (it can carry a note)", async () => {
+    const leak = Object.assign(new Error('update "call_commitments" set "human_note" = $1 - Customer prefers mornings, gate 4417'), { code: '57014' });
+    CallCommitments.applyHumanUpdate.mockRejectedValueOnce(leak);
+    const { conn } = ledgerDb(LEDGER());
+    await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }], visitDate: '2026-10-01',
+    });
+    expect(logger.warn).toHaveBeenCalledWith(`[visit-promises] mark not applied for promise ${ID(1)} (57014)`);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/prefers mornings|4417/);
+  });
+
   test('Not yet on a promise the office already reviewed writes nothing', async () => {
     const ledger = LEDGER();
     ledger.commitments[ID(1)].human_state = 'confirmed';

@@ -25158,7 +25158,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         visitPromises = await require('../services/service-report/visit-promises')
           .resolveVisitPromiseMarks(db, { customerId: groundingCustomerId, marks: promiseMarks });
       } catch (promiseErr) {
-        logger.warn(`[generate-report] promise marks not loaded: ${promiseErr.message}`);
+        logger.warn(`[generate-report] promise marks not loaded (${require('../services/service-report/visit-promises').errorCode(promiseErr)})`);
       }
     }
     if (!baseHasReportInput && !companionCustomerInput && !visitPromises.length) {

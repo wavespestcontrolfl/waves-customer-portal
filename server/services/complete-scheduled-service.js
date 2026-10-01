@@ -7886,7 +7886,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               reviewedBy: completionInput.actor?.technicianId || null,
             });
           } catch (applyErr) {
-            logger.warn(`[dispatch] promise marks not applied: ${applyErr.message}`);
+            logger.warn(`[dispatch] promise marks not applied (${VisitPromises.errorCode(applyErr)})`);
           }
           const unsaved = await VisitPromises.unsavedVisitPromiseMarks(db, {
             customerId: svc.customer_id, marks: promiseMarks, results: promiseResults,
@@ -7896,7 +7896,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           });
         }
       } catch (promiseErr) {
-        logger.warn(`[dispatch] promise marks failed (non-blocking): ${promiseErr.message}`);
+        logger.warn(`[dispatch] promise marks failed (non-blocking) (${require('../services/service-report/visit-promises').errorCode(promiseErr)})`);
       }
     }
 

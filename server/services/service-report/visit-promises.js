@@ -44,6 +44,12 @@ const MAX_HUMAN_NOTE_CHARS = 2000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VERSION_RE = /^[0-9a-f]{16}$/;
 
+// A failed ledger write's message can carry the SQL and its bound values
+// (an office note, a technician's words), so logs get the error's code only.
+function errorCode(err) {
+  return String(err?.code || err?.name || 'error').slice(0, 40);
+}
+
 function cleanText(value, max = Infinity) {
   const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   return text.length > max ? text.slice(0, max).trim() : text;
@@ -359,7 +365,7 @@ async function applyVisitPromiseMarks(conn, { customerId, marks, visitDate = nul
         results.push({ id: promise.id, mark: 'partly', applied: await addStillLeftNote(conn, promise, customerId, line) });
       }
     } catch (err) {
-      logger.warn(`[visit-promises] mark not applied for promise ${promise.id}: ${err.message}`);
+      logger.warn(`[visit-promises] mark not applied for promise ${promise.id} (${errorCode(err)})`);
       results.push({ id: promise.id, mark: promise.mark, applied: false });
     }
   }
@@ -380,7 +386,7 @@ async function unsavedVisitPromiseMarks(conn, { customerId, marks, results = nul
   try {
     open = new Map((await openVisitPromises(conn, { customerId })).map((row) => [String(row.id).toLowerCase(), row]));
   } catch (err) {
-    logger.warn(`[visit-promises] promise list unreadable after the marks: ${err.message}`);
+    logger.warn(`[visit-promises] promise list unreadable after the marks (${errorCode(err)})`);
     return kept.map((entry) => ({ id: entry.id, mark: entry.mark, stillLeft: entry.stillLeft || null, description: null }));
   }
   return kept.flatMap((entry) => {
@@ -439,6 +445,7 @@ async function alertUnsavedVisitPromiseMarks(conn, { customerId, serviceId, visi
 }
 
 module.exports = {
+  errorCode,
   VISIT_PROMISE_KINDS,
   MAX_LISTED_PROMISES,
   MAX_STILL_LEFT_CHARS,
