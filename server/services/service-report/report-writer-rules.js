@@ -226,7 +226,7 @@ function activeIngredientsMentioned(text, value) {
 }
 
 const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|cc|ccs|cubic\s+centimet(?:er|re)s?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gals?|gallons?|qts?|ozs|pts?|tsps|tbsps|lbs?|pounds?|grams?|kilograms?|kgs?)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
-const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\bacres?\b|\bacreage\b/i;
+const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\b\d[\d,.]*\s*(?:lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\bacres?\b|\bacreage\b/i;
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
 const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
@@ -268,6 +268,12 @@ const TIMEFRAME_RE = new RegExp(
   + '|\\bnext\\s+(?:month|year|season|quarter)\\b',
   'i',
 );
+// Customer messages are never quoted (rule 3): an attributed quotation
+// ("You said, “ants are everywhere”", "you texted 'roaches again'") or any
+// double-quoted run of three or more words. An apostrophe ("the customer's
+// kitchen") opens no quote, and a paraphrase ("You mentioned ants near the
+// dishwasher") passes.
+const QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told\s+us|reported|asked|noted)\b[^.!?]{0,20}?(?:[:,]\s*|\s+)["“‘']\w|["“](?:[^"”\n]*\s){2,}[^"”\n]*["”]/i;
 // The activity gauge's number or scale (rule 12) in any form: "the rating
 // was 2", "rated two out of five", "2 on the five-point scale". The level in
 // words ("activity was light") and a count of a set ("2 of 5 stations",
@@ -277,7 +283,7 @@ const GAUGE_RE = /\b(?:rat(?:ed|ing)|scored?|gauge|level)\s+(?:(?:was|is|of|at|r
 // forms ("the next check is free", "the follow-up is included") but not a
 // physical state ("covered by mulch", "free of standing water").
 const ENTITLEMENT_RE = /\b(?:is|are|was|were|be|comes?)\s+(?:(?:completely|totally|also|fully)\s+)?(?:free|included|covered)\b(?!\s+(?:by|with|in|under|of|from|on)\b)/i;
-const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]?|pricing|fees?|invoice[ds]?|billing|payments?)\b|(?<!\bin\s)\bcharg(?:e|es|ed|ing)\b|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
+const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]?|pricing|fees?|invoice[ds]?|billing|payments?|complimentary)\b|\bon\s+the\s+house\b|(?<!\bin\s)\bcharg(?:e|es|ed|ing)\b|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
 // Next-visit dates, days and times (rule 11): the report prints the
 // appointment itself. "October 7", "next Tuesday", "10 AM".
 // "May" only capitalized, so "activity may 2…" is not a date. A date is
@@ -400,6 +406,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [REENTRY_RE, 'reentry'],
   [TIMEFRAME_RE, 'timeframe'],
   [GAUGE_RE, 'gauge'],
+  [QUOTE_RE, 'quote'],
   [PRICE_RE, 'price'],
   [ENTITLEMENT_RE, 'price'],
   [(copy) => forwardMention(copy, MONTH_DAY_RE), 'date'],
