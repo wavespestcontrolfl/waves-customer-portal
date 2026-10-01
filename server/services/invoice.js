@@ -10759,6 +10759,9 @@ const InvoiceService = {
 
   async retireRodentSetupObligationForRevivedPrepay(conn, prepayInvoiceId) {
     if (!prepayInvoiceId) return null;
+    // The revived prepay waives a pay-after-first-visit setup fee its reversal
+    // had restored (any program, not only rodent): clear it again.
+    await require("./setup-fee-obligation").rewaiveDeferredSetupFeeForRevivedPrepay(conn, prepayInvoiceId);
     const invoiceRow = await conn("invoices")
       .where({ id: prepayInvoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");

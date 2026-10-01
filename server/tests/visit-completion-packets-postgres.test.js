@@ -572,6 +572,19 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  // Pre-push audit: a performed $0 plan member is never in the billed or
+  // fee-review scan, so the packet returns a SUCCESSFUL outcome (no_charge);
+  // its series' queued fee must still reach the office, not slide to a later visit.
+  test('a performed $0 plan member\'s queued fee is parked even when the closeout bills nothing (no_charge)', async () => {
+    await markPlanMembers();
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ estimated_price: 0, source_estimate_id: null });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing.state).not.toBe('office_required');
+    expect(await officeFeeAlertsOf()).toHaveLength(1);
+    expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+  });
+
   test('a secure-plan stamp with NO source estimate (gates off) is not lost: the grouped closeout parks it for the office (no invoice, no claim)', async () => {
     await markPlanMembers();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99, source_estimate_id: null });

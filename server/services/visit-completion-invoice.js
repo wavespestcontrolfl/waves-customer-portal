@@ -190,9 +190,14 @@ async function parkQueuedSetupClaimsForOffice(trx, members, { packet, visit }) {
 }
 
 // Every office-required exit of the mint hands over the queued claims it found.
+// Every outcome of the packet mint, not only an office exit: this mint never
+// carries a setup line, so a queued fee left on a performed plan member's
+// series after it (a $0 member never checked by the billed / fee-review scan,
+// or a closeout that invoiced another member) would otherwise slide to a later
+// visit. Parked for the office in the same transaction (the alert is the
+// durable record).
 async function mintPacketInvoice(args) {
   const result = await mintPacketInvoiceInner(args);
-  if (result.state !== 'office_required') return result;
   const parked = await parkQueuedSetupClaimsForOffice(args.trx, args.members, args);
   return parked.length ? { ...result, setupFeeParked: parked } : result;
 }

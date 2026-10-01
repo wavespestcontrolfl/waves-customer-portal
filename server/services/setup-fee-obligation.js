@@ -241,36 +241,71 @@ async function waiveDeferredSetupFeeForPrepay(trx, { estimateId, prepayInvoiceId
       .update({ pending_setup_fee: null, updated_at: new Date() });
     if (cleared === 1) waived.push({ parentId: row.id, amount: Math.round(stamp * 100) / 100 });
   }
-  if (waived.length) {
-    await trx('invoices').where({ id: prepayInvoiceId }).update({
-      notes: trx.raw('concat(coalesce(notes, ?::text), ?::text)', ['', waived.map((w) => `\n${prepayWaivedMarker(w.parentId, w.amount)}`).join('')]),
-      updated_at: new Date(),
-    });
-  }
+  await appendPrepayMarkers(trx, prepayInvoiceId, waived.map((w) => prepayWaivedMarker(w.parentId, w.amount)));
   return waived;
 }
 
+// The waiver's history lives on the prepay invoice as an ordered marker list
+// per series: [paf-setup-waived:<series>:<amount>] then, on a reversal,
+// [paf-setup-restored:<series>] — the LAST marker for a series is its state.
+// Returns { parentId -> { amount, state: 'waived' | 'restored' } }.
+function prepayDeferredSetupState(notes) {
+  const state = new Map();
+  for (const m of String(notes || '').matchAll(/\[paf-setup-(waived|restored):([^:\]]+)(?::([0-9.]+))?\]/g)) {
+    const [, kind, parentId, amount] = m;
+    const prior = state.get(parentId);
+    state.set(parentId, { state: kind, amount: amount != null ? Number(amount) : prior?.amount });
+  }
+  return state;
+}
+
+async function appendPrepayMarkers(conn, prepayInvoiceId, markers) {
+  if (!markers.length) return;
+  await conn('invoices').where({ id: prepayInvoiceId }).update({
+    notes: conn.raw('concat(coalesce(notes, ?::text), ?::text)', ['', markers.map((m) => `\n${m}`).join('')]),
+    updated_at: new Date(),
+  });
+}
+
 // The reversal: the prepay that waived a deferred setup fee was voided or
-// refunded, so the customer is back on pay-per-application and owes the fee
-// with the first visit again. Re-stamps each waived series ONCE (CAS onto a
-// NULL stamp; a restored marker on the prepay makes a second sync a no-op, so
-// a fee a later completion already billed is never re-armed).
+// refunded (or lost a dispute), so the customer is back on pay-per-application
+// and owes the fee with the first visit again. Re-stamps each series whose
+// last state is 'waived' (CAS onto a NULL stamp) and records 'restored', so a
+// second sync is a no-op and a fee a later completion billed is never re-armed.
 async function restoreWaivedDeferredSetupFeeForPrepay(conn, prepayInvoiceId) {
   if (!prepayInvoiceId) return [];
   const prepay = await conn('invoices').where({ id: prepayInvoiceId }).first('id', 'notes');
-  const notes = String(prepay?.notes || '');
   const restored = [];
-  for (const [, parentId, amount] of notes.matchAll(/\[paf-setup-waived:([^:\]]+):([0-9.]+)\]/g)) {
-    if (notes.includes(prepayRestoredMarker(parentId))) continue;
+  const markers = [];
+  for (const [parentId, { state, amount }] of prepayDeferredSetupState(prepay?.notes)) {
+    if (state !== 'waived' || !(amount > 0)) continue;
     const stamped = await conn('scheduled_services').where({ id: parentId }).whereNull('pending_setup_fee')
-      .update({ pending_setup_fee: Number(amount), updated_at: new Date() });
-    await conn('invoices').where({ id: prepayInvoiceId }).update({
-      notes: conn.raw('concat(coalesce(notes, ?::text), ?::text)', ['', `\n${prepayRestoredMarker(parentId)}`]),
-      updated_at: new Date(),
-    });
-    if (stamped === 1) restored.push({ scheduledServiceId: parentId, amount: Number(amount) });
+      .update({ pending_setup_fee: amount, updated_at: new Date() });
+    markers.push(prepayRestoredMarker(parentId));
+    if (stamped === 1) restored.push({ scheduledServiceId: parentId, amount });
   }
+  await appendPrepayMarkers(conn, prepayInvoiceId, markers);
   return restored;
+}
+
+// The prepay REVIVED (re-paid, or a dispute won back) after its reversal put
+// the deferred fee back: annual prepay waives it again. Clears each series
+// whose last state is 'restored' (CAS on the exact restored amount; a stamp a
+// completion is billing or already billed is left alone) and records 'waived'.
+async function rewaiveDeferredSetupFeeForRevivedPrepay(conn, prepayInvoiceId) {
+  if (!prepayInvoiceId) return [];
+  const prepay = await conn('invoices').where({ id: prepayInvoiceId }).first('id', 'notes');
+  const rewaived = [];
+  const markers = [];
+  for (const [parentId, { state, amount }] of prepayDeferredSetupState(prepay?.notes)) {
+    if (state !== 'restored' || !(amount > 0)) continue;
+    const cleared = await conn('scheduled_services').where({ id: parentId, pending_setup_fee: amount })
+      .update({ pending_setup_fee: null, updated_at: new Date() });
+    markers.push(prepayWaivedMarker(parentId, amount));
+    if (cleared === 1) rewaived.push({ scheduledServiceId: parentId, amount });
+  }
+  await appendPrepayMarkers(conn, prepayInvoiceId, markers);
+  return rewaived;
 }
 
 async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null, completingParentId = null } = {}) {
@@ -654,6 +689,7 @@ module.exports = {
   estimateSetupSeries,
   waiveDeferredSetupFeeForPrepay,
   restoreWaivedDeferredSetupFeeForPrepay,
+  rewaiveDeferredSetupFeeForRevivedPrepay,
   officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
   parkSetupFeeStampForOffice,

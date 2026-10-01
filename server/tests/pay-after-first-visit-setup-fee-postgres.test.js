@@ -302,6 +302,28 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('cancel -> revive -> cancel: a revived prepay waives the restored fee again; each state change applies once', async () => {
+    const f = await seed();
+    const Obligation = require('../services/setup-fee-obligation');
+    const stampOf = async () => (await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee;
+    try {
+      const prepay = await require('../services/invoice').create({
+        customerId: f.customerId, title: 'Annual Prepay',
+        lineItems: [{ description: 'Prepay', quantity: 1, unit_price: 400 }],
+      });
+      await mockPg.transaction((trx) => Obligation.waiveDeferredSetupFeeForPrepay(trx, { estimateId: f.estimateId, prepayInvoiceId: prepay.id }));
+      await Obligation.restoreWaivedDeferredSetupFeeForPrepay(mockPg, prepay.id);
+      expect(Number(await stampOf())).toBe(SETUP_FEE);
+      // Dispute won back: the prepay revives and waives the fee again.
+      expect(await Obligation.rewaiveDeferredSetupFeeForRevivedPrepay(mockPg, prepay.id)).toEqual([{ scheduledServiceId: f.parentId, amount: SETUP_FEE }]);
+      expect(await stampOf()).toBeNull();
+      expect(await Obligation.rewaiveDeferredSetupFeeForRevivedPrepay(mockPg, prepay.id)).toEqual([]);
+      // Lost again: restored once more.
+      expect(await Obligation.restoreWaivedDeferredSetupFeeForPrepay(mockPg, prepay.id)).toEqual([{ scheduledServiceId: f.parentId, amount: SETUP_FEE }]);
+      expect(Number(await stampOf())).toBe(SETUP_FEE);
+    } finally { await cleanup(f); }
+  });
+
   test('the prepay waiver ignores an estimate that did not defer its setup fee', async () => {
     const f = await seed({ withDeferredMarker: false });
     const Obligation = require('../services/setup-fee-obligation');
