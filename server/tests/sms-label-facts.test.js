@@ -399,6 +399,26 @@ describe('label row selection (mock knex)', () => {
     expect(one.products[0].rainfastMinutes).toBe(90);
   });
 
+  test('r30: a null (unapproved) snapshot entry keeps no name, so it blocks the name fallback for every product_id-less row of the visit', async () => {
+    // deleted UNAPPROVED product + an APPROVED product of the same name: the approved one must not lend its timing
+    const deletedUnapproved = await read({ conn: fakeConn({
+      visits: [snapVisit('r2', { p1: frozen({ name: 'Some Product', rainfastMinutes: 90 }), p2: null })],
+      rows: [row({ product_id: null }), row({ id: 2, product_id: 'p1' })],
+    }) });
+    expect(deletedUnapproved.unverifiedCount).toBe(1); // the deleted row is unverified (the approved p1 row still resolves by id)
+    expect(deletedUnapproved.products).toHaveLength(1);
+    // with only the deleted row: nothing to say at all
+    expect(await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ name: 'Some Product', rainfastMinutes: 90 }), p2: null })], rows: [row({ product_id: null })] }) })).toBeNull();
+    // a null entry on ANOTHER record of the visit counts too
+    expect(await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ name: 'Some Product' }) }), snapVisit('r3', { p9: null })], rows: [row({ product_id: null })] }) })).toBeNull();
+    // a deleted APPROVED product with a unique name and no null entries anywhere still resolves
+    const unique = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ name: 'Some Product', rainfastMinutes: 90 }) })], rows: [row({ product_id: null })] }) });
+    expect(unique.products[0].rainfastMinutes).toBe(90);
+    // an id match is untouched by null entries
+    const byId = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ rainfastMinutes: 90 }), p2: null })], rows: [row({ product_id: 'p1' })] }) });
+    expect(byId.products[0].rainfastMinutes).toBe(90);
+  });
+
   test('a frozen re-entry of 0 (a catalog NULL is frozen as 0) is "until dry" only when the frozen summary says so', async () => {
     const zero = (reentrySummary) => read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ reentryHours: 0, reentrySummary }) })], rows: [row()] }) });
     expect((await zero('Keep people and pets off treated areas until dry.')).products[0].reiHours).toBe(0);

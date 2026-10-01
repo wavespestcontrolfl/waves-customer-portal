@@ -148,9 +148,14 @@ function frozenFactsFor(row, snapshot, allSnapshots = [snapshot]) {
     // service_products.product_id is ON DELETE SET NULL: fall back to the frozen name, as the report does -
     // but names are not unique, so only when EXACTLY ONE frozen entry across the visit's snapshots carries
     // this name (and it is on this record); none or several leaves the product unverified.
+    // A NULL entry (a product not approved at completion) is keyed by id only and keeps no name, so it could be exactly this deleted
+    // product: an approved product of the same name must not lend its timing to it. Any null / non-object entry anywhere in the visit's
+    // snapshots therefore leaves every product_id-less row unverifiable (fail closed).
     const name = normalizedName(row.product_name);
-    const named = (m) => Object.values(m || {}).filter((f) => f && normalizedName(f.name) === name);
-    const total = name ? allSnapshots.reduce((n, snap) => n + named(snap && snap.productFacts).length, 0) : 0;
+    const named = (m) => Object.values(m || {}).filter((f) => f && typeof f === 'object' && normalizedName(f.name) === name);
+    const hasUnnamedEntry = (m) => Object.values(m || {}).some((f) => !f || typeof f !== 'object');
+    const anyUnnamed = allSnapshots.some((snap) => hasUnnamedEntry(snap && snap.productFacts));
+    const total = name && !anyUnnamed ? allSnapshots.reduce((n, snap) => n + named(snap && snap.productFacts).length, 0) : 0;
     const own = name && total === 1 ? named(map) : [];
     facts = own.length === 1 ? own[0] : null;
   }
