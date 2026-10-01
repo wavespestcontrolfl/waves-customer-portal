@@ -189,7 +189,9 @@ async function endedLinkedVisitBlocksSend(input, { fresh = false } = {}) {
       ? await require('../composer-customer-links').visitsLinkedInBody(input.body)
       : await visitsLinkedInBodyOf(input);
   } catch {
-    return false;   // the hold step above already failed such a lookup closed
+    // Step 6.36's memoized lookup already succeeded for the hold step, so an error here is the boundary's
+    // fresh read failing: fail CLOSED (the caller defers retryably), never send on an unreadable visit.
+    return fresh ? 'lookup_failed' : false;
   }
   const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
   return linked.some((v) => v.rescheduleLink && v.status && !RESCHEDULABLE_STATUSES.has(String(v.status).toLowerCase()));
@@ -1234,7 +1236,14 @@ async function sendCustomerMessageCore(input) {
     }
     // Stale reschedule link boundary re-check: a visit cancelled / skipped / completed since step 6.36 read it
     // (the lookup there is memoized) must still end the scheduled operator text, on its LIVE status.
-    if (await endedLinkedVisitBlocksSend(sendInput, { fresh: true })) {
+    const endedVerdict = await endedLinkedVisitBlocksSend(sendInput, { fresh: true });
+    if (endedVerdict === 'lookup_failed') {
+      return rememberBoundaryBlock(
+        { ok: false, code: 'LINKED_VISIT_LOOKUP_FAILED', reason: 'Could not re-read the visit this text links to', retryable: true },
+        'linked_visit_lookup_boundary',
+      );
+    }
+    if (endedVerdict) {
       return rememberBoundaryBlock(
         { ok: false, code: LINKED_VISIT_ENDED_BLOCK.code, reason: LINKED_VISIT_ENDED_BLOCK.reason },
         'linked_visit_ended_boundary',

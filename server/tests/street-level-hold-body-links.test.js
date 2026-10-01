@@ -228,6 +228,23 @@ describe('a scheduled operator text whose reschedule link points at a visit that
     expect((await replay()).sent).toBe(true);
   });
 
+  test('the boundary\'s fresh lookup failing fails CLOSED (retryable deferral), never sends', async () => {
+    mockTables.scheduled_services = [{ ...ENDED, status: 'confirmed' }];
+    let dialed = false;
+    sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+      const queriesBefore = db.queries.length;
+      db.mockImplementationOnce(() => { throw new Error('db down'); });   // the boundary's own re-read
+      const verdict = await hooks.preSendCheck();
+      expect(db.queries.length).toBe(queriesBefore);
+      if (!verdict.ok) return { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent', retryable: true };
+      dialed = true;
+      return { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+    });
+    const result = await replay();
+    expect(dialed).toBe(false);
+    expect(result.sent).toBe(false);
+  });
+
   test('immediate operator sends and automated replays keep their prior behavior; a non-reschedule link to the visit does not end it', async () => {
     expect((await send(body, { entryPoint: 'admin_communications_manual_sms', metadata: { humanAuthored: true } })).sent).toBe(true);
     expect((await send(body, { entryPoint: 'scheduled_sms_cron' })).sent).toBe(true);
