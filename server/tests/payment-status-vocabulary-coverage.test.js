@@ -1552,3 +1552,91 @@ describe('round-35: an inbound naming several payment dates or amounts has no si
     expect(paymentRowMatchesIdentity({ ...rowSep1, payment_date: '2026-09-03' }, id)).toBe(false);
   });
 });
+
+// Codex round-36 P1: a FULL invoice reference is a full identifier (WPC-2025-0123 is not WPC-2026-0123).
+describe('round-36: full invoice references are compared as full identifiers', () => {
+  const invs = [
+    { id: 'i25', invoiceNumber: 'WPC-2025-0123', status: 'paid', total: 120, amountDue: 0 },
+    { id: 'i26', invoiceNumber: 'WPC-2026-0123', status: 'sent', total: 95, amountDue: 95 },
+  ];
+  const ctx = (list) => ({ billing: { outstandingBalance: 95, recentPayments: [], invoiceStatuses: list } });
+  const ung = (reply, inbound, list = invs) => replyQuotesUngroundedAmount(reply, ctx(list), { byMeaning: true, inboundMessage: inbound });
+
+  test('a reply naming the full WPC-2025-0123 does not agree with an inbound about WPC-2026-0123', () => {
+    expect(ung('Invoice WPC-2025-0123 is paid.', 'Is invoice WPC-2026-0123 paid?')).toBe(true);
+    expect(ung('Invoice WPC-2026-0123 is paid.', 'Is invoice WPC-2026-0123 paid?')).toBe(true); // 2026 is open, not paid
+    expect(ung('Invoice WPC-2025-0123 is paid.', 'Is invoice WPC-2025-0123 paid?')).toBe(false);
+  });
+  test('each year resolves to ITS invoice (the status claim is judged on the right one)', () => {
+    expect(ung('Invoice WPC-2026-0123 is still unpaid.', 'Is invoice WPC-2026-0123 still unpaid?')).toBe(false);
+    expect(ung('Invoice WPC-2025-0123 is still unpaid.', 'Is invoice WPC-2025-0123 still unpaid?')).toBe(true);
+  });
+  test('a tail-only reference matches by tail only when the customer supplied a tail: two invoices sharing it are ambiguous', () => {
+    expect(ung('Invoice #0123 is paid.', 'Is invoice 0123 paid?')).toBe(true); // matches both years => ambiguous => ungrounded
+    expect(ung('Invoice #0123 is paid.', 'Is invoice 0123 paid?', [invs[0]])).toBe(false); // only one invoice has that tail
+  });
+  test('a tail-only reply about the invoice the customer named IN FULL means that full invoice', () => {
+    expect(ung('Invoice #0123 is paid.', 'Is invoice WPC-2025-0123 paid?')).toBe(false); // resolves to the 2025 invoice, which is paid
+    expect(ung('Invoice #0123 is paid.', 'Is invoice WPC-2026-0123 paid?')).toBe(true); // resolves to the 2026 invoice, which is open
+  });
+});
+
+// Codex round-36 P1: a generic refund reply takes the customer's amount / date / tender, or the most recent refund.
+describe('round-36: refund claims use the inbound identity fallback and the most-recent rule', () => {
+  const mk = (id, date, rs, amount, extra = {}) => ({ id, amount: 120, status: 'paid', payment_date: date, payment_method_type: 'card', refund_status: rs, refund_amount: amount, created_at: `${date}T12:00:00Z`, ...extra });
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } });
+  const ung = (reply, rows, inbound) => replyQuotesUngroundedAmount(reply, ctx(rows), { byMeaning: true, inboundMessage: inbound });
+  const oldDone = mk('old', '2026-08-01', 'partial', 30);
+  const newPending = mk('new', '2026-09-20', 'pending', 40, { status: 'refunded' });
+
+  test('an identity-free inbound => the MOST RECENT refund decides (an older refund in another state cannot back or sink it)', () => {
+    expect(ung('Your refund is pending.', [oldDone, newPending], 'Where is my refund?')).toBe(false);
+    expect(ung('Your refund was issued.', [oldDone, newPending], 'Where is my refund?')).toBe(true); // the newest is pending
+    expect(ung('Your refund is pending.', [newPending, oldDone], 'Where is my refund?')).toBe(false); // order-independent
+  });
+  test('the customer\'s amount is the fallback identity: "Your refund is pending" about the $30 refund binds to THAT refund', () => {
+    expect(ung('Your refund was issued.', [oldDone, newPending], 'Did my $30 refund go through?')).toBe(false);
+    expect(ung('Your refund is pending.', [oldDone, newPending], 'Did my $30 refund go through?')).toBe(true); // the $30 one is completed
+    expect(ung('Your refund is pending.', [oldDone, newPending], 'Where is my $40 refund?')).toBe(false);
+  });
+  test('the customer\'s date is the fallback identity', () => {
+    expect(ung('Your partial refund was issued.', [oldDone, newPending], 'Did my Aug 1 payment get refunded?')).toBe(false);
+    expect(ung('Your refund is pending.', [oldDone, newPending], 'Did my Aug 1 payment get refunded?')).toBe(true);
+  });
+  test('the customer\'s tender is the fallback identity; a reply identity the customer did not ask about is a different payment', () => {
+    const ach = mk('ach', '2026-09-25', 'pending', 40, { status: 'refunded', payment_method_type: 'us_bank_account' });
+    expect(ung('Your refund is pending.', [oldDone, ach], 'Where is the refund for my card payment?')).toBe(true); // the card refund is completed
+    expect(ung('Your refund is pending.', [oldDone, ach], 'Where is the refund for my ACH payment?')).toBe(false);
+    expect(ung('Your $40 refund is pending.', [oldDone, newPending], 'Where is my $30 refund?')).toBe(true);
+  });
+  test('several distinct amounts / dates named and a silent reply => ambiguous', () => {
+    expect(ung('Your refund is pending.', [oldDone, newPending], 'Did my $30 or $40 refund go through?')).toBe(true);
+    expect(ung('Your $40 refund is pending.', [oldDone, newPending], 'Did my $30 or $40 refund go through?')).toBe(false);
+  });
+});
+
+// Codex round-36 P1: partially_paid — SMS agrees with the portal balance and fails closed on settlement.
+describe('round-36: a partially_paid invoice with an amount due makes settlement claims ungrounded', () => {
+  const partial = { id: 'ip', invoiceNumber: 'WPC-2026-0003', status: 'partially_paid', total: 100, amountDue: 40 };
+  const billing = (extra = {}) => ({ outstandingBalance: 0, recentPayments: [], invoiceStatuses: [partial], hasUncountedPartialDue: true, ...extra });
+  const ung = (reply, b = billing(), inbound) => replyQuotesUngroundedAmount(reply, { billing: b }, { byMeaning: true, inboundMessage: inbound });
+  test('settlement / zero balance are ungrounded; without the uncounted partial they stand', () => {
+    for (const r of ["You're paid up.", 'Your account is current.', 'Your balance is $0.', "You don't owe anything."]) expect({ r, ung: ung(r) }).toEqual({ r, ung: true });
+    expect(ung("You're paid up.", billing({ hasUncountedPartialDue: false, invoiceStatuses: [] }))).toBe(false);
+  });
+  test('an unpaid claim about that invoice binds through its status (partially paid with an amount due => still unpaid)', () => {
+    expect(ung('Invoice #0003 is still unpaid.', billing(), 'Is invoice 0003 unpaid?')).toBe(false);
+    expect(ung('Invoice #0003 is still unpaid.', billing({ invoiceStatuses: [{ ...partial, amountDue: 0, status: 'paid' }] }), 'Is invoice 0003 unpaid?')).toBe(true);
+  });
+  test('the model-facing facts say so (gate on only; gate off stays byte-identical)', () => {
+    const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+    const context = { customer: { first_name: 'Test' }, billing: { ...billing(), unavailable: false } };
+    const prior = process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      expect(buildFactsBlock(context)).toMatch(/PARTIALLY PAID/);
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      expect(buildFactsBlock(context)).not.toMatch(/PARTIALLY PAID/);
+    } finally { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; }
+  });
+});

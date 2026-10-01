@@ -42,25 +42,30 @@ const isNeverAttemptedDeferral = (p) => isNeverAttemptedHoldDeferral(p) || isNev
 // (/api/billing/balance, unchanged); the context aggregator passes main's ['failed', 'pending', 'overdue'] so the shared
 // balance semantics (admin overdue flag, voice / email context, "$X overdue" summary) stay exactly as on main — but over the
 // COMPLETE ledger, not the 5-row display window (Codex round-35 P1).
-async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['failed'] } = {}) {
+// `strict` (the SMS grounding caller) = payer-aware and fail-closed: direct payer-owned rows (payments.payer_id) are filtered in
+// SQL and every column the shared payer-linkage predicate reads (payer_id, stripe_charge_id, description, PI, metadata) is
+// selected so `isPayerLinked` can exclude AP rows; and a failed non-draft-invoice lookup THROWS (an empty set would
+// double-count the invoice's debt) so the aggregator marks billing unavailable. The route (default) keeps its original
+// behavior exactly: no payer_id filter (it excludes payer rows by metadata) and a lookup error reads as "no carrying
+// invoices" (Codex round-36 P1/P2).
+async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['failed'], strict = false } = {}) {
   // the default (route) query keeps its exact original shape
   const base = dbh('payments');
-  const scoped = statuses.length === 1 && statuses[0] === 'failed'
+  let scoped = statuses.length === 1 && statuses[0] === 'failed'
     ? base.where({ customer_id: customerId, status: 'failed' })
     : base.where({ customer_id: customerId }).whereIn('status', statuses);
-  const rows = await scoped
-    .whereNull('superseded_by_payment_id')
-    .select('id', 'amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
+  scoped = scoped.whereNull('superseded_by_payment_id');
+  if (strict) scoped = scoped.whereNull('payer_id');
+  const rows = await scoped.select(...(strict
+    ? ['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id', 'retry_count', 'next_retry_at']
+    : ['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at']));
   const failedInvoiceIds = [...new Set(rows.map(metadataInvoiceId).filter(Boolean))];
-  const balanceCarryingInvoiceIds = new Set(
-    failedInvoiceIds.length
-      ? (await dbh('invoices')
-          .whereIn('id', failedInvoiceIds)
-          .whereNot({ status: 'draft' })
-          .select('id')
-          .catch(() => [])).map((r) => String(r.id))
-      : [],
-  );
+  let carrying = [];
+  if (failedInvoiceIds.length) {
+    const lookup = dbh('invoices').whereIn('id', failedInvoiceIds).whereNot({ status: 'draft' }).select('id');
+    carrying = strict ? await lookup : await lookup.catch(() => []);
+  }
+  const balanceCarryingInvoiceIds = new Set(carrying.map((r) => String(r.id)));
   return { rows, failedInvoiceIds, balanceCarryingInvoiceIds };
 }
 

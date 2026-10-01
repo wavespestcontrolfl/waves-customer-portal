@@ -81,7 +81,7 @@ test('the Recent payments query keeps NULL-status rows: (status IS NULL OR statu
 
 // Codex round-23: ONE collectible-own-invoice predicate (invoice-helpers) drives the balance, open invoice,
 // Zelle-target list, invoice-status facts and the payer-billed flag.
-describe('collectible own invoices (partially_paid included, withdrawn packet invoices excluded)', () => {
+describe('collectible own invoices (sent / viewed / overdue; partially_paid flagged separately; withdrawn packet invoices excluded)', () => {
   const db = require('../models/db');
   const inv = (id, number, status, total, over = {}) => ({ id, invoice_number: number, status, total, credit_applied: 0, payer_id: null, scheduled_send_error: null, due_date: null, created_at: `2026-09-2${id.slice(-1)}`, ...over });
   afterEach(() => { delete db.__rows; });
@@ -91,25 +91,40 @@ describe('collectible own invoices (partially_paid included, withdrawn packet in
     return build();
   };
 
-  test('a partially_paid invoice with an amount due IS the obligation: balance, openInvoice, openInvoices, invoiceStatuses', async () => {
+  // Codex round-36 P1: the portal's /api/billing/balance sums sent / viewed / overdue only — SMS agrees with that number and
+  // FAILS CLOSED on settlement while a partially_paid invoice still has an amount due.
+  test('a partially_paid invoice with an amount due is NOT in the balance (the portal omits it) but is flagged, and stays in invoiceStatuses', async () => {
     const billing = await billingFor([inv('i3', 'WPC-2026-0003', 'partially_paid', 100)]);
-    expect(billing.outstandingBalance).toBe(100);
-    expect(billing.openInvoice).toMatchObject({ id: 'i3', amountDue: 100 });
-    expect(billing.openInvoices.map((x) => x.id)).toEqual(['i3']);
+    expect(billing.outstandingBalance).toBe(0);
+    expect(billing.openInvoice).toBeNull();
+    expect(billing.openInvoices).toEqual([]);
+    expect(billing.hasUncountedPartialDue).toBe(true);
     expect(billing.invoiceStatuses.map((x) => x.status)).toEqual(['partially_paid']);
   });
-  test("\"You're paid up\" is ungrounded while a partially_paid invoice has an amount due (settlement uses the same obligation)", async () => {
+  test('settlement / zero-balance claims are ungrounded while a partially_paid invoice has an amount due; an unpaid claim about THAT invoice still binds', async () => {
     const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
     const billing = await billingFor([inv('i3', 'WPC-2026-0003', 'partially_paid', 100)]);
-    expect(replyQuotesUngroundedAmount("You're paid up.", { billing }, { byMeaning: true })).toBe(true);
+    for (const claim of ["You're paid up.", 'Your account is current.', 'You have a $0 balance.', "You don't owe anything."]) {
+      expect({ claim, ungrounded: replyQuotesUngroundedAmount(claim, { billing }, { byMeaning: true }) }).toEqual({ claim, ungrounded: true });
+    }
+    // "Invoice #0003 is still unpaid" binds through the invoice status (partially paid with an amount due => true of it)
+    expect(replyQuotesUngroundedAmount('Invoice #0003 is still unpaid.', { billing }, { byMeaning: true, inboundMessage: 'Is invoice 0003 unpaid?' })).toBe(false);
+    // ...and a paid invoice (no uncounted partial) still grounds "paid up"
     const clean = await billingFor([inv('i3', 'WPC-2026-0003', 'paid', 100)]);
+    expect(clean.hasUncountedPartialDue).toBe(false);
     expect(replyQuotesUngroundedAmount("You're paid up.", { billing: clean }, { byMeaning: true })).toBe(false);
+  });
+  test('a sent invoice alongside a partially_paid one: the balance is the sent one only (the portal number)', async () => {
+    const billing = await billingFor([inv('i2', 'WPC-2026-0002', 'sent', 95), inv('i3', 'WPC-2026-0003', 'partially_paid', 100)]);
+    expect(billing.outstandingBalance).toBe(95);
+    expect(billing.hasUncountedPartialDue).toBe(true);
   });
   test('a fully credited partially_paid invoice (nothing due) is not an open invoice', async () => {
     const billing = await billingFor([inv('i3', 'WPC-2026-0003', 'partially_paid', 100, { credit_applied: 100 })]);
     expect(billing.outstandingBalance).toBe(0);
     expect(billing.openInvoice).toBeNull();
     expect(billing.openInvoices).toEqual([]);
+    expect(billing.hasUncountedPartialDue).toBe(false); // nothing due => nothing uncounted
   });
   test('a packet invoice WITHDRAWN to a payer (status sent, payer_id NULL, payer_billed stamp) is not the homeowner\'s: excluded everywhere', async () => {
     const withdrawn = inv('i4', 'WPC-2026-0123', 'sent', 250, { scheduled_send_error: 'payer_billed:payer-1' });

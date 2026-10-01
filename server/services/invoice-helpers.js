@@ -203,9 +203,21 @@ function invoiceWithdrawnFromCustomer(invoice) {
 // Codex round-23 P1: ONE definition of "a collectible invoice the HOMEOWNER owes" shared by the SMS context
 // (outstanding balance, open invoice, Zelle-target list, invoice-status facts), the settlement / obligation
 // checks and the drafter's invoice-status map. Status must be one a customer can still be asked to pay
-// (sent / viewed / overdue / partially_paid), the invoice must not be payer-billed (payer_id) or WITHDRAWN to a
+// (sent / viewed / overdue — see the note below on partially_paid), the invoice must not be payer-billed (payer_id) or WITHDRAWN to a
 // payer (stamp only), and `hasCollectibleAmountDue` adds a positive amount due (total minus applied credit).
-const OWN_COLLECTIBLE_INVOICE_STATUSES = Object.freeze(['sent', 'viewed', 'overdue', 'partially_paid']);
+// Codex round-36 P1: EXACTLY the statuses /api/billing/balance (the customer portal) sums as owed. A partially_paid
+// invoice is NOT among them (a billing product decision this module does not change), so the SMS grounding balance
+// agrees with the portal and treats a partially_paid invoice with an amount due as an UNCOUNTED obligation instead
+// (isUncountedPartialDueInvoice): settlement claims fail closed on it, unpaid claims bind through the invoice status.
+const OWN_COLLECTIBLE_INVOICE_STATUSES = Object.freeze(['sent', 'viewed', 'overdue']);
+const PARTIALLY_PAID_STATUS = 'partially_paid';
+function isUncountedPartialDueInvoice(invoice) {
+  return !!invoice
+    && !invoice.payer_id
+    && invoiceStatusKey(invoice.status) === PARTIALLY_PAID_STATUS
+    && !invoiceWithdrawnFromCustomer(invoice)
+    && invoiceAmountDue(invoice) > 0;
+}
 function isCollectibleOwnInvoice(invoice) {
   return !!invoice
     && !invoice.payer_id
@@ -356,6 +368,8 @@ module.exports = {
   isInvoiceCollectibleStatus,
   invoiceWithdrawnFromCustomer,
   OWN_COLLECTIBLE_INVOICE_STATUSES,
+  PARTIALLY_PAID_STATUS,
+  isUncountedPartialDueInvoice,
   isCollectibleOwnInvoice,
   hasCollectibleAmountDue,
   invoiceAmountDue,

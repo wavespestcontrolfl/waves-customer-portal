@@ -10,7 +10,7 @@ const PAYMENT_OVERFETCH = 40;
 const OPEN_INVOICES_CAP = 100;
 const {
   INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, isCollectibleOwnInvoice, hasCollectibleAmountDue,
-  OWN_COLLECTIBLE_INVOICE_STATUSES,
+  OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS, isUncountedPartialDueInvoice,
 } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
@@ -649,7 +649,7 @@ class ContextAggregator {
       // EVERY unsuperseded failed / pending / overdue payment (main's status set, over the complete ledger — services/failed-payments.js) — NOT the
       // 5-row display slice: an older failure behind five newer paid rows is still owed (Codex round-35 P1).
       // null = the read failed => the money picture is unknowable (billing unavailable).
-      loadFailedPaymentFacts(customer.id, undefined, { statuses: ['failed', 'pending', 'overdue'] }).catch((err) => { logger.warn(`[context-aggregator] failed-payment read failed for ${customer.id}: ${err.message}`); return null; }),
+      loadFailedPaymentFacts(customer.id, undefined, { statuses: ['failed', 'pending', 'overdue'], strict: true }).catch((err) => { logger.warn(`[context-aggregator] failed-payment read failed for ${customer.id}: ${err.message}`); return null; }),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -660,7 +660,7 @@ class ContextAggregator {
     // payer ownership of the payment rows is UNKNOWN when the linkage lookup failed => the money picture is unknowable
     const billingUnavailable = allInvoices === null || payerLinkage.failed === true || failedFacts === null;
     const invoiceRows = allInvoices || [];
-    const VISIBLE_INVOICE_STATUSES = new Set(OWN_COLLECTIBLE_INVOICE_STATUSES);
+    const VISIBLE_INVOICE_STATUSES = new Set([...OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS]); // payer-billed flag: any open payer debt
     const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
     const paymentInvoiceId = (p) => {
       try {
@@ -680,12 +680,16 @@ class ContextAggregator {
     // attempt is NOT "Current". Invoice-linked failed attempts are excluded
     // (the invoice itself already counts — double-count guard). Superseded
     // failed attempts were collected by their retry's own row.
-    // ONE shared predicate (invoice-helpers.isCollectibleOwnInvoice): sent / viewed / overdue / partially_paid,
+    // ONE shared predicate (invoice-helpers.isCollectibleOwnInvoice): sent / viewed / overdue (the statuses the portal's
+    // /api/billing/balance sums — a partially_paid invoice is NOT counted, Codex round-36 P1; see hasUncountedPartialDue),
     // not payer-billed, and not WITHDRAWN to a payer (stamp only — billing-v2 /balance excludes those too), so
     // the balance, open invoice, Zelle-target list and settlement checks all mean the same invoices
     // (Codex round-23 P1).
     const ownInvoices = invoiceRows.filter(isCollectibleOwnInvoice);
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
+    // an own partially_paid invoice with an amount due: owed in fact, but NOT in the portal balance above — SMS agrees with the
+    // portal's number and instead FAILS CLOSED on settlement claims ("you're paid up", "$0 balance")
+    const hasUncountedPartialDue = invoiceRows.some(isUncountedPartialDueInvoice);
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     // Standalone failed attempts: the canonical shared sum over ALL unsuperseded failures (not the display slice). Payer
     // ownership goes through the same linkage the payments display read uses, plus the invoice-id set above.
@@ -864,6 +868,7 @@ class ContextAggregator {
           dueDate: openInvoice.due_date || null,
         } : null,
         openInvoices,
+        hasUncountedPartialDue,
         // the list is complete unless the customer has more than OPEN_INVOICES_CAP open invoices — then a caller must
         // not conclude "that invoice isn't open" from its absence (Codex round-28 P2)
         openInvoicesTruncated: collectibleOpen.length > OPEN_INVOICES_CAP,

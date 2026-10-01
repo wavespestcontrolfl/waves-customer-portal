@@ -1468,7 +1468,9 @@ function billingHasOutstandingObligation(context) {
   // "paid up" / "current" while it hasn't landed.
   const inFlight = billing.hasProcessingPayment === true
     || (billing.recentPayments || []).some((p) => PAYMENT_STATUS_VOCABULARY.pending.rowStatuses.includes(String(p?.status || '').toLowerCase()));
-  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0 || inFlight;
+  // an own partially_paid invoice with an amount due is owed but NOT in outstandingBalance (the portal omits it): unsettled
+  // (Codex round-36 P1) — a settlement / zero-balance claim is ungrounded, never "paid up"
+  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0 || inFlight || billing.hasUncountedPartialDue === true;
 }
 
 // Independent-review P1 (round 3, PR #5331): ONE shared tender vocabulary,
@@ -2290,10 +2292,18 @@ function validateRefundClaim(claim, env) {
   const ctx = env.context;
   if (claim.state === 'unsupported' || claim.state === 'unknown') return true;
   if (ctx?.billing?.recentPaymentsTruncated === true && ctx?.billing?.paymentHistory === null) return true;
-  const figures = claim.amounts || [];
-  const claimedDate = parseClaimedPaymentDate(claim.text);
-  const candidates = paymentRowsForBinding(ctx).filter((p) => {
+  // Codex round-36 P1: the SAME identity rules as the payment-status binder — the reply's own amount / date / tender win; the
+  // customer's message is the fallback where the reply is silent (a reply identity the customer did not ask about, several
+  // distinct dates / amounts in the message, or an ambiguous tender => ungrounded); and a refund claim with NO identity from
+  // either side is about the customer's MOST RECENT refund, never "any refund on the account".
+  const binding = claimBinding({ family: 'refunded', text: claim.text, amounts: claim.amounts || [] }, env);
+  if (!binding) return true;
+  const askedAmounts = [...new Set(amountCentsIn(env.inboundText))];
+  const figures = (claim.amounts || []).length ? claim.amounts : askedAmounts;
+  const { claimedDate, claimedTender } = binding;
+  let candidates = paymentRowsForBinding(ctx).filter((p) => {
     if (refundStateOfRow(p) === null) return false;
+    if (claimedTender && paymentTenderLabel(p) !== claimedTender) return false;
     const partial = partialRefundCents(p) !== 0; // a paid row with only part of it refunded
     if (figures.length) {
       const cents = refundedCentsOfRow(p);
@@ -2306,6 +2316,7 @@ function validateRefundClaim(claim, env) {
     return !claimedDate || paymentDateMatchesClaim(p, claimedDate);
   });
   if (claim.state === 'absent') return candidates.length > 0;
+  if (!figures.length && !claimedDate && !claimedTender) candidates = mostRecentPaymentRows(candidates); // identity-free: the newest refund
   if (!candidates.length) return true;
   return candidates.some((p) => refundStateOfRow(p) !== claim.state);
 }
@@ -2363,7 +2374,8 @@ function validateAnaphoricClaim(claim, text, env) {
 // (the invoice total or amount due); with nothing to go on it must be the ONLY recent invoice. Unknown
 // invoice state, no match, or several candidates all fail closed.
 // the SAME status list as the aggregator's collectible-own-invoice predicate (invoice-helpers)
-const INVOICE_COLLECTIBLE_STATUSES = new Set(require('./invoice-helpers').OWN_COLLECTIBLE_INVOICE_STATUSES);
+// (plus partially_paid: an unpaid claim about THAT invoice still binds through its status although the portal balance omits it)
+const INVOICE_COLLECTIBLE_STATUSES = new Set([...require('./invoice-helpers').OWN_COLLECTIBLE_INVOICE_STATUSES, require('./invoice-helpers').PARTIALLY_PAID_STATUS]);
 const INVOICE_STATUS_FAMILY = { paid: 'paid', prepaid: 'paid', processing: 'pending', refunded: 'refunded' };
 function validateInvoiceStatusClaim(claim, text, amounts, env) {
   claim.matchedInvoice = null;
@@ -2376,10 +2388,15 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
   // Codex round-25 P1: the reply's invoice identity must AGREE with the invoice the customer asked about (like
   // the payment-row binder): a number the reply names that the inbound's numbers don't include, or a reply
   // amount the inbound didn't name, is a DIFFERENT invoice — ungrounded, never resolved to a separate one.
-  const numberKeys = (n) => [...n.full.map((f) => strip0(f.split('-').pop())), ...n.tail.map(strip0)];
-  const replyKeys = numberKeys(named[0]);
-  const askedKeys = numberKeys(named[1]);
-  if (replyKeys.length && askedKeys.length && !replyKeys.every((k) => askedKeys.includes(k))) return true;
+  // Codex round-36 P1: a FULL reference (WPC-2025-0123) is compared as a full identifier — never reduced to its tail, or it would
+  // match WPC-2026-0123. A tail is compared only against a tail-only reference the customer supplied (or the tail of a full one).
+  const tailOf = (f) => strip0(String(f).split('-').pop());
+  const refAgrees = (ref, asked) => (ref.kind === 'full'
+    ? asked.full.includes(ref.value) || asked.tail.map(strip0).includes(tailOf(ref.value))
+    : asked.tail.map(strip0).includes(strip0(ref.value)) || asked.full.some((f) => tailOf(f) === strip0(ref.value)));
+  const replyRefs = [...named[0].full.map((value) => ({ kind: 'full', value })), ...named[0].tail.map((value) => ({ kind: 'tail', value }))];
+  const askedHasRefs = named[1].full.length > 0 || named[1].tail.length > 0;
+  if (replyRefs.length && askedHasRefs && !replyRefs.every((ref) => refAgrees(ref, named[1]))) return true;
   const askedAmounts = amountCentsIn(env.inboundText);
   if (askedAmounts.length && amounts.length && amounts.some((a) => !askedAmounts.includes(a))) return true;
   // Codex round-35 P1: EVERY invoice number named must resolve to exactly ONE invoice of the account, and EVERY one must
@@ -2393,9 +2410,16 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
     return kind === 'full' ? num === String(value).toUpperCase() : strip(value) === strip(num.split('-').pop());
   });
   const source = (named[0].full.length || named[0].tail.length) ? named[0] : named[1];
+  // a tail-only reply reference to the invoice the customer named IN FULL means that full invoice (same tail, e.g. year 2025)
+  const promoted = source === named[0]
+    ? named[0].tail.map((t) => named[1].full.find((f) => String(f).split('-').pop().replace(/^0+/, '') === String(t).replace(/^0+/, '')) || null)
+    : [];
   // a tail (#0123) that is just the tail of a named full number is the same invoice, not a second one
   const fullTails = new Set(source.full.map((f) => strip(String(f).split('-').pop())));
-  const refs = [...source.full.map((v) => ['full', v]), ...source.tail.filter((t) => !fullTails.has(strip(t))).map((v) => ['tail', v])];
+  const refs = [
+    ...source.full.map((v) => ['full', v]),
+    ...source.tail.map((v, i) => [v, i]).filter(([v]) => !fullTails.has(strip(v))).map(([v, i]) => (promoted[i] ? ['full', promoted[i]] : ['tail', v])),
+  ];
   let invoices;
   if (refs.length) {
     invoices = [];
@@ -3086,6 +3110,10 @@ function buildFactsBlock(context, extras = {}) {
     billingLines.push(`- Open invoice: ${invParts.join(', ')}`);
   } else if (billingKnown) {
     billingLines.push('- Open invoice: none');
+  }
+  // Gate off (v11) facts stay byte-identical to main; gate on tells the model an invoice is only PARTLY paid (round 36).
+  if (billingKnown && context.billing?.hasUncountedPartialDue && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+    billingLines.push('- An invoice on this account is PARTIALLY PAID with an amount still due that the Balance above does not include — never say the account is current, paid up or at $0, and do not state an amount owed; say the office can confirm what remains');
   }
   if (context.billing?.payerBilledInvoice) {
     billingLines.push('- A separate invoice is BILLED TO A THIRD-PARTY PAYER — never ask the customer to pay that one');

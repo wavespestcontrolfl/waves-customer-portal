@@ -52,18 +52,36 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   const named = invoiceNumbersNamed(inboundMessage);
   const namesNumber = named.full.length > 0 || named.tail.length > 0;
   const namedAmounts = invoiceAmountsNamed(inboundMessage);
-  const byNumber = namesNumber ? open.filter((inv) => {
-    const num = String(inv.invoiceNumber || '').toUpperCase();
-    if (!num) return false;
-    if (named.full.includes(num)) return true;
-    const last = num.split('-').pop();
-    return named.tail.some((t) => stripZeros(t) === stripZeros(last));
-  }) : [];
+  // Codex round-36 P1: EVERY explicit reference is resolved on its own against the open list and they must all land on the
+  // SAME single open invoice — a second (or third) number that is not open, ambiguous, or a different invoice makes the
+  // target unresolved (abstain), never "the one that happened to match". A tail that is just the tail of a named full
+  // number is the same reference.
+  const fullTailSet = new Set(named.full.map((f) => stripZeros(f.split('-').pop())));
+  const refs = [
+    ...named.full.map((f) => (inv) => String(inv.invoiceNumber || '').toUpperCase() === f),
+    ...named.tail.filter((t) => !fullTailSet.has(stripZeros(t))).map((t) => (inv) => {
+      const num = String(inv.invoiceNumber || '').toUpperCase();
+      return !!num && stripZeros(t) === stripZeros(num.split('-').pop());
+    }),
+  ];
+  let byNumber = [];
+  let missing = false;
+  let ambiguous = false;
+  if (namesNumber) {
+    const resolved = new Map();
+    for (const matches of refs.map((test) => open.filter(test))) {
+      if (matches.length === 0) missing = true;
+      else if (matches.length > 1) ambiguous = true;
+      else resolved.set(String(matches[0].id), matches[0]);
+    }
+    byNumber = [...resolved.values()];
+    if (!missing && !ambiguous && byNumber.length > 1) return { invoiceId: null, reason: 'reference_conflict' }; // different invoices named
+  }
   // the open list was CUT (more open invoices than the context lists): absence from it proves nothing — do not declare
   // a conflict, treat the target as unresolved (Codex round-28 P2)
-  if (namesNumber && byNumber.length === 0 && billing?.openInvoicesTruncated) return { invoiceId: null, reason: 'open_list_truncated' };
-  if (namesNumber && byNumber.length === 0) return { invoiceId: null, reason: 'named_invoice_not_open' };
-  if (byNumber.length > 1) return { invoiceId: null, reason: 'ambiguous_invoice_number' };
+  if (namesNumber && missing && billing?.openInvoicesTruncated) return { invoiceId: null, reason: 'open_list_truncated' };
+  if (namesNumber && missing) return { invoiceId: null, reason: 'named_invoice_not_open' };
+  if (namesNumber && ambiguous) return { invoiceId: null, reason: 'ambiguous_invoice_number' };
   if (byNumber.length === 1) {
     const inv = byNumber[0];
     if (namedAmounts.length && !namedAmounts.includes(Math.round(Number(inv.amountDue) * 100))) return { invoiceId: null, reason: 'reference_conflict' };

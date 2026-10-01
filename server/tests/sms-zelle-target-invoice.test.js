@@ -318,3 +318,27 @@ describe('invoice-scoped amount vs bare amounts (round 31)', () => {
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle invoice WPC-2026-0003. I paid $200 last time.').invoiceId).toBe('c');
   });
 });
+
+// Codex round-36 P1: every explicit invoice reference must resolve to the SAME single open invoice.
+describe('multiple named invoice references (round 36)', () => {
+  const { resolveZelleTargetInvoice } = require('../services/zelle-target-invoice');
+  const open = [
+    { id: 'a', invoiceNumber: 'WPC-2026-0123', status: 'sent', amountDue: 95 },
+    { id: 'b', invoiceNumber: 'WPC-2026-0124', status: 'sent', amountDue: 210 },
+  ];
+  const only = [open[0]];
+  test('one open + a second number that is not open => abstain (the second is never ignored)', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: only }, 'Can I Zelle invoice 0123 and invoice 0999?')).toEqual({ invoiceId: null, reason: 'named_invoice_not_open' });
+    expect(resolveZelleTargetInvoice({ openInvoices: only }, 'Zelle for WPC-2026-0123 and WPC-2025-0123?')).toEqual({ invoiceId: null, reason: 'named_invoice_not_open' });
+  });
+  test('two DIFFERENT open invoices named => a reference conflict, not the first', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle invoices 0123 and 0124?')).toEqual({ invoiceId: null, reason: 'reference_conflict' });
+  });
+  test('several references to the SAME open invoice (full + its own tail) still resolve', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle WPC-2026-0123 (invoice #0123)?')).toMatchObject({ invoiceId: 'a', reason: 'invoice_number' });
+    expect(resolveZelleTargetInvoice({ openInvoices: only }, 'Zelle invoice 0123?')).toMatchObject({ invoiceId: 'a' });
+  });
+  test('a truncated open list never declares the second number "not open"', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: only, openInvoicesTruncated: true }, 'Zelle invoice 0123 and 0999?')).toEqual({ invoiceId: null, reason: 'open_list_truncated' });
+  });
+});
