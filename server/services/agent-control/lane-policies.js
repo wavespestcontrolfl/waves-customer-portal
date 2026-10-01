@@ -178,6 +178,9 @@ const LANE_RUNTIME = {
   // that times out or fails leaves the Gemini/Sol answer standing (interactive, never queued).
   plant_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
+  // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.
+  typed_decisions: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
