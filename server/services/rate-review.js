@@ -632,132 +632,144 @@ function classifyBand({ currentCents, listCents, rph = null, lineRph = null, usa
 
 // ── exception rules (pure; takes already-loaded facts) ──────────────────
 
-const EXCEPTION_FLAGS = Object.freeze([
-  'tenure_under_lock', 'prepay_mid_term', 'prepay_term_missing', 'reviewed_within_12mo', 'manual_rate_edit_recent',
-  'retention_offer_active', 'plan_hold_active', 'callback_recent', 'cancellation_case_recent', 'complaint_open',
-  'past_due', 'hand_picked_tier', 'commercial', 'termite_program', 'multi_property', 'lane_cleanup', 'cadence_conflict',
-  'prepay_term_ambiguous', 'rate_unattributed', 'list_low_confidence', 'list_bundle_incomplete', 'multi_program_line', 'unsupported_family', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
-]);
-
-function evaluateExceptions(line, config = DEFAULT_CONFIG) {
-  const flags = [];
-  const f = line.facts || null;
-  if (!line.anniversaryDate) flags.push('no_anniversary');
-  else if (line.tenureMonths != null && line.tenureMonths < config.lock_months) flags.push('tenure_under_lock');
-  if (line.prepayMidTerm) flags.push('prepay_mid_term');
-  if (line.prepayTermMissing) flags.push('prepay_term_missing');
-  if (line.prepayTermAmbiguous) flags.push('prepay_term_ambiguous');
-  if (line.rateUnattributed) flags.push('rate_unattributed');
-  if (line.cadenceConflict) flags.push('cadence_conflict');
-  if (line.reviewedWithin12mo) flags.push('reviewed_within_12mo');
-  if (line.manualRateEditRecent) flags.push('manual_rate_edit_recent');
-  if (line.retentionOfferActive) flags.push('retention_offer_active');
-  if (line.planHoldActive) flags.push('plan_hold_active');
-  if (line.callbackRecent) flags.push('callback_recent');
-  if (line.cancellationCaseRecent) flags.push('cancellation_case_recent');
-  if (f && f.openComplaint) flags.push('complaint_open');
-  if (f && f.accountCurrent === false) flags.push('past_due');
-  if (line.handPickedTier) flags.push('hand_picked_tier');
-  if (line.commercial) flags.push('commercial');
-  if (line.familyKey === 'termite' || (f && f.termiteRental)) flags.push('termite_program');
-  if (f && f.multiProperty) flags.push('multi_property');
+// ── exception rules — one row per hold flag, in reporting order ─────────
+// `f` is the account's cancellation facts (null when the loader failed).
+const EXCEPTION_RULES = Object.freeze([
+  ['no_anniversary', (l) => !l.anniversaryDate],
+  ['tenure_under_lock', (l, c) => !!l.anniversaryDate && l.tenureMonths != null && l.tenureMonths < c.lock_months],
+  ['prepay_mid_term', (l) => !!l.prepayMidTerm],
+  ['prepay_term_missing', (l) => !!l.prepayTermMissing],
+  ['prepay_term_ambiguous', (l) => !!l.prepayTermAmbiguous],
+  ['rate_unattributed', (l) => !!l.rateUnattributed],
+  ['cadence_conflict', (l) => !!l.cadenceConflict],
+  ['reviewed_within_12mo', (l) => !!l.reviewedWithin12mo],
+  ['manual_rate_edit_recent', (l) => !!l.manualRateEditRecent],
+  ['retention_offer_active', (l) => !!l.retentionOfferActive],
+  ['plan_hold_active', (l) => !!l.planHoldActive],
+  ['callback_recent', (l) => !!l.callbackRecent],
+  ['cancellation_case_recent', (l) => !!l.cancellationCaseRecent],
+  ['complaint_open', (l, c, f) => !!(f && f.openComplaint)],
+  ['past_due', (l, c, f) => !!(f && f.accountCurrent === false)],
+  ['hand_picked_tier', (l) => !!l.handPickedTier],
+  ['commercial', (l) => !!l.commercial],
+  ['termite_program', (l, c, f) => l.familyKey === 'termite' || !!(f && f.termiteRental)],
+  ['multi_property', (l, c, f) => !!(f && f.multiProperty)],
   // per_visit and one_time are explicit per-visit lanes (billing-lane.js); a
   // recurring series on either, or on the legacy NULL lane, is cleanup first.
-  if (line.billingLane === 'per_visit' || line.billingLane === 'one_time' || line.billingLane == null) flags.push('lane_cleanup');
-  if (line.listLowConfidence) flags.push('list_low_confidence');
-  if (line.listBundleIncomplete) flags.push('list_bundle_incomplete');
-  if (line.multiProgramLine) flags.push('multi_program_line');
-  if (line.familyKey === 'other') flags.push('unsupported_family');
-  if (!f) flags.push('facts_unavailable');
-  else if (f.moneyFactsDegraded) flags.push('facts_degraded');
-  return flags;
+  ['lane_cleanup', (l) => l.billingLane === 'per_visit' || l.billingLane === 'one_time' || l.billingLane == null],
+  ['list_low_confidence', (l) => !!l.listLowConfidence],
+  ['list_bundle_incomplete', (l) => !!l.listBundleIncomplete],
+  ['multi_program_line', (l) => !!l.multiProgramLine],
+  ['unsupported_family', (l) => l.familyKey === 'other'],
+  ['facts_unavailable', (l, c, f) => !f],
+  ['facts_degraded', (l, c, f) => !!(f && f.moneyFactsDegraded)],
+]);
+// every hold flag a snapshot can carry (no_current_rate is assigned by the
+// band math, not a rule)
+const EXCEPTION_FLAGS = Object.freeze([...EXCEPTION_RULES.map(([flag]) => flag), 'no_current_rate']);
+
+// Informational flags (never a hold), in reporting order. A flag given as a
+// function names itself from the line (engine_sync_failed / engine_replay_failed).
+const INFO_FLAG_RULES = Object.freeze([
+  ['list_from_cadence_mode', (l) => l.listRateSource === 'cadence_mode'],
+  ['list_cadence_mismatch', (l) => !!l.listCadenceMismatch],
+  ['anniversary_predates_portal', (l) => !!l.anniversaryConflict],
+  ['stamped_zero_free', (l) => !!l.stampedZeroFree],
+  ['carried_forward', (l) => !!l.carriedFrom],
+  // a legacy NULL billing_mode resolved through the canonical lane rule
+  // (billing-lane.js) — the lane itself decides any hold
+  ['lane_inferred', (l) => !!l.laneInferred],
+  ['composite_discount_withheld', (l) => !!l.compositeWithheld],
+  [(l) => l.engineUnavailable, (l) => !!l.engineUnavailable],
+  ['rph_from_not_home_visits', (l) => !!l.rphFromNotHome],
+  ['interaction_unknown', (l) => l.unknownInteractionVisits > 0],
+  ['conversation_minutes_captured', (l) => l.capturedConversationVisits > 0],
+  ['rph_from_dues', (l) => l.duesAttributedVisits > 0],
+  ['composite_visits_excluded', (l) => l.compositeVisits > 0],
+]);
+
+function informationalFlags(line) {
+  return INFO_FLAG_RULES.filter(([, applies]) => applies(line)).map(([flag]) => (typeof flag === 'function' ? flag(line) : flag));
+}
+
+function evaluateExceptions(line, config = DEFAULT_CONFIG) {
+  const facts = line.facts || null;
+  return EXCEPTION_RULES.filter(([, applies]) => applies(line, config, facts)).map(([flag]) => flag);
 }
 
 // ── snapshot assembly (pure) ────────────────────────────────────────────
 
+// Band math per rate unit. Monthly dues are a cadence's annual price spread
+// over 12 months; the bands, the $ cap and the minimum are PER APPLICATION,
+// so a monthly line is normalized to the per-application equivalent
+// (monthly × 12 ÷ visits), classified there, and the whole-dollar
+// per-application proposal is spread back over 12.
+function classifyLine(line, config) {
+  const current = line.currentRateCents || 0;
+  const vpy = line.visitsPerYear || 0;
+  if (current <= 0) return { band: null, gapPct: null, proposedCents: 0, deltaCents: 0, noChange: true, flags: ['no_current_rate'] };
+  // No annual visit count (a legacy/custom cadence with no catalog count):
+  // a proposal with no annual impact is not actionable — skipped, never
+  // green with annual_delta_cents 0.
+  if (!(vpy > 0)) return { band: null, gapPct: null, proposedCents: current, deltaCents: 0, noChange: true, flags: ['no_visits_per_year'] };
+  const evidence = { rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config };
+  if (line.rateUnit !== 'month') return classifyBand({ currentCents: current, listCents: line.listRateCents, ...evidence });
+  const perAppCurrent = Math.round((current * 12) / vpy);
+  const perAppList = line.listRateCents != null ? Math.round((line.listRateCents * 12) / vpy) : null;
+  const perApp = classifyBand({ currentCents: perAppCurrent, listCents: perAppList, ...evidence });
+  const proposedMonthly = perApp.noChange ? current : Math.round((perApp.proposedCents * vpy) / 12);
+  return { ...perApp, proposedCents: proposedMonthly, deltaCents: proposedMonthly - current, perApplication: { current: perAppCurrent, list: perAppList, proposed: perApp.proposedCents, delta: perApp.deltaCents } };
+}
+
+// Column defaults applied in one pass (a `??` per column was a decision each).
+const SNAPSHOT_ROW_DEFAULTS = Object.freeze({
+  visits_per_year: null, billing_lane: null, anniversary_date: null, anniversary_source: null, review_date: null, tenure_months: null,
+  current_rate_source: 'none', rate_unit: 'application', list_rate_cents: null, list_rate_source: 'none',
+  usable_visits: 0, home_visits: 0, not_home_visits: 0, allowance_minutes_applied: null, treatment_minutes_median: null, revenue_per_hour_cents: null,
+});
+
 function computeSnapshot(line, config = DEFAULT_CONFIG) {
   const exceptions = evaluateExceptions(line, config);
-  const flags = [...exceptions];
-  if (line.listRateSource === 'cadence_mode') flags.push('list_from_cadence_mode');
-  if (line.listCadenceMismatch) flags.push('list_cadence_mismatch');
-  if (line.anniversaryConflict) flags.push('anniversary_predates_portal');
-  if (line.stampedZeroFree) flags.push('stamped_zero_free');
-  if (line.carriedFrom) flags.push('carried_forward');
-  // informational: a legacy NULL billing_mode resolved through the canonical
-  // lane rule (billing-lane.js) — the lane itself decides any hold
-  if (line.laneInferred) flags.push('lane_inferred');
-  if (line.compositeWithheld) flags.push('composite_discount_withheld');
-  if (line.engineUnavailable) flags.push(line.engineUnavailable);
-  if (line.rphFromNotHome) flags.push('rph_from_not_home_visits');
-  if (line.unknownInteractionVisits > 0) flags.push('interaction_unknown');
-  if (line.capturedConversationVisits > 0) flags.push('conversation_minutes_captured');
-  if (line.duesAttributedVisits > 0) flags.push('rph_from_dues');
-  if (line.compositeVisits > 0) flags.push('composite_visits_excluded');
-
+  const classified = classifyLine(line, config);
+  const flags = [...new Set([...exceptions, ...informationalFlags(line), ...classified.flags])];
   const current = line.currentRateCents || 0;
-  const monthlyUnit = line.rateUnit === 'month';
-  const vpy = line.visitsPerYear || 0;
-  let classified;
-  if (current <= 0) {
-    classified = { band: null, gapPct: null, proposedCents: 0, deltaCents: 0, noChange: true, flags: ['no_current_rate'] };
-  } else if (!monthlyUnit && vpy > 0) {
-    classified = classifyBand({ currentCents: current, listCents: line.listRateCents, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config });
-  } else if (monthlyUnit && vpy > 0) {
-    // Monthly dues are a cadence's annual price spread over 12 months; the
-    // bands, the $ cap and the minimum are PER APPLICATION. Normalize to the
-    // per-application equivalent (monthly × 12 ÷ visits), classify there,
-    // then spread the whole-dollar per-application proposal back over 12.
-    const perAppCurrent = Math.round((current * 12) / vpy);
-    const perAppList = line.listRateCents != null ? Math.round((line.listRateCents * 12) / vpy) : null;
-    const perApp = classifyBand({ currentCents: perAppCurrent, listCents: perAppList, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config });
-    const proposedMonthly = perApp.noChange ? current : Math.round((perApp.proposedCents * vpy) / 12);
-    classified = { ...perApp, proposedCents: proposedMonthly, deltaCents: proposedMonthly - current, perApplication: { current: perAppCurrent, list: perAppList, proposed: perApp.proposedCents, delta: perApp.deltaCents } };
-  } else {
-    // No annual visit count (a legacy/custom cadence with no catalog count):
-    // a proposal with no annual impact is not actionable — skipped, never
-    // green with annual_delta_cents 0.
-    classified = { band: null, gapPct: null, proposedCents: current, deltaCents: 0, noChange: true, flags: ['no_visits_per_year'] };
-  }
-  for (const flag of classified.flags) if (!flags.includes(flag)) flags.push(flag);
-
-  const unitMultiplier = monthlyUnit ? 12 : vpy;
-  let status;
+  let status = 'green';
   if (current <= 0 || (classified.band == null && !exceptions.length)) status = 'skipped';
   else if (exceptions.length) status = 'exception';
   else if (classified.noChange) status = 'no_change';
-  else status = 'green';
-
-  return {
+  const row = {
     batch_key: line.batchKey,
     customer_id: line.customerId,
     family_key: line.familyKey,
     cadence: line.cadence,
-    visits_per_year: line.visitsPerYear ?? null,
-    billing_lane: line.billingLane ?? null,
-    anniversary_date: line.anniversaryDate ?? null,
-    anniversary_source: line.anniversarySource ?? null,
-    review_date: line.reviewDate ?? null,
-    tenure_months: line.tenureMonths ?? null,
+    visits_per_year: line.visitsPerYear,
+    billing_lane: line.billingLane,
+    anniversary_date: line.anniversaryDate,
+    anniversary_source: line.anniversarySource,
+    review_date: line.reviewDate,
+    tenure_months: line.tenureMonths,
     current_rate_cents: current,
-    current_rate_source: line.currentRateSource || 'none',
-    rate_unit: line.rateUnit || 'application',
-    list_rate_cents: line.listRateCents ?? null,
-    list_rate_source: line.listRateSource || 'none',
+    current_rate_source: line.currentRateSource,
+    rate_unit: line.rateUnit,
+    list_rate_cents: line.listRateCents,
+    list_rate_source: line.listRateSource,
     gap_pct: classified.gapPct,
-    usable_visits: line.usableVisits || 0,
-    home_visits: line.homeVisits || 0,
-    not_home_visits: line.notHomeVisits || 0,
-    allowance_minutes_applied: line.allowanceMinutesApplied ?? null,
+    usable_visits: line.usableVisits,
+    home_visits: line.homeVisits,
+    not_home_visits: line.notHomeVisits,
+    allowance_minutes_applied: line.allowanceMinutesApplied,
     rph_from_not_home: !!line.rphFromNotHome,
-    treatment_minutes_median: line.treatmentMinutesMedian ?? null,
-    revenue_per_hour_cents: line.revenuePerHourCents ?? null,
+    treatment_minutes_median: line.treatmentMinutesMedian,
+    revenue_per_hour_cents: line.revenuePerHourCents,
     band: classified.band,
     proposed_rate_cents: classified.proposedCents,
     delta_cents: classified.deltaCents,
-    annual_delta_cents: Math.round(classified.deltaCents * unitMultiplier),
+    annual_delta_cents: Math.round(classified.deltaCents * (line.rateUnit === 'month' ? 12 : (line.visitsPerYear || 0))),
     flags,
     status,
   };
+  for (const [column, fallback] of Object.entries(SNAPSHOT_ROW_DEFAULTS)) if (row[column] == null) row[column] = fallback;
+  return row;
 }
 
 // ── anniversary ─────────────────────────────────────────────────────────
@@ -816,23 +828,25 @@ function lazyTranslateV2() {
 // engine shape there, but is the UI form on an admin V2 save, so it only
 // counts when it carries a services map. Returns null when nothing can be
 // replayed (→ cadence mode or skipped).
+const isObject = (value) => !!value && typeof value === 'object';
+
 function engineInputsFromEstimate(estimate, deps = {}) {
   const data = parseJson(estimate && estimate.estimate_data);
-  if (!data || typeof data !== 'object') return null;
+  if (!isObject(data)) return null;
   const req = data.engineRequest;
-  if (req && typeof req === 'object' && req.profile && typeof req.profile === 'object') {
+  if (isObject(req) && isObject(req.profile)) {
     const translate = deps.translateV2CallToV1Input !== undefined ? deps.translateV2CallToV1Input : lazyTranslateV2();
     if (typeof translate === 'function') {
       try {
         const v1 = translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {});
-        if (v1 && typeof v1 === 'object') return v1;
+        if (isObject(v1)) return v1;
       } catch (err) {
         logger.warn(`[rate-review] engineRequest translation failed for estimate ${estimate.id}: ${err.message}`);
       }
     }
   }
-  if (data.engineInputs && typeof data.engineInputs === 'object') return data.engineInputs;
-  if (data.inputs && typeof data.inputs === 'object' && data.inputs.services && typeof data.inputs.services === 'object') return data.inputs;
+  if (isObject(data.engineInputs)) return data.engineInputs;
+  if (isObject(data.inputs) && isObject(data.inputs.services)) return data.inputs;
   return null;
 }
 
@@ -914,6 +928,17 @@ function qualifyingKeyForLine(line) {
 const PEST_FREQUENCY_FOR_CADENCE = Object.freeze({ quarterly: 'quarterly', bimonthly: 'bimonthly', monthly: 'monthly' });
 const LAWN_TIER_FOR_CADENCE = Object.freeze({ every_6_weeks: 'enhanced', monthly: 'premium', bimonthly: 'standard' });
 const MOSQUITO_TIER_FOR_CADENCE = Object.freeze({ seasonal: 'seasonal', monthly: 'monthly' });
+// Re-keying a saved service to the line's own cadence: the engine prices
+// pest by `frequency`, lawn by `tier` + `lawnFreq`, mosquito by `tier`.
+const CADENCE_REKEY = Object.freeze({
+  pest_control: { service: 'pest', keyFor: (cadence) => PEST_FREQUENCY_FOR_CADENCE[cadence], apply: (svc, key) => ({ ...svc, frequency: key }) },
+  lawn_care: {
+    service: 'lawn',
+    keyFor: (cadence) => LAWN_TIER_FOR_CADENCE[cadence],
+    apply: (svc, key, cadence, clean) => { delete clean.lawnFreq; return { ...svc, tier: key, lawnFreq: CADENCE_VISITS[cadence] }; },
+  },
+  mosquito: { service: 'mosquito', keyFor: (cadence) => MOSQUITO_TIER_FOR_CADENCE[cadence], apply: (svc, key) => ({ ...svc, tier: key }) },
+});
 
 // Quote-time concessions come off so the replay prices TODAY'S LIST for the
 // same property, services and (engine-derived) tier — at the cadence the
@@ -944,7 +969,7 @@ const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersio
 // so an add-on estimate legitimately sold at Silver (the customer already
 // had another program) replays at Silver, not Bronze. Never the client-
 // posted copy inside the inputs, which the sanitizer strips.
-function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFamilies = null, savedPriorQualifying = null } = {}) {
+function listReplayInputs(inputs, { familyKey, cadence, activeFamilies, savedPriorQualifying } = {}) {
   // The shared client-identity sanitizer first (estimate-client-identity-
   // fields.js: every server-owned replay stamp — treeShrubPricingKnobs,
   // palmAnnualRounding, catalogPricing, the identity flags …), the same
@@ -952,45 +977,39 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFami
   // the local pin list below covers the service-level pins it does not.
   const clean = sanitizeClientIdentityFields(JSON.parse(JSON.stringify(inputs)));
   for (const key of REPLAY_PIN_KEYS) delete clean[key];
-  if (clean.services && typeof clean.services === 'object') {
-    for (const [service, keys] of Object.entries(REPLAY_PIN_SERVICE_KEYS)) {
-      if (clean.services[service] && typeof clean.services[service] === 'object') {
-        for (const key of keys) delete clean.services[service][key];
-      }
-    }
+  const services = isObject(clean.services) ? clean.services : null;
+  for (const [service, keys] of Object.entries(REPLAY_PIN_SERVICE_KEYS)) {
+    if (!services || !isObject(services[service])) continue;
+    for (const key of keys) delete services[service][key];
   }
   if (!Array.isArray(activeFamilies) && Array.isArray(savedPriorQualifying) && savedPriorQualifying.length) {
     clean.priorQualifyingServices = savedPriorQualifying.map(String);
     clean.recurringCustomer = true;
   }
-  if (Array.isArray(activeFamilies) && clean.services && typeof clean.services === 'object') {
-    const lines = activeFamilies.map((f) => (typeof f === 'string' ? { familyKey: f, serviceKeys: [] } : f));
-    const activePrograms = new Set(lines.flatMap(linePrograms));
-    const present = new Set(); // programs the surviving saved services price inside the bundle
-    for (const [service, value] of Object.entries(clean.services)) {
-      const program = ENGINE_INPUT_SERVICE_PROGRAM[service];
-      if (!program) continue; // one-time / commercial / unknown keys are left as saved
-      if (!value) continue;
-      if (activePrograms.has(program)) present.add(program);
-      else delete clean.services[service]; // cancelled since the quote
-    }
-    // every other active program the engine counts toward the tier goes in
-    // as a prior — a bed program added after a pest + palm quote included
-    const priors = [...new Set(lines.filter((l) => !present.has(qualifyingProgramForLine(l))).map(qualifyingKeyForLine).filter(Boolean))];
-    clean.priorQualifyingServices = priors;
-    if (priors.length) clean.recurringCustomer = true;
-  }
-  if (familyKey === 'pest_control' && clean.services && clean.services.pest && PEST_FREQUENCY_FOR_CADENCE[cadence]) {
-    clean.services.pest = { ...clean.services.pest, frequency: PEST_FREQUENCY_FOR_CADENCE[cadence] };
-  }
-  if (familyKey === 'lawn_care' && clean.services && clean.services.lawn && LAWN_TIER_FOR_CADENCE[cadence]) {
-    clean.services.lawn = { ...clean.services.lawn, tier: LAWN_TIER_FOR_CADENCE[cadence], lawnFreq: CADENCE_VISITS[cadence] };
-    delete clean.lawnFreq;
-  }
-  if (familyKey === 'mosquito' && clean.services && clean.services.mosquito && MOSQUITO_TIER_FOR_CADENCE[cadence]) {
-    clean.services.mosquito = { ...clean.services.mosquito, tier: MOSQUITO_TIER_FOR_CADENCE[cadence] };
-  }
+  if (Array.isArray(activeFamilies) && services) reconcileToActivePrograms(clean, services, activeFamilies);
+  const rekey = CADENCE_REKEY[familyKey];
+  const cadenceKey = rekey && rekey.keyFor(cadence);
+  if (cadenceKey && services && services[rekey.service]) services[rekey.service] = rekey.apply(services[rekey.service], cadenceKey, cadence, clean);
   return clean;
+}
+
+// The current-bundle reconciliation (see listReplayInputs): a saved program
+// survives only while an active line still carries it; every other active
+// program the engine counts toward the tier goes in as a prior — a bed
+// program added after a pest + palm quote included.
+function reconcileToActivePrograms(clean, services, activeFamilies) {
+  const lines = activeFamilies.map((f) => (typeof f === 'string' ? { familyKey: f, serviceKeys: [] } : f));
+  const activePrograms = new Set(lines.flatMap(linePrograms));
+  const present = new Set(); // programs the surviving saved services price inside the bundle
+  for (const [service, value] of Object.entries(services)) {
+    const program = ENGINE_INPUT_SERVICE_PROGRAM[service];
+    if (!program || !value) continue; // one-time / commercial / unknown keys are left as saved
+    if (activePrograms.has(program)) present.add(program);
+    else delete services[service]; // cancelled since the quote
+  }
+  const priors = [...new Set(lines.filter((l) => !present.has(qualifyingProgramForLine(l))).map(qualifyingKeyForLine).filter(Boolean))];
+  clean.priorQualifyingServices = priors;
+  if (priors.length) clean.recurringCustomer = true;
 }
 
 // The engine's own review-gating predicates (estimator-engine/draft-builder
@@ -1016,6 +1035,12 @@ function engineReviewPredicates() {
 
 // An engine line that needs a human (manual review, measurement, custom
 // quote, heuristic turf, LOW pricing confidence) is not a list price.
+// The engine's WaveGuard tier as a comparable key (null when absent).
+const tierKey = (tier) => (tier ? String(tier).toLowerCase() : null);
+function engineTier(result) {
+  return tierKey(result && result.waveGuard && result.waveGuard.tier);
+}
+
 function engineItemLowConfidence(item) {
   const { lineRequiresReview, lineHasHeuristicTurf } = engineReviewPredicates();
   return lineRequiresReview(item) || lineHasHeuristicTurf(item) || String(item.pricingConfidence || '').toUpperCase() === 'LOW';
@@ -1050,9 +1075,10 @@ function engineItemVisits(item) {
 // `riderAllow`: the ledger family keys the current monthly slice actually
 // sums (ledgerSliceForLine(...).family_keys) — a rider priced on the saved
 // estimate but cancelled since has no slice and must not inflate the list.
-function listRateFromEngineResult(result, line, cadence, { includeRiders = false, expectedVisits = null, riderAllow = null } = {}) {
+function listRateFromEngineResult(result, line, cadence, { includeRiders, expectedVisits, riderAllow } = {}) {
   const keys = ENGINE_SERVICE_KEYS[line] || [];
   const items = result && Array.isArray(result.lineItems) ? result.lineItems : [];
+  const tier = engineTier(result);
   // First key present wins (tree_shrub before palm_injection); a standalone
   // palm program is then the primary, never a rider of a missing line.
   const item = keys.map((k) => items.find((i) => i.service === k)).find(Boolean);
@@ -1065,9 +1091,9 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   // no comparison for the combined ledger rate — held (list_bundle_incomplete).
   if (includeRiders && Array.isArray(riderAllow)) {
     const missing = riderAllow.filter((k) => keys.includes(k) && !items.some((i) => i.service === k));
-    if (missing.length) return { bundleIncomplete: true, missingServices: missing, tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null };
+    if (missing.length) return { bundleIncomplete: true, missingServices: missing, tier };
   }
-  if (engineItemLowConfidence(item)) return { lowConfidence: true, tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null };
+  if (engineItemLowConfidence(item)) return { lowConfidence: true, tier };
   const annual = positive(item.annualAfterDiscount ?? item.annual);
   const visits = engineItemVisits(item);
   if (!annual || !visits) return null;
@@ -1082,16 +1108,14 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   // A rider the current slice carries is part of the compared bundle: one
   // that needs a human holds the whole line, never a silent drop that
   // compares a rider-inclusive current rate against a rider-free list.
-  if (riders.some((i) => engineItemLowConfidence(i))) {
-    return { lowConfidence: true, tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null };
-  }
+  if (riders.some((i) => engineItemLowConfidence(i))) return { lowConfidence: true, tier };
   const riderAnnual = riders.reduce((sum, r) => sum + (positive(r.annualAfterDiscount ?? r.annual) || 0), 0);
   return {
     perAppCents: Math.round((annual / visits) * 100),
     monthlyCents: Math.round(((annual + riderAnnual) / 12) * 100),
     riderServices: riders.map((r) => r.service),
     cadenceMismatch,
-    tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null,
+    tier,
   };
 }
 
@@ -1651,7 +1675,7 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
   // visit beside NULL-priced ones (which bill the per-application fee,
   // completionInvoiceAmount) is not a free line.
   const zeroVisits = planLine.zero_priced_visits || 0;
-  const authoritativeZero = !(visitMedianCents > 0) && zeroVisits > 0 && zeroVisits === (planLine.open_visits || 0)
+  const authoritativeZero = !(visitMedianCents > 0) && zeroVisits > 0 && zeroVisits === planLine.open_visits
     && hasAuthoritativeZeroPrice(0, planLine.zero_with_base ? 1 : null);
   const fromVisits = () => {
     if (visitMedianCents > 0) return { cents: visitMedianCents, source: 'visit_median', unit: 'application' };
@@ -1675,12 +1699,12 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
     if (cents) return { cents, source: 'prepay_term', unit: 'application', prepayMidTerm: true, prepayTermId: term.id };
     return { ...fromVisits(), prepayMidTerm: true, prepayTermId: term.id };
   }
-  if (lane === 'annual_prepay' || prepayLinked || ambiguous) {
+  const prepayLane = lane === 'annual_prepay' || prepayLinked;
+  if (prepayLane || ambiguous) {
     // Prepay by scalar or visit link but no resolvable live term — or live
     // terms that could belong to more than one line: held, priced off the
     // visits so the owner still sees numbers.
-    const fallback = fromVisits();
-    return { ...fallback, prepayTermMissing: lane === 'annual_prepay' || prepayLinked, prepayTermAmbiguous: ambiguous };
+    return { ...fromVisits(), prepayTermMissing: prepayLane, prepayTermAmbiguous: ambiguous };
   }
   if (lane === 'monthly_membership') {
     if (isEnabled('planRateLedger') && ledgerSlice && positive(ledgerSlice.monthly_rate)) {
@@ -1753,6 +1777,7 @@ function assertBatchKey(batchKey) {
 }
 
 function assertYmd(value, name) {
+  if (value == null) return; // optional
   if (!DATE_RE.test(String(value || '')) || !validCalendarDate(String(value))) {
     const err = new Error(`${name} must be a real calendar date, YYYY-MM-DD`);
     err.status = 400;
@@ -1796,86 +1821,89 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
 
 // Stage 2 — one book entry per plan line: current rate per lane, duration /
 // revenue stats, list rate by engine replay (newest estimate first).
+// get-or-compute on the per-batch replay cache
+async function memo(cache, key, compute) {
+  if (!cache.has(key)) cache.set(key, await compute());
+  return cache.get(key);
+}
+
+// Stage 2b — the engine replay for one line. The NEWEST applicable
+// estimate that replays at the line's own cadence gives today's list; a
+// result whose cadence still does not match the line (a family the replay
+// cannot re-cadence) is NOT a list rate — discarded (list_cadence_mismatch),
+// and the row falls to the cadence mode or is skipped. Hand-picked-tier
+// evidence (tierMoved) compares the estimate's SAVED tier with a replay of
+// the mix it was sold with (no reconciliation) — a tier that moved because
+// the customer later added or dropped a program is the engine's own doing,
+// not a manual pick.
+async function replayListForLine(candidates, { familyKey, cadence, activeFamilies, visitsPerYear, monthly, includeRiders, riderAllow, replayCache, deps }) {
+  const out = { list: { cents: null, source: 'none', cadenceMismatch: false, engineTier: null }, engineUnavailable: null, listLowConfidence: false, listBundleIncomplete: false };
+  const bundleKey = activeFamilies.map((l) => `${l.familyKey}:${l.serviceKeys.join('+')}`).join(',');
+  for (const estimate of candidates) {
+    if (!hasSizeInput(engineInputsFromEstimate(estimate, deps), familyKey)) continue;
+    const replay = await memo(replayCache, `${estimate.id}|${familyKey}|${cadence}|${bundleKey}`, () => replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
+    if (!replay) continue;
+    if (replay.unavailable) { out.engineUnavailable = replay.unavailable; continue; }
+    const rate = listRateFromEngineResult(replay.result, familyKey, cadence, { includeRiders, riderAllow, expectedVisits: visitsPerYear });
+    if (!rate) continue;
+    if (rate.lowConfidence) { out.listLowConfidence = true; continue; }
+    if (rate.bundleIncomplete) { out.listBundleIncomplete = true; continue; }
+    const original = await memo(replayCache, `${estimate.id}|original`, () => replayEstimate(estimate, { familyKey: null, cadence: null, activeFamilies: null }, deps));
+    const originalTier = engineTier(original && original.result);
+    const estimateTier = tierKey(estimate.waveguard_tier);
+    const tierMoved = !!(originalTier && estimateTier && originalTier !== estimateTier);
+    if (rate.cadenceMismatch) {
+      out.list = { cents: null, source: 'none', cadenceMismatch: true, engineTier: rate.tier, originalTier, estimateTier, tierMoved };
+      continue;
+    }
+    out.list = { cents: monthly ? rate.monthlyCents : rate.perAppCents, source: 'engine', cadenceMismatch: false, engineTier: rate.tier, originalTier, estimateTier, tierMoved };
+    break;
+  }
+  return out;
+}
+
 async function assembleBookEntry(inputs, planLine, { config, replayCache, deps }) {
   const { customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances, planLines } = inputs;
-    const customer = customers.get(planLine.customer_id);
-    if (!customer) return null;
-    const familyKey = planLine.family_key;
-    const cadence = planLine.cadence;
-    const ledgerSlice = ledgerSliceForLine(ledger, customer.id, familyKey);
-    const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice });
-    const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
-    const multiProgram = current.unit === 'application' && isMultiProgramLine(familyKey, planLine.service_keys);
-    const lineVisits = visitsByLine.get(`${customer.id}|${familyKey}`) || [];
-    const stats = lineDurationStats(lineVisits, {
-      config,
-      allowanceMinutes: allowanceFor(allowances, familyKey),
-      termVisitsFallback: visitsPerYear,
-      duesRevenueCents: current.unit === 'month'
-        ? duesPerVisitCents({ settledCents: settledDues.get(customer.id) || 0, ledger, customerId: customer.id, familyKey, accountLines: planLine.account_lines, completedVisits: lineVisits.length })
-        : null,
-    });
-    const first = firstVisits.get(`${customer.id}|${familyKey}`) || null;
-
-    // Earliest acceptance anchors the anniversary; the NEWEST applicable
-    // estimate is replayed first for today's list (updated size / inputs).
-    const linkedEstimates = (planLine.source_estimate_ids || []).map((id) => estimates.get(id)).filter(Boolean)
-      .sort((a, b) => new Date(a.accepted_at || 0) - new Date(b.accepted_at || 0));
-    const acceptedAt = linkedEstimates.length ? linkedEstimates[0].accepted_at : null;
-    const replayCandidates = [...linkedEstimates].reverse();
-
-    // Engine replay at the line's own cadence. A result whose cadence still
-    // does not match the line (a family the replay cannot re-cadence) is NOT
-    // a list rate — it is discarded (list_cadence_mismatch), and the row
-    // falls to the cadence mode or is skipped.
-    let list = { cents: null, source: 'none', cadenceMismatch: false, engineTier: null };
-    let engineUnavailable = null;
-    let listLowConfidence = false;
-    let listBundleIncomplete = false;
-    for (const estimate of replayCandidates) {
-      const inputs = engineInputsFromEstimate(estimate, deps);
-      if (!hasSizeInput(inputs, familyKey)) continue;
-      const activeFamilies = planLines.filter((p) => p.customer_id === customer.id)
-        .map((p) => ({ familyKey: p.family_key, serviceKeys: p.service_keys || [] }))
-        .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
-      const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.map((l) => `${l.familyKey}:${(l.serviceKeys || []).join('+')}`).join(',')}`;
-      if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
-      const replay = replayCache.get(cacheKey);
-      if (replay && replay.unavailable) { engineUnavailable = replay.unavailable; continue; }
-      const rate = replay
-        ? listRateFromEngineResult(replay.result, familyKey, cadence, {
-          includeRiders: current.unit === 'month' && current.source === 'ledger_slice',
-          riderAllow: ledgerSlice ? ledgerSlice.family_keys : [],
-          expectedVisits: visitsPerYear,
-        })
-        : null;
-      if (!rate) continue;
-      if (rate.lowConfidence) { listLowConfidence = true; continue; }
-      if (rate.bundleIncomplete) { listBundleIncomplete = true; continue; }
-      // Hand-picked tier evidence compares the estimate's SAVED tier with a
-      // replay of the mix it was sold with (no reconciliation) — a tier that
-      // moved because the customer later added or dropped a program is the
-      // engine's own doing, not a manual pick.
-      const originalKey = `${estimate.id}|original`;
-      if (!replayCache.has(originalKey)) replayCache.set(originalKey, await replayEstimate(estimate, { familyKey: null, cadence: null, activeFamilies: null }, deps));
-      const original = replayCache.get(originalKey);
-      const originalTier = original && original.result && original.result.waveGuard && original.result.waveGuard.tier ? String(original.result.waveGuard.tier).toLowerCase() : null;
-      const estimateTier = estimate.waveguard_tier ? String(estimate.waveguard_tier).toLowerCase() : null;
-      if (rate.cadenceMismatch) {
-        list = { cents: null, source: 'none', cadenceMismatch: true, engineTier: rate.tier, originalTier, estimateTier };
-        continue;
-      }
-      list = { cents: current.unit === 'month' ? rate.monthlyCents : rate.perAppCents, source: 'engine', cadenceMismatch: false, engineTier: rate.tier, originalTier, estimateTier };
-      break;
-    }
-
-    return {
-      planLine, customer, familyKey, cadence,
-      visitsPerYear,
-      current, stats, first, acceptedAt, list,
-      engineUnavailable, listLowConfidence, listBundleIncomplete, multiProgram,
-      serviceKeys: planLine.service_keys || [],
-    };
+  const customer = customers.get(planLine.customer_id);
+  if (!customer) return null;
+  const { family_key: familyKey, cadence } = planLine;
+  const serviceKeys = planLine.service_keys || [];
+  const ledgerSlice = ledgerSliceForLine(ledger, customer.id, familyKey);
+  const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice });
+  const monthly = current.unit === 'month';
+  const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
+  const lineVisits = visitsByLine.get(`${customer.id}|${familyKey}`) || [];
+  const stats = lineDurationStats(lineVisits, {
+    config,
+    allowanceMinutes: allowanceFor(allowances, familyKey),
+    termVisitsFallback: visitsPerYear,
+    duesRevenueCents: monthly
+      ? duesPerVisitCents({ settledCents: settledDues.get(customer.id) || 0, ledger, customerId: customer.id, familyKey, accountLines: planLine.account_lines, completedVisits: lineVisits.length })
+      : null,
+  });
+  // Earliest acceptance anchors the anniversary; the NEWEST applicable
+  // estimate is replayed first for today's list (updated size / inputs).
+  const linkedEstimates = (planLine.source_estimate_ids || []).map((id) => estimates.get(id)).filter(Boolean)
+    .sort((a, b) => new Date(a.accepted_at || 0) - new Date(b.accepted_at || 0));
+  const acceptedAt = linkedEstimates.length ? linkedEstimates[0].accepted_at : null;
+  // the customer's plan lines TODAY, for the current-bundle reconciliation
+  const activeFamilies = planLines.filter((p) => p.customer_id === customer.id)
+    .map((p) => ({ familyKey: p.family_key, serviceKeys: p.service_keys || [] }))
+    .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
+  const replayed = await replayListForLine([...linkedEstimates].reverse(), {
+    familyKey, cadence, activeFamilies, visitsPerYear, monthly,
+    includeRiders: monthly && current.source === 'ledger_slice',
+    riderAllow: ledgerSlice ? ledgerSlice.family_keys : [],
+    replayCache, deps,
+  });
+  return {
+    planLine, customer, familyKey, cadence, visitsPerYear, current, stats,
+    first: firstVisits.get(`${customer.id}|${familyKey}`) || null,
+    acceptedAt,
+    ...replayed,
+    multiProgram: !monthly && isMultiProgramLine(familyKey, serviceKeys),
+    serviceKeys,
+  };
 }
 
 // Stage 3 — references across the whole book: revenue/hour quartiles per
@@ -1941,6 +1969,9 @@ function selectReviewEntries(book, { from, to, now, latestByLine }) {
     entry.carriedFrom = latest.batch_key;
     selected.push(entry);
   }
+  // Tenure is measured AT the review date (the anniversary's occurrence in
+  // the window, or the carried-forward one), never at build time.
+  for (const entry of selected) entry.tenureMonths = entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null;
   return selected;
 }
 
@@ -1959,128 +1990,124 @@ async function loadReviewFacts(dbh, selected, { now, config, batchKey }) {
 }
 
 // Stage 6 — the snapshot row for one selected entry.
-function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }) {
-    const { customer, familyKey, cadence, current, stats, list } = entry;
-    const { priorReviews, factsByCustomer, signalsByCustomer } = reviewFacts;
-    const { cadenceModes, lineRphStats } = refs;
-    const facts = factsByCustomer.get(customer.id) || null;
-    const signals = signalsByCustomer.get(customer.id) || null;
-    // No replayable estimate → the book's per-application mode for this
-    // family × cadence; a monthly-billed line takes it spread over 12 months
-    // (mode × visits ÷ 12) so the two units compare like for like.
-    let listCents = list.cents;
-    let listSource = list.source;
-    if (listCents == null) {
-      const mode = cadenceModes.get(`${familyKey}|${cadence}`);
-      if (mode && current.unit === 'application') { listCents = mode; listSource = 'cadence_mode'; }
-      else if (mode && current.unit === 'month' && entry.visitsPerYear > 0) { listCents = Math.round((mode * entry.visitsPerYear) / 12); listSource = 'cadence_mode'; }
-    }
-    if (listCents == null) listSource = 'none';
-    // Hand-picked tier (owner ruling 2026-09-01: call-the-office, permanent):
-    // the provenance column says manual, or the accepted estimate carries a
-    // tier the engine does not derive from its own inputs. The customer's
-    // live tier is deliberately NOT compared — a multi-plan customer's older
-    // single-line estimate replays at a lower tier than the account now has.
-    const tierSource = String(customer.waveguard_tier_source || '').toLowerCase();
-    const handPickedTier = tierSource === 'manual'
-      || !!(list.source === 'engine' && list.originalTier && list.estimateTier && list.originalTier !== list.estimateTier);
-    const manualAt = facts && facts.manualPriceOverrideAt ? etDay(facts.manualPriceOverrideAt) : null;
-    const tierProtected = customer.tier_protected_until && dateColumn(customer.tier_protected_until) >= today;
-    const callbackLines = signals ? signals.callbackLines : 'error';
-    // Open re-service callbacks (facts.openCallbackLanes: 'pest' | 'lawn' |
-    // 'unknown') hold only the family they belong to; 'unknown' holds all.
-    const openLanes = facts && Array.isArray(facts.openCallbackLanes) ? facts.openCallbackLanes : [];
-    const familyLane = CALLBACK_LANE_FOR_FAMILY[familyKey] || null;
-    const callbackRecent = callbackLines === 'error'
-      || callbackLines.some((line) => line === familyKey || line === 'other')
-      || openLanes.includes('unknown')
-      || (familyLane != null && openLanes.includes(familyLane));
-    const planHoldActive = familySignalTouchesLine(signals ? signals.planHoldFamilies : 'error', familyKey) || !!tierProtected;
-    const retentionOfferActive = familySignalTouchesLine(signals ? signals.retentionOfferFamilies : 'error', familyKey);
+// A failed signal read holds every line (fail closed) — the loader's own
+// shape, so one default replaces a per-field 'error' fallback.
+const SIGNALS_UNAVAILABLE = Object.freeze({ callbackLines: 'error', cancellationCaseRecent: true, retentionOfferFamilies: 'error', planHoldFamilies: 'error' });
 
-    const line = {
-      batchKey,
-      customerId: customer.id,
-      familyKey,
-      cadence,
-      visitsPerYear: entry.visitsPerYear,
-      billingLane: resolveBillingLane(customer).mode,
-      laneInferred: resolveBillingLane(customer).source === 'inferred',
-      anniversaryDate: entry.anniversary.date,
-      anniversarySource: entry.anniversary.source,
-      anniversaryConflict: entry.anniversary.conflict,
-      reviewDate: entry.reviewDate,
-      carriedFrom: entry.carriedFrom,
-      engineUnavailable: entry.engineUnavailable,
-      listLowConfidence: entry.listLowConfidence,
-      listBundleIncomplete: entry.listBundleIncomplete,
-      multiProgramLine: !!entry.multiProgram,
-      tenureMonths: entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null,
-      currentRateCents: current.cents,
-      currentRateSource: current.source,
-      stampedZeroFree: !!current.stampedZeroFree,
-      rateUnit: current.unit,
-      listRateCents: listCents,
-      listRateSource: listSource,
-      listCadenceMismatch: list.cadenceMismatch,
-      usableVisits: stats.usableVisits,
-      homeVisits: stats.homeVisits,
-      notHomeVisits: stats.notHomeVisits,
-      unknownInteractionVisits: stats.unknownInteractionVisits,
-      allowanceMinutesApplied: stats.allowanceMinutesApplied,
-      capturedConversationVisits: stats.capturedConversationVisits,
-      duesAttributedVisits: stats.duesAttributedVisits,
-      compositeVisits: stats.compositeVisits,
-      rphFromNotHome: stats.rphFromNotHome,
-      treatmentMinutesMedian: stats.treatmentMinutesMedian,
-      revenuePerHourCents: stats.revenuePerHourCents,
-      lineRph: lineRphStats.get(familyKey) || null,
-      prepayMidTerm: !!current.prepayMidTerm,
-      prepayTermMissing: !!current.prepayTermMissing,
-      prepayTermAmbiguous: !!current.prepayTermAmbiguous,
-      rateUnattributed: !!current.rateUnattributed,
-      compositeWithheld: !!current.compositeWithheld,
-      cadenceConflict: !!entry.planLine.cadence_conflict,
-      reviewedWithin12mo: priorReviews.has(`${customer.id}|${familyKey}`),
-      manualRateEditRecent: !!(manualAt && manualAt >= manualEditCutoff),
-      retentionOfferActive,
-      planHoldActive,
-      callbackRecent,
-      cancellationCaseRecent: !signals || signals.cancellationCaseRecent,
-      handPickedTier,
-      commercial: isCommercialCustomer(customer, entry.serviceKeys),
-      facts,
-    };
-    return computeSnapshot(line, config);
+// Completed / recent callbacks (loadExceptionSignals callbackLines, by line;
+// 'other' = unclassified) and open re-service callbacks (facts
+// openCallbackLanes: 'pest' | 'lawn' | 'unknown') hold only the family they
+// belong to; a failed read or an unknown lane holds every family.
+function callbackHoldsFamily(callbackLines, openLanes, familyKey) {
+  if (callbackLines === 'error' || openLanes.includes('unknown')) return true;
+  const familyLane = CALLBACK_LANE_FOR_FAMILY[familyKey] || null;
+  return callbackLines.some((line) => line === familyKey || line === 'other') || (familyLane != null && openLanes.includes(familyLane));
+}
+
+function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }) {
+  const { customer, familyKey, cadence, current, stats, list } = entry;
+  const { priorReviews, factsByCustomer, signalsByCustomer } = reviewFacts;
+  const facts = factsByCustomer.get(customer.id) || null;
+  const signals = signalsByCustomer.get(customer.id) || SIGNALS_UNAVAILABLE;
+  // No replayable estimate → the book's per-application mode for this
+  // family × cadence; a monthly-billed line takes it spread over 12 months
+  // (mode × visits ÷ 12) so the two units compare like for like.
+  let listCents = list.cents;
+  const mode = listCents == null ? refs.cadenceModes.get(`${familyKey}|${cadence}`) : null;
+  if (mode) listCents = current.unit === 'month' ? (entry.visitsPerYear > 0 ? Math.round((mode * entry.visitsPerYear) / 12) : null) : mode;
+  const listSource = listCents == null ? 'none' : (mode ? 'cadence_mode' : list.source);
+  // Hand-picked tier (owner ruling 2026-09-01: call-the-office, permanent):
+  // the provenance column says manual, or the accepted estimate carries a
+  // tier the engine does not derive from its own inputs (list.tierMoved,
+  // replayListForLine). The customer's live tier is deliberately NOT
+  // compared — a multi-plan customer's older single-line estimate replays
+  // at a lower tier than the account now has.
+  const handPickedTier = String(customer.waveguard_tier_source || '').toLowerCase() === 'manual' || (list.source === 'engine' && !!list.tierMoved);
+  const manualAt = facts ? etDay(facts.manualPriceOverrideAt) : null;
+  const tierProtected = !!(customer.tier_protected_until && dateColumn(customer.tier_protected_until) >= today);
+  const openLanes = Array.isArray(facts && facts.openCallbackLanes) ? facts.openCallbackLanes : [];
+  const lane = resolveBillingLane(customer);
+  const line = {
+    batchKey,
+    customerId: customer.id,
+    familyKey,
+    cadence,
+    visitsPerYear: entry.visitsPerYear,
+    billingLane: lane.mode,
+    laneInferred: lane.source === 'inferred',
+    anniversaryDate: entry.anniversary.date,
+    anniversarySource: entry.anniversary.source,
+    anniversaryConflict: entry.anniversary.conflict,
+    reviewDate: entry.reviewDate,
+    tenureMonths: entry.tenureMonths,
+    carriedFrom: entry.carriedFrom,
+    engineUnavailable: entry.engineUnavailable,
+    listLowConfidence: entry.listLowConfidence,
+    listBundleIncomplete: entry.listBundleIncomplete,
+    multiProgramLine: !!entry.multiProgram,
+    currentRateCents: current.cents,
+    currentRateSource: current.source,
+    stampedZeroFree: !!current.stampedZeroFree,
+    rateUnit: current.unit,
+    listRateCents: listCents,
+    listRateSource: listSource,
+    listCadenceMismatch: list.cadenceMismatch,
+    ...stats,
+    lineRph: refs.lineRphStats.get(familyKey) || null,
+    prepayMidTerm: !!current.prepayMidTerm,
+    prepayTermMissing: !!current.prepayTermMissing,
+    prepayTermAmbiguous: !!current.prepayTermAmbiguous,
+    rateUnattributed: !!current.rateUnattributed,
+    compositeWithheld: !!current.compositeWithheld,
+    cadenceConflict: !!entry.planLine.cadence_conflict,
+    reviewedWithin12mo: priorReviews.has(`${customer.id}|${familyKey}`),
+    manualRateEditRecent: !!(manualAt && manualAt >= manualEditCutoff),
+    retentionOfferActive: familySignalTouchesLine(signals.retentionOfferFamilies, familyKey),
+    planHoldActive: familySignalTouchesLine(signals.planHoldFamilies, familyKey) || tierProtected,
+    callbackRecent: callbackHoldsFamily(signals.callbackLines, openLanes, familyKey),
+    cancellationCaseRecent: !!signals.cancellationCaseRecent,
+    handPickedTier,
+    commercial: isCommercialCustomer(customer, entry.serviceKeys),
+    facts,
+  };
+  return computeSnapshot(line, config);
+}
+
+// The window a build uses: explicit from/to win; otherwise an EXISTING
+// batch keeps the window it was built with (a recompute must never drop
+// rows by sliding the window to today), and a new batch takes the standing
+// review window (35–65 days out) counted from `windowAnchor` when the
+// caller names one (the monthly job: the first of the build month) or from
+// the build date. An allowed rebuild of a batch whose digest already went
+// out resets the one-email marker (digestReset): the rankings the owner
+// read are stale, so the next delivery (the day 1–7 tick, or the admin
+// build route right away) sends the updated digest instead of
+// 'already_emailed' forever.
+function assertWindowOrder(from, to) {
+  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+}
+
+function resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, windowAnchor }) {
+  const stored = existing ? { from: dateColumn(existing.window_from), to: dateColumn(existing.window_to) } : null;
+  const defaults = !(anniversaryFrom && anniversaryTo) && stored && stored.from && stored.to ? stored : reviewWindowFor(now, { anchor: windowAnchor });
+  const from = anniversaryFrom || defaults.from;
+  const to = anniversaryTo || defaults.to;
+  assertWindowOrder(from, to);
+  return { from, to, digestReset: !!(existing && existing.email_sent_at) };
 }
 
 async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor = null, trx = null, now = new Date(), deps = {} } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
-  if (anniversaryFrom) assertYmd(anniversaryFrom, 'anniversaryFrom');
-  if (anniversaryTo) assertYmd(anniversaryTo, 'anniversaryTo');
-  if (anniversaryFrom && anniversaryTo && anniversaryFrom > anniversaryTo) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+  assertYmd(anniversaryFrom, 'anniversaryFrom');
+  assertYmd(anniversaryTo, 'anniversaryTo');
+  if (anniversaryFrom && anniversaryTo) assertWindowOrder(anniversaryFrom, anniversaryTo); // before any read
 
   const dbh = trx || db;
   if (await batchHasSentRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', batchKey };
 
-  // No explicit window → an EXISTING batch keeps the window it was built
-  // with (a recompute must never drop rows by sliding the window to today);
-  // a new batch takes the standing review window (35–65 days out) counted
-  // from `windowAnchor` when the caller names one (the monthly job: the
-  // first of the build month) or from the build date.
   const existing = await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to', 'email_sent_at');
-  const defaults = !(anniversaryFrom && anniversaryTo) && existing && dateColumn(existing.window_from) && dateColumn(existing.window_to)
-    ? { from: dateColumn(existing.window_from), to: dateColumn(existing.window_to) }
-    : reviewWindowFor(now, { anchor: windowAnchor });
-  // An allowed rebuild of a batch whose digest already went out resets the
-  // one-email marker: the rankings the owner read are stale, so the next
-  // delivery (the day 1–7 tick, or the admin build route right away) sends
-  // the updated digest instead of 'already_emailed' forever.
-  const digestReset = !!(existing && existing.email_sent_at);
-  const from = anniversaryFrom || defaults.from;
-  const to = anniversaryTo || defaults.to;
-  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+  const { from, to, digestReset } = resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, windowAnchor });
 
   const today = etDateString(now);
   const config = await loadConfig(dbh);
