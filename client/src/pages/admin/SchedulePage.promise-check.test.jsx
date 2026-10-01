@@ -280,6 +280,39 @@ describe('the promise check on the completion form', () => {
     expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: OLDER.id, mark: 'done', version: OLDER.version }]);
   });
 
+  it('a stalled promise list gives up after 15 seconds even without AbortSignal.timeout (older WebKit)', async () => {
+    const staticTimeout = AbortSignal.timeout;
+    AbortSignal.timeout = undefined;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.stubGlobal('fetch', vi.fn((url, options) => {
+        if (String(url).includes('/promises')) {
+          return new Promise((_, reject) => options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))));
+        }
+        return Promise.resolve({ ok: true, json: async () => ({ customer: {}, actions: [], available: false }) });
+      }));
+      localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+        serviceId: service.id,
+        savedAt: Date.now(),
+        notes: 'Ghost ants on the slider track.',
+        promiseMarks: { [PROMISES[0].id]: { mark: 'done', version: PROMISES[0].version, stillLeft: '' } },
+      }));
+      const onSubmit = vi.fn().mockResolvedValue({});
+      await renderPanel({ onSubmit });
+      fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+      await act(async () => { vi.advanceTimersByTime(15000); });
+      const submit = await screen.findByRole('button', { name: /^Complete/i });
+      await waitFor(() => expect(submit.disabled).toBe(false));
+      await act(async () => fireEvent.click(submit));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+      expect(alert).not.toHaveBeenCalledWith('Still loading the promises you marked. Try again in a moment.');
+      expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: PROMISES[0].id, mark: 'done', version: PROMISES[0].version }]);
+    } finally {
+      vi.useRealTimers();
+      AbortSignal.timeout = staticTimeout;
+    }
+  });
+
   it('a promise list that cannot be read keeps the restored report and sends the marks for the server to check', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url) => {
       if (String(url).includes('/promises')) throw new TypeError('Failed to fetch');

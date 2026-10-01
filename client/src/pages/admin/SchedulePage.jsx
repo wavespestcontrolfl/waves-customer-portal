@@ -14692,8 +14692,12 @@ export function CompletionPanel({
     }
     setPromiseCheckLoading(true);
     const include = promiseIncludeKey;
-    const timeout = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-      ? { signal: AbortSignal.timeout(PROMISE_CHECK_TIMEOUT_MS) } : {};
+    // A deadline on every supported browser (AbortSignal.timeout is missing
+    // on older WebKit): a controller and a timer, which also cancels a load
+    // this effect has moved on from (Codex #5516).
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), PROMISE_CHECK_TIMEOUT_MS) : null;
+    const timeout = controller ? { signal: controller.signal } : {};
     adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`, timeout)
       .then((data) => {
         if (cancelled) return;
@@ -14707,9 +14711,14 @@ export function CompletionPanel({
         setPromiseCheckUnavailable(true);
       })
       .finally(() => {
+        clearTimeout(deadline);
         if (!cancelled) setPromiseCheckLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      clearTimeout(deadline);
+      controller?.abort();
+    };
   }, [service.id, promiseReloadKey, promiseIncludeKey]);
   const visitPromises = promiseCheck?.promises || [];
   // Marks on promises the list has not shown yet and has not been asked
