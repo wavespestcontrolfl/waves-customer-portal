@@ -62,7 +62,12 @@ describe('statuses match the table', () => {
 
   test('every status and closed reason the constants list is documented in the migration', () => {
     for (const status of C.SCHEDULE_STATUSES) expect(migration).toContain(status);
-    for (const reason of C.CLOSED_REASONS) expect(migration).toContain(reason);
+    // closed_reason is a free string column; reasons added after the migration
+    // shipped (a pushed migration is frozen) are listed here instead.
+    const ADDED_AFTER_MIGRATION = ['released_merge'];
+    for (const reason of C.CLOSED_REASONS) {
+      if (!ADDED_AFTER_MIGRATION.includes(reason)) expect(migration).toContain(reason);
+    }
   });
 
   test('a claim goes stale after the same 10 minutes as the per-invoice claim', () => {
