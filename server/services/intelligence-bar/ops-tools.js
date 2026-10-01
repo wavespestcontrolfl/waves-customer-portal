@@ -31,11 +31,18 @@
  *
  * set_railway_gate (owner ruling 2026-09-28, Decision 5: GATE_* changes may
  * be made from the bar) proposes setting ONE known GATE_* variable on the
- * portal's own production service to 'true' or 'false'. THIS PR IS PREVIEW
- * ONLY: called with confirmed:true it refuses (code not_yet_implemented) —
- * the variableUpsert commit path ships in a follow-up PR. The preview reads
+ * portal's own production service to 'true' or 'false'. The preview reads
  * the one variable's live value and never returns, logs or pins any other
- * variable's value.
+ * variable's value. Confirmed, it acts ONLY on the `_verified_railway_*`
+ * pins (service, environment, gate name, value, prior state): it re-resolves
+ * the production target and refuses unless the ids still match, re-reads the
+ * variable and refuses unless its prior state is unchanged (a non-boolean
+ * prior compares by keyed digest), then calls Railway's
+ * `variableUpsert(input: { projectId, environmentId, serviceId, name, value })`
+ * with deploys left on — Railway redeploys the portal with the new value
+ * (verified against the public API schema via `railway api describe`).
+ * Railway has no conditional write, so the re-read narrows the race window
+ * but cannot close it. A read-only token refuses as write_access_required.
  */
 
 const logger = require('../logger');
@@ -132,12 +139,11 @@ Use for: "set GATE_X to true", "turn the Y feature on" (after mapping it to the 
   },
 ];
 
-const NOT_YET_IMPLEMENTED_MESSAGE = 'Railway gate changes cannot be committed yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
 const GATE_NAME_RE = /^GATE_[A-Z0-9_]+$/;
 const PORTAL_SERVICE_NAME = 'waves-customer-portal';
 const MAX_GATE_SUGGESTIONS = 5;
 
-const READ_ONLY_TOKEN_MESSAGE = 'The Railway token cannot deploy or restart — it needs write access (a token with deploy/restart permission) before this action can commit.';
+const READ_ONLY_TOKEN_MESSAGE = 'The Railway token cannot make this change — it needs write access (deploy/restart and variable changes) before this action can commit.';
 // GraphQL reports an authorization failure as HTTP 200 + errors[]; match the
 // message shapes Railway uses for it.
 const RAILWAY_PERMISSION_ERROR_RE = /not authorized|unauthori[sz]ed|forbidden|permission|access denied|insufficient/i;
@@ -512,7 +518,7 @@ async function writeRailwayService(toolName, input) {
   return { success: true, tool: toolName, service_id: pinnedServiceId, restarted_deployment_id: pinnedDeploymentId };
 }
 
-// ── set_railway_gate (preview only) ────────────────────────────────────────
+// ── set_railway_gate ────────────────────────────────────────
 
 // The ONLY service this tool may touch: the portal's own production service.
 // Never a caller-supplied service — the environment must be named
@@ -596,9 +602,7 @@ function knownGateOrRefusal(rawName) {
 }
 
 async function setRailwayGate(input) {
-  if (input.confirmed === true) {
-    return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
-  }
+  if (input.confirmed === true) return commitRailwayGate(input);
   const known = knownGateOrRefusal(input.gate_name);
   if (known.refusal) return known.refusal;
   const { entry } = known;
@@ -665,7 +669,74 @@ async function setRailwayGate(input) {
     prior_value: priorValue,
     prior_kind: currentKind,
     prior_value_digest: currentKind === 'non_boolean' ? valueDigest(raw) : null,
-    note: `Set ${entry.name} to ${input.value} on the portal's production service (currently ${currentLabel}). This preview cannot be confirmed yet.`,
+    note: `Set ${entry.name} to ${input.value} on the portal's production service (currently ${currentLabel}).`,
+  };
+}
+
+const GATE_CHANGED_MESSAGE = 'The gate changed after the card was shown (its value or the portal service is no longer what the card named). Nothing was written — ask again for a fresh confirmation card.';
+
+// Confirmed set_railway_gate: acts ONLY on the pins /confirm-action derived
+// from the fingerprint-verified live preview — never on gate_name / value
+// from this call's own input (untrusted here).
+async function commitRailwayGate(input) {
+  const name = input._verified_railway_gate_name;
+  const value = input._verified_railway_gate_value;
+  const serviceId = input._verified_railway_service_id;
+  const environmentId = input._verified_railway_environment_id;
+  const priorKind = input._verified_railway_gate_prior_kind;
+  if (!name || !serviceId || !environmentId || !priorKind || (value !== 'true' && value !== 'false')) {
+    return {
+      error: 'Missing the verified gate change for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  // The gate must still be a known plain on/off gate (a later deploy could
+  // have retired it or shown it takes a mode).
+  const entry = require('../../config/feature-gates').knownGateCatalog().get(name);
+  if (!entry || !entry.boolean) {
+    return { error: `${name} is no longer a plain on/off gate this portal knows, so nothing was written.`, code: 'not_a_boolean_gate' };
+  }
+  const target = await resolvePortalProductionTarget();
+  if (target.service.id !== serviceId || target.environment.id !== environmentId) {
+    return { error: GATE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+  }
+  // Compare-and-swap (best effort): the live prior state must still be the
+  // one the card showed.
+  const raw = await readOneVariable(target, name);
+  let liveKind;
+  if (raw === undefined || raw === null) liveKind = 'unset';
+  else if (raw === 'true' || raw === 'false') liveKind = 'boolean';
+  else liveKind = 'non_boolean';
+  const unchanged = liveKind === priorKind && (
+    (liveKind === 'unset')
+    || (liveKind === 'boolean' && raw === input._verified_railway_gate_prior)
+    || (liveKind === 'non_boolean' && !!input._verified_railway_gate_prior_digest
+      && valueDigest(raw) === input._verified_railway_gate_prior_digest)
+  );
+  if (!unchanged) {
+    return { error: GATE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+  }
+  await railwayGraphQL(
+    `mutation variableUpsert($input: VariableUpsertInput!) { variableUpsert(input: $input) }`,
+    {
+      input: {
+        projectId: target.projectId,
+        environmentId,
+        serviceId,
+        name,
+        value,
+      },
+    },
+    { forWrite: true },
+  );
+  return {
+    success: true,
+    tool: 'set_railway_gate',
+    gate: name,
+    value,
+    service_id: serviceId,
+    environment_id: environmentId,
+    redeploy_notice: 'Railway is redeploying the portal with the new value; it restarts briefly and the change takes effect once the new deploy is live.',
   };
 }
 

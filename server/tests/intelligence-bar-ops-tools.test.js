@@ -513,7 +513,7 @@ describe('intelligence bar Railway write tools (confirmed commit)', () => {
     global.fetch.mockResolvedValueOnce(envFixture('d1')).mockResolvedValueOnce(denied);
     const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal', ...pins, confirmed: true });
     expect(result.code).toBe('write_access_required');
-    expect(result.error).toMatch(/cannot deploy or restart.*write access/i);
+    expect(result.error).toMatch(/cannot make this change.*write access/i);
     expect(result.success).toBeUndefined();
   });
 
@@ -531,7 +531,7 @@ describe('intelligence bar Railway write tools (confirmed commit)', () => {
 // preview reads the live value of ONE variable on the portal's production
 // service; it never echoes a non-boolean value or any other variable, and
 // confirmed:true refuses without touching the network.
-describe('intelligence bar set_railway_gate (preview only)', () => {
+describe('intelligence bar set_railway_gate', () => {
   const KNOWN_GATE = 'GATE_STAMPED_ZERO_FREE';
   // Sentinel values that must never appear in any result: another variable's
   // secret and a non-boolean value of the gate itself.
@@ -783,12 +783,108 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
-  test('confirmed:true refuses (the commit path is not built in this PR) and makes no network call', async () => {
+  // ── commit path: acts only on the _verified_* pins ──
+  const PINS = {
+    _verified_railway_service_id: 'svc-portal',
+    _verified_railway_environment_id: 'env-1',
+    _verified_railway_gate_name: KNOWN_GATE,
+    _verified_railway_gate_value: 'true',
+    _verified_railway_gate_prior_kind: 'boolean',
+    _verified_railway_gate_prior: 'false',
+    _verified_railway_gate_prior_digest: null,
+  };
+  const commit = (pins = {}, input = {}) => executeOpsTool('set_railway_gate', {
+    gate_name: 'GATE_FORGED_FROM_INPUT', value: 'false', ...input, confirmed: true, ...PINS, ...pins,
+  });
+  const mutationCalls = () => global.fetch.mock.calls.filter(([, init]) => String(init?.body || '').includes('mutation'));
+
+  test('confirmed without pins refuses with missing_verified_pin and no network call', async () => {
     configure();
-    const result = await propose({ confirmed: true });
-    expect(result.error).toMatch(/cannot be committed yet/);
-    expect(result.code).toBe('not_yet_implemented');
+    const result = await executeOpsTool('set_railway_gate', { gate_name: KNOWN_GATE, value: 'true', confirmed: true });
+    expect(result.code).toBe('missing_verified_pin');
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('confirmed: upserts the pinned gate + value (never the call input) and reports the redeploy', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false', OTHER: OTHER_SECRET }))
+      .mockResolvedValueOnce(gqlResponse({ variableUpsert: true }));
+    const result = await commit();
+    expect(result.success).toBe(true);
+    expect(result.gate).toBe(KNOWN_GATE);
+    expect(result.redeploy_notice).toMatch(/redeploying/);
+    const [[, init]] = mutationCalls();
+    const body = JSON.parse(init.body);
+    expect(body.query).toContain('variableUpsert');
+    expect(body.variables.input).toEqual({
+      projectId: 'proj-1', environmentId: 'env-1', serviceId: 'svc-portal', name: KNOWN_GATE, value: 'true',
+    });
+    expect(JSON.stringify(result)).not.toContain(OTHER_SECRET);
+    expect(JSON.stringify(body)).not.toContain('GATE_FORGED_FROM_INPUT');
+  });
+
+  test.each([
+    ['the value moved', { [KNOWN_GATE]: 'true' }],
+    ['the gate was unset', {}],
+    ['a non-boolean value appeared', { [KNOWN_GATE]: WEIRD_VALUE }],
+  ])('confirmed but %s since the card: target_changed, no write', async (_label, vars) => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables(vars));
+    const result = await commit();
+    expect(result.code).toBe('target_changed');
+    expect(result.preview_changed).toBe(true);
+    expect(mutationCalls()).toHaveLength(0);
+    expect(JSON.stringify(result)).not.toContain(WEIRD_VALUE);
+  });
+
+  test('a non-boolean prior commits only when its keyed digest still matches', async () => {
+    configure();
+    const crypto = require('crypto');
+    const digest = (v) => crypto.createHmac('sha256', process.env.JWT_SECRET || 'ib-gate-prior-value').update(v).digest('hex').slice(0, 16);
+    const pins = { _verified_railway_gate_prior_kind: 'non_boolean', _verified_railway_gate_prior: null, _verified_railway_gate_prior_digest: digest(WEIRD_VALUE) };
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'other-weird' }));
+    expect((await commit(pins)).code).toBe('target_changed');
+    expect(mutationCalls()).toHaveLength(0);
+
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: WEIRD_VALUE }))
+      .mockResolvedValueOnce(gqlResponse({ variableUpsert: true }));
+    expect((await commit(pins)).success).toBe(true);
+    expect(mutationCalls()).toHaveLength(1);
+  });
+
+  test('confirmed but the portal service id moved: target_changed, no variable read or write', async () => {
+    configure();
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT());
+    const result = await commit({ _verified_railway_service_id: 'svc-gone' });
+    expect(result.code).toBe('target_changed');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a pinned gate that is no longer a plain on/off gate refuses with no network call', async () => {
+    configure();
+    const result = await commit({ _verified_railway_gate_name: 'GATE_REVIEW_AUTO_REPLY' });
+    expect(result.code).toBe('not_a_boolean_gate');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('a read-only token on the upsert: write_access_required, no success', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false' }))
+      .mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({}) });
+    const result = await commit();
+    expect(result.success).toBeUndefined();
+    expect(result.code).toBe('write_access_required');
+    expect(result.error).toMatch(/needs write access/);
   });
 
   test('a Railway failure surfaces as { error } without echoing the gate input', async () => {

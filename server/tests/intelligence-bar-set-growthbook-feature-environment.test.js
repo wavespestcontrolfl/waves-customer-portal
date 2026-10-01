@@ -2,7 +2,7 @@
  * set_growthbook_feature_environment (owner ruling 2026-09-28, Decision 5) — PREVIEW ONLY.
  * Mocked GrowthBook API: the preview reads GET /api/v1/features/{id} and shows
  * the environment's current state; the toggle endpoint is never called, and
- * confirmed:true refuses without any network call.
+ * confirmed:true acts only on the _verified_growthbook_* pins.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -50,7 +50,7 @@ beforeEach(() => {
 
 const propose = (input) => executeGrowthbookTool('set_growthbook_feature_environment', { feature_id: 'pricing-hub', enabled: true, ...input });
 
-describe('set_growthbook_feature_environment (preview only)', () => {
+describe('set_growthbook_feature_environment', () => {
   test('missing key: configured:false, no error, no card, no network call', async () => {
     const result = await propose({});
     expect(result.configured).toBe(false);
@@ -149,12 +149,74 @@ describe('set_growthbook_feature_environment (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('confirmed:true refuses (no commit path yet) and the toggle endpoint is never called', async () => {
+  // ── commit path: acts only on the _verified_growthbook_* pins ──
+  const PINS = {
+    _verified_growthbook_feature_id: 'pricing-hub',
+    _verified_growthbook_environment: 'production',
+    _verified_growthbook_prior_enabled: false,
+    _verified_growthbook_feature_updated: '2026-09-01T12:00:00.000Z',
+    _verified_growthbook_revision: 7,
+  };
+  const commit = (pins = {}) => executeGrowthbookTool('set_growthbook_feature_environment', {
+    feature_id: 'forged-from-input', environment: 'dev', enabled: false, confirmed: true, ...PINS, ...pins,
+  });
+  const posts = () => global.fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+
+  test('confirmed without pins refuses with missing_verified_pin and no network call', async () => {
     process.env.GROWTHBOOK_API_KEY = 'secret_test';
     const result = await propose({ confirmed: true });
-    expect(result.error).toMatch(/cannot be committed yet/);
-    expect(result.code).toBe('not_yet_implemented');
+    expect(result.code).toBe('missing_verified_pin');
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('confirmed: toggles the pinned feature + environment via the v2 endpoint (never the call input)', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(featureBody()))
+      .mockResolvedValueOnce(jsonResponse({ feature: {} }));
+    const result = await commit();
+    expect(result.success).toBe(true);
+    expect(result.enabled).toBe(true);
+    const [[url, init]] = posts();
+    expect(url).toBe('https://api.growthbook.io/api/v2/features/pricing-hub/toggle');
+    const body = JSON.parse(init.body);
+    expect(body.environments).toEqual({ production: true });
+    expect(body.reason).toMatch(/Intelligence Bar/);
+    expect(JSON.stringify(global.fetch.mock.calls)).not.toContain('forged-from-input');
+  });
+
+  test.each([
+    ['edited in the GrowthBook UI (dateUpdated moved)', { dateUpdated: '2026-10-01T09:00:00.000Z' }],
+    ['a new revision', { revision: { version: 8 } }],
+    ['archived', { archived: true }],
+    ['the environment was already enabled', { environments: { production: { enabled: true, defaultValue: 'false', rules: [] } } }],
+    ['the environment is gone', { environments: { dev: { enabled: true } } }],
+  ])('confirmed but %s since the card: target_changed, no toggle', async (_label, overrides) => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    global.fetch.mockResolvedValueOnce(jsonResponse(featureBody(overrides)));
+    const result = await commit();
+    expect(result.code).toBe('target_changed');
+    expect(result.preview_changed).toBe(true);
+    expect(posts()).toHaveLength(0);
+  });
+
+  test('confirmed but the feature was deleted: target_changed, no toggle', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    global.fetch.mockResolvedValueOnce(jsonResponse({}, 404));
+    const result = await commit();
+    expect(result.code).toBe('target_changed');
+    expect(posts()).toHaveLength(0);
+  });
+
+  test('a key without Publish access on the toggle: write_access_required, no success', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(featureBody()))
+      .mockResolvedValueOnce(jsonResponse({ message: 'Forbidden' }, 403));
+    const result = await commit();
+    expect(result.success).toBeUndefined();
+    expect(result.code).toBe('write_access_required');
+    expect(result.error).toMatch(/Publish access/);
   });
 
   test('a rejected key surfaces as { error } and logs only the tool name', async () => {

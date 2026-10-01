@@ -1,8 +1,8 @@
 /**
  * Feature-switch cards (set_railway_gate, set_growthbook_feature_environment)
  * — Codex r1 on #5489: the card shows the live preview facts (not the raw
- * model params), and its contract is marked preview_only so the client hides
- * Confirm until the commit-path PR.
+ * model params). The commit path has shipped, so the contract is no longer
+ * preview_only and the card shows Confirm.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -61,14 +61,14 @@ describe('feature-switch cards show the live preview facts', () => {
     });
   });
 
-  test('the contract effects carry those lines, and preview_only is set', () => {
+  test('the contract effects carry those lines, and the card is confirmable (not preview_only)', () => {
     for (const [toolName, params, preview] of [
       ['set_railway_gate', { gate_name: 'GATE_LATE_PAYMENT_CHECKER_OFF', value: 'true' }, gatePreview],
       ['set_growthbook_feature_environment', { feature_id: 'pricing-hub', enabled: true }, gbPreview],
     ]) {
       const displayParams = confirmationDisplayParams(toolName, params, preview);
       const contract = buildContract({ toolName, params, displayParams, preview, summary: 's' });
-      expect(contract.preview_only).toBe(true);
+      expect(contract.preview_only).toBeUndefined();
       const labels = contract.effects.map((e) => e.label).join('\n');
       expect(labels).toMatch(toolName === 'set_railway_gate' ? /turns the thing it names OFF/ : /does not by itself make it serve true/);
     }
@@ -79,6 +79,7 @@ describe('feature-switch cards show the live preview facts', () => {
       toolName: 'purge_cloudflare_cache', params: { zone_name: 'wavespestcontrol.com' }, displayParams: { zone_name: 'wavespestcontrol.com' }, preview: {}, summary: 's',
     });
     expect(contract.preview_only).toBeUndefined();
-    expect([...PREVIEW_ONLY_WRITE_TOOL_NAMES].sort()).toEqual(['set_growthbook_feature_environment', 'set_railway_gate']);
+    // The commit path shipped: no switch is preview-only any more.
+    expect([...PREVIEW_ONLY_WRITE_TOOL_NAMES]).toEqual([]);
   });
 });

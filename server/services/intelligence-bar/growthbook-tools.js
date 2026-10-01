@@ -12,18 +12,22 @@
  * propose a flag toggle through the usual confirmation card (full-access login
  * only, write-gates.js OUTSIDE_WRITE_TOOL_NAMES).
  *
- * set_growthbook_feature_environment is PREVIEW ONLY in this change: it reads the feature
- * (GET /api/v1/features/{id}) and shows the environment's current state, but
- * called with confirmed:true it refuses (code not_yet_implemented). The commit
- * path will call GrowthBook's documented toggle endpoint —
- * POST /api/v1/features/{id}/toggle with a body of
- * { environments: { "<env>": true|false }, reason: "<why>" } — which is NOT
- * called anywhere yet. (GrowthBook marks the v1 feature endpoints deprecated in
- * favor of /v2/features; v1 is what the owner asked for and what the existing
- * read tools use.)
+ * set_growthbook_feature_environment reads the feature
+ * (GET /api/v1/features/{id}) and shows the environment's current state.
+ * Confirmed, it acts ONLY on the `_verified_growthbook_*` pins: it re-reads
+ * the feature and refuses unless it is unarchived, the environment still has
+ * the prior state the card showed, and the feature's dateUpdated / revision
+ * are unchanged (an edit made anywhere — including the GrowthBook UI —
+ * refuses). Then it calls GrowthBook's documented toggle endpoint,
+ * POST /api/v2/features/{id}/toggle with
+ * { environments: { "<env>": true|false }, reason, comment }, which publishes
+ * immediately. (The v1 toggle is deprecated in favor of v2, same body; the
+ * reads stay on v1.) GrowthBook has no conditional toggle, so the re-read
+ * narrows the race window but cannot close it.
  *
  * Auth: GROWTHBOOK_API_KEY. The reads work with a read-only secret key; a
- * toggle will need a key with write access. GROWTHBOOK_API_BASE overrides for
+ * toggle needs a key with Publish access for the environment — a 401/403
+ * refuses as write_access_required. GROWTHBOOK_API_BASE overrides for
  * self-hosted.
  */
 
@@ -77,7 +81,8 @@ Use for: "enable the pricing-hub feature in production", "disable the X feature 
   },
 ];
 
-const NOT_YET_IMPLEMENTED_MESSAGE = 'GrowthBook flag changes cannot be committed yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const READ_ONLY_KEY_MESSAGE = 'The GrowthBook key cannot change flags — it needs a secret key with Publish access for this environment (or the environment requires approval) before this action can commit.';
+const FEATURE_CHANGED_MESSAGE = 'The GrowthBook feature changed after the card was shown (edited, archived, or its environment state moved). Nothing was changed — ask again for a fresh confirmation card.';
 const FEATURE_ID_RE = /^[A-Za-z0-9_.:-]{1,100}$/;
 const ENVIRONMENT_RE = /^[A-Za-z0-9_-]{1,40}$/;
 const MAX_DEFAULT_VALUE_CHARS = 120;
@@ -107,6 +112,34 @@ async function gbGet(path) {
     return await res.json();
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`GrowthBook API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function gbPost(path, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${GROWTHBOOK_API_BASE}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.GROWTHBOOK_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (res.status === 401 || res.status === 403) {
+      const err = new Error(READ_ONLY_KEY_MESSAGE);
+      err.writeAccessRequired = true;
+      throw err;
+    }
+    if (!res.ok) throw new Error(`GrowthBook API returned HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`GrowthBook API timed out after ${REQUEST_TIMEOUT_MS / 1000}s — the toggle may or may not have applied; check the feature before trying again.`);
     throw err;
   } finally {
     clearTimeout(timer);
@@ -268,7 +301,7 @@ async function getExperimentResultsSummary() {
   return { experiments: out, running: out.length };
 }
 
-// ── set_growthbook_feature_environment (preview only) ──────────────────────────────────
+// ── set_growthbook_feature_environment ──────────────────────────────────
 
 function shortValue(v) {
   if (v === undefined || v === null) return null;
@@ -277,9 +310,7 @@ function shortValue(v) {
 }
 
 async function setGrowthbookFeatureEnvironment(input) {
-  if (input.confirmed === true) {
-    return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
-  }
+  if (input.confirmed === true) return commitGrowthbookFeatureEnvironment(input);
   const featureId = typeof input.feature_id === 'string' ? input.feature_id.trim() : '';
   const environment = input.environment === undefined || input.environment === null || input.environment === ''
     ? 'production' : String(input.environment).trim();
@@ -344,7 +375,54 @@ async function setGrowthbookFeatureEnvironment(input) {
     prior_enabled: priorEnabled,
     feature_version: feature.dateUpdated || null,
     revision_version: feature.revision && feature.revision.version !== undefined ? feature.revision.version : null,
-    note: `${input.enabled ? 'Enable' : 'Disable'} GrowthBook feature ${feature.id || featureId} in ${environment} (currently ${word(priorEnabled)}). This preview cannot be confirmed yet.`,
+    note: `${input.enabled ? 'Enable' : 'Disable'} GrowthBook feature ${feature.id || featureId} in ${environment} (currently ${word(priorEnabled)}).`,
+  };
+}
+
+// Confirmed set_growthbook_feature_environment: acts ONLY on the pins
+// /confirm-action derived from the fingerprint-verified live preview — never
+// on feature_id / environment / enabled from this call's own input.
+async function commitGrowthbookFeatureEnvironment(input) {
+  const featureId = input._verified_growthbook_feature_id;
+  const environment = input._verified_growthbook_environment;
+  const priorEnabled = input._verified_growthbook_prior_enabled;
+  if (!featureId || !FEATURE_ID_RE.test(featureId) || !environment || !ENVIRONMENT_RE.test(environment)
+    || typeof priorEnabled !== 'boolean') {
+    return {
+      error: 'Missing the verified feature change for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  const enabled = !priorEnabled;
+  let json;
+  try {
+    json = await gbGet(`/api/v1/features/${encodeURIComponent(featureId)}`);
+  } catch (err) {
+    if (isNotFound(err)) return { error: FEATURE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+    throw err;
+  }
+  const feature = json && json.feature;
+  const envs = feature && feature.environments && typeof feature.environments === 'object' ? feature.environments : {};
+  const envCfg = Object.prototype.hasOwnProperty.call(envs, environment) ? envs[environment] : null;
+  const liveRevision = feature && feature.revision && feature.revision.version !== undefined ? feature.revision.version : null;
+  if (!feature || feature.archived || !envCfg || typeof envCfg !== 'object'
+    || Boolean(envCfg.enabled) !== priorEnabled
+    || (feature.dateUpdated || null) !== (input._verified_growthbook_feature_updated ?? null)
+    || liveRevision !== (input._verified_growthbook_revision ?? null)) {
+    return { error: FEATURE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+  }
+  await gbPost(`/api/v2/features/${encodeURIComponent(featureId)}/toggle`, {
+    environments: { [environment]: enabled },
+    reason: 'Intelligence Bar: owner-confirmed card',
+    comment: `Intelligence Bar: ${enabled ? 'enabled' : 'disabled'} in ${environment} (owner-confirmed card)`,
+  });
+  return {
+    success: true,
+    tool: 'set_growthbook_feature_environment',
+    feature: featureId,
+    environment,
+    enabled,
+    note: `Feature ${featureId} is now ${enabled ? 'enabled' : 'disabled'} in ${environment}. SDK clients pick it up on their next feature refresh.`,
   };
 }
 
@@ -370,7 +448,7 @@ async function executeGrowthbookTool(toolName, input = {}) {
     } else {
       logger.error(`[intelligence-bar:growthbook] Tool ${toolName} failed:`, err);
     }
-    return { error: err.message };
+    return { error: err.message, ...(err.writeAccessRequired ? { code: 'write_access_required' } : {}) };
   }
 }
 
