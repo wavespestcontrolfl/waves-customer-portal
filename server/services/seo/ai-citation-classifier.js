@@ -321,7 +321,7 @@ function classifyUrl(urlString, { providerIntent = false } = {}) {
 const ENQUEUABLE_CATEGORIES = Object.freeze(['listing', 'editorial']);
 
 module.exports = {
-  classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES,
+  classifyUrl, isLocallyRelevant, isProviderIntentQuestion, hasBestToken, ENQUEUABLE_CATEGORIES,
   _internals: {
     LISTING_DOMAINS, EDITORIAL_DOMAINS, REFERENCE_SUFFIXES, REFERENCE_DOMAINS, competitorDomains,
     EXTRA_COMPETITOR_DOMAINS, COMMUNITY_VIDEO_DOMAINS, SWFL_LOCAL_DOMAINS, GEO_TERMS, BEST_TOKENS,
