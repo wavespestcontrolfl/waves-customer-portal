@@ -938,6 +938,37 @@ describe('InspectionPage emailed-time card', () => {
   });
 });
 
+describe('InspectionPage emailed-time card: Codex #5450 r1', () => {
+  it('SLOT_TAKEN with no availability and a failed refresh still drops the card\'s Book button', async () => {
+    let gets = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ success: false, code: 'SLOT_TAKEN', availability: null }, 409));
+      gets += 1;
+      return Promise.resolve(gets === 1 ? jsonResponse(okPayload()) : jsonResponse({ error: 'down' }, 500));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.click(within(emailCard()).getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(within(emailCard()).getByRole('alert')).toHaveTextContent(/just taken/i));
+    expect(within(emailCard()).queryByRole('button', { name: /^Book /i })).toBeNull();
+  });
+
+  it('a search that drops the fallback time also drops its "we moved you" note', async () => {
+    const monday = { ...TWO_DAYS, days: [TWO_DAYS.days[1]] };
+    stubFetch({ get: jsonResponse(okPayload()), findSlots: jsonResponse({ availability: monday, summary: 'Open Monday morning.' }) });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|09:00'); // moved to 13:00
+    await screen.findByText(/moved you to the next open time/i);
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'monday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 10:00 AM on Monday, July 13/i }));
+    expect(screen.getByRole('button', { name: /^Book Mon/i })).toBeInTheDocument();
+    expect(screen.queryByText(/moved you to the next open time/i)).toBeNull();
+  });
+});
+
 describe('InspectionPage: a search keeps a pick it still offers', () => {
   it('searching for the time already picked keeps it picked, with Book still showing', async () => {
     stubFetch({ findSlots: jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }) });

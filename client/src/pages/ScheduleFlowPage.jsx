@@ -1542,7 +1542,12 @@ export default function ScheduleFlowPage({ flow }) {
     const kept = held ? findSlotInDays(days, held) : null;
     if (held && !kept) setSelectedSlot(null);
     else if (kept) setSelectedSlot(kept);
-    if (emailPickRef.current) setEmailPick(findSlotInDays(days, emailPickRef.current));
+    if (emailPickRef.current) {
+      const keptEmail = findSlotInDays(days, emailPickRef.current);
+      setEmailPick(keptEmail);
+      // Its "we moved you" note goes with it — never under a later pick.
+      if (!keptEmail) setSlotMovedNotice(null);
+    }
     if (!days.length) {
       setSelectedDate(null);
       return;
@@ -1771,6 +1776,14 @@ export default function ScheduleFlowPage({ flow }) {
       }
       if (body.code === 'SLOT_TAKEN') {
         setSelectedSlot(null);
+        // The taken time may be the emailed one: drop it here, not only via
+        // a later availability update — the refresh is best-effort and can
+        // leave `data` untouched, which would re-arm the card's Book button
+        // on a known-unavailable time.
+        if (emailPick && sameSlot(slotToBook, emailPick)) {
+          setEmailPick(null);
+          setSlotMovedNotice(null);
+        }
         setAiFiltered(false); // refreshed availability spans the full window
         setAiSession((n) => n + 1); // remount the card — its recap is stale too
         // Inspection only: a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY
@@ -1932,7 +1945,7 @@ export default function ScheduleFlowPage({ flow }) {
             setSubmitError(null);
             // Another time replaces the emailed one — its top card (and its
             // "we moved you" note) no longer describe what Book will book.
-            if (emailPick && !sameSlot(slot, emailPick)) {
+            if (!emailPick || !sameSlot(slot, emailPick)) {
               setEmailPick(null);
               setSlotMovedNotice(null);
               setBookedFromTop(false);
