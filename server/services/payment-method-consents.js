@@ -13,7 +13,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const {
-  CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY, getConsentText, renderedConsentVersionIsCurrent,
+  CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY, CARD_HOLD_CONSENT_VERSION, PREPAY_CONSENT_MARKER,
+  getConsentText, renderedConsentVersionIsCurrent,
 } = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
@@ -35,7 +36,11 @@ async function recordConsent({
   // 'prepay_card' snapshots the annual-prepay authorization (immediate
   // charge + future invoices) instead of the base card text — the UI must
   // have rendered the SAME variant at the checkbox (GATE_PREPAY_CARD_AND_CHARGE).
+  // 'card_hold' snapshots the one-time hold disclosure the CardHoldModal
+  // rendered (fee + window in `holdTerms`) under CARD_HOLD_CONSENT_VERSION —
+  // never the card authorization that modal does not show (codex #5434 r3).
   consentVariant = null,
+  holdTerms = null,
   // Authorization that came from a SIGNED AGREEMENT rather than a consent
   // checkbox (termite annual plan charged at signature, owner ruling
   // 2026-09-25): the snapshot is the agreement text the customer actually
@@ -58,21 +63,22 @@ async function recordConsent({
   if ((consentTextSnapshot || evidenceContractId) && !(consentTextSnapshot && consentTextVersion && evidenceContractId)) {
     throw new Error('recordConsent: an agreement-backed consent needs its snapshot, version, and contract id');
   }
-  const consentText = consentTextSnapshot || getConsentText(methodType, { variant: consentVariant });
+  const consentText = consentTextSnapshot || getConsentText(methodType, { variant: consentVariant, holdTerms });
+  const versionForVariant = consentVariant === 'card_hold' ? CARD_HOLD_CONSENT_VERSION : CONSENT_VERSION;
 
   const [row] = await database('payment_method_consents').insert({
     customer_id: customerId,
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,
     source,
-    consent_text_version: consentTextVersion || CONSENT_VERSION,
+    consent_text_version: consentTextVersion || versionForVariant,
     consent_text_snapshot: consentText,
     ip,
     user_agent: userAgent,
     ...(evidenceContractId ? { evidence_contract_id: evidenceContractId } : {}),
   }).returning('*');
 
-  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${CONSENT_VERSION}, methodType=${methodType})`);
+  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${consentTextVersion || versionForVariant}, methodType=${methodType})`);
   return row;
 }
 
@@ -149,6 +155,14 @@ async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, {
     .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId });
   if (version) q.where({ consent_text_version: String(version) });
   else if (!anyVersion) q.where({ consent_text_snapshot: getConsentText(methodType, { variant }) });
+  // A version/any-version lookup for the PREPAY variant still has to be the
+  // prepay authorization (codex #5434 r3 P1): a base save-and-charge row the
+  // recurring-card backstop recorded for the same method, matching on
+  // version/source/time alone, must never stand in for the immediate-charge
+  // authorization. The marker rides every version of both prepay texts.
+  if ((version || anyVersion) && variant === 'prepay_card') {
+    q.where('consent_text_snapshot', 'like', `%${PREPAY_CONSENT_MARKER}%`);
+  }
   // `source` scopes the idempotency to ONE capture surface: an identical
   // consent the customer gave elsewhere (portal, another link) is its own
   // ledger row and must not stand in for this surface's record.

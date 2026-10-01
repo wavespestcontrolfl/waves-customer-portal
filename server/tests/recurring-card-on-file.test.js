@@ -349,14 +349,14 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       mockHasConsentSnapshotForVariant.mockResolvedValueOnce(true);
       await expect(resolvePrepayRecoveryAuthorization({ ...JOB, consent_text_version: 'v11_2026-08-25' }, 'cust-1')).resolves.toEqual({ recordable: false, version: 'v11_2026-08-25' });
       expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_job', expect.objectContaining({
-        source: 'estimate_accept', version: 'v11_2026-08-25', since: new Date('2026-09-30T20:00:00.000Z'),
+        source: 'estimate_accept', variant: 'prepay_card', version: 'v11_2026-08-25', since: new Date('2026-09-30T20:00:00.000Z'),
       }));
     });
 
     it('a job written before versions were persisted looks the row up under ANY version', async () => {
       mockHasConsentSnapshotForVariant.mockResolvedValueOnce(true);
       await expect(resolvePrepayRecoveryAuthorization({ ...JOB }, 'cust-1')).resolves.toEqual({ recordable: false, version: null });
-      expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_job', expect.objectContaining({ source: 'estimate_accept', anyVersion: true }));
+      expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_job', expect.objectContaining({ source: 'estimate_accept', variant: 'prepay_card', anyVersion: true }));
       expect(mockHasConsentSnapshotForVariant.mock.calls[0][2]).not.toHaveProperty('version');
     });
 

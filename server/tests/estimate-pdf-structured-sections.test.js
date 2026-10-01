@@ -267,6 +267,10 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     // Declined: historical, never restated.
     text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'declined' }, { billsPerApplication: false }));
     expect(text).not.toContain('Rate reviewed yearly');
+    // Accepted with NO drawer snapshot (gate off / annual prepay) but the
+    // accept's own document stamp (codex r3 P1): the line stays.
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted', estimate_data: { ...base.estimate_data, rateReviewDisclosedAtAccept: true } }, { billsPerApplication: false, acceptance: null }));
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
   });
 
   test('a synthesized lawn proposal carries the rate-review disclosure without the pest-only callback line', async () => {

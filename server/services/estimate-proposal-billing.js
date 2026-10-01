@@ -133,8 +133,16 @@ function proposalCallbackTermsEligible(proposal, estimateId = null) {
 // frozen before this disclosure existed, one accepted under the 'base'
 // drawer (rodent, one-time toggle), or a declined one never acquires it. An
 // open estimate is being sold under the current terms and prints it.
+// Two pieces of persisted evidence, either suffices (codex #5434 r3 P1):
+// the acceptance drawer snapshot, or the accept's own document stamp
+// (estimate_data.rateReviewDisclosedAtAccept — written atomically with the
+// acceptance whenever the open document carried the line, including accepts
+// that record no drawer snapshot: the gate off, the annual prepay lane).
 function documentCarriesRateReviewTerms(estimate, acceptance = null) {
   if (!estimateIsPriceLocked(estimate)) return true;
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  if (data && typeof data === 'object' && data.rateReviewDisclosedAtAccept === true) return true;
   const { RATE_REVIEW_SENTENCE } = require('./acceptance-terms-text');
   const text = acceptance?.termsText ?? acceptance?.terms_text ?? '';
   return typeof text === 'string' && text.includes(RATE_REVIEW_SENTENCE);

@@ -9724,9 +9724,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // beside a current version — a bundle that predates scopes) is the same
     // reloadable 409 as a stale version. Still read-only here; the
     // transaction opens below.
-    const recordedTermsScope = recordAcceptanceTerms
-      ? acceptanceTermsScopeFor(estimate, rawEstData, pricingBundle, { oneTime: treatAsOneTime })
-      : null;
+    // The accept's plan-terms scope, computed regardless of the acceptance
+    // gate: it also decides the document stamp below (codex #5434 r3 P1).
+    const acceptTermsScope = acceptanceTermsScopeFor(estimate, rawEstData, pricingBundle, { oneTime: treatAsOneTime });
+    const recordedTermsScope = recordAcceptanceTerms ? acceptTermsScope : null;
     if (recordAcceptanceTerms && acceptedTermsScope !== recordedTermsScope) {
       return res.status(409).json({
         error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
@@ -11438,6 +11439,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // so an estimate can never be accepted without its record (or vice
       // versa). Retries of an already-accepted estimate never reach here
       // (the guarded UPDATE above 409s first).
+      // Frozen-document stamp (codex #5434 r3 P1): the proposal document of
+      // a recurring residential plan carried the annual rate review
+      // disclosure while this estimate was open, whether or not the
+      // acceptance drawer recorded it (gate off, or the terms-neutral annual
+      // prepay lane records nothing). Stamp that fact atomically with the
+      // acceptance so the accepted document keeps the line it showed —
+      // persisted evidence, independent of the drawer snapshot. A rodent,
+      // one-time-only or one-time-toggle accept carries no rate to review
+      // and gets no stamp.
+      if (acceptTermsScope === 'plan') {
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{rateReviewDisclosedAtAccept}', 'true'::jsonb)",
+          ),
+        });
+      }
       if (recordAcceptanceTerms) {
         const [acceptanceRow] = await trx('estimate_acceptances').insert({
           estimate_id: estimate.id,
@@ -12832,6 +12849,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       void CardHolds.attachCardHoldPaymentMethod({
         customerId,
         paymentMethodId: cardHoldVerification.paymentMethodId,
+        // The fee/window this accept resolved — the hold disclosure the
+        // modal rendered is snapshotted with these numbers.
+        holdTerms: { noShowFeeAmount: cardHoldPolicy.noShowFeeAmount, cancelWindowHours: cardHoldPolicy.cancelWindowHours },
       }).catch(() => {});
       // Hold-confirmation email (owner 2026-07-13; GATED OFF until
       // GATE_CARD_ENROLLMENT_EMAILS): the customer's copy of the

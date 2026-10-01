@@ -117,6 +117,35 @@ const PREPAY_ACH_CONSENT_TEXT = [
 // contract code working without a forced refactor in this PR.
 const CONSENT_TEXT = CARD_CONSENT_TEXT;
 
+// The phrase that distinguishes BOTH prepay variants (card and ACH) from the
+// base texts, in every version that has carried them: recovery evidence for
+// an annual-prepay charge is matched on it (codex #5434 r3 P1), because a
+// base save-and-charge consent for the same method must never stand in for
+// the immediate-charge authorization.
+const PREPAY_CONSENT_MARKER = '12-month annual prepay invoice';
+
+// One-time card HOLD (CardHoldModal on the estimate page): the customer reads
+// the hold's own disclosure — final total charged after the visit, the
+// no-show / late-cancel fee and window, the surcharge line — never the card
+// authorization above (codex #5434 r3 P1). Its ledger row snapshots exactly
+// that text under its own version (not a 'v<N>' card-copy version, so it can
+// never read as Auto Pay enrollment consent; hold rows are also excluded by
+// source). Mirror of EstimateViewPage.jsx CardHoldModal — keep in lockstep.
+const CARD_HOLD_CONSENT_VERSION = 'card_hold_v1_2026-10-01';
+const SURCHARGE_RATE_PHRASE = (CARD_CONSENT_TEXT.match(/up to \d+(?:\.\d+)?%/) || [])[0];
+const CARD_SURCHARGE_DISCLOSURE = SURCHARGE_RATE_PHRASE
+  ? `A credit card surcharge of ${SURCHARGE_RATE_PHRASE} may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.`
+  : 'A credit card surcharge may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.';
+function fmtHoldMoney(n) {
+  const v = Math.round(Number(n) * 100) / 100;
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function cardHoldConsentText({ noShowFeeAmount = 75, cancelWindowHours = 24 } = {}) {
+  const feeText = fmtHoldMoney(noShowFeeAmount != null ? noShowFeeAmount : 75);
+  const windowText = `${cancelWindowHours != null ? cancelWindowHours : 24} hours`;
+  return `We won’t charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren’t home. Rescheduling is free but doesn’t reset the cancellation window. ${CARD_SURCHARGE_DISCLOSURE}`;
+}
+
 // ── Rendered-version attestation (codex #5434 r1 P1) ──────────────────────
 // The client bundles its own copy of this text, so a tab that loaded an
 // OLDER bundle keeps rendering the older copy after a deploy bumps this
@@ -158,7 +187,9 @@ function consentVersionStaleError() {
   return err;
 }
 
-function getConsentText(methodType, { variant = null } = {}) {
+function getConsentText(methodType, { variant = null, holdTerms = null } = {}) {
+  // A one-time card hold snapshots the hold disclosure the customer read.
+  if (variant === 'card_hold') return cardHoldConsentText(holdTerms || {});
   // Accept both Stripe-style ('us_bank_account') and DB-style ('ach')
   // to be forgiving at call sites.
   if (methodType === 'us_bank_account' || methodType === 'ach') {
@@ -179,6 +210,9 @@ module.exports = {
   PREPAY_CARD_CONSENT_TEXT,
   PREPAY_ACH_CONSENT_TEXT,
   RATE_IN_EFFECT_SENTENCE,
+  PREPAY_CONSENT_MARKER,
+  CARD_HOLD_CONSENT_VERSION,
+  cardHoldConsentText,
   CONSENT_VERSION,
   CONSENT_VERSION_STALE_CODE,
   CONSENT_VERSION_STALE_MESSAGE,

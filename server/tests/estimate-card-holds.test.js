@@ -2131,6 +2131,23 @@ describe('attach revocation guard is SELF-HEAL scoped (pre-push r13/r14 P0)', ()
     const r = await attachCardHoldPaymentMethod({ customerId: 'cust1', paymentMethodId: 'pm_live', mode: 'self_heal' });
     expect(r).toEqual(expect.objectContaining({ attached: true, paymentMethodRowId: 'pmrow_new' }));
   });
+  // codex #5434 r3 P1: the hold's ledger row is the hold disclosure the modal
+  // rendered (fee/window frozen by the accept), never the card authorization.
+  it('the attach records the card_hold consent variant with the frozen fee and window', async () => {
+    const ConsentService = require('../services/payment-method-consents');
+    const record = jest.spyOn(ConsentService, 'recordConsent').mockResolvedValue({ id: 'c-hold' });
+    mockSavePaymentMethod.mockResolvedValueOnce({ id: 'pmrow_hold' });
+    const { attachCardHoldPaymentMethod } = require('../services/estimate-card-holds');
+    const r = await attachCardHoldPaymentMethod({ customerId: 'cust1', paymentMethodId: 'pm_hold', holdTerms: { noShowFeeAmount: 49.5, cancelWindowHours: 48 } });
+    expect(r).toEqual(expect.objectContaining({ attached: true, paymentMethodRowId: 'pmrow_hold' }));
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'estimate_card_hold',
+      consentVariant: 'card_hold',
+      holdTerms: { noShowFeeAmount: 49.5, cancelWindowHours: 48 },
+    }));
+    record.mockRestore();
+  });
+
   it("INITIAL post-accept attach of a fresh customerless capture (SetupIntent has no Stripe customer) attaches — the guard must not fire", async () => {
     stubDb([null]);
     mockSavePaymentMethod.mockResolvedValueOnce({ id: 'pmrow_fresh' });

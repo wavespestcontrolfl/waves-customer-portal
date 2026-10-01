@@ -135,7 +135,36 @@ jest.mock('../models/db', () => {
       // → rows (commitReservation's graduation UPDATE uses the latter).
       state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
-      hits.forEach((row) => Object.assign(row, obj));
+      // Atomic JSON-path stamps (`jsonb_set(estimate_data, '{key}', value)`)
+      // reach this fake as the raw marker object; apply the keys to the
+      // stored JSON instead of replacing the column with the marker, so a
+      // later read of estimate_data (proposal, delivery marker) still parses.
+      const applyJsonbSet = (row, column, raw) => {
+        const sql = String(raw.__raw);
+        const bindings = Array.isArray(raw.bindings) ? [...raw.bindings] : [];
+        const wasString = typeof row[column] === 'string';
+        let data = row[column];
+        if (wasString) { try { data = JSON.parse(data); } catch { data = {}; } }
+        data = data && typeof data === 'object' ? data : {};
+        const re = /'\{([A-Za-z0-9_]+)\}',\s*(to_jsonb\(\?::text\)|'true'::jsonb|'false'::jsonb|\?::jsonb)/g;
+        let m;
+        while ((m = re.exec(sql))) {
+          const [, key, valueSrc] = m;
+          if (valueSrc === "'true'::jsonb") data[key] = true;
+          else if (valueSrc === "'false'::jsonb") data[key] = false;
+          else {
+            const b = bindings.shift();
+            data[key] = valueSrc === '?::jsonb' ? JSON.parse(b) : b;
+          }
+        }
+        row[column] = wasString ? JSON.stringify(data) : data;
+      };
+      hits.forEach((row) => {
+        for (const [col, val] of Object.entries(obj)) {
+          if (val && typeof val === 'object' && val.__raw && String(val.__raw).includes('jsonb_set(')) applyJsonbSet(row, col, val);
+          else row[col] = val;
+        }
+      });
       return {
         returning: async () => hits.map((r) => ({ ...r })),
         then: (res, rej) => Promise.resolve(hits.length).then(res, rej),
@@ -1613,6 +1642,31 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(res.data.code).toBe('TERMS_VERSION_STALE');
     expect(storedEstimate().status).toBe('sent');
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  // codex #5434 r3 P1: the accept stamps the document fact independently of
+  // the drawer record — here with the acceptance gate OFF (no drawer at all).
+  test('a recurring plan accept stamps rateReviewDisclosedAtAccept atomically, even with the acceptance gate off; a rodent accept does not', async () => {
+    mockGateState.acceptanceTerms = false;
+    seed({ id: 'est-stamp-1', token: 'tok-stamp-1-x0123456789' });
+    conversionOk();
+    const plan = await putAccept('tok-stamp-1-x0123456789', {});
+    expect(plan.status).toBe(200);
+    const stampOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'));
+    expect(stampOps()).toHaveLength(1);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    seed({
+      id: 'est-stamp-r',
+      token: 'tok-stamp-r-x0123456789',
+      monthly_total: 40,
+      annual_total: 480,
+      estimate_data: JSON.stringify({ result: { recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] }, oneTime: { items: [], membershipFee: 0 } } }),
+    });
+    conversionOk();
+    const rodent = await putAccept('tok-stamp-r-x0123456789', {});
+    expect(rodent.status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
   });
 
   test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {

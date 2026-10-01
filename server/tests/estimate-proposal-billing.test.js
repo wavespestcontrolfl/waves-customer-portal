@@ -230,6 +230,15 @@ describe('proposalRateReviewTermsEligible (annual rate review disclosure, owner 
       expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'declined' } })).toBe(false);
     });
 
+    // codex #5434 r3 P1: an accept that records no drawer snapshot (gate off,
+    // the annual prepay lane) stamps the document fact itself.
+    it("an accepted estimate stamped rateReviewDisclosedAtAccept prints even with no acceptance row", () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: { rateReviewDisclosedAtAccept: true } }, acceptance: null })).toBe(true);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: JSON.stringify({ rateReviewDisclosedAtAccept: true }) }, acceptance: null })).toBe(true);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: { rateReviewDisclosedAtAccept: false } }, acceptance: null })).toBe(false);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: '{not json' }, acceptance: null })).toBe(false);
+    });
+
     it('without the estimate row the plan-terms decision stands alone (legacy callers)', () => {
       expect(proposalRateReviewTermsEligible(plan, 'e1')).toBe(true);
     });

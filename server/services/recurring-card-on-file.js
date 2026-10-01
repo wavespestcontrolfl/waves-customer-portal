@@ -981,6 +981,9 @@ async function resolvePrepayRecoveryAuthorization(job, customerId) {
   const onRecord = job?.stripe_payment_method_id
     ? await require('./payment-method-consents').hasConsentSnapshotForVariant(customerId, job.stripe_payment_method_id, {
       source: 'estimate_accept',
+      // The PREPAY authorization specifically (codex #5434 r3 P1) — never a
+      // base consent the recurring-card backstop recorded for the method.
+      variant: 'prepay_card',
       ...(version ? { version } : { anyVersion: true }),
       ...(since && !Number.isNaN(since.getTime()) ? { since } : {}),
     })

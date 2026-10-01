@@ -350,7 +350,12 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
 // revocation guard must not fire there) | 'self_heal' (pre-charge repair
 // of a missing local row — here customer=null means the pm was DETACHED
 // after having been attached, i.e. revoked, and must never re-attach).
-async function attachCardHoldPaymentMethod({ customerId, paymentMethodId, mode = 'initial' }) {
+// `holdTerms` = the fee/window the hold was frozen with (the accept's
+// resolved policy, or the hold row's own columns on self-heal): the ledger
+// row snapshots the hold disclosure the CardHoldModal rendered with exactly
+// those numbers (codex #5434 r3 P1) — never the card authorization text the
+// modal does not show. Absent terms fall back to the current policy.
+async function attachCardHoldPaymentMethod({ customerId, paymentMethodId, mode = 'initial', holdTerms = null }) {
   if (!customerId || !paymentMethodId) return { attached: false };
   // Idempotent: this runs post-accept AND again as a self-heal before the
   // no-show / completion charge. savePaymentMethod inserts unconditionally, so
@@ -406,6 +411,11 @@ async function attachCardHoldPaymentMethod({ customerId, paymentMethodId, mode =
         stripePaymentMethodId: paymentMethodId,
         source: 'estimate_card_hold',
         methodType: 'card',
+        consentVariant: 'card_hold',
+        holdTerms: {
+          noShowFeeAmount: holdTerms?.noShowFeeAmount != null ? Number(holdTerms.noShowFeeAmount) : cardHoldNoShowFee(),
+          cancelWindowHours: holdTerms?.cancelWindowHours != null ? Number(holdTerms.cancelWindowHours) : cardHoldCancelWindowHours(),
+        },
       });
     } catch (consentErr) {
       logger.warn('[estimate-card-holds] card-hold consent record failed (non-fatal)', { error: consentErr.message });
@@ -744,7 +754,12 @@ async function resolveHoldPaymentMethodRowId(hold) {
     .first('id');
   let pm = await lookup();
   if (!pm) {
-    await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id, mode: 'self_heal' });
+    await attachCardHoldPaymentMethod({
+      customerId: hold.customer_id,
+      paymentMethodId: hold.stripe_payment_method_id,
+      mode: 'self_heal',
+      holdTerms: { noShowFeeAmount: hold.no_show_fee_amount, cancelWindowHours: hold.cancel_window_hours },
+    });
     pm = await lookup();
   }
   return pm?.id || null;
@@ -1292,7 +1307,12 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
     // removed in the check-to-charge gap then simply fails the off-session
     // charge below — never resurrected.
     if (attachSelfHeal) {
-      await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id, mode: 'self_heal' });
+      await attachCardHoldPaymentMethod({
+        customerId: hold.customer_id,
+        paymentMethodId: hold.stripe_payment_method_id,
+        mode: 'self_heal',
+        holdTerms: { noShowFeeAmount: hold.no_show_fee_amount, cancelWindowHours: hold.cancel_window_hours },
+      });
     }
     paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
       customerId: hold.customer_id,
