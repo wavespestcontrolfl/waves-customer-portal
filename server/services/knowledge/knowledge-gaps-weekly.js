@@ -9,7 +9,10 @@
 // Source: knowledge_queries rows with coverage 'none' or 'partial'. WikiQA
 // records coverage on every answer (texting assistant, lead agent, tech
 // field Q&A, admin Q&A, content agents). Intelligence Bar searches are not
-// logged: their queries can carry customer names, addresses and phones.
+// logged automatically (their queries can carry customer names, addresses
+// and phones); an empty search offers the operator an "add to knowledge
+// gaps" button, and only rows they tap land here (asked_by
+// 'intelligence_bar', coverage 'none').
 //
 // Cron: Monday 8:43am ET in scheduler.js, inside runExclusive, then hourly
 // at :43 through Tuesday as catch-up ticks — the once-per-week stamp makes
@@ -42,6 +45,7 @@ const SOURCE_LABELS = {
   admin_manual: 'admin Q&A',
   content_agent: 'blog writer',
   brief_driven_agent: 'blog writer',
+  intelligence_bar: 'Intelligence Bar',
 };
 const sourceLabel = (s) => SOURCE_LABELS[s] || String(s || 'unknown').replace(/_/g, ' ');
 
@@ -54,8 +58,10 @@ function reportWindow(now) {
 }
 
 // Same question asked twice = same key: case, punctuation and spacing ignored.
+// Letters and digits of any script count, so a question in another language
+// is listed, not dropped as empty.
 function questionKey(text) {
-  return String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function clip(text, max) {
@@ -204,7 +210,16 @@ async function runKnowledgeGapsWeekly(opts = {}) {
   return { sent: true, gaps: composed.gaps };
 }
 
+// Gaps saved from the Intelligence Bar are questions with no answer: they
+// belong in this email, not in the recent Q&A lists (admin-knowledge.js,
+// knowledge.js). Apply to a knowledge_queries query to leave them out.
+function withoutSavedGaps(q) {
+  return q.where((w) => w.whereNull('asked_by').orWhereNot('asked_by', 'intelligence_bar'));
+}
+
 module.exports = {
+  questionKey,
+  withoutSavedGaps,
   runKnowledgeGapsWeekly,
   _private: { composeGapsEmail, reportWindow, questionKey, sourceLabel, loadWeek, sentThisWeek, OPS_KEY },
 };

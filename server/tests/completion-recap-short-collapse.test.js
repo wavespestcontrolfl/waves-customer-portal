@@ -33,3 +33,20 @@ describe('product-name matcher: short collapsed pairs', () => {
     expect(screen('We sprayed Bifen I/T along the fence.')).toBe(true);
   });
 });
+
+describe('report trade-name screen: ordinary pest and bait words', () => {
+  test('"ant bait" and "bait gel" are copy, not Advion Ant Bait Gel', async () => {
+    const screen = await buildReportTradeNameScreen({ products: [{ name: 'Advion Ant Bait Gel' }], extraNames: [], db: null });
+    expect(screen('We placed ant bait along the back of the counter.')).toBe(false);
+    expect(screen('We put bait gel in the cabinet hinges.')).toBe(false);
+    expect(screen('We used Advion in the kitchen.')).toBe(true);
+    expect(screen('Advion ant gel went under the sink.')).toBe(true);
+  });
+
+  test('singular pest words are copy too', async () => {
+    const screen = await buildReportTradeNameScreen({ products: [{ name: 'Contrac Rat Bait' }, { name: 'Wasp Freeze Bee Spray' }], extraNames: [], db: null });
+    expect(screen('We checked the rat bait stations by the shed.')).toBe(false);
+    expect(screen('A bee nest was under the eave.')).toBe(false);
+    expect(screen('We refilled the Contrac blocks.')).toBe(true);
+  });
+});

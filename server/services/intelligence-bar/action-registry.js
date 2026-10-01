@@ -59,6 +59,7 @@ const MODULES = [
   ['job-health-tools', 'JOB_HEALTH_TOOLS', 'executeJobHealthTool'],
   ['call-research-tools', 'CALL_RESEARCH_TOOLS', 'executeCallResearchTool'],
   ['gap-report-tools', 'GAP_REPORT_TOOLS', 'executeGapReportTool'],
+  ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });
@@ -171,7 +172,7 @@ function discover(input, scope) {
 
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
-  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads', 'list_gap_reports']);
+  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads', 'list_gap_reports', 'needs_me']);
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
