@@ -391,6 +391,18 @@ describe('missedVisit', () => {
     expect(seen).toEqual(expect.arrayContaining([['where', 'property_id', 'prop-A'], ['whereNot', 'id', 'v9']]));
   });
 
+  test('a no-show logged without new_date, later rebooked or completed on the SAME row, is resolved', async () => {
+    const base = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Pest Control' };
+    const run1 = (noshow) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: () => [], reschedule_log: () => [noshow] }) });
+    // rebooked to another day, or to a later window the same day, or completed
+    expect((await run1({ ...base, ss_scheduled_date: '2026-10-03', window_start: '09:00:00', status: 'confirmed' })).missedVisit).toBeNull();
+    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '15:00:00', status: 'confirmed' })).missedVisit).toBeNull();
+    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'completed' })).missedVisit).toBeNull();
+    // still the missed occurrence, untouched: still missed
+    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'confirmed' })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
+    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'no_show' })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
+  });
+
   test('a same-day visit counts as the follow-up only when it starts AFTER the missed slot', async () => {
     const noshow = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '13:00:00-14:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
     const at = (later) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : later), reschedule_log: () => [noshow] }) });

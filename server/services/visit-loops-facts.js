@@ -286,12 +286,8 @@ function missedWindowLabel(originalWindow, deriveWindow) {
   const startHms = missedWindowStart(originalWindow);
   return startHms ? windowLabel({ window_start: startHms }, deriveWindow) : null;
 }
-async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
-  const today = etDateString(now);
-  // ET calendar days, not fixed 24h periods (a DST week would reach an 8th day back)
-  const since = etDateString(addETDays(now, -MISSED_LOOKBACK_DAYS));
-  const candidates = [];
-
+// A pending/confirmed visit from the lookback that nobody performed.
+async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { today, since }) {
   const unfinishedRows = await conn('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '<', today).where('scheduled_date', '>=', since)
@@ -313,29 +309,37 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
   const nowMin = nowEtMinutes(now);
   const stillOpen = (row) => calendarDay(row.scheduled_date) === yesterday && crossesIntoNow(row, nowMin);
   const unfinished = (unfinishedRows || []).find((row) => !stillOpen(row));
-  if (unfinished) {
-    candidates.push({
-      type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date), windowStart: unfinished.window_start || null,
-      windowDisplay: windowLabel(unfinished, deriveWindow), status: unfinished.status, reason: 'not_completed',
-    });
-  }
+  if (!unfinished) return null;
+  return {
+    type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date), windowStart: unfinished.window_start || null,
+    windowDisplay: windowLabel(unfinished, deriveWindow), status: unfinished.status, reason: 'not_completed',
+  };
+}
 
+// The newest customer no-show in the lookback that was not followed up.
+async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since }) {
   const noshows = await conn('reschedule_log as rl')
     .leftJoin('scheduled_services as ss', 'ss.id', 'rl.scheduled_service_id')
     .where('rl.customer_id', customerId).where('rl.reason_code', 'customer_noshow')
     .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
     .orderBy('rl.original_date', 'desc')
     .limit(MISSED_SCAN_MAX)
-    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'ss.property_id', 'ss.service_type',
+    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'ss.property_id', 'ss.scheduled_date as ss_scheduled_date', 'ss.service_type',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status');
   // Newest UNRESOLVED no-show: a rebooked newer one must not hide an older open miss.
   for (const noshow of noshows || []) {
     const date = calendarDay(noshow.original_date);
     const family = familyKey(noshow.service_type);
     const liveOrDone = [...UPCOMING_SERVICE_STATUSES, 'completed'];
-    // The soft no-show path moves the SAME row (possibly later the same day)
-    // and stamps new_date: that row still live or done is the follow-up.
-    const movedSelf = noshow.new_date != null && liveOrDone.includes(noshow.status);
+    // The logged row itself is the follow-up when it is live or done AND no longer
+    // the missed occurrence: the soft path stamps new_date; a no-show logged
+    // without one (missed-appointment onSkip) can still be rebooked on the same
+    // row later (another day or a later window) or completed.
+    const missedStartHms = missedWindowStart(noshow.original_window);
+    const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
+      || (missedStartHms != null && hhmmToMinutes(noshow.window_start) !== hhmmToMinutes(missedStartHms));
+    const movedSelf = liveOrDone.includes(noshow.status)
+      && (noshow.new_date != null || noshow.status === 'completed' || rowMoved);
     // Otherwise another visit of the same service on or after the missed day
     // (a same-day replacement counts), never the logged row itself.
     const later = !movedSelf && date && family
@@ -351,23 +355,33 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
       : [];
     // A same-day visit counts only when its window starts AFTER the missed slot (an
     // earlier visit that day preceded the no-show); unknown starts do not count.
-    const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
+    const missedStart = hhmmToMinutes(missedStartHms);
     const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
       || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
     const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family && afterMiss(r));
     if (!followedUp) {
-      candidates.push({
-        type: noshow.service_type || null, date, windowStart: missedWindowStart(noshow.original_window),
+      return {
+        type: noshow.service_type || null, date, windowStart: missedStartHms,
         // The window that was MISSED, as the customer was promised it: the logged
         // original START through the arrival-window formatter (writers store
         // "start-end" with the internal job block as the end), never the joined
         // row's current (possibly moved) window.
         windowDisplay: missedWindowLabel(noshow.original_window, deriveWindow),
         status: noshow.status || 'no_show', reason: 'customer_noshow',
-      });
-      break;
+      };
     }
   }
+  return null;
+}
+
+// The most recent of the two missed-visit sources.
+async function loadMissedVisit(ctx) {
+  const range = {
+    today: etDateString(ctx.now),
+    // ET calendar days, not fixed 24h periods (a DST week would reach an 8th day back)
+    since: etDateString(addETDays(ctx.now, -MISSED_LOOKBACK_DAYS)),
+  };
+  const candidates = (await Promise.all([loadUnfinishedVisit(ctx, range), loadOpenNoshow(ctx, range)])).filter(Boolean);
   if (!candidates.length) return null;
   candidates.sort((a, b) => String(b.date).localeCompare(String(a.date)));
   return candidates[0];
