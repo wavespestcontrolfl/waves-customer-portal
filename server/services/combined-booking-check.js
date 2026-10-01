@@ -81,6 +81,9 @@ const PRICE_TOLERANCE = 0.02;
 const COMPARISON_CODES = new Set(['price_mismatch', 'first_invoice_mismatch', 'split_invoice_mismatch', 'first_day_price_mismatch']);
 const CANCELLED = new Set(['cancelled', 'canceled']);
 const NOT_LIVE = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
+// A visit parked as `rescheduled` (the legacy customer reschedule path) is out
+// of the schedule checks but still billed on its original invoice.
+const OFF_INVOICE = new Set(['cancelled', 'canceled', 'skipped', 'no_show']);
 
 const FAMILY_LABELS = {
   pest_control: 'Pest',
@@ -430,7 +433,7 @@ function evaluateCombinedBooking(ctx) {
   if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
   const labels = [...programs.keys()].map(familyLabel);
   // No live rows: the schedule shape is the accepted-schedule alert's.
-  if (!rows.length) return { ok: false, deferred: true, problems: [], labels };
+  if (!rows.length) return { ok: false, deferred: true, pricesHidden: false, problems: [], labels };
 
   // A combined first-application invoice still bills a family left out above
   // (a held tree program's first visit stays on it), so the invoice is judged
@@ -438,10 +441,10 @@ function evaluateCombinedBooking(ctx) {
   // A member the office has since split off onto its own invoice (the
   // sibling-split workflow's resolution evidence, has_own_live_invoice) is
   // covered by that invoice, not the combined one.
-  const topLevel = allRows.filter((row) => !row.recurring_parent_id && !NOT_LIVE.has(row.status));
+  const topLevel = allRows.filter((row) => !row.recurring_parent_id && !OFF_INVOICE.has(row.status));
   const stamped = topLevel.filter((row) => isPlanRow(row, accepted.programs)
     && row.first_application_invoice_id && !row.has_own_live_invoice);
-  const split = topLevel.filter((row) => isPlanRow(row, programs) && row.has_own_live_invoice);
+  const split = topLevel.filter((row) => isPlanRow(row, programs) && row.has_own_live_invoice && !NOT_LIVE.has(row.status));
   // Prices are judged against the WHOLE accepted plan: a combined row (lawn +
   // tree) still bills a left-out family's share, and so does the shared
   // invoice. `programs` above scopes only which rows are checked.
@@ -457,7 +460,9 @@ function evaluateCombinedBooking(ctx) {
   // are still reported).
   const unbackedDiscount = [...stamped.map((row) => invoices.get(String(row.first_application_invoice_id))),
     ...split.map((row) => row.own_first_invoice)].some((invoice) => invoice?.unbacked_discount);
-  const deferred = scheduleGaps.length > 0 || scheduleUnjudged || pricesUnverifiable || unbackedDiscount;
+  // pricesHidden: the price comparisons below were not looked for.
+  const pricesHidden = pricesUnverifiable || unbackedDiscount;
+  const deferred = scheduleGaps.length > 0 || scheduleUnjudged || pricesHidden;
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
     a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
@@ -475,7 +480,7 @@ function evaluateCombinedBooking(ctx) {
     ...(unstamped.length ? checkUnstampedFirstDay(unstamped, priced) : []),
     ...checkSplitInvoices(split, priced),
   ];
-  return { ok: problems.length === 0 && !deferred, deferred, problems, labels };
+  return { ok: problems.length === 0 && !deferred, deferred, pricesHidden, problems, labels };
 }
 
 function shortName(customer) {
@@ -658,12 +663,13 @@ async function retireStanding(conn, estimateIds, resolution) {
   });
 }
 
-async function postAlert(estimate, verdict, ctx, { raise } = {}) {
+async function postAlert(estimate, verdict, ctx, { raise, held = [] } = {}) {
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const { detail, ...spec } = composeAlert(verdict, {
     customerName: ctx.customerName, customerId: estimate.customer_id, estimateId: estimate.id,
   });
-  const codes = verdict.problems.map((problem) => problem.code);
+  // A held price finding stays on the bell's codes (see heldCodes).
+  const codes = [...new Set([...verdict.problems.map((problem) => problem.code), ...held])];
   return raiseAdminAlert(CATEGORY, spec, {
     detail,
     dedupeKey: dedupeKeyFor(estimate.id),
@@ -707,13 +713,22 @@ async function retireAbandoned(conn) {
 //   ok       — verified: close a standing bell as fixed
 //   deferred — nothing of this check's own to say (the schedule shape is the
 //              accepted-schedule alert's, or a price cannot be verified): close
-//   held     — deferred, and the standing bell carries a price comparison the
-//              deferral did not look for: leave it as it is
+//   held     — prices could not be verified, and the standing bell carries a
+//              price comparison that was therefore not looked for: leave it
 function outcomeOf(verdict, standingCodes = []) {
   if (!verdict) return 'skipped';
   if (verdict.problems.length) return 'problems';
   if (verdict.ok) return 'ok';
-  return standingCodes.some((code) => COMPARISON_CODES.has(code)) ? 'held' : 'deferred';
+  return heldCodes(verdict, standingCodes).length ? 'held' : 'deferred';
+}
+
+// The standing bell's price comparisons this verdict could not re-judge (its
+// prices were not verifiable): they stay on the bell until a verdict that
+// can see them says otherwise.
+function heldCodes(verdict, standingCodes = []) {
+  if (!verdict.pricesHidden) return [];
+  const now = new Set(verdict.problems.map((problem) => problem.code));
+  return standingCodes.filter((code) => COMPARISON_CODES.has(code) && !now.has(code));
 }
 
 /**
@@ -764,7 +779,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
   // estimates it judged and which families it skipped on each.
   const coverage = new Map();
   const gaps = await require('./recurring-schedule-audit')
-    .findAcceptedRecurringScheduleGaps({ now, settleMs: 0, estimateIds: work.map((estimate) => estimate.id), coverage }, conn);
+    .acceptedRecurringScheduleGaps(conn, { now, cutoff: now, estimateIds: work.map((estimate) => estimate.id), coverage });
 
   let posted = 0;
   for (const estimate of work) {
@@ -787,7 +802,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
         continue;
       }
       result.checked += 1;
-      const row = await postAlert(estimate, checked.verdict, checked.ctx, { raise });
+      const row = await postAlert(estimate, checked.verdict, checked.ctx, { raise, held: heldCodes(checked.verdict, standing.get(id)) });
       if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
       if (isNew) posted += 1;
       result.problems += 1;

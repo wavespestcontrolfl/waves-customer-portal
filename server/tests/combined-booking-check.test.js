@@ -315,6 +315,11 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.ok).toBe(true);
   });
 
+  test('a first visit parked as rescheduled is still billed on the shared invoice', () => {
+    const rows = [...pestRows(), ...lawnRows()].map((row) => (row.id === 'parent-lawn_care_recurring' ? { ...row, status: 'rescheduled' } : row));
+    expect(run([PEST, LAWN], rows).problems.map((p) => p.code)).not.toContain('first_invoice_mismatch');
+  });
+
   test('a void first invoice with live first-day rows is still reported', () => {
     const rows = [...pestRows(), ...lawnRows()].map((row) => (row.recurring_parent_id || /lawn/.test(row.id) ? row : { ...row, status: 'cancelled' }));
     const verdict = run([PEST, LAWN], rows, { invoice: invoice([firstApp(250)], 'void') });
@@ -466,14 +471,28 @@ describe('postAlert', () => {
 
 describe('outcomeOf', () => {
   const { outcomeOf } = check;
-  test('a deferred verdict closes a standing bell, unless that bell carries a price comparison it did not look for', () => {
-    const deferred = { ok: false, deferred: true, problems: [] };
+  test('a deferred verdict closes a standing bell, unless its prices were unverifiable and the bell carries a price comparison', () => {
+    const deferred = { ok: false, deferred: true, pricesHidden: true, problems: [] };
+    // A schedule-gap deferral looks at every price: nothing is held.
+    expect(outcomeOf({ ...deferred, pricesHidden: false }, ['first_invoice_mismatch'])).toBe('deferred');
     expect(outcomeOf(null)).toBe('skipped');
     expect(outcomeOf({ ok: true, deferred: false, problems: [] }, ['price_mismatch'])).toBe('ok');
     expect(outcomeOf({ ok: false, deferred: false, problems: [{ code: 'price_missing' }] })).toBe('problems');
     expect(outcomeOf(deferred, ['missing_time_tech'])).toBe('deferred');
     expect(outcomeOf(deferred, ['first_invoice_mismatch'])).toBe('held');
     expect(outcomeOf(deferred)).toBe('deferred');
+  });
+});
+
+describe('postAlert held codes', () => {
+  test('a price finding the verdict could not re-judge stays on the bell while another problem refreshes it', async () => {
+    const raise = jest.fn(async () => ({ id: 'n1' }));
+    const verdict = { ok: false, deferred: true, pricesHidden: true, labels: ['Pest', 'Lawn'],
+      problems: [{ code: 'missing_time_tech', text: '3 lawn visits missing time/tech' }] };
+    expect(check.outcomeOf(verdict, ['first_invoice_mismatch'])).toBe('problems');
+    await postAlert({ id: 'estimate-1', customer_id: 'customer-1' }, verdict, { customerName: 'J. Sample' },
+      { raise, held: ['first_invoice_mismatch'] });
+    expect(raise.mock.calls[0][2].metadata.problemCodes).toEqual(['missing_time_tech', 'first_invoice_mismatch']);
   });
 });
 

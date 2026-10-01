@@ -209,7 +209,7 @@ postgres('combined-booking check through the real conversion', () => {
       await trx('scheduled_services').whereIn('recurring_parent_id', parents.filter((row) => /pest/i.test(row.service_type)).map((row) => row.id)).del();
       const coverage = new Map();
       const gaps = await require('../services/recurring-schedule-audit')
-        .findAcceptedRecurringScheduleGaps({ settleMs: 0, estimateIds: [est.estimateId], coverage }, trx);
+        .acceptedRecurringScheduleGaps(trx, { now: new Date(), cutoff: new Date(), estimateIds: [est.estimateId], coverage });
       expect(gaps.map((gap) => gap.serviceFamily)).toEqual(['pest_control']);
       // Judged, with no family skipped.
       expect([...coverage.get(String(est.estimateId))]).toEqual([]);
