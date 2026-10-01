@@ -412,6 +412,7 @@ describe('four-section report (writer rules v2)', () => {
     ['a callback', { serviceKey: 'pest_general_quarterly', findingsType: null, billingType: 'recurring' }, { is_callback: true }, 're_service'],
     ['a one-time service', { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, {}, 'one_time'],
     ['a one-time key on a recurring series', { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, { recurring_parent_id: 'parent-1' }, 'recurring'],
+    ["a one-time service carrying the 'one_time' pattern marker", { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, { recurring_pattern: 'one_time' }, 'one_time'],
     ['a recurring plan visit', { serviceKey: 'pest_general_quarterly', findingsType: null, billingType: 'recurring' }, {}, 'recurring'],
     ['an unresolved profile', { serviceKey: null, findingsType: null, billingType: null, synthesized: true }, {}, null],
     ['an unresolved profile on a recurring series', { serviceKey: null, findingsType: null, billingType: null }, { recurring_parent_id: 'parent-1' }, 'recurring'],

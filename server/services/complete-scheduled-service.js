@@ -1958,12 +1958,23 @@ const REPORT_RULE_FINDING_LABELS = Object.freeze({
   date: 'A date or day',
   time: 'A time or arrival window',
   active_ingredient: 'An active ingredient name',
+  report_shape: 'The report no longer has its four titled parts with one line each, so the customer would get the standard summary instead',
+});
+// The writer's own titles, so a re-checked sentence is screened inside its
+// section: a timeframe allowed in WHAT TO EXPECT is refused in WHAT WE DID
+// AND WHY (Codex #5500). An unknown key screens as WHAT WE FOUND, where
+// nothing extra is allowed.
+const SECTION_SCREEN_TITLES = Object.freeze({
+  whatWeFound: 'WHAT WE FOUND', whatWeDid: 'WHAT WE DID AND WHY', whatToExpect: 'WHAT TO EXPECT', whatsNext: "WHAT'S NEXT",
 });
 const normalizeSentence = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 const reportSentences = (sections) => (Array.isArray(sections) ? sections : [])
-  .flatMap((section) => (section?.paragraphs || []).join(' ').split(/(?<=[.!?])\s+/))
-  .map((sentence) => sentence.trim())
-  .filter(Boolean);
+  .flatMap((section) => (section?.paragraphs || []).join(' ').split(/(?<=[.!?])\s+/)
+    .map((sentence) => ({ key: section?.key || null, sentence: sentence.trim() })))
+  .filter((entry) => entry.sentence);
+const REFUSED_WORDS_LABEL = 'Words the report can\'t publish (it would show the plain summary instead)';
+// Unchanged means the same sentence in the same section.
+const sectionSentenceKey = (entry) => `${entry.key}|${normalizeSentence(entry.sentence)}`;
 
 // Edit heads-up for the four-section report (owner 2026-10-01: "it
 // shouldn't stop us, but we should rerun it if I or a tech edits it";
@@ -1980,12 +1991,24 @@ function reportRulesReviewBlockPayload({
     // Structure, not the publishable parse: an edit that adds a refused
     // word ("safe") drops the whole body at render, and the tech must hear
     // about that too (Codex #5500).
-    const submitted = fourSectionReport(technicianNotes);
-    if (!submitted) return null;
     const base = typeof reportDraftBase === 'string' && reportDraftBase.trim()
       ? fourSectionReport(reportDraftBase)
       : null;
-    const unchanged = new Set(reportSentences(base?.sections).map(normalizeSentence));
+    const submitted = fourSectionReport(technicianNotes);
+    if (!submitted) {
+      // An installed draft edited out of its shape (a second line in a
+      // section, a changed title): the render parse refuses it too and the
+      // customer gets the standard summary, so the tech hears about it
+      // (Codex #5500). Notes with no installed draft are not a report, and
+      // notes in the older two-section layout still publish as one.
+      if (!base || normalizeSentence(technicianNotes) === normalizeSentence(reportDraftBase)) return null;
+      const legacy = technicianReportCustomerCopy(technicianNotes);
+      if (legacy?.body) return null;
+      return reportRulesReviewPayload([legacy
+        ? { reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: legacy.violations.join(', ') }
+        : { reason: 'report_shape', label: REPORT_RULE_FINDING_LABELS.report_shape, sentence: null }]);
+    }
+    const unchanged = new Set(reportSentences(base?.sections).map(sectionSentenceKey));
     // The same context the generation screen had: this visit's catalog
     // actives, and the timeframes and dates the generated draft carried
     // (they passed that screen), so an edit that keeps them is no finding.
@@ -1996,32 +2019,33 @@ function reportRulesReviewBlockPayload({
     };
     const findings = [];
     if (submitted.violations.length) {
-      findings.push({
-        reason: 'refused_words',
-        label: 'Words the report can\'t publish (it would show the plain summary instead)',
-        sentence: submitted.violations.join(', '),
-      });
+      findings.push({ reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: submitted.violations.join(', ') });
     }
-    for (const sentence of reportSentences(submitted.sections)) {
-      if (unchanged.has(normalizeSentence(sentence))) continue;
-      const reason = writerRulesRejection(sentence, screenOptions);
-      if (reason) findings.push({ reason, label: REPORT_RULE_FINDING_LABELS[reason] || 'A rule the report follows', sentence });
+    for (const entry of reportSentences(submitted.sections)) {
+      if (unchanged.has(sectionSentenceKey(entry))) continue;
+      const titled = `${SECTION_SCREEN_TITLES[entry.key] || SECTION_SCREEN_TITLES.whatWeFound}\n${entry.sentence}`;
+      const reason = writerRulesRejection(titled, screenOptions);
+      if (reason) findings.push({ reason, label: REPORT_RULE_FINDING_LABELS[reason] || 'A rule the report follows', sentence: entry.sentence });
     }
     if (!findings.length) return null;
-    return {
-      status: 409,
-      payload: {
-        // adminFetch surfaces only error + code, so the plain-words list
-        // rides in the error string; the structured list stays for tests.
-        error: findings.map((finding) => `${finding.label}: "${finding.sentence}"`).join('\n'),
-        code: 'report_rules_review',
-        findings,
-        confirmable: true,
-      },
-    };
+    return reportRulesReviewPayload(findings);
   } catch {
     return null;
   }
+}
+
+function reportRulesReviewPayload(findings) {
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code, so the plain-words list
+      // rides in the error string; the structured list stays for tests.
+      error: findings.map((finding) => (finding.sentence ? `${finding.label}: "${finding.sentence}"` : finding.label)).join('\n'),
+      code: 'report_rules_review',
+      findings,
+      confirmable: true,
+    },
+  };
 }
 
 // Completion invoice-candidate lookups + reconciliation live in

@@ -24928,6 +24928,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
             companions = [],
           } = completionProfile || {};
           const synthesizedGeneric = completionProfile?.synthesized === true && !serviceKey;
+          // 'one_time' is the explicit not-a-series marker (visit-prep.js),
+          // never recurring lineage (Codex #5500).
+          const recurringPattern = svc.recurring_pattern && svc.recurring_pattern !== 'one_time' ? svc.recurring_pattern : null;
           reportPromptContext = profileResolutionFailed
             ? { requireCanonical: false }
             : {
@@ -24947,10 +24950,10 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               serviceKind: (serviceKey === 'pest_re_service' || svc.is_callback === true)
                 ? 're_service'
                 : (String(serviceModel || '').toLowerCase() === 'one_time'
-                  && svc.is_recurring !== true && !svc.recurring_parent_id && !svc.recurring_pattern)
+                  && svc.is_recurring !== true && !svc.recurring_parent_id && !recurringPattern)
                   ? 'one_time'
                   : (String(serviceModel || '').toLowerCase() === 'recurring'
-                    || svc.is_recurring === true || Boolean(svc.recurring_parent_id) || Boolean(svc.recurring_pattern))
+                    || svc.is_recurring === true || Boolean(svc.recurring_parent_id) || Boolean(recurringPattern))
                     ? 'recurring'
                     : null,
             };

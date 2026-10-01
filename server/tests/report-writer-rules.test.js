@@ -527,3 +527,24 @@ describe('four-section report: the reach-out date under its own heading', () => 
     expect(writerRulesRejection(report('Your next visit is Wednesday, October 14.'), { allowedDates })).toBe('date');
   });
 });
+
+describe('four-section report: the reach-out date asks the customer to get in touch', () => {
+  const allowedDates = ['Wednesday, October 14', 'October 14'];
+
+  test.each([
+    ["WHAT'S NEXT\nContact us on Wednesday, October 14 if the ant activity has not dropped off."],
+    ["WHAT'S NEXT: If ant activity has not dropped off, contact us on Wednesday, October 14."],
+    ["WHAT'S NEXT\nIf you still see roaches after October 14, give us a call."],
+  ])('a contact sentence passes: %s', (text) => {
+    expect(writerRulesRejection(text, { allowedDates })).toBeNull();
+  });
+
+  test.each([
+    ['WHAT TO EXPECT\nThe treatment keeps working until Wednesday, October 14.'],
+    ['WHAT TO EXPECT\nThe treatment keeps working until Wednesday, October 14, so let us know.'],
+    ["WHAT'S NEXT\nProtection lasts through October 14, so call us after that."],
+  ])('a date that is not a reach-out is refused: %s', (text) => {
+    expect(writerRulesRejection(text, { allowedDates })).toBe('date');
+  });
+});
+

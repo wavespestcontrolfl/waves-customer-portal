@@ -531,6 +531,11 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // …", "booked for …") is never a reach-out date: the report shows the next
 // visit itself (Codex #5500).
 const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
+// The reach-out date is the day to get in touch: its sentence must ask the
+// customer to contact us, and the date never ends a period ("keeps working
+// until Wednesday, October 14" would make it a residual claim; Codex #5500).
+const REACH_OUT_CONTACT_RE = /\b(?:contact us|let us know|tell us|call us|text us|email us|message us|reach out|get in touch|give us a (?:call|text|ring)|call or text|text or call)\b/i;
+const DURATION_END_BEFORE_DATE = '\\b(?:until|till|through|thru)\\s+(?:on\\s+)?';
 
 // The four report titles, alone on a line or written inline with text.
 const REPORT_TITLE_LINE_RE = /^\s*(WHAT WE FOUND|WHAT WE DID AND WHY|WHAT TO EXPECT|WHAT['’]S NEXT)(?::(.*))?\s*$/;
@@ -569,7 +574,9 @@ function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [
   const sentences = titleFree.split(/(?<=[.!?])\s+|\n+/);
   for (const date of dates) {
     const datePattern = new RegExp(`(?<![\\w-])${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
-    if (sentences.some((sentence) => datePattern.test(sentence) && REACH_OUT_DATE_MISUSE_RE.test(sentence))) {
+    const durationEnd = new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
+    if (sentences.some((sentence) => datePattern.test(sentence)
+      && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
       return 'date';
     }
   }

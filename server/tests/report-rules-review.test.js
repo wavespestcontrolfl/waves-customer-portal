@@ -60,6 +60,29 @@ describe('edit heads-up', () => {
     expect(block.payload.findings.map((finding) => finding.reason)).toEqual(['active_ingredient']);
   });
 
+  test('an approved timeframe moved into WHAT WE DID AND WHY is a finding', () => {
+    const moved = DRAFT.replace('We placed bait along the counter, because ants carry it back to the colony.', 'You may see a few more ants for about 1–2 weeks.');
+    const block = reportRulesReviewBlockPayload(args({ technicianNotes: moved, reportDraftBase: DRAFT }));
+    expect(block.payload.findings.map((finding) => finding.reason)).toEqual(['timeframe']);
+  });
+
+  test('an installed draft edited out of its four-part shape is a heads-up', () => {
+    const broken = DRAFT.replace('We placed bait along the counter, because ants carry it back to the colony.', 'We placed bait along the counter.\nWe also sealed a gap.');
+    const block = reportRulesReviewBlockPayload(args({ technicianNotes: broken, reportDraftBase: DRAFT }));
+    expect(block.status).toBe(409);
+    expect(block.payload.findings).toEqual([expect.objectContaining({ reason: 'report_shape', sentence: null })]);
+    expect(block.payload.error).toMatch(/standard summary/);
+  });
+
+  test('an installed draft rewritten in the two-section layout with a refused word is a heads-up', () => {
+    const block = reportRulesReviewBlockPayload(args({ technicianNotes: 'WHAT WE DID\nThe treatment is safe for pets.\nWHAT WE FOUND\nAnts.' }));
+    expect(block.payload.findings).toEqual([expect.objectContaining({ reason: 'refused_words' })]);
+  });
+
+  test('handwritten notes with no installed draft get no heads-up', () => {
+    expect(reportRulesReviewBlockPayload(args({ technicianNotes: 'Treated the kitchen for ants.', reportDraftBase: null }))).toBeNull();
+  });
+
   test('with no draft to compare, every sentence is checked', () => {
     const block = reportRulesReviewBlockPayload(args({ technicianNotes: DRAFT, reportDraftBase: null }));
     expect(block.payload.findings.map((finding) => finding.reason)).toEqual(['timeframe']);

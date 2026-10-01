@@ -1118,7 +1118,7 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 export function completionReportRulesPrompt(error) {
   if (error?.code !== "report_rules_review") return null;
   const lead = String(error?.message || "").trim();
-  return `Heads-up on your edits. The report now includes things customer reports leave out:\n${lead}\n\nOK — send as is.\nCancel — go back and edit the report.`;
+  return `Heads-up on your edits:\n${lead}\n\nOK — send as is.\nCancel — go back and edit the report.`;
 }
 
 // Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
