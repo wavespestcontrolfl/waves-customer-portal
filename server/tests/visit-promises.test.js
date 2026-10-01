@@ -537,9 +537,13 @@ describe('marks that did not reach the list', () => {
         dedupeKey: 'visit-promise-marks:svc-1',
         bell: true,
         detail: expect.stringContaining('"Check under the dishwasher": marked Done, still open.'),
-        metadata: expect.objectContaining({ subject: { type: 'visit', id: 'svc-1' }, severity: 'needs-you', promise_ids: [ID(1)] }),
+        metadata: expect.objectContaining({ subject: { type: 'visit', id: 'svc-1' }, severity: 'needs-you', promise_ids: [ID(1)], itemKeys: [ID(1)] }),
+        // A later run rewrites the standing bell with what is still unsaved,
+        // quietly (its read state stands).
+        refreshOnDedupe: true,
       }),
     );
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].ringOnRefresh()).toBe(false);
   });
 });
 

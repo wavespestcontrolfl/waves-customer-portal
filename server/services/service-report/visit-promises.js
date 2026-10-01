@@ -421,6 +421,7 @@ async function alertUnsavedVisitPromiseMarks(conn, { customerId, serviceId, visi
   const name = cutAtWord([customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'the customer', 40);
   const day = visitDayLabel(visitDate);
   const count = unsaved.length;
+  const promiseIds = unsaved.map((entry) => entry.id).sort();
   const lines = unsaved.map((entry) => {
     const what = entry.description ? `"${cleanText(redactAccessCodes(entry.description), 200)}"` : 'a promise the list could not show';
     return entry.mark === 'done'
@@ -439,8 +440,14 @@ async function alertUnsavedVisitPromiseMarks(conn, { customerId, serviceId, visi
   }, {
     dedupeKey,
     bell: true,
+    // A later run (a resumed completion that saved some of the marks)
+    // rewrites the standing bell with what is still unsaved, quietly: its
+    // read state stands, and the sweep judges only the promises still
+    // listed (Codex #5516).
+    refreshOnDedupe: true,
+    ringOnRefresh: () => false,
     detail: `The visit's report already went out saying what the technician marked. Settle these on the Promises list:\n${lines.join('\n')}`,
-    metadata: { customer_id: customerId || null, promise_ids: unsaved.map((entry) => entry.id) },
+    metadata: { customer_id: customerId || null, promise_ids: promiseIds, itemKeys: promiseIds },
   });
 }
 
