@@ -27,6 +27,7 @@ vi.mock('../utils/api', () => {
 
 import api from '../utils/api';
 import { LocalConditionsSlot, WeatherPestWidget } from './PortalPage';
+import { YARD_PROBE_TIMEOUT_MS } from '../components/portal/YardMonthCard';
 
 const customer = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', tier: 'Silver', property: {} };
 const WEATHER = {
@@ -119,8 +120,27 @@ describe('Local Conditions slot', () => {
     expect(screen.getByRole('tab', { name: 'Lawn' })).toBeInTheDocument();
   });
 
-  it('shows the widget loading panel while the gate answer is pending', () => {
+  it('while the gate answer is pending: the widget loading panel shows and the widget reads already started', async () => {
+    api.getYardMonth.mockImplementation(() => new Promise(() => {}));
     render(<LocalConditionsSlot customer={customer} nextService={null} onOpenPhotoId={null} />);
+    await settle();
+    // The widget's own data has landed, but it is held until the gate answers.
+    expect(api.getWeather).toHaveBeenCalled();
     expect(screen.getByText('Loading local conditions')).toBeInTheDocument();
+    expect(screen.queryByText('Mosquito Pressure')).not.toBeInTheDocument();
+  });
+
+  it('a hung gate probe gives up and shows the widget', async () => {
+    vi.useFakeTimers();
+    try {
+      api.getYardMonth.mockImplementation(() => new Promise(() => {}));
+      render(<LocalConditionsSlot customer={customer} nextService={null} onOpenPhotoId={null} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(YARD_PROBE_TIMEOUT_MS); });
+      expect(screen.queryByText('Loading local conditions')).not.toBeInTheDocument();
+      expect(screen.getByText('Local Conditions')).toBeInTheDocument();
+      expect(screen.queryByText('Your yard this month')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

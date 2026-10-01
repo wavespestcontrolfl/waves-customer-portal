@@ -9084,8 +9084,9 @@ const ARTICLES = [
 // Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
 // server answers {available:false} off the gate and the existing
 // WeatherPestWidget renders exactly as before; on, the yard-month card takes
-// its place. The loading panel is the widget's own first state, so neither
-// path shows a different placeholder.
+// its place. While the gate answer is pending the widget is already mounted
+// (its reads start at once) but held on its own loading panel, so gate-off
+// pays no extra round trip and gate-on never flashes the old widget.
 function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = null }) {
   const yard = useYardMonth();
   // A card the server resolved to another house than this tab shows (the
@@ -9104,24 +9105,16 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = nul
   const onOpenReport = isNativeApp()
     ? (url) => openPagePreview({ id: 'yard-last-lawn-visit', title: 'Lawn service report' }, url)
     : null;
-  if (yard.status === 'loading') return (
-    <PortalStatePanel
-      icon="cloud"
-      eyebrow="Local Conditions"
-      title="Loading local conditions"
-      message="Checking weather and seasonal pest pressure for your area."
-    />
-  );
   if (yard.status === 'on' && !scopeStale) return <>
     <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} externalLinks={!isNativeApp()} />
     {preview && <DocumentPreviewOverlay key="report-preview"
       preview={preview} onClose={closePreview}
       onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />}
   </>;
-  return <WeatherPestWidget customer={customer} nextService={nextService} />;
+  return <WeatherPestWidget customer={customer} nextService={nextService} hold={yard.status === 'loading'} />;
 }
 
-function WeatherPestWidget({ customer, nextService }) {
+function WeatherPestWidget({ customer, nextService, hold = false }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   // Fungus / chinch / irrigation are lawn advisories — pest-only customers
@@ -9148,7 +9141,7 @@ function WeatherPestWidget({ customer, nextService }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
 
-  if (loading || lawnHealth.loading) return (
+  if (hold || loading || lawnHealth.loading) return (
     <PortalStatePanel
       icon="cloud"
       eyebrow="Local Conditions"

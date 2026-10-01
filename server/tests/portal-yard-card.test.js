@@ -169,10 +169,15 @@ describe('grass mapping and hidden count', () => {
     expect(loaders.loadCustomerGrassContext).not.toHaveBeenCalled();
   });
 
-  test('a grass lookup failure falls back to every grass', async () => {
+  test('a grass lookup failure shows every grass and says unavailable, never "not set"', async () => {
     loaders.loadCustomerGrassContext.mockRejectedValue(new Error('boom'));
     const card = await build({});
-    expect(card.grass.key).toBe('all');
+    expect(card.grass).toEqual({ key: 'all', known: false, mixed: false, label: null, unavailable: true });
+  });
+
+  test('the grass read is strict, so a failed query is not an unset profile', async () => {
+    await build({});
+    expect(loaders.loadCustomerGrassContext.mock.calls[0][2]).toEqual({ strict: true });
   });
 });
 
@@ -244,15 +249,42 @@ describe('home pests', () => {
     ]);
   });
 
-  test('forecast failure drops the pest list, not the card', async () => {
+  test('forecast failure drops the pest list, not the card, and marks it unavailable (not an all-clear)', async () => {
+    ownedKeys = ['pest_control', 'lawn_care'];
     forecastPests = new Error('weather down');
     const card = await build({});
     expect(card.homePests).toEqual([]);
     expect(card.homePestsLive).toBe(false);
+    expect(card.homePestsUnavailable).toBe(true);
     expect(card.items.length).toBeGreaterThan(0);
   });
 
+  test('a plan without the Home pests tab never reads the forecast', async () => {
+    const forecast = require('../services/pest-forecast/forecast');
+    for (const keys of [['lawn_care'], ['tree_shrub'], ['lawn_care', 'tree_shrub']]) {
+      ownedKeys = keys;
+      const card = await build({});
+      expect(card.homePests).toEqual([]);
+      expect(card.homePestsUnavailable).toBe(false);
+    }
+    expect(forecast.getForecast).not.toHaveBeenCalled();
+    ownedKeys = [];
+    await build({});
+    expect(forecast.getForecast).toHaveBeenCalledTimes(1);
+  });
+
+  test('showsHomePests matches the client tab rule', () => {
+    const { showsHomePests } = service._test;
+    const plan = (over) => ({ lawn: false, pest: false, treeShrub: false, mosquito: false, rodent: false, termite: false, ...over });
+    expect(showsHomePests(plan({}))).toBe(true);
+    expect(showsHomePests(plan({ lawn: true }))).toBe(false);
+    expect(showsHomePests(plan({ treeShrub: true }))).toBe(false);
+    expect(showsHomePests(plan({ lawn: true, mosquito: true }))).toBe(true);
+    expect(showsHomePests(plan({ treeShrub: true, termite: true }))).toBe(true);
+  });
+
   test('live weather: homePestsLive true; weather down (seasonal baseline): false, pests still listed', async () => {
+    ownedKeys = ['pest_control', 'lawn_care'];
     forecastPests = [{ key: 'ants', label: 'Ants', score10: 6, level: 'elevated', note: 'a' }];
     expect((await build({})).homePestsLive).toBe(true);
     weatherAvailable = false;
@@ -305,13 +337,15 @@ describe('last lawn visit', () => {
   });
 
   test('a selected secondary property scopes the visit to that property; the primary also takes unstamped visits', async () => {
-    const secondary = { enabled: true, scoped: true, closed: false, property: { id: 'prop-b', is_primary: false } };
+    // Readable streets, so the scoped plan still owns lawn and the scan runs.
+    const street = { address_line1: '12 Palm Ave', city: 'Venice', zip: '34285' };
+    const secondary = { enabled: true, scoped: true, closed: false, property: { id: 'prop-b', is_primary: false, ...street } };
     const calls = [];
     await build({ scope: secondary, knex: fakeKnex(row(), calls) });
     expect(calls).toContainEqual(['where', 'scheduled_services.property_id', 'prop-b']);
     expect(calls.find((c) => c[0] === 'orWhereNull')).toBeUndefined();
 
-    const primary = { enabled: true, scoped: true, closed: false, property: { id: 'prop-a', is_primary: true } };
+    const primary = { enabled: true, scoped: true, closed: false, property: { id: 'prop-a', is_primary: true, ...street } };
     const primaryCalls = [];
     await build({ scope: primary, knex: fakeKnex(row(), primaryCalls) });
     expect(primaryCalls).toContainEqual(['where', 'scheduled_services.property_id', 'prop-a']);
@@ -321,8 +355,18 @@ describe('last lawn visit', () => {
   test('every property retired matches nothing', async () => {
     const closed = { enabled: true, scoped: true, closed: true, property: null };
     const calls = [];
-    await build({ scope: closed, knex: fakeKnex(row(), calls) });
+    // The card itself skips the scan (a closed scope owns no lawn); the
+    // reader still matches nothing if asked.
+    await service._test.loadLastLawnVisit('cust-1', closed, fakeKnex(row(), calls), { lawn: true });
     expect(calls).toContainEqual(['whereRaw', '1 = 0']);
+  });
+
+  test('a plan without lawn never scans for a lawn visit', async () => {
+    ownedKeys = ['pest_control'];
+    const calls = [];
+    const card = await build({ knex: fakeKnex(row(), calls) });
+    expect(card.lastLawnVisit).toBeNull();
+    expect(calls).toEqual([]);
   });
 
   test('a lookup failure drops the visit row, not the card', async () => {

@@ -226,6 +226,12 @@ describe('seasonal wording when live weather is down', () => {
     expect(screen.getByText('No household pest is above moderate this season.')).toBeInTheDocument();
   });
 
+  it('a failed forecast read says unavailable, never the all-clear', async () => {
+    await renderCard({ ...YARD, plan: PLAN_PEST_ONLY, homePests: [], homePestsLive: false, homePestsUnavailable: true });
+    expect(screen.getByText('The local pest forecast is unavailable right now.')).toBeInTheDocument();
+    expect(screen.queryByText(/above moderate/)).not.toBeInTheDocument();
+  });
+
   it('live (or the field absent) keeps the live wording', async () => {
     await renderCard({ ...YARD, plan: PLAN_PEST_ONLY, homePestsLive: true });
     expect(screen.getByText('In your pest plan · live forecast')).toBeInTheDocument();
@@ -239,6 +245,11 @@ describe('mixed versus unset grass', () => {
     expect(screen.queryByText(/Grass type not set/)).not.toBeInTheDocument();
     rerender(<YardMonthCard yard={{ ...YARD, grass: { key: 'all', known: false, mixed: false, label: null }, hiddenCount: 0 }} onOpenPhotoId={null} />);
     expect(screen.getByText('Grass type not set. Showing every grass.')).toBeInTheDocument();
+  });
+  it('a failed grass lookup shows every grass without claiming the profile is unset', async () => {
+    await renderCard({ ...YARD, grass: { key: 'all', known: false, mixed: false, label: null, unavailable: true }, hiddenCount: 0 });
+    expect(screen.getByText('Showing every grass.')).toBeInTheDocument();
+    expect(screen.queryByText(/not set/)).not.toBeInTheDocument();
   });
 });
 

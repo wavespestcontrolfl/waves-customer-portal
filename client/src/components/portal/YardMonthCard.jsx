@@ -10,8 +10,9 @@ import { formatETDateOnly, formatETTime } from '../../lib/timezone';
 // the SWFL yard pressure calendar (dark behind GATE_PORTAL_YARD_CALENDAR).
 //
 //   useYardMonth()   — one GET /api/feed/yard. {available:false} (gate off),
-//                      or any failure, means "not live": the caller keeps
-//                      rendering the existing WeatherPestWidget untouched.
+//                      any failure, or no answer within YARD_PROBE_TIMEOUT_MS
+//                      means "not live": the caller keeps rendering the
+//                      existing WeatherPestWidget untouched.
 //   YardMonthCard    — the card: weather box (GET /api/feed/weather, the
 //                      same-city data), tabs by the customer's plan lines,
 //                      in-season items only, last lawn visit, the Photo ID
@@ -22,6 +23,10 @@ import { formatETDateOnly, formatETTime } from '../../lib/timezone';
 // =========================================================================
 
 const MAX_ROWS = 3;
+
+// The API client has no request timeout; a hung /feed/yard must not hold the
+// Learn tab on its loading panel, so the probe gives up and falls back.
+export const YARD_PROBE_TIMEOUT_MS = 6000;
 
 // Home pest levels (pest-forecast model). Text on a light fill, or white on
 // the dark red, so every pill clears contrast.
@@ -41,14 +46,16 @@ const INFO_ONLY = { bg: '#F1F5F9', fg: '#334155' };
 export function useYardMonth() {
   const [state, setState] = useState({ status: 'loading', data: null });
   useEffect(() => {
-    let cancelled = false;
+    let settled = false;
+    const settle = (next) => { if (!settled) { settled = true; setState(next); } };
+    const timer = setTimeout(() => settle({ status: 'off', data: null }), YARD_PROBE_TIMEOUT_MS);
     // Promise.resolve().then so a missing/throwing client method reads as
     // "not live" instead of breaking the Learn tab.
     Promise.resolve()
       .then(() => api.getYardMonth())
-      .then((d) => { if (!cancelled) setState(d?.available ? { status: 'on', data: d } : { status: 'off', data: null }); })
-      .catch(() => { if (!cancelled) setState({ status: 'off', data: null }); });
-    return () => { cancelled = true; };
+      .then((d) => settle(d?.available ? { status: 'on', data: d } : { status: 'off', data: null }))
+      .catch(() => settle({ status: 'off', data: null }));
+    return () => { settled = true; clearTimeout(timer); };
   }, []);
   return state;
 }
@@ -71,7 +78,7 @@ function YardItem({ item }) {
       <span style={{ fontSize: 15, fontWeight: 700, color: SHELL.text }}>{item.name}</span>
       <span style={pill(tone.bg, tone.fg)}>{item.infoOnly ? 'Info only' : item.levelLabel}</span>
       <span style={{ gridColumn: '1 / -1', fontSize: 14, fontWeight: 600, color: SHELL.muted }}>{item.hosts}</span>
-      <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 14, color: SHELL.body, lineHeight: 1.42 }}>{item.sign}</p>
+      <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 16, color: SHELL.body, lineHeight: 1.42 }}>{item.sign}</p>
     </li>
   );
 }
@@ -88,11 +95,12 @@ function PestItem({ pest }) {
       <span aria-hidden="true" style={{ gridColumn: '1 / -1', height: 5, borderRadius: 999, background: '#E2E8F0', overflow: 'hidden' }}>
         <span style={{ display: 'block', height: '100%', borderRadius: 999, background: tone.bar, width: `${Math.min(100, Math.max(0, pest.score10 * 10))}%` }} />
       </span>
-      {pest.note && <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 14, color: SHELL.body, lineHeight: 1.42 }}>{pest.note}</p>}
+      {pest.note && <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 16, color: SHELL.body, lineHeight: 1.42 }}>{pest.note}</p>}
     </li>
   );
 }
 
+// Body copy is 16px (the customer-surface floor); 14px is for labels only.
 // Home pest headings. With live weather down the server sends the seasonal
 // baseline (homePestsLive false), which must not read as current conditions.
 const HOME_COPY = {
@@ -105,12 +113,14 @@ const HOME_COPY = {
     nearAlone: 'Common this month · not in your plan', empty: 'No household pest is above moderate this season.',
   },
 };
+// The forecast read failed: say so, never the all-clear above.
+const HOME_UNAVAILABLE = 'The local pest forecast is unavailable right now.';
 
 const LAWN_CALENDAR_URL = 'https://www.wavespestcontrol.com/tools/swfl-lawn-pest-calendar/?cat=lawn';
 
 const listStyle = { listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 8 };
 const subheadStyle = { margin: '2px 0 0', fontSize: 14, fontWeight: 600, color: SHELL.muted, lineHeight: 1.3 };
-const noteStyle = { margin: 0, fontSize: 14, color: SHELL.muted };
+const noteStyle = { margin: 0, fontSize: 16, color: SHELL.muted, lineHeight: 1.42 };
 
 function WeatherBox({ weather, city }) {
   if (!weather || weather.temp == null) return null;
@@ -270,9 +280,11 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
   const yardPlan = plan.lawn || plan.treeShrub;
   const byCategory = (category) => items.filter((i) => i.category === category);
 
-  // Known grass: only the hidden-count note. Otherwise say why every grass shows.
+  // Known grass: only the hidden-count note. Otherwise say why every grass
+  // shows; a failed lookup claims nothing about the customer's profile.
   let grassNote = null;
   if (grass.known) grassNote = hiddenCount > 0 ? `${hiddenCount} more in season on other grasses, hidden for your ${grass.label} lawn.` : null;
+  else if (grass.unavailable) grassNote = 'Showing every grass.';
   else grassNote = grass.mixed ? 'Mixed lawn. Showing every grass.' : 'Grass type not set. Showing every grass.';
 
   const itemsPanel = (category, note) => {
@@ -290,6 +302,7 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
   };
 
   const homePanel = () => {
+    if (yard.homePestsUnavailable) return <p style={noteStyle}>{HOME_UNAVAILABLE}</p>;
     const copy = HOME_COPY[yard.homePestsLive === false ? 'seasonal' : 'live'];
     const mine = homePests.filter((p) => p.inPlan).slice(0, MAX_ROWS);
     const near = homePests.filter((p) => !p.inPlan).slice(0, MAX_ROWS);
@@ -346,7 +359,7 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
       <YardTabs tabs={tabs} panels={panels} />
 
       {teaser && (
-        <div style={{ border: `1px dashed ${SHELL.borderStrong}`, borderRadius: 10, padding: '10px 12px', fontSize: 14, color: SHELL.body, lineHeight: 1.42 }}>
+        <div style={{ border: `1px dashed ${SHELL.borderStrong}`, borderRadius: 10, padding: '10px 12px', fontSize: 16, color: SHELL.body, lineHeight: 1.42 }}>
           {teaser}
           {/* The app's webview cannot frame wavespestcontrol.com
               (X-Frame-Options SAMEORIGIN) and a new-window link strands the
