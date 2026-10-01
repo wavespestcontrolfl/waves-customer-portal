@@ -523,6 +523,12 @@ const REPLAYABLE_STATUSES = ['requires_payment_method', 'requires_confirmation',
 // card intent is kept — a card is already captured, nothing to widen.
 function replayableUnderTender(existing, requestId, tender) {
   if (!intentBelongsToRequest(existing, requestId) || !REPLAYABLE_STATUSES.includes(existing.status)) return false;
+  // An intent stamped with an older consent text version (or none — minted
+  // before stamps existed) is never replayed (codex #5434 r1 P1, pre-push
+  // hook): completion refuses it, so replaying it on every reload would
+  // trap a link opened before a copy change. The version-salted generation
+  // mint below produces (and repoints the row to) a current-text intent.
+  if (!require('./payment-method-consent-text').intentConsentStampIsCurrent(existing)) return false;
   const bankCapable = (existing.payment_method_types || ['card']).includes('us_bank_account');
   if (tender === 'card' && bankCapable) return false;
   if (tender === 'card_or_bank' && !bankCapable && existing.status !== 'succeeded') return false;

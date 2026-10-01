@@ -2688,7 +2688,7 @@ describe('the page replays a SUCCEEDED capture as a saved-method panel; the mint
     mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'succeeded', client_secret: 'cs_1' });
     mockRetrieveSetupIntent.mockImplementation(async (id) => {
       if (id === 'seti_1') return { ...GOOD_INTENT, client_secret: 'cs_1', metadata: { ...GOOD_INTENT.metadata, retired: 'true', replaced_by: 'seti_after' } };
-      if (id === 'seti_after') return { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1' } };
+      if (id === 'seti_after') return { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1', consent_text_version: CURRENT_CONSENT_VERSION } };
       return null;
     });
     const res = await loadSecureCardPageData(REQUEST.token);
@@ -2724,13 +2724,30 @@ describe('the page replays a SUCCEEDED capture as a saved-method panel; the mint
     };
     mockRetrieveSetupIntent.mockImplementation(async (id) => {
       if (id === 'seti_1') return { ...GOOD_INTENT, client_secret: 'cs_1', payment_method: { id: 'pm_stripe_9', type: 'card' } };
-      if (id === 'seti_after') return { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1' } };
+      if (id === 'seti_after') return { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1', consent_text_version: CURRENT_CONSENT_VERSION } };
       return null;
     });
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res).toMatchObject({ state: 'ready', setupIntentId: 'seti_after', clientSecret: 'cs_after', capturedMethodType: null });
     const cas = touches('appointment_card_requests').map((t) => t.chain).find((c) => c.calls.some(([op, patch]) => op === 'update' && patch.stripe_setup_intent_id === 'seti_1'));
     expect(cas.calls.find(([op]) => op === 'where')[1]).toEqual({ id: 'req-1', status: 'pending', stripe_setup_intent_id: null });
+  });
+
+  test('a CAS miss whose replacement was minted under OLDER consent copy is not offered (completion would refuse it) — the page renders unavailable and a refresh re-mints (codex #5434 r1 P1)', async () => {
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      first: () => (reads++ === 0 ? { ...REQUEST, stripe_setup_intent_id: null } : { ...REQUEST, stripe_setup_intent_id: 'seti_stale' }),
+      update: (chain, patch) => (patch.stripe_setup_intent_id ? 0 : 1),
+    };
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_1') return { ...GOOD_INTENT, client_secret: 'cs_1', payment_method: { id: 'pm_stripe_9', type: 'card' } };
+      if (id === 'seti_stale') return { id: 'seti_stale', status: 'requires_payment_method', client_secret: 'cs_stale', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1', consent_text_version: 'v11_2026-08-25' } };
+      return null;
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.setupIntentId).not.toBe('seti_stale');
+    expect(res.clientSecret).not.toBe('cs_stale');
   });
 
   test('a CAS miss because a CONCURRENT load stored the SAME intent adopts it (GH Codex #4163 r3 P2) — never unavailable for a usable row', async () => {

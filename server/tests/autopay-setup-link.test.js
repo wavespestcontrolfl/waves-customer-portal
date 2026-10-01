@@ -608,6 +608,43 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: `autopay_setup_link_req-1_card_${CV}` }));
   });
 
+  // codex #5434 r1 P1 (pre-push hook r2): a pending link opened BEFORE a copy
+  // change points at an intent stamped with the older consent text version
+  // (or none). Completion refuses that intent, so the reload must never
+  // replay it — it mints fresh under the version-salted key, repoints the
+  // row, and the fresh capture completes.
+  it.each([
+    ['a stale stamp', { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: 'v11_2026-08-25' }],
+    ['no stamp', { purpose: 'autopay_setup_link', request_id: 'req-1' }],
+  ])('old intent (%s) → completion refusal → reload mints a current-version intent → the fresh capture completes', async (_name, oldMetadata) => {
+    const OLD = { id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_old', payment_method_types: ['card', 'us_bank_account'], metadata: oldMetadata };
+    const FRESH = { id: 'seti_fresh', client_secret: 'cs_fresh', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
+    mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_old' ? OLD : FRESH));
+    mockTableHandlers.payment_methods = { first: () => null };
+    // 1. The old tab confirms its old intent — completion refuses it.
+    const refused = await completeAutopaySetupCapture({ request: { ...PENDING, stripe_setup_intent_id: 'seti_old' }, setupIntentId: 'seti_old' });
+    expect(refused).toEqual({ ok: false, code: 'consent_version_stale' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    // 2. The customer reloads: the stored old intent is NOT replayed; a fresh
+    //    one is minted under the current text and the row repointed.
+    mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_fresh', setupIntentId: 'seti_fresh', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
+    const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_old' });
+    expect(d).toEqual(expect.objectContaining({ state: 'ready', setupIntentId: 'seti_fresh', clientSecret: 'cs_fresh' }));
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
+      idempotencyKey: `autopay_setup_link_req-1_card_or_bank_${CV}`,
+      metadata: expect.objectContaining({ consent_text_version: CV }),
+    }));
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates.some((u) => u.stripe_setup_intent_id === 'seti_fresh')).toBe(true);
+    // 3. The fresh intent, confirmed, completes: saved, recorded, enrolled.
+    mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_fresh' ? { ...FRESH, status: 'succeeded', payment_method: 'pm_fresh' } : OLD));
+    const done = await completeAutopaySetupCapture({ request: { ...PENDING, stripe_setup_intent_id: 'seti_fresh' }, setupIntentId: 'seti_fresh' });
+    expect(done).toEqual({ ok: true });
+    expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_fresh', expect.anything());
+    expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ stripePaymentMethodId: 'pm_fresh', source: 'autopay_setup_link' }));
+    expect(mockEnrollConsentedMethod).toHaveBeenCalled();
+  });
+
   it('a replayed SUCCEEDED intent carries capturedMethodType so the capture UI renders the matching consent (GH P1)', async () => {
     mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_b', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_b', type: 'us_bank_account' });

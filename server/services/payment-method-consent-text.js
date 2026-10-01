@@ -140,6 +140,11 @@ function renderedConsentVersionIsCurrent(value) {
   return typeof value === 'string' && value.trim() === CONSENT_VERSION;
 }
 
+/** True only for an intent whose mint stamped EXACTLY this server's CONSENT_VERSION (metadata.consent_text_version). */
+function intentConsentStampIsCurrent(intent) {
+  return renderedConsentVersionIsCurrent(intent?.metadata?.[CONSENT_VERSION_METADATA_KEY]);
+}
+
 /** The JSON body for the 409 a capture route answers a stale (or absent) attestation with. */
 function consentVersionStaleResponse() {
   return { error: CONSENT_VERSION_STALE_MESSAGE, code: CONSENT_VERSION_STALE_CODE };
@@ -179,6 +184,7 @@ module.exports = {
   CONSENT_VERSION_STALE_MESSAGE,
   CONSENT_VERSION_METADATA_KEY,
   renderedConsentVersionIsCurrent,
+  intentConsentStampIsCurrent,
   consentVersionStaleResponse,
   consentVersionStaleError,
   getConsentText,

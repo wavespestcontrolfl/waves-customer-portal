@@ -1543,6 +1543,10 @@ async function adoptReplacedSecureCardIntent(request, observed, { database = db 
   try {
     const live = await readLiveSecureCardIntent(fresh.stripe_setup_intent_id);
     if (!live || live.status === 'canceled' || isRetiredSetupIntent(live) || !secureCardIntentBelongsToRequest(live, request.id)) return null;
+    // Never offer an intent stamped with an older consent text version:
+    // completion refuses it (codex #5434 r1 P1) — null renders unavailable
+    // and the refresh re-derives through the version-salted mint.
+    if (!require('./payment-method-consent-text').intentConsentStampIsCurrent(live)) return null;
     return shapeSecureCaptureIntent(live);
   } catch (err) {
     logger.warn(`[appt-card-request] replaced-intent read failed for request ${request.id}: ${err.message}`);
