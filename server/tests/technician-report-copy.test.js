@@ -111,6 +111,9 @@ const CREDENTIAL_CASES = {
   shared: [
     'Use ABCDEFGHIJKL2468MNOPQRSTUVWX to open the gate',
     `Gate code ${'1234567890'.repeat(6)}ft`,
+    'Gate password is 1ml',
+    'Gate code is 1ml',
+    'Gate PIN: 7ft',
     'Gate code 1234ft 5678ft 9012ft',
     'Gate code 1234ft 5678ft 9ft',
     'Gate PIN AB1234ml 5678ml 9012ml',
@@ -444,6 +447,8 @@ const LEGITIMATE_CASES = {
     'Use 100 ml if you ever need to treat soil before opening the gate',
     'Use 100 ml so you are able to treat soil before opening the gate',
     'Use 100 ml so you can easily treat soil before opening the gate',
+    'Lockbox has 1 key inside',
+    'Treated 1 station by the keypad',
   ],
 };
 

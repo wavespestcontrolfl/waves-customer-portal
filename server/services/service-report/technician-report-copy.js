@@ -253,6 +253,8 @@ function isExplicitDeviceWorkMeasurement(value, match) {
     && REPORT_MEASUREMENT_AT_START_RE.test(measurementTail);
 }
 
+const REPORT_SECRET_NOUN_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i;
+
 function containsExplicitNumericCredential(text) {
   const value = String(text || '');
   for (const pattern of [REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE, REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE]) {
@@ -266,6 +268,9 @@ function containsExplicitNumericCredential(text) {
       // numeric groups. A total above eight digits must not let unit-shaped
       // groups disappear during the later measurement masking.
       if (digitCount >= 2) return true;
+      // A secret noun governs even one digit ("Gate password is 1ml"); a bare
+      // device noun with one digit is ordinary prose ("Lockbox has 1 key").
+      if (digitCount === 1 && REPORT_SECRET_NOUN_RE.test(match[0])) return true;
     }
   }
   return false;
