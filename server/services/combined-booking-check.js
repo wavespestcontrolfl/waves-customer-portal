@@ -193,25 +193,35 @@ function evaluateCombinedBooking(ctx) {
   } = ctx;
   const accepted = acceptedFamilies(estimate);
   if (!accepted || accepted.size < 2) return null;
-  // On hold / stopped (the classifier skipped them): not judged now, and a
-  // standing finding about them is kept until they are (the runner's heldProblems).
-  const heldFamilies = [...accepted].filter((family) => scheduleSkippedFamilies.has(family));
-  const families = new Set([...accepted].filter((family) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
-  // Every family on hold / stopped / kept on an older series: nothing to judge.
-  if (!families.size) return { ok: false, deferred: true, frozen: true, heldFamilies, problems: [], labels: [] };
-
   const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
     && rowFamilies(row).some((family) => scope.has(family));
+  // Every row of the accepted plan cancelled (a cancelled plan, or every
+  // series stopped for good): nothing left to verify, so nothing to say.
+  const acceptedRows = allRows.filter((row) => isPlanRow(row, accepted));
+  if (acceptedRows.length && acceptedRows.every((row) => CANCELLED.has(row.status))) return null;
+  // Skipped by the classifier and still holding live visits = on hold: not
+  // judged now, and a standing finding about it is kept until it is (the
+  // runner's heldProblems). A family whose visits were all cancelled was
+  // stopped for good: its findings are not kept.
+  const hasLiveRows = (family) => acceptedRows.some((row) => rowFamilies(row).includes(family) && !CANCELLED.has(row.status));
+  const heldFamilies = [...accepted].filter((family) => scheduleSkippedFamilies.has(family) && hasLiveRows(family));
+  const families = new Set([...accepted].filter((family) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
+  // Every family on hold / stopped / kept on an older series: nothing to judge.
+  if (!families.size) return { ok: false, deferred: true, frozen: heldFamilies.length > 0, heldFamilies, problems: [], labels: [] };
+
   // The booking's first day comes from ALL its plan visits, before families on
   // hold or cancelled rows are filtered out (the seasonal exemption is judged
   // against the day the booking really started).
-  const firstDay = allRows.filter((row) => isPlanRow(row, accepted)).map((row) => dateOnly(row.scheduled_date)).sort()[0];
+  const firstDay = acceptedRows.map((row) => dateOnly(row.scheduled_date)).sort()[0];
   const planRows = allRows.filter((row) => isPlanRow(row, families));
   const rows = planRows.filter((row) => !NOT_LIVE.has(row.status));
   // Rows were created and every one was cancelled: the customer or office
   // cancelled the plan. Nothing left to verify, so nothing to say.
-  if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
+  if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) {
+    // The services still judged were cancelled; one on hold keeps the booking.
+    return heldFamilies.length ? { ok: false, deferred: true, frozen: true, heldFamilies, problems: [], labels: [] } : null;
+  }
   const labels = [...families].map(familyLabel);
   // No live rows: the schedule shape is the accepted-schedule alert's.
   if (!rows.length) return { ok: false, deferred: true, frozen: false, heldFamilies, problems: [], labels };
@@ -502,7 +512,12 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, overflow: 0 };
   result.closed += await retireAbandoned(conn);
   const owedBefore = new Set(await owedEstimateIds(conn));
-  const candidates = await candidateQuery(conn, { now, owed: [...owedBefore, ...await standingEstimateIds(conn)] });
+  // An internal test / demo customer never gets an admin artifact (the
+  // notification service suppresses its bells); it is left out before any
+  // budgeting, so it can never land on the overflow record either.
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  const candidates = (await candidateQuery(conn, { now, owed: [...owedBefore, ...await standingEstimateIds(conn)] }))
+    .filter((estimate) => !isInternalTestCustomerId(estimate.customer_id));
   result.candidates = candidates.length;
 
   // An OK verdict writes nothing (an `fyi` fact), so every candidate is judged

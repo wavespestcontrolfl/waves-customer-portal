@@ -17,6 +17,11 @@ jest.mock('../services/scheduling/blackout-dates', () => ({
   lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,
 }));
 jest.mock('../services/slot-zone', () => ({ resolveEstimateZone: async () => null, zoneSlugOf: () => null }));
+const mockTestCustomerIds = new Set();
+jest.mock('../services/internal-test-customers', () => ({
+  ...jest.requireActual('../services/internal-test-customers'),
+  isInternalTestCustomerId: (id) => mockTestCustomerIds.has(String(id)),
+}));
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
@@ -313,6 +318,22 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ ok: 1, closed: 1 });
       expect((await alertsOf(trx, est.estimateId))[0].done_at).not.toBeNull();
     } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('an internal test customer is never judged, so it can never reach the overflow record', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      mockTestCustomerIds.add(est.customerId);
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ candidates: 0, overflow: 0, problems: 0 });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
+    } finally {
+      mockTestCustomerIds.clear();
       mockPg = pool;
       await trx.rollback();
     }
