@@ -254,7 +254,13 @@ async function alertHeldInvoiceNeverQueued(meta) {
 async function queueInvoiceOfDeadDeclineNotice(meta) {
   if (!meta.invoice_id) return;
   try {
-    await require('../collections/collection-hold').queueHeldInvoiceForSender(meta.invoice_id);
+    // The queue write AND the completion's `invoiceSenderOwnsPayLinkFor` ownership marker land in ONE
+    // transaction (handOverHeldInvoiceToSender, the same pairing every completion hand-over uses): a
+    // retried closeout then sees the sender owns the pay link and goes report-only instead of
+    // texting a second one (Codex #5424 r15 P1).
+    await require('../dispatch-completion-deferred').handOverHeldInvoiceToSender({
+      invoiceId: meta.invoice_id, serviceRecordId: meta.service_record_id || null,
+    });
   } catch (err) {
     try {
       const open = await db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' })

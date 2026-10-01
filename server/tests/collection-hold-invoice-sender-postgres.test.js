@@ -1018,6 +1018,50 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(sentIds().filter((x) => x === inv)).toHaveLength(1);
     });
 
+    // Codex #5424 r15 P1: the terminal hand-over writes the queue AND the completion's ownership marker in
+    // ONE transaction, so a retried closeout sees the sender owns the pay link and texts no second one.
+    const newRecord = async (customerId) => (await db('service_records').insert({
+      customer_id: customerId, service_date: '2040-03-04', service_type: 'Pest Control', status: 'completed', structured_notes: JSON.stringify({ keep: 'me' }),
+    }).returning('id'))[0].id;
+    const recordNotes = async (id) => {
+      const n = (await db('service_records').where({ id }).first('structured_notes')).structured_notes;
+      return typeof n === 'string' ? JSON.parse(n) : n;
+    };
+
+    test('the terminal hand-over also persists invoiceSenderOwnsPayLinkFor on the completion\'s service record (existing notes kept)', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c);
+      const rec = await newRecord(c);
+      expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', { ...meta(inv, c), service_record_id: rec })).toMatchObject({ ok: true });
+      expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      expect(await recordNotes(rec)).toMatchObject({ keep: 'me', invoiceSenderOwnsPayLinkFor: String(inv) });
+      // idempotent on a sweep retry
+      expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', { ...meta(inv, c), service_record_id: rec })).toMatchObject({ ok: true });
+      expect(await recordNotes(rec)).toMatchObject({ keep: 'me', invoiceSenderOwnsPayLinkFor: String(inv) });
+    });
+
+    test('a failed marker write rolls the queue write back (one transaction), alerts, and a retry lands both', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c);
+      const rec = await newRecord(c);
+      await db.raw(`CREATE OR REPLACE FUNCTION b10_fail_marker4() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'marker down (synthetic)'; END $$ LANGUAGE plpgsql`);
+      await db.raw(`CREATE TRIGGER b10_fail_marker4_trg BEFORE UPDATE ON service_records FOR EACH ROW WHEN (OLD.id = '${rec}') EXECUTE FUNCTION b10_fail_marker4()`);
+      try {
+        expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', { ...meta(inv, c), service_record_id: rec })).toMatchObject({ ok: false });
+      } finally {
+        await db.raw('DROP TRIGGER IF EXISTS b10_fail_marker4_trg ON service_records');
+        await db.raw('DROP FUNCTION IF EXISTS b10_fail_marker4()');
+      }
+      expect((await invoice(inv)).status).toBe('draft');
+      expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      expect(await alertsFor(inv)).toHaveLength(1);
+      expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', { ...meta(inv, c), service_record_id: rec })).toMatchObject({ ok: true });
+      expect((await invoice(inv)).status).toBe('scheduled');
+      expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBe(String(inv));
+    });
+
     test('without a hold it queues too (the notice never delivered); a paid, sent or payer-billed invoice is left alone', async () => {
       const c = await newCustomer();
       const draft = await newInvoice(c);

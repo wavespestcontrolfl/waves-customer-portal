@@ -40,6 +40,7 @@ jest.mock('../services/dispatch-completion-deferred', () => ({
   finalizeDeferredDeclineNotice: jest.fn(async () => ({ ok: true })),
   terminalDeferredCompletionSend: jest.fn(async () => {}),
   terminalDeferredDeclineNotice: jest.fn(async () => {}),
+  handOverHeldInvoiceToSender: jest.fn(async () => ({ queued: true })),
 }));
 jest.mock('../services/appointment-card-request', () => ({
   sendDeferredInvitationEmailLeg: jest.fn(async () => ({ ok: true })),
@@ -1401,6 +1402,26 @@ describe('deferred-replay registry', () => {
         type: 'collection_hold_invoice_queue_failed',
         payload: expect.objectContaining({ invoiceId: 'inv-1', customerId: 'cust-1' }),
       }));
+    } finally { createAlert.mockRestore(); }
+  });
+
+  test('decline notice terminal hand-over (Codex #5424 r15 P1): queue + ownership marker go through handOverHeldInvoiceToSender with the record id', async () => {
+    const { handOverHeldInvoiceToSender } = require('../services/dispatch-completion-deferred');
+    handOverHeldInvoiceToSender.mockClear();
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1', service_record_id: 'rec-1' });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-1', serviceRecordId: 'rec-1' });
+    // a notice with no completion record hands over with a null record (queue only, no marker to write)
+    handOverHeldInvoiceToSender.mockClear();
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-2', customer_id: 'cust-1' });
+    expect(handOverHeldInvoiceToSender).toHaveBeenCalledWith({ invoiceId: 'inv-2', serviceRecordId: null });
+    // a hand-over failure is reported as a failed hook (the terminal sweep retries) after the office alert
+    handOverHeldInvoiceToSender.mockRejectedValueOnce(new Error('queue down'));
+    db.mockReturnValueOnce(firstChain(undefined)); // no open alert yet
+    const alerts = require('../services/dispatch-alerts');
+    const createAlert = jest.spyOn(alerts, 'createAlert').mockResolvedValue({ id: 'a1' });
+    try {
+      expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1', service_record_id: 'rec-1' })).toMatchObject({ ok: false });
+      expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ type: 'collection_hold_invoice_queue_failed' }));
     } finally { createAlert.mockRestore(); }
   });
 
