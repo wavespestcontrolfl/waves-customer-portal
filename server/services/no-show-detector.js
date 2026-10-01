@@ -1317,9 +1317,11 @@ async function alreadyHasOpenAlert(trx, { jobId, type, key }) {
 // technician_id, so a stale tracking notice stayed visible to a now
 // office-only user who cannot act on it (codex P2, pre-push audit on
 // 04ecfd821).
-function noticeStillCurrent({ live, visit, notice, recipientTech }) {
+// `held`: the visit is a live street-level address hold — never dispatched, so no technician notice about it is
+// current (the one place the reconcile decides this; the dismissal below is the existing automatic one).
+function noticeStillCurrent({ live, visit, notice, recipientTech, held = false }) {
   const sameRecipient = !!(live && visit?.technician_id === notice?.technician_id);
-  return sameRecipient && isAssignable(recipientTech)
+  return !held && sameRecipient && isAssignable(recipientTech)
     && live.stage === notice?.payload?.stage
     && live.promised_window.start_at === notice?.payload?.promised_window?.start_at;
 }
@@ -1676,7 +1678,10 @@ async function sweep(conn, { now = new Date() } = {}) {
     // any other mismatch already dismisses the notice.
     const recipientTech = sameRecipient ? await trx('technicians').where({ id: visit.technician_id })
       .first('id', 'employment_status', 'field_dispatchable') : null;
-    if (!noticeStillCurrent({ live, visit, notice, recipientTech })) {
+    // A visit promoted to a street-level hold after its notice was raised: lockedStop holds the stop's row lock,
+    // so this read is atomic with it. Only asked when the notice would otherwise stay current.
+    const held = !!(visitId && sameRecipient && await require('./street-level-hold').isStreetLevelHoldVisit(visitId, trx));
+    if (!noticeStillCurrent({ live, visit, notice, recipientTech, held })) {
       // Stamped as an AUTOMATIC dismissal (never a tech's own Got-it tap —
       // routes/tech-notifications.js's /dismiss and /confirm-start never
       // touch payload), so recordTrackingNotice can revive this same row
