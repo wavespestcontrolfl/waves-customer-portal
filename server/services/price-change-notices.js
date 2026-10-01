@@ -338,6 +338,13 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
           })
           .orderBy('created_at', 'desc')
           .first();
+        // An annual rate review notice for the same tuple belongs to the
+        // rate review's own sender (its letter, its frozen page): this batch
+        // never claims or stamps it — the customer is already being noticed.
+        if (existing && existing.rate_review_row_id) {
+          summary.alreadyNotified += 1;
+          return;
+        }
         if (existing && ['sent', 'viewed'].includes(existing.status)) {
           summary.alreadyNotified += 1;
           return;

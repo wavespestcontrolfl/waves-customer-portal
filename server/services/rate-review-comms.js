@@ -290,7 +290,13 @@ const LINE_RULES = [
   ['not_approved', ({ snapshot }) => !snapshot || String(snapshot.status) !== 'approved'],
   ['unsupported_line', ({ notice }) => !SERVICE_LABELS[notice.family_key]],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
-  ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0)],
+  // A line whose earlier attempt froze its words may already have been
+  // delivered (the stamp failed after the provider took it): it is
+  // reconciled under the same claim key — the email dedupes — whatever the
+  // date. The apply lane counts 30 days from the stamped sent_at, so a late
+  // stamp holds the rate change; it never applies one early.
+  ['too_late', ({ line, notice, today }) => !parseJson(notice.metadata, {}).pending_letter
+    && (!line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0))],
   ['in_flight', ({ notice, now }) => !claimable(notice, now)],
 ];
 const ACCOUNT_RULES = [
@@ -332,16 +338,18 @@ function planBatch(data, { today, now }) {
     .sort((a, b) => a.customerId.localeCompare(b.customerId));
 }
 
+// The digest the send must match: per sendable letter, the exact words
+// (the frozen ones for a retry, else the letter as it would render now —
+// cost block, dates, first application) and the channels it goes out on.
 function digestFor(entries, costBlock) {
   const h = crypto.createHash('sha256');
   h.update(`cost:${costBlock || ''}\n`);
   for (const e of entries) {
     if (e.reason || !e.lines.length) continue;
     const frozen = frozenFor(e);
-    if (frozen) h.update(`frozen:${e.customerId}:${frozen.key}:${frozen.payload?.cost_block || ''}\n`);
-    for (const l of [...e.lines].sort((a, b) => String(a.noticeId).localeCompare(String(b.noticeId)))) {
-      h.update(`${e.customerId}:${l.noticeId}:${l.currentCents}:${l.newCents}:${l.effectiveDate}\n`);
-    }
+    const payload = frozen ? frozen.payload : letterPayload({ customer: e.customer, lines: e.lines, costBlock, noticeUrl: noticeUrlFor(e.lines) });
+    const ids = e.lines.map((l) => `${l.noticeId}:${l.currentCents}:${l.newCents}:${l.effectiveDate}`).sort();
+    h.update(`${e.customerId}|${ids.join(',')}|${e.channels.email ? 'E' : ''}${e.channels.sms ? 'S' : ''}|${JSON.stringify(payload)}\n`);
   }
   return h.digest('hex');
 }
@@ -636,7 +644,10 @@ function publicLines(letter) {
 function publicReview(notice) {
   if (!notice?.rate_review_row_id) return null;
   const letter = parseJson(notice.metadata, {}).letter;
-  if (!notice.sent_at || !letter || !Array.isArray(letter.lines) || !letter.lines.length) return { unavailable: true };
+  if (!notice.sent_at) return { unavailable: true };
+  // Delivered without a frozen letter (a notice stamped by another sender):
+  // the plain notice page, never a 404 for a link the customer received.
+  if (!letter || !Array.isArray(letter.lines) || !letter.lines.length) return null;
   const lines = publicLines(letter);
   return {
     firstName: letter.first_name || null,
@@ -648,14 +659,14 @@ function publicReview(notice) {
 
 // What the next automatic charge at the new rate bills, in cents — the
 // account's whole debit, never one line's rate: per application the
-// application's own price; monthly the account's dues moved by the delta
-// (what applyMonthly writes to customers.monthly_rate); a prepaid renewal
+// application's own price; monthly the account's dues moved by every
+// pending monthly delta in force by then (what applyMonthly writes); a prepaid renewal
 // has no automatic charge (renewals are recorded by the office) → null.
-function chargeCentsAtNewRate(notice, { current, next, customer }) {
+function chargeCentsAtNewRate(notice, { next, monthlyDelta, customer }) {
   if (notice.billing_lane === 'per_application') return next;
   if (notice.billing_lane === 'monthly_membership') {
     const dues = Math.round(Number(customer?.monthly_rate || 0) * 100);
-    return dues > 0 ? dues + (next - current) : null;
+    return dues > 0 ? dues + monthlyDelta : null;
   }
   return null;
 }
@@ -680,16 +691,22 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // renewal — it stays upcoming until its effective date. Every other lane
   // drops off once the nightly apply writes the new rate.
   const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('monthly_rate') : null;
-  return rows.filter((n) => !n.applied_at || n.billing_lane === 'annual_prepay').map((n) => {
+  const pending = rows.filter((n) => !n.applied_at || n.billing_lane === 'annual_prepay');
+  return pending.map((n) => {
     const unit = unitFor(n);
     const current = Number(n.noticed_current_cents ?? n.current_amount_cents);
     const next = Number(n.noticed_new_cents ?? n.new_amount_cents);
+    // Monthly: every pending monthly increase in force by this date moves
+    // the same account dues (applyMonthly adds each delta).
+    const monthlyDelta = pending
+      .filter((o) => o.billing_lane === 'monthly_membership' && ymd(o.effective_date) <= ymd(n.effective_date))
+      .reduce((sum, o) => sum + Number(o.noticed_new_cents ?? o.new_amount_cents) - Number(o.noticed_current_cents ?? o.current_amount_cents), 0);
     return {
       service: SERVICE_LABELS[n.family_key] || null,
       unit,
       current: money(current),
       next: money(next),
-      chargeCents: chargeCentsAtNewRate(n, { current, next, customer }),
+      chargeCents: chargeCentsAtNewRate(n, { next, monthlyDelta, customer }),
       effectiveDate: ymd(n.effective_date),
       noticePath: `/price-change/${n.notice_token}`,
     };

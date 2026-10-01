@@ -138,6 +138,16 @@ describe('sendPreview', () => {
     expect(out.counts.letters).toBe(0);
   });
 
+  test('the digest binds the channels and the rendered letter, not only the amounts', async () => {
+    mockDb.reset(book({ customers: [customer(1, { phone: null })] }));
+    const a = await previewDigest();
+    mockDb.store.customers[0].phone = '+15555550109';
+    const b = await previewDigest();
+    expect(b).not.toBe(a);
+    mockDb.store.customers[0].first_name = 'Renamed';
+    expect(await previewDigest()).not.toBe(b);
+  });
+
   test('the digest moves with the cost block, not only the list', async () => {
     mockDb.reset(book());
     const a = await previewDigest();
@@ -246,6 +256,16 @@ describe('sendBatch', () => {
     expect(parsed.pending_letter).toBeUndefined();
   });
 
+  test('a frozen earlier attempt is reconciled even past the 30-day cutoff (the apply holds a late stamp)', async () => {
+    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
+    const n = draft(1, { effective_date: '2026-11-20', status: 'draft' });
+    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'November 20, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { first_name: 'Testcust1', cost_block: COST_BLOCK, lines: [] } } };
+    mockDb.reset(book({ notices: [n] }));
+    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(preview.counts.letters).toBe(1);
+    expect((await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).sent).toBe(1);
+  });
+
   test('the gate flipped off mid-batch stops the rest', async () => {
     const b = book({ customers: [customer(1), customer(2)], notices: [draft(1), draft(2, { customer_id: CUSTOMER(2), rate_review_row_id: ROW(2) })] });
     mockDb.reset(b);
@@ -350,6 +370,8 @@ describe('customer surfaces', () => {
     mockDb.reset(book());
     expect(comms.publicReview(notices()[0])).toEqual({ unavailable: true });
     expect(comms.publicReview({ rate_review_row_id: null })).toBeNull();
+    // delivered by another sender without a frozen letter: the plain page, never a 404
+    expect(comms.publicReview({ rate_review_row_id: 'r', sent_at: new Date(), metadata: {} })).toBeNull();
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
     const review = comms.publicReview(notices()[0]);
     expect(review).toMatchObject({ costBlock: COST_BLOCK, hasPrepay: false });
@@ -375,6 +397,16 @@ describe('customer surfaces', () => {
     });
     mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00' })], notices: [monthly] }));
     expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ unit: 'month', next: '$44', chargeCents: 10400 });
+  });
+
+  test('portal: two monthly increases on one account project the cumulative dues', async () => {
+    const mk = (n, eff) => draft(n, {
+      customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: eff, status: 'sent', sent_at: NOW,
+      current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+    });
+    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00' })], notices: [mk(1, '2026-12-15'), mk(2, '2026-12-15')] }));
+    const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
+    expect(out.map((c) => c.chargeCents)).toEqual([10800, 10800]);
   });
 
   test('portal: a prepaid change stays upcoming after the nightly apply, until its renewal date', async () => {

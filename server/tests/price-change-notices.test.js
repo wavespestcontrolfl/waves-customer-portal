@@ -310,6 +310,18 @@ describe('createAndSendBatch delivery', () => {
     expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
   });
 
+  it('never claims or stamps an annual rate review notice for the same change tuple', async () => {
+    customerRows = [CUSTOMER];
+    existingNoticeRow = {
+      id: 'n-review', status: 'draft', notice_token: 'abcdabcdabcdabcdabcdabcdabcdabcd', rate_review_row_id: 'row-1',
+      customer_id: 'c-1', current_amount_cents: 4900, new_amount_cents: 5200,
+    };
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ created: 0, emailed: 0, texted: 0, alreadyNotified: 1 });
+    expect(noticeUpdates).toEqual([]);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
   it('excludes customers covered by active or pending annual-prepay terms', async () => {
     customerRows = [CUSTOMER];
     getActivelyCoveredCustomerIds.mockResolvedValue(['ap-1']);

@@ -38,13 +38,16 @@ function getStripe() {
 // charge (prepaid renewal), = nothing to announce (nextCharge null). Gate off or
 // nothing pending = no field (byte-identical payload); a read failure omits
 // the field, never the card.
-async function rateChangesField(customerId, { autopayEnabled, method, funding }) {
+async function rateChangesField(customerId, { autopayEnabled, method, funding, customer }) {
   try {
     const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
     if (!changes.length) return {};
     return {
       rate_changes: changes.map(({ chargeCents, ...change }) => {
-        const charge = autopayEnabled && method && chargeCents > 0 ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
+        // A pause covering the effective date skips that charge (billing
+        // cron isPaused) — nothing to announce for it.
+        const pausedThen = isPaused(customer, new Date(`${change.effectiveDate}T16:00:00Z`));
+        const charge = autopayEnabled && method && chargeCents > 0 && !pausedThen ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
         return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge } : null };
       }),
     };
@@ -231,7 +234,7 @@ router.get('/', async (req, res, next) => {
       autopay_selected_method_ids: selectedMethodIds,
       removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
-      ...(await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding })),
+      ...(await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding, customer })),
     });
   } catch (err) { next(err); }
 });
