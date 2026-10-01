@@ -18,6 +18,8 @@
  *   node server/scripts/audit-lawn-expectation-products.js
  *   node server/scripts/audit-lawn-expectation-products.js --since-days 365 --json
  *   node server/scripts/audit-lawn-expectation-products.js --database-url postgres://...
+ *   (falls back to DATABASE_URL; the script builds its own connection and never
+ *   loads models/db.js)
  *   node server/scripts/audit-lawn-expectation-products.js --names-file names.txt
  *
  * `--names-file` skips the database and audits one product name per line
@@ -121,42 +123,63 @@ function formatReport(result) {
   return lines.join('\n');
 }
 
-async function main(argv = process.argv.slice(2)) {
+/**
+ * Own read-only knex connection. Built only from the URL given on the command
+ * line or DATABASE_URL, after args are parsed: this script never loads
+ * models/db.js or knexfile.js, so nothing can connect to a preconfigured
+ * database behind the operator's back.
+ */
+function createAuditKnex(databaseUrl) {
+  const url = String(databaseUrl || '').trim();
+  if (!url || url === 'undefined' || url === 'null') {
+    throw new Error('No database: pass --database-url or set DATABASE_URL (or use --names-file).');
+  }
+  const knex = require('knex');  
+  return knex({
+    client: 'pg',
+    connection: {
+      connectionString: url,
+      ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false },
+    },
+    pool: { min: 0, max: 2 },
+  });
+}
+
+async function main(argv = process.argv.slice(2), env = process.env) {
   const json = argv.includes('--json');
   const namesFile = argValue(argv, '--names-file');
   const sinceDays = Number(argValue(argv, '--since-days')) || DEFAULT_SINCE_DAYS;
-  const databaseUrl = argValue(argv, '--database-url');
+  const databaseUrl = argValue(argv, '--database-url') || env.DATABASE_URL;
 
   let source;
   let db = null;
-  if (namesFile) {
-    source = parseNamesFile(fs.readFileSync(namesFile, 'utf8'));
-  } else {
-    if (databaseUrl) process.env.DATABASE_URL = databaseUrl;
-    // Lazy: importing the app db requires a configured connection.
-    db = require('../models/db');
-    source = await loadLawnProductNames(db, { sinceDays });
+  try {
+    if (namesFile) {
+      source = parseNamesFile(fs.readFileSync(namesFile, 'utf8'));
+    } else {
+      db = createAuditKnex(databaseUrl);
+      source = await loadLawnProductNames(db, { sinceDays });
+    }
+    const result = auditLawnExpectationProducts(source);
+    console.log(json ? JSON.stringify(result, null, 2) : formatReport(result));
+    if (result.counts.unmapped > 0) process.exitCode = 1;
+  } finally {
+    if (db) await db.destroy();
   }
-
-  const result = auditLawnExpectationProducts(source);
-  console.log(json ? JSON.stringify(result, null, 2) : formatReport(result));
-  if (result.counts.unmapped > 0) process.exitCode = 1;
-  return db;
 }
 
 if (require.main === module) {
-  main()
-    .catch((err) => {
-      console.error(err);
-      process.exitCode = 1;
-    })
-    .then((db) => (db ? db.destroy() : undefined))
-    .catch(() => {});
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exitCode = 1;
+  });
 }
 
 module.exports = {
   auditLawnExpectationProducts,
   loadLawnProductNames,
+  createAuditKnex,
+  main,
   parseNamesFile,
   formatReport,
   DEFAULT_SINCE_DAYS,

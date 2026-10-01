@@ -95,3 +95,56 @@ describe('loadLawnProductNames', () => {
     expect(writes).toEqual([]);
   });
 });
+
+describe('connection handling', () => {
+  it('requiring the engine, the config and the audit script never loads models/db.js or knexfile.js', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => { throw new Error('models/db.js must not be loaded'); });
+      jest.doMock('../knexfile', () => { throw new Error('knexfile.js must not be loaded'); });
+      expect(() => {
+        require('../config/lawn-expectations');
+        require('../services/service-report/lawn-expectations');
+        require('../scripts/audit-lawn-expectation-products');
+      }).not.toThrow();
+      const loaded = Object.keys(require.cache).filter((k) => /models[\\/]db\.js$|knexfile\.js$/.test(k));
+      expect(loaded).toEqual([]);
+    });
+  });
+
+  it('main builds its own connection from --database-url, ahead of DATABASE_URL', async () => {
+    const trx = { raw: jest.fn(async (sql) => (/^\s*SELECT/.test(sql) ? { rows: [{ name: 'Celsius WG', uses: 1 }] } : {})) };
+    const instance = {
+      transaction: jest.fn(async (fn) => fn(trx)),
+      destroy: jest.fn(async () => {}),
+    };
+    const knexFactory = jest.fn(() => instance);
+    let main;
+    jest.isolateModules(() => {
+      jest.doMock('knex', () => knexFactory);
+      jest.doMock('../models/db', () => { throw new Error('models/db.js must not be loaded'); });
+      ({ main } = require('../scripts/audit-lawn-expectation-products'));
+    });
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await main(['--database-url', 'postgres://flag-host/flagdb'], { DATABASE_URL: 'postgres://env-host/envdb' });
+    } finally {
+      log.mockRestore();
+    }
+    expect(knexFactory).toHaveBeenCalledTimes(1);
+    expect(knexFactory.mock.calls[0][0].connection.connectionString).toBe('postgres://flag-host/flagdb');
+    expect(instance.destroy).toHaveBeenCalled();
+  });
+
+  it('falls back to DATABASE_URL, and refuses to run with no database at all', async () => {
+    const { createAuditKnex } = require('../scripts/audit-lawn-expectation-products');
+    expect(() => createAuditKnex('')).toThrow(/No database/);
+    expect(() => createAuditKnex('undefined')).toThrow(/No database/);
+    const { main } = require('../scripts/audit-lawn-expectation-products');
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(main([], {})).rejects.toThrow(/No database/);
+    } finally {
+      err.mockRestore();
+    }
+  });
+});

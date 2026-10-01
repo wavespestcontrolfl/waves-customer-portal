@@ -37,7 +37,9 @@ const {
   CURATIVE_ISSUE_KEYS,
   normalizeProductName,
 } = require('../../config/lawn-expectations');
-const { validateCustomerCopy } = require('./premium-experience');
+// Pure imports only (no models/db): the engine must never open a database.
+const { validateCustomerCopy } = require('./customer-copy-forbidden');
+const { etCalendarDayOf, parseETDateTime } = require('../../utils/datetime-et');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
 // ── Product classification ────────────────────────────────────────────────
@@ -60,14 +62,19 @@ function classifyLawnProductStatus(name) {
 // ── Dates ─────────────────────────────────────────────────────────────────
 const DAY_MS = 86400000;
 
+// A calendar day as UTC-midnight ms, resolved on the America/New_York
+// calendar. 'YYYY-MM-DD' strings and pg date values are read literally;
+// real timestamps (Date or ISO string with a time) convert to their ET day,
+// and a naive timestamp string reads as ET wall-clock. So
+// 2026-10-31T21:00:00-04:00 is October 31 even though it is November 1 UTC.
 function parseDay(value) {
   if (!value) return null;
-  if (value instanceof Date) {
-    return Number.isFinite(value.getTime())
-      ? Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate())
-      : null;
-  }
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+  const dateOnly = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  // A naive 'YYYY-MM-DDTHH:mm' string is ET wall-clock (parseETDateTime).
+  const instant = dateOnly ? null : parseETDateTime(value);
+  if (!dateOnly && !Number.isFinite(instant.getTime())) return null;
+  const day = etCalendarDayOf(dateOnly ? value : instant);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
   if (!m) return null;
   return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
 }

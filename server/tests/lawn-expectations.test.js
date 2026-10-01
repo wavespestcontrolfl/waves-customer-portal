@@ -394,6 +394,71 @@ describe('buildLawnExpectations', () => {
       expect(out.rows[0].lines.length).toBeGreaterThan(0);
     });
 
+    describe('dates resolve to the Eastern calendar day', () => {
+      it('a Date at 9 PM EDT on Oct 31 is October 31, not November 1 (UTC)', () => {
+        const visit = new Date('2026-10-31T21:00:00-04:00'); // 2026-11-01T01:00:00Z
+        expect(visitGapDays({ visitDate: visit, nextVisitDate: '2026-11-14' })).toBe(14);
+      });
+
+      it('the visit month is the ET month the other way too: Feb 28 9 PM EST is February (dip kept)', () => {
+        const out = buildLawnExpectations({ visitDate: new Date('2027-02-28T21:00:00-05:00'), issues: ['seasonal_dip'] }, PREVIEW); // Mar 1 UTC
+        expect(out.rows.map((r) => r.id)).toEqual(['issue_seasonal_dip']);
+      });
+
+      it('the visit month is the ET month: Oct 31 9 PM EDT is October (seasonal dip withheld)', () => {
+        const out = buildLawnExpectations({ visitDate: new Date('2026-10-31T21:00:00-04:00'), issues: ['seasonal_dip'] }, PREVIEW);
+        expect(out.rows).toEqual([]);
+        expect(out.withheld).toEqual([{ rowId: 'issue_seasonal_dip', reason: 'out_of_season' }]);
+      });
+
+      it('timestamp strings with an offset resolve the same way as Dates', () => {
+        expect(visitGapDays({ visitDate: '2026-10-31T21:00:00-04:00', nextVisitDate: '2026-11-14T08:00:00-05:00' })).toBe(14);
+        expect(visitGapDays({ visitDate: '2026-11-01T01:00:00Z', nextVisitDate: '2026-11-14' })).toBe(14);
+      });
+
+      it('a naive timestamp string reads as ET wall-clock, not server-local UTC', () => {
+        expect(visitGapDays({ visitDate: '2026-10-31T21:00', nextVisitDate: '2026-11-01' })).toBe(1);
+      });
+
+      it('date-only strings are read literally', () => {
+        expect(visitGapDays({ visitDate: '2026-10-31', nextVisitDate: '2026-11-01' })).toBe(1);
+        expect(visitGapDays({ visitDate: '2026-10-31', nextVisitDate: '2026-10-31' })).toBe(0);
+      });
+
+      it('gaps across the fall-back DST night (Nov 1, 2026) stay whole calendar days', () => {
+        expect(visitGapDays({ visitDate: '2026-10-31', nextVisitDate: '2026-11-02' })).toBe(2);
+        expect(visitGapDays({
+          visitDate: new Date('2026-11-01T00:30:00-04:00'), // before the 2 AM fall-back
+          nextVisitDate: new Date('2026-11-02T00:30:00-05:00'), // after it
+        })).toBe(1);
+      });
+
+      it('gaps across the spring-forward night (Mar 8, 2026) stay whole calendar days', () => {
+        expect(visitGapDays({
+          visitDate: new Date('2026-03-07T23:30:00-05:00'),
+          nextVisitDate: new Date('2026-03-08T23:30:00-04:00'),
+        })).toBe(1);
+        expect(visitGapDays({ visitDate: '2026-03-07', nextVisitDate: '2026-03-09' })).toBe(2);
+      });
+
+      it('gap math across midnight ET: 11:30 PM and 12:30 AM ET are one day apart', () => {
+        expect(visitGapDays({
+          visitDate: new Date('2026-10-14T23:30:00-04:00'), // 03:30Z on the 15th
+          nextVisitDate: new Date('2026-10-15T00:30:00-04:00'), // 04:30Z on the 15th
+        })).toBe(1);
+        // Same ET day, but a UTC date change in between: zero days.
+        expect(visitGapDays({
+          visitDate: new Date('2026-10-14T18:00:00-04:00'), // 22:00Z on the 14th
+          nextVisitDate: new Date('2026-10-14T23:30:00-04:00'), // 03:30Z on the 15th
+        })).toBe(0);
+      });
+
+      it('an invalid date is null, not a crash', () => {
+        expect(visitGapDays({ visitDate: 'garbage', nextVisitDate: '2026-11-01' })).toBeNull();
+        expect(visitGapDays({ visitDate: new Date('nope'), nextVisitDate: '2026-11-01' })).toBeNull();
+      });
+    });
+
     it('visitGapDays reads dates, gap overrides, and rejects a next visit in the past', () => {
       expect(visitGapDays({ visitDate: '2026-10-01', nextVisitDate: '2026-11-05' })).toBe(35);
       expect(visitGapDays({ nextVisitGapDays: 12 })).toBe(12);
