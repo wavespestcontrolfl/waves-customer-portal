@@ -1206,7 +1206,7 @@ describe('consent upgrade for a phone already on record (#5467)', () => {
 
   test('the loop claims the opt-in on an upgrade as well as a fresh write', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("(result === 'written' || result === 'consent_upgraded_phone_on_record') && claimedOptins.length && claimedCustRow");
+    expect(src).toContain("['written', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow");
   });
 });
 
@@ -1491,6 +1491,23 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
     expect(state.updates.some((u) => u.service_contacts_consent_at)).toBe(true);
   });
 
+  test('consented write whose stamp is withheld (another unconsented slot phone) still runs the hook', async () => {
+    const state = statefulDb({ ...emptyRow, service_contact_name: 'Other Lender', service_contact_phone: '+15550100777' });
+    let called = 0;
+    const res = await persistCallSecondaryContact('cust-1', spouse, { ...onSite, beforeStamp: async () => { called += 1; } });
+    expect(res).toBe('written');
+    expect(called).toBe(1);
+    expect(state.updates.some((u) => u.service_contacts_consent_at)).toBe(false);
+  });
+
+  test('phone-on-record with the upgrade withheld still runs the hook', async () => {
+    let called = 0;
+    statefulDb({ ...emptyRow, service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contact2_name: 'Other Lender', service_contact2_phone: '+15550100777' });
+    const res = await persistCallSecondaryContact('cust-1', spouse, { ...onSite, beforeStamp: async () => { called += 1; } });
+    expect(res).toBe('skipped_phone_on_record_consent_withheld');
+    expect(called).toBe(1);
+  });
+
   test('unconsented write: hook is not called', async () => {
     statefulDb(emptyRow);
     let called = false;
@@ -1516,6 +1533,6 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
   test('the loop claims the opt-in inside beforeStamp and dispatches only after a committed write', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('beforeStamp: claimOptinBeforeStamp');
-    expect(src).toContain("(result === 'written' || result === 'consent_upgraded_phone_on_record') && claimedOptins.length && claimedCustRow");
+    expect(src).toContain("['written', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow");
   });
 });

@@ -2890,13 +2890,15 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-// `beforeStamp` (async, optional): invoked immediately BEFORE any UPDATE that
-// publishes the consent stamp (fresh slot write with a stamp, or the
-// phone-on-record upgrade). The loop uses it to CLAIM the recipient opt-in
-// row first: once the stamp is visible, every reader (reminder crons,
-// getAppointmentContacts) treats a rowless phone as grandfathered-consented,
-// so the claim must exist before the stamp, never after (pre-push codex P1).
-// A throw aborts the write before the stamp lands (fail closed).
+// `beforeStamp` (async, optional): invoked immediately BEFORE the UPDATE
+// whenever a CONSENTED phone is being written or kept — stamped or not (fresh
+// slot write, phone-on-record upgrade, and the stamp-withheld cases). The
+// loop uses it to CLAIM the recipient opt-in row first: once a stamp is
+// visible — now, or later via a portal attestation of a row this phone
+// already sits on — every reader (reminder crons, getAppointmentContacts)
+// treats a rowless phone as grandfathered-consented, so the claim must exist
+// before any stamp can, never after (pre-push codex P1s). A throw aborts the
+// write before anything lands (fail closed).
 async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request', beforeStamp = null } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
@@ -2968,7 +2970,14 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     const phone10 = last10(contact.phone);
     const slotPhones = SERVICE_CONTACT_SLOTS.map((s) => last10(customer[s.phone])).filter(Boolean);
     if (!slotPhones.length) return null;
-    if (slotPhones.some((p) => p !== phone10)) return slotPhones.includes(phone10) ? 'withheld' : null;
+    if (slotPhones.some((p) => p !== phone10)) {
+      if (!slotPhones.includes(phone10)) return null;
+      // Stamp withheld (another unconsented slot phone) — but this phone IS
+      // consented and already filed, so claim its opt-in now: a later portal
+      // attestation of the row must not find it rowless.
+      if (typeof beforeStamp === 'function') await beforeStamp();
+      return 'withheld';
+    }
     // Same cross-customer guard as the fresh write (pre-push codex P1): a
     // slot phone that is ANOTHER customer's primary number must never be
     // upgraded into a texting target here — the office adjudicates the
@@ -3169,7 +3178,10 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       }),
     } : {}),
   };
-  if (typeof beforeStamp === 'function' && Object.prototype.hasOwnProperty.call(slotWrite, 'service_contacts_consent_at')) {
+  if (typeof beforeStamp === 'function' && effectivePhone && smsConsentExplicit) {
+    // Consented phone being written: claim first, whether or not the stamp
+    // lands in this same write (it is withheld when another unconsented slot
+    // phone exists — a later attestation would otherwise grandfather it).
     await beforeStamp();
   }
   const updated = await write.update(slotWrite);
@@ -13362,7 +13374,7 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if ((result === 'written' || result === 'consent_upgraded_phone_on_record') && claimedOptins.length && claimedCustRow) {
+        if (['written', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow) {
           const { dispatchRecipientOptins } = require('./recipient-optin');
           void dispatchRecipientOptins(claimedOptins, claimedCustRow)
             .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
