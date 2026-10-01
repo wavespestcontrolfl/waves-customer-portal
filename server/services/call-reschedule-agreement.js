@@ -1024,4 +1024,75 @@ function groundNewBookingAgreement(args = {}) {
   return commitsSlot.length ? groundStaffStated(ctx, commitsSlot) : groundCallerProposed(ctx);
 }
 
-module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding } };
+// Spoken amounts in a transcript turn ("a hundred forty nine", "two hundred and
+// fifty", "fifteen hundred", "forty-nine"), for the commercial dictated booking's
+// price grounding (codex #5377 r12 P2). The repo had no reusable spoken-number
+// parser (procurement-tools' percentWordsToValue is private, 1-99 only), so this
+// is a small CLOSED-SET one: zero..nineteen, the tens, "hundred", "thousand",
+// "and" (only right after a hundred/thousand), "a" (only right before one), and
+// hyphens. Returns one entry per run of number words:
+//   - the value for a well-formed run of 20 or more;
+//   - NaN for a run that is malformed or AMBIGUOUS ("one fifty", "two thirty", "ten
+//     thirty": a unit/teen directly before a tens word could be a price, a clock or
+//     a different number) — NaN never equals an amount, so the caller fails CLOSED;
+//   - nothing for a well-formed run under 20 ("one", "two", "nineteen"): ordinary
+//     prose ("one of our technicians", "at two") and no price Waves quotes (the
+//     bookable floor is $20).
+// Digit amounts are the caller's own concern; this reads number WORDS only.
+const SPOKEN_UNITS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+const SPOKEN_TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const SPOKEN_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const isSpokenNumberWord = (w) => Object.hasOwn(SPOKEN_UNITS, w) || Object.hasOwn(SPOKEN_TEENS, w) || Object.hasOwn(SPOKEN_TENS, w) || w === 'hundred' || w === 'thousand';
+
+function evaluateSpokenRun(words) {
+  let total = 0;
+  let group = 0; // the part below 1000 being built
+  let prev = null; // 'unit' | 'teen' | 'tens' | 'hundred' | 'thousand'
+  let sawHundredInGroup = false;
+  let sawThousand = false;
+  for (const w of words) {
+    if (Object.hasOwn(SPOKEN_UNITS, w)) {
+      // a unit may follow a tens ("forty nine"), a hundred/thousand, or start the run
+      if (prev === 'unit' || prev === 'teen') return NaN;
+      if (prev === 'tens' && group % 10 !== 0) return NaN;
+      group += SPOKEN_UNITS[w]; prev = prev === 'tens' ? 'tens-unit' : 'unit';
+    } else if (Object.hasOwn(SPOKEN_TEENS, w)) {
+      if (prev === 'unit' || prev === 'teen' || prev === 'tens' || prev === 'tens-unit') return NaN;
+      group += SPOKEN_TEENS[w]; prev = 'teen';
+    } else if (Object.hasOwn(SPOKEN_TENS, w)) {
+      // "one fifty" / "two thirty": a unit or teen directly before a tens word is ambiguous
+      if (prev === 'unit' || prev === 'teen' || prev === 'tens' || prev === 'tens-unit') return NaN;
+      group += SPOKEN_TENS[w]; prev = 'tens';
+    } else if (w === 'hundred') {
+      if (sawHundredInGroup || group < 1 || group > 99 || prev === 'hundred' || prev === 'thousand') return NaN;
+      group *= 100; sawHundredInGroup = true; prev = 'hundred';
+    } else if (w === 'thousand') {
+      if (sawThousand || group < 1) return NaN;
+      total += group * 1000; group = 0; sawHundredInGroup = false; sawThousand = true; prev = 'thousand';
+    }
+  }
+  return total + group;
+}
+
+function spokenFiguresIn(text) {
+  const tokens = String(text || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < tokens.length;) {
+    const aBeforeMultiplier = tokens[i] === 'a' && (tokens[i + 1] === 'hundred' || tokens[i + 1] === 'thousand');
+    if (!aBeforeMultiplier && !isSpokenNumberWord(tokens[i])) { i += 1; continue; }
+    const words = [];
+    if (aBeforeMultiplier) { words.push('one'); i += 1; }
+    while (i < tokens.length) {
+      if (isSpokenNumberWord(tokens[i])) { words.push(tokens[i]); i += 1; continue; }
+      // "one hundred AND fifty": "and" joins only right after a hundred/thousand, before another number word
+      const last = words[words.length - 1];
+      if (tokens[i] === 'and' && (last === 'hundred' || last === 'thousand') && isSpokenNumberWord(tokens[i + 1]) && tokens[i + 1] !== 'hundred' && tokens[i + 1] !== 'thousand') { i += 1; continue; }
+      break;
+    }
+    const value = evaluateSpokenRun(words);
+    if (Number.isNaN(value) || value >= 20) out.push(value);
+  }
+  return out;
+}
+
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn } };

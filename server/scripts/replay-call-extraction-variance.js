@@ -1222,6 +1222,9 @@ async function loadCandidateCalls(db, options) {
     'transcription_provider',
     'transcription_model',
     'recording_url',
+    // callStartedAt() backs out a post-call fallback row's own length (codex #5377 r12 P2)
+    'duration_seconds',
+    'recording_duration_seconds',
     // customer_id is no longer selected (Codex #4933 r3 P2): the linked
     // customer is now resolved via resolveKnownCallerCustomer (contactPhone
     // + operator override), which never reads that column.

@@ -1789,7 +1789,10 @@ function buildFailOpenRoutingContext({
         commercialDictatedBooking: true,
         transcriptLabelsTrusted: (gates?.isEnabled || isEnabled)('callAgentCommitTrustedLabels') === true,
         transcript: transcript !== undefined ? transcript : call.transcription,
-        callStartedAt: call.created_at,
+        // The call's own START (callStartedAt: a post-call fallback row's created_at is
+        // after the call ended), the extraction path's helper — slot dates resolve
+        // from it (codex #5377 r12 P2).
+        callStartedAt: callStartedAt(call) || call.created_at,
         commercialQuoteBookable: commercialQuoteBookableFor({
           extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
           transcription: transcript !== undefined ? transcript : call.transcription,
@@ -10538,7 +10541,7 @@ const CallRecordingProcessor = {
             } : {}),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
-            callStartedAt: call.created_at,
+            callStartedAt: callStartedAt(call) || call.created_at,
             // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a settled time + trusted
             // address is not held on an unclear service — the Waves
             // Assessment fallback below books it (both directions, same as
@@ -20123,7 +20126,7 @@ const CallRecordingProcessor = {
               extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
             }),
           } : {}),
-          callStartedAt: call.created_at,
+          callStartedAt: callStartedAt(call) || call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),
         });

@@ -699,9 +699,10 @@ describe('the audits derive the commercial context the way the processor does (c
   }).options;
 
   test('gate ON, inbound: the option, the trusted-label gate, the transcript and the call time ride along', () => {
-    expect(build()).toMatchObject({
-      commercialDictatedBooking: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT, callStartedAt: CALL_STARTED_AT,
-    });
+    const options = build();
+    expect(options).toMatchObject({ commercialDictatedBooking: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT });
+    // the call's start (callStartedAt(call), a Date): an ordinary row's created_at
+    expect(new Date(options.callStartedAt).toISOString()).toBe(new Date(CALL_STARTED_AT).toISOString());
   });
 
   test('untrusted labels ride as false (the demotion stays dark, exactly as in the processor)', () => {
@@ -885,5 +886,124 @@ describe('both gates on: a forced Assessment never clears the commercial hold (c
   test('unclear gate OFF, commercial gate on: the ambiguous flag itself still holds', () => {
     const r = route(extraction({ flags: ['commercial_requires_quote', 'ambiguous_pest_or_service'] }), { failOpen: true, callerAni: '+19415550100' });
     expect(r.allowed).toBe(false);
+  });
+});
+
+// Slot dates resolve from the call's own START (codex #5377 r12 P2): a post-call
+// fallback row's created_at is AFTER the call ended, so a call that began before
+// midnight and ended after it would resolve "eight days away" a day late.
+describe('slot dates resolve from the actual call start across midnight (codex #5377 r12 P2)', () => {
+  const said = 'We will see you Thursday eight days away at two PM.';
+  const RELATIVE_SLOT = '2026-10-01T14:00:00-04:00'; // eight days after Wed Sep 23 (ET)
+  const relativeCase = () => ({
+    ex: extraction({
+      scheduling: { confirmed_start_at: RELATIVE_SLOT, relative_date_used: true, agreed_slot_words: { day: 'Thursday', hour: 'two', period: 'PM' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', said),
+        quote('/scheduling/confirmed_start_at', 'agent', said),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/relative_date_used', 'agent', said),
+      ],
+    }),
+    transcript: transcriptOf(`Agent: ${said}`, `Caller: ${ACCEPT}`),
+  });
+  // The call began Wed Sep 23 11:30 PM ET and ended Thu Sep 24 12:30 AM ET; the
+  // status-callback fallback row was inserted AFTER it ended.
+  const STARTED = '2026-09-24T03:30:00.000Z';
+  const POST_CALL_ROW = {
+    direction: 'inbound', created_at: '2026-09-24T04:30:00.000Z', duration_seconds: 3600,
+    metadata: { source: 'status_callback' }, transcription: relativeCase().transcript,
+  };
+  const { callStartedAt } = require('../utils/call-timeline');
+  const gatesOn = { isEnabled: (g) => g === 'callAgentCommitBooking' || g === 'callAgentCommitTrustedLabels', commercialLive: () => true };
+  const { buildFailOpenRoutingContext } = require('../services/call-recording-processor');
+
+  test('the grounding itself: the real start books, the post-call created_at does not (why the helper matters)', () => {
+    const { ex, transcript } = relativeCase();
+    const at = (when) => commercialDictatedBookingGrounded({ v2: ex, transcript, callStartedAt: when, quoteBookable: () => true });
+    expect(at(STARTED).ok).toBe(true);
+    expect(at(POST_CALL_ROW.created_at).ok).toBe(false);
+  });
+
+  test('callStartedAt() backs a post-call row\'s length out of created_at', () => {
+    expect(callStartedAt(POST_CALL_ROW).toISOString()).toBe(STARTED);
+  });
+
+  test('buildFailOpenRoutingContext (the audits) hands canAutoRoute the real start, so the call books', () => {
+    const { ex, transcript } = relativeCase();
+    const options = buildFailOpenRoutingContext({ call: POST_CALL_ROW, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates: gatesOn }).options;
+    expect(new Date(options.callStartedAt).toISOString()).toBe(STARTED);
+    const r = canAutoRoute(ex, { contactPhone: '+19415550100', addressValidation: AV_CLEAN, ...options, commercialQuoteBookable: () => true, transcript });
+    expect(r).toMatchObject({ allowed: true, gateDemotedFlags: ['commercial_requires_quote'] });
+    // an ordinary inbound row (created at the call's start) is unchanged
+    const plain = buildFailOpenRoutingContext({ call: { direction: 'inbound', created_at: STARTED, transcription: transcript }, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates: gatesOn }).options;
+    expect(new Date(plain.callStartedAt).toISOString()).toBe(STARTED);
+  });
+
+  test('both processor lanes use the same helper, and every audit selects the columns it reads', () => {
+    const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+    const proc = read('../services/call-recording-processor.js');
+    expect(proc.match(/callStartedAt: callStartedAt\(call\) \|\| call\.created_at,/g)).toHaveLength(5); // builder + 2 routing lanes + the 2 extraction sites that already used it
+    expect(proc).not.toMatch(/callStartedAt: call\.created_at,/);
+    expect(read('../scripts/v2-promotion-readiness.js')).toMatch(/'duration_seconds', 'recording_duration_seconds'\)/);
+    expect(read('../scripts/verify-v2-shadow-path.js')).toMatch(/'duration_seconds', 'recording_duration_seconds',/);
+    expect(read('../scripts/replay-call-extraction-variance.js')).toMatch(/'duration_seconds',\s*'recording_duration_seconds',/);
+  });
+});
+
+// Amounts said as WORDS (codex #5377 r12 P2). There was no reusable spoken-number
+// parser in the repo (procurement-tools' percentWordsToValue is private and 1-99),
+// so a small closed-set one lives in the shared grounding tools.
+describe('prices said as words ground like digit prices (codex #5377 r12 P2)', () => {
+  const { groundingTools: { spokenFiguresIn } } = require('../services/call-reschedule-agreement');
+  const withSpoken = (spoken, amount, { between = [] } = {}) => {
+    const swap = (t) => t.split('$150').join(spoken);
+    const talk = swap(PRICE_TALK);
+    const ex = extraction({
+      service: { quoted_price_usd: amount },
+      priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', swap(PRICE_QUOTE)), PRICE_EVIDENCE[1]],
+    });
+    const t = [OPENING, `Agent: ${talk}`, ...between, `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
+    return { ex, t };
+  };
+  const verdict = (spoken, amount, opts) => { const { ex, t } = withSpoken(spoken, amount, opts); return grounded(ex, t); };
+
+  test('the parser: closed set, well-formed runs of 20+ only, ambiguity is NaN', () => {
+    const cases = {
+      'a hundred forty nine dollars': [149], 'one hundred and fifty': [150], 'two hundred fifty': [250], 'fifteen hundred': [1500],
+      'forty-nine': [49], 'a thousand': [1000], 'two thousand five hundred': [2500], 'twenty one hundred': [2100], seventy: [70],
+      'one fifty': [NaN], 'two thirty': [NaN], 'hundred fifty': [NaN],
+      // prose and sub-$20 numbers are not figures
+      'Thursday at two': [], 'one of our technicians': [], nineteen: [], 'a lot': [],
+    };
+    for (const [text, want] of Object.entries(cases)) expect([text, spokenFiguresIn(text)]).toEqual([text, want]);
+  });
+
+  test('"a hundred forty nine dollars" is the amount 149: an offer in words grounds', () => {
+    expect(verdict('a hundred forty nine dollars', 149)).toEqual({ ok: true, reason: 'dictated_booking_grounded', mode: 'staff_stated' });
+    expect(verdict('one hundred and forty nine dollars', 149).ok).toBe(true);
+    expect(verdict('one hundred fifty dollars', 150).ok).toBe(true);
+  });
+
+  test('the wrong amount in words does not ground', () => {
+    expect(verdict('a hundred forty nine dollars', 150)).toEqual({ ok: false, reason: 'price_not_stated_by_staff' });
+  });
+
+  test('"one fifty" is AMBIGUOUS (150 or 1:50 or 1 and 50): it fails closed, so the office books it', () => {
+    expect(verdict('one fifty', 150)).toEqual({ ok: false, reason: 'price_not_stated_by_staff' });
+    expect(verdict('one fifty', 50).ok).toBe(false);
+  });
+
+  test('no OTHER figure in the offer turn, in words either', () => {
+    expect(verdict('a hundred forty nine dollars, or two hundred if you add the garage', 149).ok).toBe(false);
+  });
+
+  test('a SPOKEN correction between the offer and the "yes" is still caught', () => {
+    const between = ['Agent: Actually, correction, it is two hundred fifty dollars.'];
+    expect(verdict('a hundred forty nine dollars', 149, { between })).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
+    // a staff turn with no figure between them is fine
+    expect(verdict('a hundred forty nine dollars', 149, { between: ['Agent: Great.'] }).ok).toBe(true);
+    // a plain "one of our technicians" in between is prose, not a figure
+    expect(verdict('a hundred forty nine dollars', 149, { between: ['Agent: One of our technicians will come out.'] }).ok).toBe(true);
   });
 });

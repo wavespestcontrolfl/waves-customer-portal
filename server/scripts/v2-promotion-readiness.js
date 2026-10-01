@@ -145,7 +145,7 @@ async function main() {
     // customer_id is no longer selected (Codex #4933 r3 P2): the linked
     // customer is resolved per row via resolveKnownCallerCustomer, which
     // never reads that column (see the comment at its call site below).
-    .select('id', 'twilio_call_sid', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation');
+    .select('id', 'twilio_call_sid', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation', 'duration_seconds', 'recording_duration_seconds');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions

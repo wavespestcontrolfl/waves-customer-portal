@@ -54,12 +54,19 @@ const { resolveCallAgreedPrice } = require('../utils/call-agreed-price');
 // catalog price or none): reuse it, never copy the bounds.
 const { sanitizeQuotedCallPrice } = require('./call-booking-catalog');
 
-const { parseTurns, turnsHolding } = groundingTools;
+const { parseTurns, turnsHolding, spokenFiguresIn } = groundingTools;
 
-// Dollar figures said in a text, as numbers ("$1,500", "150", "150.00").
+// Dollar figures said in a text, as numbers ("$1,500", "150", "150.00", or in
+// words).
 function figuresIn(text) {
-  return [...String(text || '').matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)]
-    .map((m) => Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
+  return [
+    ...[...String(text || '').matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)]
+      .map((m) => Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`)),
+    // Amounts SAID as words ("a hundred forty nine dollars"): the shared closed-set
+    // parser. An ambiguous run ("one fifty") is NaN and so never equals the amount:
+    // the offer is not grounded and the office books it (codex #5377 r12 P2).
+    ...spokenFiguresIn(text),
+  ];
 }
 
 // The agreed price is real. The extraction JUDGES the language (schema 1.21.0:

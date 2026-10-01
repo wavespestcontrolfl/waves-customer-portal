@@ -35,6 +35,8 @@ async function main() {
       // rather than the staff cell that dialed out — buildFailOpenRoutingContext
       // now derives identity through that resolver (Codex #4933 r1 P2).
       .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'ai_validation',
+        // callStartedAt() backs out a post-call fallback row's own length (codex #5377 r12 P2)
+        'duration_seconds', 'recording_duration_seconds',
         // Scoped to the CURRENT extraction pass (codex final-round P2) — a
         // card left from an earlier pass must not vouch for a reprocess where
         // recovery failed. NULL on either side yields NULL (not true), so an
