@@ -1,6 +1,7 @@
 const {
   inferTreeShrubOrdinanceZone,
   isSummerBlackoutForZone,
+  normalizeTreeShrubCloseout,
   productHasNpFertilizer,
   validateTreeShrubCloseout,
 } = require('../services/tree-shrub-closeout');
@@ -237,5 +238,20 @@ describe('Tree/Shrub closeout validation', () => {
     expect(isSummerBlackoutForZone('2026-06-01', 'sarasota_venice')).toBe(true);
     expect(isSummerBlackoutForZone('2026-10-01', 'sarasota_venice')).toBe(false);
     expect(isSummerBlackoutForZone('2026-07-15', 'north_port')).toBe(false);
+  });
+});
+
+describe('injection label band', () => {
+  it('keeps the band the dose was worked out from with the record', () => {
+    const normalized = normalizeTreeShrubCloseout({
+      injectionRecord: { product: 'Arborjet Ima-Jet 10', labelBand: { product: 'Arborjet Ima-Jet 10', key: 'low' } },
+    });
+    expect(normalized.injectionRecord.labelBand).toEqual({ product: 'Arborjet Ima-Jet 10', key: 'low' });
+  });
+
+  it('reads anything else as no band', () => {
+    for (const labelBand of [undefined, null, 'low', { key: '' }, { key: 'Low Rate!' }, { key: 'x'.repeat(41) }]) {
+      expect(normalizeTreeShrubCloseout({ injectionRecord: { labelBand } }).injectionRecord.labelBand).toBeNull();
+    }
   });
 });

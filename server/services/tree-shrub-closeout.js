@@ -45,6 +45,16 @@ function parseInjectionDose(value) {
   return amount > 0 && unit ? { amount, unit } : null;
 }
 
+// The label band the tech picked for the injection dose (target pest,
+// season, palm size; client/src/lib/injection-dose.js INJECTION_LABEL_BANDS),
+// kept with the record it was worked out for. Anything else reads null.
+function normalizeLabelBand(value) {
+  if (!value || typeof value !== 'object') return null;
+  const key = text(value.key);
+  if (!/^[a-z0-9_]{1,40}$/.test(key)) return null;
+  return { product: compactText(value.product, 180), key };
+}
+
 function text(value) {
   return String(value || '').trim();
 }
@@ -173,6 +183,7 @@ function normalizeTreeShrubCloseout(input = {}, service = {}) {
       numberOfPorts: nonnegativeIntegerOrNull(injectionRecord.numberOfPorts ?? injectionRecord.number_of_ports),
       targetIssue: compactText(injectionRecord.targetIssue ?? injectionRecord.target_issue, 240),
       followUpDate: compactText(injectionRecord.followUpDate ?? injectionRecord.follow_up_date, 40),
+      labelBand: normalizeLabelBand(injectionRecord.labelBand ?? injectionRecord.label_band),
     },
   };
 }
