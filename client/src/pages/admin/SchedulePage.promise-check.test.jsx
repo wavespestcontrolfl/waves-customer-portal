@@ -180,6 +180,25 @@ describe('the promise check on the completion form', () => {
     expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: PROMISES[0].id, mark: 'not_yet', version: PROMISES[0].version }]);
   });
 
+  it('a restored report whose promise was reworded since clears itself once the list loads', async () => {
+    const stale = { [PROMISES[0].id]: { mark: 'done', version: '0000000000000000', stillLeft: '' } };
+    localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+      serviceId: service.id,
+      savedAt: Date.now(),
+      notes: REPORT,
+      generatedReportText: REPORT,
+      installedReportDraft: REPORT,
+      preGenerationNotes: 'Ghost ants on the slider track.',
+      aiReportUsed: true,
+      promiseMarks: stale,
+      generationPromiseSignature: JSON.stringify([[PROMISES[0].id, 'done', '0000000000000000', '']]),
+    }));
+    await renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await screen.findByText('Promises we made');
+    await waitFor(() => expect(notes().value).toBe('Ghost ants on the slider track.'));
+  });
+
   it('no card and no marks when the server says the check is unavailable', async () => {
     promiseResponse = { available: false, promises: [] };
     const onSubmit = vi.fn().mockResolvedValue({});

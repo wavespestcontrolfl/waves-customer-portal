@@ -42,7 +42,7 @@ import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
-import PromiseCheck, { promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -13331,6 +13331,7 @@ export function CompletionPanel({
   // The promise check (owner "ok yes add these" 2026-10-01): the open
   // promises the tech can mark, and the marks by promise id.
   const [promiseCheck, setPromiseCheck] = useState(null);
+  const [promiseCheckLoading, setPromiseCheckLoading] = useState(true);
   const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
   const [techTipsError, setTechTipsError] = useState("");
@@ -14721,13 +14722,20 @@ export function CompletionPanel({
   useEffect(() => {
     let cancelled = false;
     setPromiseCheck(null);
-    if (!service.id) return () => { cancelled = true; };
+    if (!service.id) {
+      setPromiseCheckLoading(false);
+      return () => { cancelled = true; };
+    }
+    setPromiseCheckLoading(true);
     adminFetch(`/admin/dispatch/${service.id}/promises`)
       .then((data) => {
         if (!cancelled) setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
       })
       .catch(() => {
         if (!cancelled) setPromiseCheck(null);
+      })
+      .finally(() => {
+        if (!cancelled) setPromiseCheckLoading(false);
       });
     return () => { cancelled = true; };
   }, [service.id]);
@@ -14739,8 +14747,18 @@ export function CompletionPanel({
     || visitOutcome === "customer_declined" || visitOutcome === "incomplete";
   // Marked, listed promises only, each with the wording version the tech saw.
   const promiseMarksForRequest = promiseMarksSuppressed ? [] : promiseMarksPayload(promiseMarks, visitPromises);
+  // The marks that still hold: once the list loads, only marks on a listed
+  // promise's current wording (a restored mark on a reworded promise drops
+  // out); while it loads, the marks as they stand (so a restore never
+  // clears a good report early).
+  const validPromiseMarks = promiseCheckLoading
+    ? promiseMarks
+    : Object.fromEntries(visitPromises.flatMap((promise) => {
+      const entry = currentMark(promiseMarks, promise);
+      return entry ? [[promise.id, entry]] : [];
+    }));
   // The marks as the staleness check and the report heads-up compare them.
-  const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : promiseMarks));
+  const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : validPromiseMarks));
 
   useEffect(() => {
     let cancelled = false;
@@ -18630,6 +18648,19 @@ export function CompletionPanel({
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
     aiReportIncludeComms, selectedProducts, serviceTypeForArea, effectivePromiseSignature]);
+  // The installed report was written with promise marks that no longer
+  // hold (a restored draft whose promise was reworded since, which the
+  // restore's fresh watcher baseline cannot see): an untouched report clears
+  // itself like any changed input; an edited one asks at submit (Codex #5516).
+  useEffect(() => {
+    if (promiseCheckLoading || generating) return;
+    const written = generationPromiseSignatureRef.current;
+    if (written == null || written === effectivePromiseSignature) return;
+    const installed = generatedReportTextRef.current;
+    if (installed && String(notes || "").trim() === installed) invalidateGeneratedReportOnTypedEdit();
+    // promiseMarks: a restore sets marks and the report together, and its
+    // stale marks may leave the effective signature itself unchanged.
+  }, [effectivePromiseSignature, promiseCheckLoading, generating, promiseMarks]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose
