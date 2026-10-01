@@ -295,7 +295,10 @@ describe('card-hold consent snapshot', () => {
   });
 
   test("the hold version is not a 'v<N>' card-copy version: it never qualifies for enrollment", () => {
-    expect(text.CARD_HOLD_CONSENT_VERSION).toMatch(/^card_hold_v\d+_/);
+    expect(text.CARD_HOLD_CONSENT_VERSION).toMatch(/^hold_v\d+_/);
+    // The ledger column is varchar(20) (migration 20260424000014).
+    expect(text.CARD_HOLD_CONSENT_VERSION.length).toBeLessThanOrEqual(20);
+    expect(text.CONSENT_VERSION.length).toBeLessThanOrEqual(20);
     expect(consentVersionQualifiesForEnrollment(text.CARD_HOLD_CONSENT_VERSION)).toBe(false);
   });
 
