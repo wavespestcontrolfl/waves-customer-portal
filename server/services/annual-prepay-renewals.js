@@ -5848,7 +5848,20 @@ function rowStampedByTerm(term, row) {
 // do, then run it under the paid-backing recheck. Returns 'clean' (nothing
 // unstamped), 'held' (only price-held rows are unstamped), 'skipped' (no
 // longer a paid live term) or 'restamped'.
-async function restampOneTerm(term, conn, refresh) {
+// Stamp the term's existing canonical visits without seeding (attach + apply,
+// the stamping half of refreshTermSnapshot).
+async function stampTermCoverageOnly(term, t) {
+  const window = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
+  await attachScheduledServices(window, t);
+  await applyPrepaidCoverageForTerm(window, t);
+}
+
+async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), stampOnly = stampTermCoverageOnly) {
+  // A term whose window has ENDED still owes its stamps to unfinished in-window
+  // visits (Codex #5453 r2 P1), but it is only ever stamped, never refreshed:
+  // an activated term's refresh gap-fills the whole stored window with no
+  // today floor, which on an ended term would seed past-dated visits.
+  const ended = !!term.term_end && term.term_end < todayKey;
   const rows = await coverageRowsForTerm(term, conn);
   const open = rows.filter((row) => row.id
     && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
@@ -5863,7 +5876,7 @@ async function restampOneTerm(term, conn, refresh) {
     // A term that ever carried a linked visit is never re-seeded here (the
     // office may have cancelled slots on purpose), nor is one that cannot
     // seed yet (termite awaiting installation, renewal successors).
-    if (!(await activationNeverSeeded(term, rows, conn))) return 'clean';
+    if (ended || !(await activationNeverSeeded(term, rows, conn))) return 'clean';
   } else {
     const { held, heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
     if (!open.some((row) => !heldIds.has(String(row.id)))) {
@@ -5905,7 +5918,11 @@ async function restampOneTerm(term, conn, refresh) {
       .first('t.*');
     if (!fresh) return 'skipped';
     if (fresh.customer_id) await t('customers').where({ id: fresh.customer_id }).forUpdate().first('id');
-    await refresh(fresh, t);
+    if (ended) {
+      await stampOnly(fresh, t);
+    } else {
+      await refresh(fresh, t);
+    }
     // The activation that threw before its stamp also never reached the
     // billing-mode stamp (syncTermForInvoicePayment runs it right after the
     // refresh): without 'annual_prepay' the completion gate does not read the
@@ -5933,7 +5950,9 @@ async function activationNeverSeeded(term, rows, conn) {
   return !linked;
 }
 
-async function restampUnstampedActiveTerms({ today = etDateString(), conn = db, refresh = refreshTermSnapshot } = {}) {
+async function restampUnstampedActiveTerms({
+  today = etDateString(), conn = db, refresh = refreshTermSnapshot, stampOnly = stampTermCoverageOnly,
+} = {}) {
   const summary = { scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 };
   if (!(await annualPrepayTableExists())) return summary;
   const todayKey = dateOnly(today) || etDateString();
@@ -5943,13 +5962,13 @@ async function restampUnstampedActiveTerms({ today = etDateString(), conn = db, 
     if (!cols.annual_prepay_term_id || !cols.prepaid_method || !cols.prepaid_amount) return summary;
     const excluded = [...PREPAID_UPDATE_EXCLUDED_STATUSES];
     // Cheap prefilter: paid-backed (coveredTermsAsOf — the one "which terms
-    // hold money" definition) LIVE terms with an open or future window that
+    // hold money" definition) LIVE terms (ended windows included: a pending in-window visit is still
+    // prepaid work) that
     // have at least one non-terminal visit in their window not already
     // stamped by this term. coverageRowsForTerm (the canonical selection)
     // then runs only for those.
     terms = await coveredTermsAsOf(conn, null)
       .whereIn('t.status', ACTIVE_STATUSES)
-      .where('t.term_end', '>=', todayKey)
       .whereNotNull('t.coverage_service_type')
       .where('t.coverage_visit_count', '>', 0)
       .where('t.prepay_amount', '>', 0)
@@ -5970,12 +5989,14 @@ async function restampUnstampedActiveTerms({ today = etDateString(), conn = db, 
             )
         )
         -- or a term no visit was EVER linked to (activation failed before
-        -- seeding); restampOneTerm decides whether it truly needs seeding
-        or not exists (
+        -- seeding) whose window is still open; restampOneTerm decides whether
+        -- it truly needs seeding. An ENDED term is admitted only by the
+        -- branch above (an unfinished in-window visit still owed its stamp).
+        or (t.term_end >= ? and not exists (
           select 1 from scheduled_services lk
           where lk.annual_prepay_term_id is not null and lk.annual_prepay_term_id::text = t.id::text
-        ))`,
-        [...excluded, ANNUAL_PREPAY_PREPAID_METHOD],
+        )))`,
+        [...excluded, ANNUAL_PREPAY_PREPAID_METHOD, todayKey],
       )
       .orderBy('t.term_end', 'asc')
       .select('t.*');
@@ -5988,7 +6009,7 @@ async function restampUnstampedActiveTerms({ today = etDateString(), conn = db, 
     summary.scanned += 1;
     try {
       const term = { ...row, term_start: dateOnly(row.term_start), term_end: dateOnly(row.term_end) };
-      const outcome = await restampOneTerm(term, conn, refresh);
+      const outcome = await restampOneTerm(term, conn, refresh, todayKey, stampOnly);
       if (outcome === 'restamped') {
         summary.restamped += 1;
         logger.info(`[annual-prepay] restamp sweep re-applied coverage for term ${row.id}`);

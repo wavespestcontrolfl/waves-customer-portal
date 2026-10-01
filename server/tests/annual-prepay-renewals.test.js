@@ -7843,7 +7843,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('the term select is the paid-backed covered set narrowed to live, open-window, configured terms with an unstamped visit', async () => {
+  test('the term select is the paid-backed covered set narrowed to live, configured terms with an unstamped visit (ended windows included)', async () => {
     const terms = [termRow('term-1')];
     const q = query({ rows: terms });
     setDbQueues({
@@ -7854,11 +7854,47 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn() });
 
     expect(q.whereIn).toHaveBeenCalledWith('t.status', ['active', 'renewal_pending']);
-    expect(q.where).toHaveBeenCalledWith('t.term_end', '>=', '2026-10-20');
+    // No date cutoff on the unstamped-visit branch: a pending visit inside an
+    // ENDED window is still prepaid work. Only the never-seeded branch is
+    // limited to open windows.
+    expect(q.where).not.toHaveBeenCalledWith('t.term_end', '>=', expect.anything());
     const existsCall = q.whereRaw.mock.calls.find(([sql]) => /exists \(\s*select 1 from scheduled_services/.test(sql));
     expect(existsCall).toBeTruthy();
     // Terminal statuses (incl. completed) never make a term a candidate.
-    expect(existsCall[1]).toEqual(expect.arrayContaining(['completed', 'cancelled', 'annual_prepay_invoice']));
+    expect(existsCall[1]).toEqual(expect.arrayContaining(['completed', 'cancelled', 'annual_prepay_invoice', '2026-10-20']));
+  });
+
+  test('an ENDED term with an unfinished in-window visit is stamped only — never refreshed (no seeding past-dated visits)', async () => {
+    const term = termRow('term-1', { term_start: '2025-10-01', term_end: '2026-09-30' });
+    queues({
+      terms: [term],
+      perTerm: [{
+        term,
+        reachesRefresh: true,
+        rows: [stamped('v1', 'term-1', '2025-10-15'), visit('v2', 'term-1', '2026-09-20')],
+      }],
+    });
+    const refresh = jest.fn();
+    const stampOnly = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh, stampOnly });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(stampOnly).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-1' }), db);
+  });
+
+  test('an ENDED term with no linked visit is never seeded', async () => {
+    const term = termRow('term-1', { term_start: '2025-10-01', term_end: '2026-09-30' });
+    queues({ terms: [term], perTerm: [{ term, rows: [] }] });
+    const refresh = jest.fn();
+    const stampOnly = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh, stampOnly });
+
+    expect(summary.restamped).toBe(0);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(stampOnly).not.toHaveBeenCalled();
   });
 
   test('a fully stamped term is left untouched: no refresh, no transaction, no writes, no alert', async () => {
@@ -8101,7 +8137,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
 
     const sqls = q.whereRaw.mock.calls.map(([sql]) => sql);
     expect(sqls.some((sql) => /updated_at.*interval '15 minutes'/.test(sql))).toBe(true);
-    expect(sqls.some((sql) => /or not exists \(\s*select 1 from scheduled_services lk/.test(sql))).toBe(true);
+    expect(sqls.some((sql) => /or \(t\.term_end >= \? and not exists \(\s*select 1 from scheduled_services lk/.test(sql))).toBe(true);
   });
 
   describe('a term whose activation failed before seeding (no canonical rows at all)', () => {
