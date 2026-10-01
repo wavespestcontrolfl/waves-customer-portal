@@ -729,6 +729,29 @@ describe('buildBatch over the synthetic December book', () => {
     db.transaction.mockImplementation((fn) => scripted.transaction(fn));
   });
 
+  test('a monthly-billed line with no estimate takes the cadence mode spread over 12 months', async () => {
+    const dues = fixture.customer(12, { member_since: '2024-12-15', billing_mode: 'monthly_membership', monthly_rate: 30, last_name: 'Dues' });
+    const lines = [...book.planLines, fixture.planLine(dues.id, 'pest_control', 'quarterly', null, { priced_visits: 0 })];
+    const scenario = {
+      planLines: lines, customers: [...book.customerRows, dues], firstVisits: [...book.firstVisits, { customer_id: dues.id, line: 'pest_control', first_visit: '2026-05-05', completed_visits: 2 }],
+      completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const db3 = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => db3(table));
+    db.raw.mockImplementation((...args) => db3.raw(...args));
+    db.transaction.mockImplementation((fn) => db3.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = db3.writes.snapshotInserts.find((r) => r.customer_id === dues.id);
+    // quarterly pest mode $117/application → $39/mo; $30/mo = $90/application → 23% under → D →
+    // per-application step min(12% × 90 = 10.80, 15) → floor($100.80) = $100/application → $33.33/mo (+$3.33/mo, +$39.96/yr)
+    expect(row).toMatchObject({ rate_unit: 'month', current_rate_cents: 3000, current_rate_source: 'monthly_rate', list_rate_cents: 3900, list_rate_source: 'cadence_mode', band: 'D', proposed_rate_cents: 3333, delta_cents: 333, annual_delta_cents: 3996, status: 'green' });
+    expect(JSON.parse(row.flags)).toContain('list_from_cadence_mode');
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+  });
+
   test('a year-long catch-up window holds everyone and the 12-month lock holds the young lines out', async () => {
     const catchUp = fixture.scriptedDb({
       planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits,

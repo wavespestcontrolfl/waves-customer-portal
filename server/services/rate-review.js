@@ -1311,11 +1311,15 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     const { customer, familyKey, cadence, current, stats, list } = entry;
     const facts = factsByCustomer.get(customer.id) || null;
     const signals = signalsByCustomer.get(customer.id) || null;
+    // No replayable estimate → the book's per-application mode for this
+    // family × cadence; a monthly-billed line takes it spread over 12 months
+    // (mode × visits ÷ 12) so the two units compare like for like.
     let listCents = list.cents;
     let listSource = list.source;
-    if (listCents == null && current.unit === 'application') {
+    if (listCents == null) {
       const mode = cadenceModes.get(`${familyKey}|${cadence}`);
-      if (mode) { listCents = mode; listSource = 'cadence_mode'; }
+      if (mode && current.unit === 'application') { listCents = mode; listSource = 'cadence_mode'; }
+      else if (mode && current.unit === 'month' && entry.visitsPerYear > 0) { listCents = Math.round((mode * entry.visitsPerYear) / 12); listSource = 'cadence_mode'; }
     }
     if (listCents == null) listSource = 'none';
     // Hand-picked tier (owner ruling 2026-09-01: call-the-office, permanent):
