@@ -306,6 +306,23 @@ postgres('customer merge reconciles customer-level overdue reminder schedules (P
     expect((await mockDatabase('invoices').where({ id: invoiceA }).first()).customer_id).toBe(winnerId);
   });
 
+  // Pre-push audit P1: a member row claimed by another sender (the bank-verification nudge of an invoice the
+  // set excludes claims only its own sequence) is a send in flight: the release must not land it.
+  test('a member row with a fresh foreign claim refuses the merge (in flight); nothing moved', async () => {
+    const phone = `+1999562${String(Math.floor(Math.random() * 9000) + 1000)}`;
+    const winnerId = await customer('Winner', phone);
+    const loserId = await customer('Loser', phone);
+    const loserOpen = await schedule(loserId, 1, 'active');
+    const invoiceA = await memberInvoice(loserId);
+    await memberInvoice(loserId);
+    await mockDatabase('invoice_followup_sequences').where({ invoice_id: invoiceA }).update({ touch_claimed_at: new Date() });
+    const before = await mockDatabase('invoice_followup_sequences').where({ invoice_id: invoiceA }).first();
+    await expect(dedupe.executeMerge({ winnerId, loserId, performedBy: 'test:dunning-merge' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'DUNNING_SCHEDULE_BUSY', dunningReason: 'in_flight' });
+    expect(await mockDatabase(TABLE).where({ id: loserOpen.id }).first()).toMatchObject({ status: 'active', customer_id: loserId });
+    expect(await mockDatabase('invoice_followup_sequences').where({ invoice_id: invoiceA }).first()).toEqual(before);
+  });
+
   test('a release the engine refuses (a send in flight) aborts the merge before anything moved', async () => {
     const phone = `+1999557${String(Math.floor(Math.random() * 9000) + 1000)}`;
     const winnerId = await customer('Winner', phone);

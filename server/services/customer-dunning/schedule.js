@@ -597,6 +597,13 @@ async function closeUnderLock(trx, schedule, reason, now, at, delivery, { extra 
   // so locking a member sequence before its invoice could close a cycle with that edit.
   await lockMemberInvoices(trx, row.customer_id);
   const members = await activeMemberRows(row.customer_id, { database: trx, forUpdate: true });
+  // A member row another sender holds right now (a per-invoice touch: the bank-verification nudge of an
+  // invoice the set excludes claims only its own sequence, never this schedule) is a send in flight too:
+  // landing that row under it would be overwritten by the send's own progress write. The caller's own
+  // claim (stamped on the members it claimed) is not foreign.
+  if (members.some((m) => claimIsFresh(m, now) && !(claimStamp && sameStamp(m.touch_claimed_at, claimStamp)))) {
+    return { closed: false, landed: [], reason: 'in_flight' };
+  }
   // The evidence fence: any write since the snapshot the evidence was read against (a same-step TOLD
   // delivery that cleared its claim included) makes that evidence stale.
   if (row.row_version !== at.row_version) return { closed: false, landed: [], changed: true };

@@ -2276,7 +2276,14 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   const anchorAt = row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
   const nextAt = computeNextTouchAt(anchorAt, nextIndex);
 
-  await db('invoice_followup_sequences').where({ id: row.id }).update({
+  // A verification nudge of a customer on a combined schedule (verificationOnly) advances its row only while
+  // it still holds the row exactly as it claimed it: a release of the schedule lands every member (a new
+  // step, or the schedule's pause), and a send outliving its claim TTL must not overwrite that landing.
+  // (A release refuses while this claim is fresh: closeUnderLock's member-claim check.)
+  const progressed = await db('invoice_followup_sequences').where({
+    id: row.id,
+    ...(verificationOnly ? { touch_claimed_at: claimStamp, step_index: row.step_index, status: 'active' } : {}),
+  }).update({
     updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
     step_index: nextIndex,
@@ -2284,6 +2291,9 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
+  if (verificationOnly && !Number(progressed)) {
+    logger.warn(`[invoice-followups] sequence ${row.id} not advanced after its verification nudge — the row changed under the send (a customer reminder schedule released it); its landing is kept`);
+  }
 
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)

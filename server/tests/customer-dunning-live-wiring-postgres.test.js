@@ -473,6 +473,31 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       await Schedule.releaseClaim(claimed);
     });
 
+    // Pre-push audit P1: the nudge claims only its own sequence, never the schedule; a release during it
+    // would land the row and the send's progress write would then overwrite that landing.
+    test('a verification fire in flight: a release (admin / kill switch) refuses as in flight, the schedule and members untouched', async () => {
+      const c = await customer();
+      const a = await member(c, { pi: 'pi_md' });
+      const b = await member(c, { sentDaysAgo: 35, step: 2 });
+      const schedule = await openSchedule(c, { status: 'paused', paused_reason: 'admin_paused', next_touch_at: null });
+      waiting.add(a.invoiceId);
+      let reached;
+      const atStripe = new Promise((r) => { reached = r; });
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      stripeSpy.mockImplementation(async () => { reached(); await gate; return true; });
+      const fire = Followups._test.fireStep(batchRow(a), { ownedMicrodeposit: true });
+      await atStripe;
+      const beforeB = await seqRow(b.seq.id);
+      const out = await Schedule.release(schedule, 'released_admin', new Date());
+      expect(out).toMatchObject({ closed: false, reason: 'in_flight' });
+      expect((await app('customer_dunning_schedules').where({ id: schedule.id }).first()).status).toBe('paused');
+      expect(await seqRow(b.seq.id)).toEqual(beforeB);
+      release();
+      await fire;
+      expect(deadlocks()).toEqual([]);
+    });
+
     test('a verification fire in flight (claimed, asking Stripe): the engine\'s claim refuses, never a deadlock, never both', async () => {
       const c = await customer();
       const a = await member(c, { pi: 'pi_md' });
