@@ -110,7 +110,7 @@ describe("lead status 'handled'", () => {
     expect(src.match(/db\('leads'\)\.where\('id', req\.params\.id\)\s*\.whereNotIn\('status', CLOSED_LEAD_STATUSES\)/g)).toHaveLength(2);
     expect(src.match(/if \(!updated\) return res\.status\(409\)/g)).toHaveLength(2);
     // draft-response: re-read under a share lock inside the draft transaction
-    expect(src).toMatch(/const live = await trx\('leads'\)\.where\(\{ id: lead\.id \}\)\.forShare\(\)\.first\('status'\);\s*if \(!live \|\| CLOSED_LEAD_STATUSES\.includes\(live\.status\)\) return \{ closed: true \};/);
+    expect(src).toMatch(/const stillOpen = await trx\('leads'\)\.where\(\{ id: lead\.id \}\)\s*\.whereNotIn\('status', CLOSED_LEAD_STATUSES\)\.forShare\(\)\.first\('id'\);\s*if \(!stillOpen\) return \{ closed: true \};/);
   });
 
   test('the Intelligence Bar lead overview keeps handled out of the conversion denominator (a cohort containing a handled request)', async () => {

@@ -1467,8 +1467,9 @@ router.post('/leads/:id/draft-response', async (req, res, next) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`agent_ops_lead_draft:${lead.id}:${taskType}`]).catch(() => {});
       // Still open under a share lock (see mark-contacted): a close that committed
       // since the read above means no draft; one that comes later waits for this.
-      const live = await trx('leads').where({ id: lead.id }).forShare().first('status');
-      if (!live || CLOSED_LEAD_STATUSES.includes(live.status)) return { closed: true };
+      const stillOpen = await trx('leads').where({ id: lead.id })
+        .whereNotIn('status', CLOSED_LEAD_STATUSES).forShare().first('id');
+      if (!stillOpen) return { closed: true };
       const matches = await trx('message_drafts')
         .where({ status: 'pending', intent: 'agent_ops_lead_followup' })
         .whereRaw("flags ->> 'source' = ?", ['agent_ops'])
