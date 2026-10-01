@@ -8881,7 +8881,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // manual bill that would double the draft; the office reviews and sends
         // the draft (never auto-sent, no pay link, no charge). A failure here
         // fails the lookup CLOSED (503 + resume) like any other read.
-        if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length) {
+        // Only a performed LIVE visit hands a stranded stamp to the office: a
+        // declined / inspection-only visit, a backfill or a recap-only record
+        // performed no application, so the stamp stays for the visit that does.
+        if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length
+          && visitPerformed && !isBackfillCompletion && !recapReviewOnly) {
           const { consumeUnconsumableSetupFeeStamps } = require('../services/setup-fee-obligation');
           const drafts = await consumeUnconsumableSetupFeeStamps(db, obligation.unconsumableStamps, {
             customerId: svc.customer_id,
@@ -10321,6 +10325,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // adoption) collapses concurrent completions to one fee. Never under
     // backfill (frozen-money posture) and never for callbacks.
     let secureSetupFee = null;
+    // A FRESH negative marker this completion could not adopt: its owning
+    // completion may be a crashed attempt this very retry replaced (the
+    // attempt lease starts before the fee lease), so minting now would bill
+    // the visit without its fee and finalize. Refused below through the
+    // mint's release/503 path; the retry re-reads the marker (null once the
+    // owner commits, adoptable once its lease lapses).
+    let setupFeeClaimInFlight = false;
     if (shouldInvoice && !isBackfillCompletion && !svc.is_callback) {
       try {
         const setupParentId = svc.recurring_parent_id || svc.id;
@@ -10385,6 +10396,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               if (adopted === 1) {
                 secureSetupFee = { parentId: setupParentId, amount };
                 logger.warn(`[dispatch] orphaned setup-fee claim ADOPTED for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+              } else {
+                setupFeeClaimInFlight = true;
               }
             }
           } else {
@@ -10405,6 +10418,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
     if (shouldInvoice) {
       try {
+        if (setupFeeClaimInFlight) {
+          const inFlightErr = new Error('a setup-fee claim on this series is still in flight (fresh lease) — refusing to mint without it; retry');
+          inFlightErr.code = 'SETUP_FEE_CLAIM_IN_FLIGHT';
+          throw inFlightErr;
+        }
         // A REQUIRED resume mints the FROZEN amount or nothing (Codex P0,
         // fix round 10): reaching here without it (a record committed
         // before the money freeze existed, or corrupt notes) means the only
@@ -10830,6 +10848,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // #5237, refuseCoveredMemberMintInTrx): handled by its own
         // release-for-resume below, never the manual-billing bell.
         const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;
+        // Refused before any mint because a fresh setup-fee claim on the series
+        // is still in flight (see setupFeeClaimInFlight): release for resume on
+        // every lane, never a finalize without the fee.
+        const setupFeeInFlight = invErr?.code === 'SETUP_FEE_CLAIM_IN_FLIGHT' && !invoice?.id;
         // Visit went non-live (cancelled/no-show/skipped) WHILE this
         // REQUIRED mint waited on the shared schedule.invoice.mint lock
         // (Codex #5244 r7 P0 — the exact race this fix closes): unlike a
@@ -10853,7 +10875,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
           } });
         }
-        if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {
+        if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
           // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
           // the resume this release promises mints the frozen cents with
@@ -10953,6 +10975,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? 'The completion invoice could not be created — the closeout is saved but NOT finalized. Retry the closeout to mint the invoice.'
               : `The completion invoice could not be created — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'backfill_invoice_mint_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        if (setupFeeInFlight) {
+          logger.warn(`[dispatch] visit ${svc.id}: a setup-fee claim on its series is still in flight — releasing for resume instead of minting without the fee`);
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 503, body: {
+            error: released
+              ? 'This visit\'s setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
+              : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'setup_fee_claim_in_flight',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
