@@ -41,6 +41,7 @@ const mockBudgetRow = (i, budgetTo = 8) => ({
 let mockBudgetLog = [];
 let mockSearchTerms = SEARCH_TERMS;
 let mockFirstRows = {};
+let mockConflictRows = {};
 const mockLimits = [];
 jest.mock('../models/db', () => jest.fn((table) => {
   const rowsFor = {
@@ -52,7 +53,13 @@ jest.mock('../models/db', () => jest.fn((table) => {
     where: (...args) => { mockWhereCalls.push({ table, args }); return b; }, orderBy: () => b, select: () => b, distinct: () => b,
     limit: (n) => { mockLimits.push([table, n]); return b; },
     first: () => Promise.resolve(mockFirstRows[table] || null),
-    insert: (row) => mockInsert(table, row),
+    insert: (row) => {
+      const p = mockInsert(table, row);
+      // Chainable for the fallback's insert-or-skip; resolves like the plain insert.
+      return Object.assign(p, {
+        onConflict: (col) => ({ ignore: () => ({ returning: () => Promise.resolve(mockConflictRows[table]?.(col) ?? [{ date: row.date }]) }) }),
+      });
+    },
     then: (r, j) => Promise.resolve(rowsFor[table] || []).then(r, j),
   };
   return b;
@@ -351,14 +358,15 @@ describe('no Apply on campaigns changed in the last 7 days (Codex r9 on #5486)',
 });
 
 describe('an outage never overwrites today\'s report (Codex r10 on #5486)', () => {
-  afterEach(() => { mockFirstRows = {}; });
+  afterEach(() => { mockConflictRows = {}; });
 
-  test('both providers fail and today already has a report: nothing is stored, caller is told it was kept', async () => {
-    mockFirstRows = { ad_advisor_reports: { date: '2026-10-01' } };
+  test('both providers fail and today already has a report: insert-or-skip on date, caller is told it was kept', async () => {
+    const conflictCols = [];
+    mockConflictRows = { ad_advisor_reports: (col) => { conflictCols.push(col); return []; } };
     mockDispatch.mockRejectedValue(new Error('both legs failed'));
     const out = await advisor.generateDailyAdvice();
     expect(out.kept_existing_report).toBe(true);
-    expect(mockInsert).not.toHaveBeenCalled();
+    expect(conflictCols).toEqual(['date']);
   });
 
   test('both providers fail and no report today: the N/A report is stored', async () => {

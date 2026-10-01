@@ -353,15 +353,27 @@ class CampaignAdvisor {
   }
 
   // An outage never replaces a real report: if today already has one (an
-  // earlier run or regeneration), it is kept and the caller is told so.
+  // earlier run or regeneration), it is kept and the caller is told so. One
+  // insert-or-skip on the unique date, so a report saved concurrently is never
+  // overwritten either.
   async storeFallbackAdvice(campaignSummaries) {
     const fallback = this.generateFallbackAdvice(campaignSummaries);
-    const existing = await db('ad_advisor_reports').where({ date: fallback.date }).first('date');
-    if (existing) {
-      fallback.kept_existing_report = true;
-      return fallback;
+    try {
+      const inserted = await db('ad_advisor_reports')
+        .insert({
+          date: fallback.date,
+          report_data: JSON.stringify(fallback),
+          grade: fallback.grade,
+          recommendation_count: 0,
+          waste_alert_count: 0,
+        })
+        .onConflict('date')
+        .ignore()
+        .returning('date');
+      if (!inserted || inserted.length === 0) fallback.kept_existing_report = true;
+    } catch (err) {
+      logger.error(`Store fallback advisor report failed: ${err.message}`);
     }
-    await this.storeReport(fallback);
     return fallback;
   }
 
