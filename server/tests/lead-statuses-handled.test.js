@@ -5,6 +5,28 @@
  * prospect denominator (so conversion / win / lost rates never count it), and
  * settable by staff through the same status validation as every other status.
  */
+const mockRows = [];
+// A recording query builder: .modify(fn) applies fn to a stand-in that honours whereNotIn,
+// so the scope the real code applies decides which rows the test sees.
+function mockBuilder() {
+  let rows = mockRows;
+  const b = {
+    where: () => b, whereNull: () => b, leftJoin: () => b, select: () => b, groupBy: () => b, orderByRaw: () => b,
+    modify: (fn) => {
+      const scope = { whereNotIn: (col, list) => { rows = rows.filter((r) => !list.includes(r.status)); return scope; }, whereRaw: () => scope };
+      fn(scope);
+      return b;
+    },
+    then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+    first: () => Promise.resolve({ total: 0 }),
+    sum: () => b,
+    catch: () => Promise.resolve({ total: 0 }),
+  };
+  return b;
+}
+jest.mock('../models/db', () => Object.assign(jest.fn(() => mockBuilder()), { raw: (s) => s }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
 const fs = require('fs');
 const path = require('path');
 const {
@@ -67,6 +89,19 @@ describe("lead status 'handled'", () => {
     expect(email.match(/whereNotIn\('status', \['won', 'lost', 'handled'\]\)/g)).toHaveLength(3);
     const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/leads-tools.js'), 'utf8');
     expect(ib).toMatch(/const LEAD_STATUSES = \[[^\]]*'handled',[^\]]*\];/s);
+  });
+
+  test('the Intelligence Bar lead overview keeps handled out of the conversion denominator (a cohort containing a handled request)', async () => {
+    mockRows.length = 0;
+    mockRows.push({ status: 'won' }, { status: 'new' }, { status: 'lost' }, { status: 'handled' }, { status: 'handled' });
+    const { executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
+    const out = await executeLeadsTool('get_lead_overview', { days: 30 });
+    expect(out).toMatchObject({ total_leads: 3, won: 1, lost: 1, conversion_rate: 33.3 });
+  });
+
+  test('the Intelligence Bar source and funnel reads apply the same prospect scope', () => {
+    const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/leads-tools.js'), 'utf8');
+    expect((ib.match(/\.modify\(scopeToProspects\)/g) || []).length).toBe(3);
   });
 
   test('the pipeline opportunity list never shows a handled lead as a new lead needing action', () => {

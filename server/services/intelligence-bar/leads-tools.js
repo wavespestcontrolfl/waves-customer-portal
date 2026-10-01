@@ -11,6 +11,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
 const leadAttribution = require('../lead-attribution');
+const { scopeToProspects } = require('../lead-statuses');
 
 const LEAD_STATUSES = [
   'new',
@@ -175,7 +176,9 @@ async function executeLeadsTool(toolName, input, actionContext = {}) {
 async function getLeadOverview(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
-  const leads = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since);
+  // Prospects only (the Leads dashboard's own denominator): a /book request its own
+  // booking closed ('handled') is neither won nor lost and must not dilute the rate.
+  const leads = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since).modify(scopeToProspects);
   const total = leads.length;
   const won = leads.filter(l => l.status === 'won').length;
   const lost = leads.filter(l => l.status === 'lost').length;
@@ -314,6 +317,7 @@ async function getLeadFunnel(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
   const stages = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since)
+    .modify(scopeToProspects)
     .select('status', db.raw('COUNT(*) as count'))
     .groupBy('status').orderByRaw('COUNT(*) DESC');
 
@@ -353,6 +357,7 @@ async function getSourcePerformance(days) {
     .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
     .whereNull('leads.deleted_at')
     .where('leads.first_contact_at', '>=', since)
+    .modify(scopeToProspects)
     .select(
       'lead_sources.name as source',
       'lead_sources.channel',
