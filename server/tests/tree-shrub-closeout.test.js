@@ -265,6 +265,17 @@ describe('injection record against the product label', () => {
     expect(injectionCodes(PHOSPHO, { product: 'PHOSPHO old name', productId: PHOSPHO.id, sizeClassOrDbh: '30 cm DBH' })).toEqual(['tree_shrub_injection_dbh_inches']);
   });
 
+  test('a trunk_injection method recorded on the visit requires the injection record', () => {
+    const PLAIN = { id: 'pl-1', name: 'Some Systemic', category: 'insecticide', default_unit: 'oz/gal', application_method: 'foliar_spray' };
+    const codes = (applicationMethod) => validate({
+      products: [{ productId: PLAIN.id, name: PLAIN.name, totalAmount: 2, amountUnit: 'tsp', applicationMethod }],
+      productRows: [PLAIN],
+      completion: { injectionPerformed: false, injectionRecord: {} },
+    }).blocks.map((block) => block.code);
+    expect(codes('trunk_injection')).toContain('tree_shrub_injection_dose_required');
+    expect(codes('foliar_spray')).not.toContain('tree_shrub_injection_dose_required');
+  });
+
   test('a per-inch label in grams (Arbor-OTC) needs the trunk in inches too', () => {
     const ARBOR_OTC = { id: 'otc-1', name: 'Arborjet Arbor OTC Fungicide 1 oz', category: 'fungicide', default_rate: '0.28', default_unit: 'g/inch dbh', application_method: 'trunk_injection' };
     expect(injectionCodes(ARBOR_OTC, { sizeClassOrDbh: 'Large' })).toEqual(['tree_shrub_injection_dbh_inches']);

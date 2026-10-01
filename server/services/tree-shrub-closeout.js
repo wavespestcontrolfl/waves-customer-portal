@@ -289,9 +289,13 @@ const INJECTION_LABEL_UNIT = /^\s*(?:ml|g)\s*\/\s*(?:inch|in\b|palm)/i;
 function isInjectionProduct(productRef = {}) {
   if (/\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productText(productRef))) return true;
   const catalog = productRef.catalog || productRef;
-  const method = text(catalog.application_method ?? catalog.applicationMethod).toLowerCase();
+  const input = productRef.input || productRef;
+  // The method the tech recorded on this visit counts as much as the
+  // catalog's default (the client reads the same row field).
+  const methods = [catalog.application_method ?? catalog.applicationMethod, input.applicationMethod ?? input.application_method]
+    .map((method) => text(method).toLowerCase());
   const unit = text(catalog.default_unit ?? catalog.defaultUnit);
-  return method === 'trunk_injection' || INJECTION_LABEL_UNIT.test(unit);
+  return methods.includes('trunk_injection') || INJECTION_LABEL_UNIT.test(unit);
 }
 
 function isInsectLikeProduct(productRef = {}) {
