@@ -287,10 +287,14 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await owedIds()).toEqual([est.estimateId]);
       expect((await alertsOf(trx, est.estimateId))[0].read_at).not.toBeNull(); // not refreshed in silence
 
-      // Its bell write fails: it stays owed.
+      expect(await require('../services/combined-booking-check').owedEstimateIds(trx)).toEqual([est.estimateId]);
+
+      // Its bell write fails: it stays on the record, typed as a failed check (not a confirmed defect).
       const failing = jest.fn(async (category, spec, opts) => (spec.subject.type === 'check' ? raiseAdminAlert(category, spec, opts) : null));
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: failing })).toMatchObject({ failed: 1, overflow: 1 });
       expect(await owedIds()).toEqual([est.estimateId]);
+      expect(await require('../services/combined-booking-check').owedEstimateIds(trx)).toEqual([]);
+      expect(await require('../services/combined-booking-check').failedCheckEstimateIds(trx)).toEqual([est.estimateId]);
 
       // The overflow bell's own write fails: the sweep fails loudly, never silently.
       const lost = jest.fn(async () => null);
@@ -370,6 +374,25 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1, overflow: 0 });
       const open = (await alertsOf(trx, est.estimateId)).filter((row) => !row.done_at);
       expect(open.map((row) => row.metadata.itemKeys)).toEqual([['missing_time_tech:lawn_care']]);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a booking corrected to a single service closes its open bell', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      const estimateRow = await trx('estimates').where({ id: est.estimateId }).first('estimate_data');
+      const data = typeof estimateRow.estimate_data === 'string' ? JSON.parse(estimateRow.estimate_data) : estimateRow.estimate_data;
+      data.result.recurring.services = data.result.recurring.services.slice(0, 1);
+      await trx('estimates').where({ id: est.estimateId }).update({ estimate_data: JSON.stringify(data), annual_total: 600, monthly_total: 50 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ skipped: 1, closed: 1 });
+      expect((await alertsOf(trx, est.estimateId))[0].done_at).not.toBeNull();
     } finally {
       mockPg = pool;
       await trx.rollback();

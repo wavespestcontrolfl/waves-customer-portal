@@ -293,6 +293,19 @@ describe('Action Inbox generators', () => {
     owed.mockRestore();
   });
 
+  test('combined_booking_checks_failed: a failed check is its own item, never counted as a booking defect', async () => {
+    const combined = require('../services/combined-booking-check');
+    const owed = jest.spyOn(combined, 'owedEstimateIds').mockResolvedValue([]);
+    const failed = jest.spyOn(combined, 'failedCheckEstimateIds').mockResolvedValue(['est-f']);
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((a) => a.id === 'combined_bookings_owed')).toBeUndefined();
+    expect(alerts.find((a) => a.id === 'combined_booking_checks_failed')).toMatchObject({
+      kind: 'action', count: 1, members: ['est-f'], label: '1 combined booking could not be checked',
+    });
+    owed.mockRestore();
+    failed.mockRestore();
+  });
+
   test('at_risk_mrr: reuses the shared at-risk account list; absent when nothing is at risk', async () => {
     listAtRiskMrrAccounts.mockResolvedValue([
       atRiskAccount('cust-b', 400),

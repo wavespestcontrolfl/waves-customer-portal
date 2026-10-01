@@ -862,6 +862,22 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] combined_bookings_owed: ${err.message}`); }
+  // The same check's failures (a booking it could not read or judge, or whose
+  // alert could not be written): kept apart, never shown as a booking defect.
+  try {
+    const failed = await require('./combined-booking-check').failedCheckEstimateIds(db);
+    if (failed.length > 0) {
+      alerts.push({
+        id: 'combined_booking_checks_failed',
+        kind: 'action',
+        severity: 'warn',
+        count: failed.length,
+        label: `${failed.length} combined booking${failed.length === 1 ? '' : 's'} could not be checked`,
+        href: '/admin/customers',
+        members: queueMembers(failed),
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] combined_booking_checks_failed: ${err.message}`); }
 
   // Everything not explicitly tagged above is a passive watch-state alarm; the
   // client separates do-this-now actions from alerts on this field.

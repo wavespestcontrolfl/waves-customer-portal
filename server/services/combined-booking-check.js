@@ -429,20 +429,30 @@ function outcomeOf(verdict, standingProblems = []) {
 }
 
 // The overflow record's entries: every estimate it keeps a candidate
-// (`all`), and the subset waiting only for a service's hold to end (`held`),
-// which has no known problem yet.
+// (`all`), and the subsets with no confirmed problem: waiting for a service's
+// hold to end (`held`), or whose check / alert write failed (`failed`).
 async function overflowEntries(conn) {
   const row = await conn('notifications').where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKeyFor(OVERFLOW_ID)]).first('metadata');
   const list = (value) => (Array.isArray(value) ? value.map(String) : []);
-  return { all: list(row?.metadata?.itemKeys), held: new Set(list(row?.metadata?.heldIds)) };
+  return {
+    all: list(row?.metadata?.itemKeys),
+    held: new Set(list(row?.metadata?.heldIds)),
+    failed: new Set(list(row?.metadata?.failedIds)),
+  };
 }
 
-// The bookings owed their own alert: each has a known problem (the dashboard
+// The bookings owed their own alert for a CONFIRMED problem (the dashboard
 // Action Inbox count, dashboard-alerts.js combined_bookings_owed).
 async function owedEstimateIds(conn) {
-  const { all, held } = await overflowEntries(conn);
-  return all.filter((id) => !held.has(id));
+  const { all, held, failed } = await overflowEntries(conn);
+  return all.filter((id) => !held.has(id) && !failed.has(id));
+}
+
+// The bookings whose check or alert write failed: surfaced on their own
+// (dashboard-alerts.js combined_booking_checks_failed), never as a defect.
+async function failedCheckEstimateIds(conn) {
+  return [...(await overflowEntries(conn)).failed];
 }
 
 // The estimates with an open bell of this check: they stay candidates past
@@ -491,14 +501,16 @@ async function postOverflow(conn, owed, { raise } = {}) {
   if (!owed.length) return retireStanding(conn, [OVERFLOW_ID], RESOLVED_FIXED);
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const ids = owed.map((entry) => entry.id);
-  const heldIds = owed.filter((entry) => entry.held).map((entry) => entry.id);
-  const toFix = ids.length - heldIds.length;
+  const idsOf = (kind) => owed.filter((entry) => entry.kind === kind).map((entry) => entry.id);
+  const heldIds = idsOf('held');
+  const failedIds = idsOf('failed');
+  const toFix = idsOf('owed').length;
   const row = await raiseAdminAlert(CATEGORY, {
     area: AREA,
     action: toFix
       ? `fix ${toFix} more combined booking${toFix === 1 ? '' : 's'}`
-      : `recheck ${ids.length} combined booking${ids.length === 1 ? '' : 's'} after a hold`,
-    why: 'Past the daily alert budget, so these bookings are listed here until each gets its own alert.',
+      : `recheck ${ids.length} combined booking${ids.length === 1 ? '' : 's'}`,
+    why: 'Each booking listed here is checked again every run until it is judged and, if needed, gets its own alert.',
     severity: 'needs-you',
     link: '/admin/customers',
     subject: { type: 'check', id: OPS_KEY },
@@ -511,7 +523,7 @@ async function postOverflow(conn, owed, { raise } = {}) {
     refreshOnDedupe: true,
     ringGate: async () => false,
     ringOnRefresh: () => false,
-    metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids, heldIds },
+    metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids, heldIds, failedIds },
   });
   // This row is the only record of what is owed: a lost write fails the
   // sweep loudly (the watchdog logs COMBINED-BOOKING-CHECK-FAILED).
@@ -555,13 +567,19 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   // A booking that could not be judged, or whose bell could not be written,
   // goes on the overflow bell: it stays a candidate until it is.
   const owed = [];
-  const owe = (estimate, why, { held = false } = {}) => owed.push({
-    id: String(estimate.id), held, line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}`,
+  // kind: 'owed' (a confirmed problem past the budget), 'held' (a service on
+  // hold, nothing known yet) or 'failed' (the check or its write failed).
+  const owe = (estimate, why, kind = 'failed') => owed.push({
+    id: String(estimate.id), kind, line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}`,
   });
+  // No longer a combined booking (the accepted snapshot was corrected to one
+  // service, or no longer converts): an open bell for it is closed.
+  const notCombined = [];
   const work = candidates.filter((estimate) => {
     try {
       if ((acceptedFamilies(estimate)?.size || 0) >= 2) return true;
       result.skipped += 1;
+      if (standing.has(String(estimate.id))) notCombined.push(String(estimate.id));
     } catch (err) {
       result.failed += 1;
       owe(estimate, 'could not be read this run');
@@ -569,6 +587,8 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     }
     return false;
   });
+
+  result.closed += await retireStanding(conn, notCombined, RESOLVED_GONE);
 
   // The shared accepted-plan classifier, with no 24h wait: the same findings
   // the watchdog's accepted-schedule alerts are built from, plus which
@@ -594,7 +614,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         // bell (any standing one was just closed): the overflow record keeps
         // the booking a candidate (as `held`, no known problem), so it is
         // judged when the hold ends even past the lookback.
-        if (onHold) owe(estimate, 'a service is on hold; it is checked again when the hold ends', { held: true });
+        if (onHold) owe(estimate, 'a service is on hold; it is checked again when the hold ends', 'held');
         continue;
       }
       result.checked += 1;
@@ -606,7 +626,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       // a read bell in silence.
       const wouldRing = !known || problems.flatMap(problemKeys).some((key) => !known.keys.has(key));
       if (wouldRing && rings >= ringBudget) {
-        owe(estimate, `${ctx.customerName}: ${problems.map((problem) => problem.text).join('; ')}`);
+        owe(estimate, `${ctx.customerName}: ${problems.map((problem) => problem.text).join('; ')}`, 'owed');
         continue;
       }
       const row = await postAlert(estimate, verdict, ctx, { raise });
@@ -640,6 +660,7 @@ module.exports = {
   outcomeOf,
   heldProblems,
   owedEstimateIds,
+  failedCheckEstimateIds,
   overflowEntries,
   acceptedFamilies,
   shortName,
