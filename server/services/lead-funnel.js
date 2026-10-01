@@ -36,6 +36,27 @@ const REACHED = {
   booked: new Set(['booked', 'completed']),
   completed: new Set(['completed']),
 };
+const emptyGroup = () => ({ leads: 0, contacted: 0, estimate: 0, booked: 0, completed: 0, lost: 0, revenue: 0 });
+// One current-state row's contribution: every rung it has reached, plus the
+// completed revenue the attribution sync credited to it.
+function tallyStage(g, stage, n, revenue) {
+  g.leads += n;
+  if (REACHED.contacted.has(stage)) g.contacted += n;
+  if (REACHED.estimate.has(stage)) g.estimate += n;
+  if (REACHED.booked.has(stage)) g.booked += n;
+  if (REACHED.completed.has(stage)) g.completed += n;
+  if (stage === 'lost') g.lost += n;
+  g.revenue = Math.round((g.revenue + revenue) * 100) / 100;
+}
+const withRates = (g) => ({
+  ...g,
+  rates: {
+    contactRate: pctOf(g.contacted, g.leads),
+    estimateRate: pctOf(g.estimate, g.leads),
+    bookRate: pctOf(g.booked, g.leads),
+    completeRate: pctOf(g.completed, g.leads),
+  },
+});
 
 /**
  * buildLeadFunnel(rows) — rows are GROUP BY (lead_source, funnel_stage,
@@ -47,17 +68,7 @@ function buildLeadFunnel(rows = []) {
   const bySource = new Map();
   const ensure = (key, isPaid) => {
     if (!bySource.has(key)) {
-      bySource.set(key, {
-        sourceKey: key,
-        source: formatSourceName(key),
-        isPaid: !!isPaid,
-        leads: 0,
-        contacted: 0,
-        estimate: 0,
-        booked: 0,
-        completed: 0,
-        lost: 0,
-      });
+      bySource.set(key, { sourceKey: key, source: formatSourceName(key), isPaid: !!isPaid, ...emptyGroup() });
     }
     return bySource.get(key);
   };
@@ -78,43 +89,26 @@ function buildLeadFunnel(rows = []) {
     const isPaid = key === 'google_ads' || key === 'google_lsa' || (rawKey === 'facebook' && !!r.is_paid);
     const s = ensure(key, isPaid);
     s.isPaid = s.isPaid || isPaid;
-    s.leads += n;
     const stage = r.funnel_stage;
     if (n > 0) {
       if (stage === 'contacted') present.contacted = true;
       if (stage === 'estimate_sent' || stage === 'estimate_viewed') present.estimate = true;
       if (stage === 'booked') present.booked = true;
     }
-    if (REACHED.contacted.has(stage)) s.contacted += n;
-    if (REACHED.estimate.has(stage)) s.estimate += n;
-    if (REACHED.booked.has(stage)) s.booked += n;
-    if (REACHED.completed.has(stage)) s.completed += n;
-    if (stage === 'lost') s.lost += n;
+    tallyStage(s, stage, n, Number(r.revenue) || 0);
   }
 
   const sources = [...bySource.values()]
-    .map((s) => ({
-      ...s,
-      rates: {
-        contactRate: pctOf(s.contacted, s.leads),
-        estimateRate: pctOf(s.estimate, s.leads),
-        bookRate: pctOf(s.booked, s.leads),
-        completeRate: pctOf(s.completed, s.leads),
-      },
-    }))
+    .map(withRates)
     .sort((a, b) => b.leads - a.leads || a.source.localeCompare(b.source));
 
   const totalOf = (filter) => {
-    const t = { leads: 0, contacted: 0, estimate: 0, booked: 0, completed: 0, lost: 0 };
+    const t = emptyGroup();
     for (const s of sources) {
       if (filter && !filter(s)) continue;
-      t.leads += s.leads;
-      t.contacted += s.contacted;
-      t.estimate += s.estimate;
-      t.booked += s.booked;
-      t.completed += s.completed;
-      t.lost += s.lost;
+      for (const k of Object.keys(t)) t[k] += s[k];
     }
+    t.revenue = Math.round(t.revenue * 100) / 100;
     return { ...t, bookRate: pctOf(t.booked, t.leads), completeRate: pctOf(t.completed, t.leads) };
   };
 
@@ -127,4 +121,65 @@ function buildLeadFunnel(rows = []) {
   };
 }
 
-module.exports = { buildLeadFunnel };
+// The same funnel along the other dimensions the AI-search plan asks for
+// (landing page → lead → estimate → booked → revenue, by service and city),
+// plus the visitor's own "How did you hear about us?" answer. That answer is
+// self-reported, so it stays its own view and never re-labels a source; a
+// missing value stays unknown rather than being guessed.
+const UNKNOWN = '(unknown)';
+const SERVICE_LABELS = {
+  pest: 'Pest control', lawn: 'Lawn care', mosquito: 'Mosquito', termite: 'Termite',
+  rodent: 'Rodent', tree_shrub: 'Tree & shrub', specialty: 'Specialty',
+};
+const HEARD_ABOUT_LABELS = {
+  google_search: 'Google search', google_maps: 'Google Maps', chatgpt: 'ChatGPT',
+  other_ai: 'Another AI assistant', facebook_instagram: 'Facebook / Instagram',
+  nextdoor: 'Nextdoor', yelp: 'Yelp', friend_neighbor: 'Friend or neighbor',
+  truck_yard_sign: 'Truck or yard sign', other: 'Other',
+};
+const BREAKDOWN_LABELS = {
+  page: (k) => k,
+  service: (k) => SERVICE_LABELS[k] || k,
+  city: (k) => k,
+  heard: (k) => HEARD_ABOUT_LABELS[k] || (k === UNKNOWN ? 'No answer (not asked or skipped)' : k),
+};
+
+// Group keys for the other views, as SQL over the route's aliases (asa =
+// ad_service_attribution, l = leads, c = customers).
+// Landing page: the lead's own form page (lead webhook attribution), else the
+// customer's first landing page (quote wizard); host + path, lower-cased, no
+// scheme / www / query / fragment / trailing slash. Calls and tools that record
+// no page stay '(unknown)'. heard: the visitor's self-reported answer, kept
+// apart from observed attribution. chr(63) is '?', kept out of the SQL text
+// because knex reads a bare ? as a binding.
+const FUNNEL_URL_SQL = `NULLIF(regexp_replace(regexp_replace(regexp_replace(split_part(split_part(lower(trim(COALESCE(
+  NULLIF(l.extracted_data->'attribution'->>'landingUrl', ''),
+  NULLIF(l.extracted_data->'attribution'->>'pageUrl', ''),
+  NULLIF(c.landing_page_url, ''),
+  ''))), chr(63), 1), '#', 1), '^[a-z][a-z0-9+.-]*://', ''), '^www\\.', ''), '(.)/$', '\\1'), '')`;
+const FUNNEL_BREAKDOWN_SQL = {
+  page: `COALESCE(${FUNNEL_URL_SQL}, '${UNKNOWN}')`,
+  service: `COALESCE(NULLIF(asa.service_line, ''), '${UNKNOWN}')`,
+  city: `COALESCE(NULLIF(initcap(trim(COALESCE(NULLIF(l.city, ''), c.city, ''))), ''), '${UNKNOWN}')`,
+  heard: `COALESCE(NULLIF(l.heard_about, ''), '${UNKNOWN}')`,
+};
+
+/**
+ * buildFunnelBreakdown(rows, dimension) — rows are GROUP BY (group_key,
+ * funnel_stage) counts: [{ group_key, funnel_stage, n, revenue }]. No paid
+ * split: paid vs organic is a property of the source, shown on that view.
+ */
+function buildFunnelBreakdown(rows = [], dimension) {
+  const labelOf = BREAKDOWN_LABELS[dimension] || ((k) => k);
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.group_key || UNKNOWN;
+    if (!groups.has(key)) groups.set(key, { key, label: labelOf(key), ...emptyGroup() });
+    tallyStage(groups.get(key), r.funnel_stage, parseInt(r.n, 10) || 0, Number(r.revenue) || 0);
+  }
+  return [...groups.values()]
+    .map(withRates)
+    .sort((a, b) => b.leads - a.leads || a.label.localeCompare(b.label));
+}
+
+module.exports = { buildLeadFunnel, buildFunnelBreakdown, FUNNEL_BREAKDOWN_SQL, UNKNOWN };

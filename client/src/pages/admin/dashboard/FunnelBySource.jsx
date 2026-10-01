@@ -1,5 +1,6 @@
-import { Badge, cn, UiSurface } from "../../../components/ui";
-import { EmptyState, fmtInt } from "../../../components/dashboard/charts";
+import { useState } from "react";
+import { Badge, cn, Select, UiSurface } from "../../../components/ui";
+import { EmptyState, fmtInt, fmtMoneyCompact } from "../../../components/dashboard/charts";
 import Verdict from "./Verdict";
 import FormulaNote from "./FormulaNote";
 import { leadFunnelVerdict } from "./scorecard-metrics";
@@ -12,6 +13,20 @@ import SampleBadge from "./SampleBadge";
 // keys don't match lead_sources.name, so an exact-match drill would land on
 // an empty Leads list.
 const TOP_N = 5;
+// The same funnel along other dimensions (server/services/lead-funnel.js
+// breakdowns). "Heard about" is what the visitor said on the form, so it is
+// its own view and never re-labels a source.
+const VIEWS = [
+  { key: "source", label: "Source" },
+  { key: "page", label: "Landing page" },
+  { key: "service", label: "Service" },
+  { key: "city", label: "City" },
+  { key: "heard", label: "Heard about (self-reported)" },
+];
+const viewRows = (data, view) =>
+  view === "source"
+    ? data?.sources || []
+    : (data?.breakdowns?.[view] || []).map((g) => ({ ...g, sourceKey: g.key, source: g.label, isPaid: false }));
 const ALL_STAGES = [
   { key: "contacted", label: "Contacted" },
   { key: "estimate", label: "Estimate" },
@@ -54,10 +69,11 @@ function StageBars({ s, stages }) {
 }
 
 export default function FunnelBySource({ data, loading, error }) {
+  const [view, setView] = useState("source");
   if (loading && !data) return <EmptyState>Loading…</EmptyState>;
   if (error && !data) return <EmptyState>Failed to load the lead funnel for this period</EmptyState>;
-  const sources = data?.sources || [];
-  if (!sources.length) return <EmptyState>No attributed leads this period</EmptyState>;
+  if (!data?.sources?.length) return <EmptyState>No attributed leads this period</EmptyState>;
+  const sources = viewRows(data, view);
 
   const top = sources.slice(0, TOP_N);
   const rest = sources.length - top.length;
@@ -78,6 +94,14 @@ export default function FunnelBySource({ data, loading, error }) {
           paid {fmtInt(data.paid?.leads || 0)} · organic {fmtInt(data.organic?.leads || 0)}
         </span>
       </div>
+      <label className="flex items-center gap-2 mb-3 text-ui-caption text-ink-secondary">
+        View by
+        <Select size="sm" className="!w-auto" value={view} onChange={(e) => setView(e.target.value)}>
+          {VIEWS.map((v) => (
+            <option key={v.key} value={v.key}>{v.label}</option>
+          ))}
+        </Select>
+      </label>
 
       <div className="space-y-4">
         {top.map((s) => {
@@ -89,7 +113,7 @@ export default function FunnelBySource({ data, loading, error }) {
                     attribution keys, and the Leads page filters by exact
                     lead_sources.name — the labels don't match, so a drill
                     would land on an empty list. */}
-                <span className="truncate text-ui-body font-medium text-ink-primary">
+                <span className="truncate text-ui-body font-medium text-ink-primary" title={s.source}>
                   {s.source}
                 </span>
                 {s.isPaid && (
@@ -101,6 +125,7 @@ export default function FunnelBySource({ data, loading, error }) {
                 <span className="ml-auto whitespace-nowrap u-nums text-ui-caption text-ink-secondary">
                   {fmtInt(s.leads)} lead{s.leads === 1 ? "" : "s"}
                   {s.lost > 0 && <span className="ml-1.5">· {fmtInt(s.lost)} lost</span>}
+                  {s.revenue > 0 && <span className="ml-1.5">· {fmtMoneyCompact(s.revenue)} won</span>}
                 </span>
               </div>
               <StageBars s={s} stages={stages} />
@@ -110,7 +135,7 @@ export default function FunnelBySource({ data, loading, error }) {
       </div>
       {rest > 0 && (
         <div className="mt-2 text-ui-caption text-ink-secondary">
-          +{rest} smaller source{rest === 1 ? "" : "s"} not shown — every source still counts in the totals above.
+          +{rest} smaller group{rest === 1 ? "" : "s"} not shown — every lead still counts in the totals above.
         </div>
       )}
 
@@ -124,7 +149,12 @@ export default function FunnelBySource({ data, loading, error }) {
         recorded render — today most rows move lead → won directly, and the
         middle rungs light up as stage tracking starts writing them. Lost leads
         count only as leads + lost. Call↔lead linkage is call-SID based.
-        Shaping: server/services/lead-funnel.js.
+        Won revenue is the completed revenue the attribution sync credited to
+        each lead&apos;s row. Landing page is the form page the lead submitted
+        from (else the customer&apos;s first landing page); calls and tools that
+        record no page show as unknown. Heard about is the visitor&apos;s own
+        answer on the form, shown separately from observed attribution; an
+        unknown answer stays unknown. Shaping: server/services/lead-funnel.js.
       </FormulaNote>
     </UiSurface>
   );
