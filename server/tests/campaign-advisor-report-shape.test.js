@@ -151,3 +151,22 @@ describe('owner quality bar (2026-10-01)', () => {
     expect(isUsableAdsReport({ ...GOOD, recommendations: [rec] })).toBe(false);
   });
 });
+
+describe('secondary findings need numeric evidence (Codex r3 on #5486)', () => {
+  test.each([
+    ['an SEO insight with no figures', { seo_insights: [{ detail: 'Update metadata', type: 'opportunity', action: 'rewrite title' }] }],
+    ['a waste alert without spend', { waste_alerts: [{ search_term: 'free pest control', conversions: 0, action: 'add_negative' }] }],
+    ['a scaling row without budgets', { scaling_opportunities: [{ campaign: 'Pest', headroom_reason: 'room to grow' }] }],
+    ['a capacity warning without utilization', { capacity_warnings: [{ area: 'Venice', recommendation: 'slow spend' }] }],
+  ])('%s fails the leg', (_label, extra) => {
+    expect(isUsableAdsReport({ ...GOOD, ...extra })).toBe(false);
+  });
+
+  test('numeric strings count as evidence; figures in SEO detail count', () => {
+    expect(isUsableAdsReport({
+      ...GOOD,
+      waste_alerts: [{ search_term: 'free pest control', spend: '12.50', conversions: '0', action: 'add_negative' }],
+      seo_insights: [{ detail: 'pest control venice at position 11, 420 impressions', type: 'opportunity', action: 'add FAQ' }],
+    })).toBe(true);
+  });
+});

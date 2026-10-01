@@ -173,4 +173,10 @@ describe("Ads page Advisor tab", () => {
     await screen.findByText(REPORT_DATA.overall_assessment);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+  it("with no recommendations but flagged items, the empty state points at them instead of 'nothing worth changing'", async () => {
+    stubFetch({ report: { date: "2026-10-01", grade: "B", report_data: { ...REPORT_DATA, recommendations: [] } } });
+    await openAdvisor();
+    expect(await screen.findByText(/see the flagged items below/)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing worth changing/)).not.toBeInTheDocument();
+  });
 });

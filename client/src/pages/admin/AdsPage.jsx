@@ -1192,15 +1192,23 @@ function AdvisorGradeCard({ data }) {
 }
 
 // The advisor may recommend nothing, and that is a valid answer, so say so
-// instead of leaving a blank page.
-function AdvisorEmptyState() {
+// instead of leaving a blank page. When secondary findings exist (waste,
+// scaling, capacity, SEO cards below), "nothing worth changing" would
+// contradict them, so the copy points at those instead.
+const ADVISOR_FLAGGED_LISTS = ["waste_alerts", "scaling_opportunities", "capacity_warnings", "seo_insights"];
+function hasFlaggedFindings(data) {
+  return ADVISOR_FLAGGED_LISTS.some((k) => Array.isArray(data?.[k]) && data[k].length > 0);
+}
+function AdvisorEmptyState({ flagged }) {
   return (
     <UiCard data-qa="advisor-empty" className="p-6">
       <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
         No recommendations today
       </div>
       <div className="text-ui-body text-ink-secondary">
-        No recommendations today — nothing worth changing.
+        {flagged
+          ? "No campaign changes recommended — see the flagged items below."
+          : "No recommendations today — nothing worth changing."}
       </div>
     </UiCard>
   );
@@ -1320,8 +1328,8 @@ function RecommendationGroup({ priority, recs, applied, generating, onApply }) {
   );
 }
 
-function RecommendationList({ recommendations, applied, generating, onApply }) {
-  if (recommendations.length === 0) return <AdvisorEmptyState />;
+function RecommendationList({ recommendations, flagged, applied, generating, onApply }) {
+  if (recommendations.length === 0) return <AdvisorEmptyState flagged={flagged} />;
   return (
     <UiCard className="p-6">
       {" "}
@@ -1570,6 +1578,7 @@ export function AdvisorTab() {
           <AdvisorGradeCard data={data} />
           <RecommendationList
             recommendations={data.recommendations || []}
+            flagged={hasFlaggedFindings(data)}
             applied={applied}
             generating={generating}
             onApply={handleApply}

@@ -72,6 +72,17 @@ const ADS_LIST_FIELDS = {
   capacity_warnings: ['area', 'utilization', 'recommendation'],
   seo_insights: ['detail', 'type', 'action'],
 };
+// Owner ruling 2026-10-01 applies to secondary findings too: each must rest
+// on numbers, so a placeholder row ("Update metadata") fails the leg and the
+// backup provider runs instead. Numeric fields may arrive as numeric strings.
+const isNumberLike = (v) => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== ''))
+  && Number.isFinite(Number(v));
+const ADS_LIST_EVIDENCE = {
+  waste_alerts: (item) => isNumberLike(item.spend) && isNumberLike(item.conversions),
+  scaling_opportunities: (item) => isNumberLike(item.current_budget) && isNumberLike(item.suggested_budget),
+  capacity_warnings: (item) => isNumberLike(item.utilization),
+  seo_insights: (item) => hasNumericEvidence(item.detail),
+};
 // apply_action / manual_action feed `.replace()` on the page's manual-action
 // hint, so a non-string one crashed the view (Codex r20 on #4884).
 // Owner ruling 2026-10-01: every recommendation must rest on the numbers
@@ -97,7 +108,8 @@ function isUsableAdsReport(advice) {
   // deliberate "nothing to change" — it must not be texted as one.
   if (!Array.isArray(advice.recommendations) || !advice.recommendations.every(isUsableRecommendation)) return false;
   return Object.entries(ADS_LIST_FIELDS).every(([key, [label, ...fields]]) => advice[key] == null
-    || advice[key].every((item) => isText(item[label]) && fields.every((f) => isRenderable(item[f]))));
+    || advice[key].every((item) => isText(item[label]) && fields.every((f) => isRenderable(item[f]))
+      && ADS_LIST_EVIDENCE[key](item)));
 }
 
 // After the leg was accepted: the only rewrite is the case of a priority the
@@ -230,7 +242,7 @@ RECOMMENDATION QUALITY RULES (these override everything below):
 - Every recommendation MUST cite the specific numbers it rests on (spend, clicks, conversions, CPA/ROAS, impression share, budget) in its "reasoning".
 - When data volume is too small to conclude anything (a handful of conversions, a few dollars of spend, a short window), say so plainly in overall_assessment and do not recommend a change that only makes sense with more data.
 - Do NOT recommend something that has already been done: RECENT BUDGET CHANGES lists what was changed in the last 7 days — never repeat or reverse a change made there without new evidence.
-- The secondary lists (waste_alerts, scaling_opportunities, capacity_warnings, insights, seo_insights) follow the same rule: leave them as empty arrays unless there is a real, number-backed item. Never emit placeholder or template rows.
+- The secondary lists (waste_alerts, scaling_opportunities, capacity_warnings, seo_insights) follow the same rule: leave them as empty arrays unless there is a real, number-backed item (spend/conversions, budgets, utilization, and figures in an SEO detail are required). Never emit placeholder or template rows. insights are short factual observations; leave the array empty rather than pad it.
 
 PAID ADS RULES:
 - Be specific with numbers. Don't say "consider increasing budget" — say "increase Pest Bradenton budget from $20 to $30/day based on 7.0x ROAS and 25% lost IS (budget)"
