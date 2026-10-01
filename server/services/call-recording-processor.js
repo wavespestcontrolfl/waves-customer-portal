@@ -3260,7 +3260,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false } = {}) {
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
@@ -3427,7 +3427,9 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
     } : {}),
-    ...((contact.phone && !smsConsentExplicit && customer.service_contacts_consent_at) ? {
+    // keepConsentStamp: the caller already holds the new phone behind a
+    // blocking recipient_optin row, so the stamp (other people's consent) stays.
+    ...((contact.phone && !smsConsentExplicit && !keepConsentStamp && customer.service_contacts_consent_at) ? {
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
@@ -13574,6 +13576,7 @@ const CallRecordingProcessor = {
         // Pre-persist: only entries that could be asked need the slot-phone read.
         const onSitePreAsk = onSiteOptinAskTrigger(secondaryEntry) && !v2DoNotContact && optinRailLive;
         let otherSlotPhone = false;
+        let onSiteBlockedBeforeWrite = false;
         if (onSitePreAsk) {
           const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
           const before = await db('customers').where({ id: customerId }).first();
@@ -13583,8 +13586,32 @@ const CallRecordingProcessor = {
             const key = lastTen(before?.[slot.phone]);
             return !!key && key !== lastTen(secondaryEntry.phone);
           });
+          // A phone NEW to this account is blocked BEFORE the slot write (a
+          // reclaimable ask_failed row; an existing row is left as it is), so
+          // the account's existing consent stamp can stay: the row, not the
+          // stamp, holds the new phone until its own YES (the rail is live, so
+          // the opt-in gate is on). A phone already on record keeps its standing.
+          const newKey = lastTen(secondaryEntry.phone);
+          const knownKeys = [before?.phone, ...SERVICE_CONTACT_SLOTS.map((slot) => before?.[slot.phone])].map(lastTen).filter(Boolean);
+          if (newKey && !knownKeys.includes(newKey)) {
+            await db('recipient_optin').insert({
+              phone_key: newKey,
+              phone_e164: String(secondaryEntry.phone || '').trim(),
+              status: 'ask_failed',
+              customer_id: customerId,
+              requested_by: 'call_pipeline',
+              requested_at: new Date(),
+            }).onConflict(['customer_id', 'phone_key']).ignore();
+            onSiteBlockedBeforeWrite = true;
+          }
         }
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit, onSiteAskEligible: onSitePreAsk });
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
+          smsConsentExplicit: v2SmsConsentExplicit,
+          onSiteAskEligible: onSitePreAsk,
+          // Model-inferred on-site contact behind a blocking opt-in row: the
+          // account's existing consent (other people's) is not cleared.
+          keepConsentStamp: onSiteBlockedBeforeWrite,
+        });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
@@ -13601,21 +13628,7 @@ const CallRecordingProcessor = {
           // (no opt-in row yet must not read as grandfathered) and from the
           // explicit-consent claim below, so nobody is asked before a visit lands.
           optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));
-          // ...and DURABLY blocked meanwhile: a just-written rowless slot phone
-          // reads as grandfathered to every later reminder sender. A BLOCKING
-          // ask_failed row (reclaimable: the booking-site claim re-asks it)
-          // holds this phone until the recipient answers. Only for a slot
-          // written by THIS pass — a phone already on record keeps whatever
-          // standing it had (a grandfathered contact is never silenced), and
-          // an existing row (confirmed / declined / pending) is left as it is.
-          if (result === 'written') await db('recipient_optin').insert({
-            phone_key: lastTen(secondaryEntry.phone),
-            phone_e164: String(secondaryEntry.phone || '').trim(),
-            status: 'ask_failed',
-            customer_id: customerId,
-            requested_by: 'call_pipeline',
-            requested_at: new Date(),
-          }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
+          // (Durably blocked before the slot write — see onSiteBlockedBeforeWrite.)
         }
         const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
         if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {

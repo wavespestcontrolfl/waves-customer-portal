@@ -519,6 +519,20 @@ describe('persistCallSecondaryContact', () => {
     }]);
   });
 
+  test('keepConsentStamp (new phone already behind a blocking opt-in row): an inferred on-site add does NOT clear the account\'s existing stamp', async () => {
+    const writes = makeDb({
+      customer: {
+        ...bareCustomer,
+        service_contact_name: 'Property Manager',
+        service_contact_phone: '+19415557777',
+        service_contacts_consent_at: '2026-07-22T00:00:00Z',
+      },
+    });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', on_site: true }, { onSiteAskEligible: true, keepConsentStamp: true })).toBe('written');
+    expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_at');
+    expect(writes.updates[0]).not.toHaveProperty('service_preferences');
+  });
+
   test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
     const writes = makeDb({ customer: bareCustomer });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
@@ -818,7 +832,7 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");
     expect(src).toContain('JSON.stringify({ optin_ask: value })');
     // The save only admits an on-site-only contact when the ask can go out.
-    expect(src).toContain('{ smsConsentExplicit: v2SmsConsentExplicit, onSiteAskEligible: onSitePreAsk }');
+    expect(src).toContain('onSiteAskEligible: onSitePreAsk,');
     // Either extractor's do-not-contact request blocks the ask.
     expect(src).toMatch(/const v2DoNotContact = v2CanonicalExtraction\?\.consent\?\.do_not_contact_request === true\s*\|\| extracted\.do_not_contact_request === true;/);
     // Explicit V2 consent keeps the original claim path (fresh slot only).
@@ -826,9 +840,13 @@ describe('on-site contact opt-in ask', () => {
     // kept out of the same-call fan-out until it has an opt-in row.
     expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {");
     expect(src).toContain('optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
-    // A freshly written slot phone is durably blocked (ask_failed, reclaimable)
-    // until the booking-site ask; a phone already on record is left alone.
-    expect(src).toContain("if (result === 'written') await db('recipient_optin').insert({");
+    // A phone NEW to the account is durably blocked (ask_failed, reclaimable)
+    // BEFORE the slot write, so the account's existing consent stamp stays; a
+    // phone already on record is left alone.
+    expect(src).toContain('if (newKey && !knownKeys.includes(newKey)) {');
+    expect(src).toContain('keepConsentStamp: onSiteBlockedBeforeWrite,');
+    const block = src.indexOf('if (newKey && !knownKeys.includes(newKey)) {');
+    expect(block).toBeLessThan(src.indexOf('const result = await persistCallSecondaryContact(customerId, secondaryEntry, {', block));
     // The same-call fan-out gate is the original one.
     expect(src).toContain('const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(');
     // No booking landed: the card says so.
