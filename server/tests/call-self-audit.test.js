@@ -6,14 +6,13 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), ty
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 jest.mock('../services/typed-decisions/jev', () => ({ askPackage: jest.fn() }));
 jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: jest.fn() }));
-jest.mock('../services/typed-decisions/outcome-evidence', () => ({ callEvidence: jest.fn() }));
 
 const db = require('../models/db');
 const { createDeepMessage } = require('../services/llm/deep');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { askPackage } = require('../services/typed-decisions/jev');
 const { recordDecisions } = require('../services/typed-decisions/shadow-recorder');
-const { callEvidence } = require('../services/typed-decisions/outcome-evidence');
+const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock } = require('../services/call-self-audit');
 
 const SAMPLE = (over = {}) => ({
@@ -168,16 +167,13 @@ test('stratifySample reserves half per direction and gives unused share to the o
 describe('Jev shadow', () => {
   const VERDICT = { content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":true,"quote_promised":false,"complaint":true,"excerpt":"ok"}' }] };
   const JEV_OK = { ok: true, answers: { is_lead: { p: 0.9, yes: true, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
-  const EVIDENCE = { appointment_agreed: { source: 'scheduled_services', window: '24h', value: null, observed_at: 'now' } };
 
   beforeEach(() => {
     typedDecisionsLive.mockReturnValue(false);
     askPackage.mockReset();
     recordDecisions.mockReset();
-    callEvidence.mockReset();
     askPackage.mockResolvedValue(JEV_OK);
     recordDecisions.mockResolvedValue({ recorded: 6 });
-    callEvidence.mockResolvedValue(EVIDENCE);
   });
   afterAll(() => typedDecisionsLive.mockReturnValue(false));
 
@@ -189,7 +185,7 @@ describe('Jev shadow', () => {
     expect(res.jev).toEqual({ asked: 0, recorded: 0, failed: 0 });
   });
 
-  test('gate on: asks call_judge.v2 with the transcript and direction, records both baselines and the evidence', async () => {
+  test('gate on: asks call_judge.v2 with the transcript and direction, records both baselines and the transcript digest', async () => {
     typedDecisionsLive.mockReturnValue(true);
     const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false }) });
     mockDb({ calls: [prodCall] });
@@ -205,7 +201,8 @@ describe('Jev shadow', () => {
 
     expect(recordDecisions).toHaveBeenCalledTimes(1);
     const args = recordDecisions.mock.calls[0][0];
-    expect(args).toMatchObject({ capability: 'call_judge', subjectType: 'call_log', subjectId: 'call-9', result: JEV_OK, outcomeEvidence: EVIDENCE });
+    expect(args).toMatchObject({ capability: 'call_judge', subjectType: 'call_log', subjectId: 'call-9', result: JEV_OK, subjectHash: callSubjectHash(prodCall.transcription) });
+    expect(args).not.toHaveProperty('outcomeEvidence');
     expect(args.pkg.id).toBe('call_judge.v2');
     // production and deep judge side by side for the five shared fields
     expect(args.baselines.appointment_agreed).toEqual({ production: false, deep_judge: true });
@@ -240,7 +237,6 @@ describe('Jev shadow', () => {
     ['Jev answers ok:false', () => askPackage.mockResolvedValue({ ok: false, reason: 'error' }), { asked: 1, recorded: 0, failed: 1 }],
     ['Jev throws', () => askPackage.mockRejectedValue(new Error('provider down')), { asked: 1, recorded: 0, failed: 1 }],
     ['the recorder throws', () => recordDecisions.mockRejectedValue(new Error('db down')), { asked: 1, recorded: 0, failed: 1 }],
-    ['the evidence read throws (still recorded, no evidence)', () => callEvidence.mockRejectedValue(new Error('evidence down')), { asked: 1, recorded: 1, failed: 0 }],
   ])('%s: the audit itself is unaffected', async (_name, arrange, jev) => {
     typedDecisionsLive.mockReturnValue(true);
     arrange();

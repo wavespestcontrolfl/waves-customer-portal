@@ -17,7 +17,6 @@ const yesNoRow = (over = {}) => ({
   subjectType: 'sms_log',
   jevAnswer: { p: 0.91, yes: true, confident: true },
   baselineAnswers: { production: { yes: false } },
-  outcomeEvidence: { source: 'visit_booked', window: '7d', value: 'booked', observed_at: '2026-10-01T14:00:00Z' },
   sampledFor: 'disagreement',
   label: null,
   labelStatus: 'unreviewed',
@@ -39,7 +38,7 @@ it('requests unreviewed rows by default and renders answers, baseline, evidence 
   expect(adminFetch.mock.calls[0][0]).toContain('sampled_for=disagreement%2Crandom_audit');
   expect(screen.getByText('Jev: Yes (0.91)')).toBeInTheDocument();
   expect(screen.getByText('production: No')).toBeInTheDocument();
-  expect(screen.getByText(/Outcome \(visit booked, 7d\): booked/)).toBeInTheDocument();
+  expect(screen.queryByText(/Outcome/)).toBeNull(); // outcome evidence was dropped (owner, 2026-10-01)
   expect(screen.getByText('Disagreement', { selector: 'span' })).toBeInTheDocument();
   expect(screen.getByText('Fixture Waves text')).toBeInTheDocument();
   expect(screen.getByText('Fixture customer text')).toBeInTheDocument();
@@ -187,4 +186,24 @@ it('shows the call direction, and the swapped-speaker warning on outbound calls'
   expect(screen.getByText(/^Outbound call/)).toBeInTheDocument();
   expect(screen.getByText(/^Inbound call/)).toBeInTheDocument();
   expect(screen.getAllByText(/Speaker labels can be swapped/)).toHaveLength(1);
+});
+
+it('a call reprocessed after Jev answered shows why and offers no label buttons', async () => {
+  mockList([yesNoRow({ id: 'm1', question: 'Moved question', subjectChanged: true })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Moved question');
+  expect(screen.getByText(/reprocessed after Jev answered/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Jev right' })).toBeNull();
+});
+
+it('a 409 subject_changed from the server locks the row instead of offering Replace', async () => {
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method === 'POST') { const e = new Error('changed'); e.status = 409; e.code = 'subject_changed'; throw e; }
+    return { reviews: [yesNoRow({ id: 's1', question: 'Live question' })], count: 1 };
+  });
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Live question');
+  fireEvent.click(screen.getByRole('button', { name: 'Jev right' }));
+  expect(await screen.findByText(/reprocessed after Jev answered/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
 });

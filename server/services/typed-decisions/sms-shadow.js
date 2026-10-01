@@ -75,7 +75,6 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
   const conn = require('../../models/db');
   const { askPackage } = require('./jev');
   const { recordDecisions } = require('./shadow-recorder');
-  const { smsEvidence } = require('./outcome-evidence');
   const { packageFor } = require('./packages');
 
   let previous = lastOutboundBody;
@@ -85,8 +84,6 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
       : null;
   }
   const state = { previous_waves_text: previous || null, customer_text: text.slice(0, MAX_TEXT_CHARS) };
-
-  const evidence = await smsEvidence({ id: smsLogId, customer_id: customerId, created_at: receivedAt || new Date(), from_phone: fromPhone, to_phone: toPhone }, { conn }).catch(() => ({}));
 
   await Promise.all(QUESTIONS.map(async ({ packageId, question, rule }) => {
     out.asked += 1;
@@ -101,7 +98,6 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
         subjectId: smsLogId,
         result,
         baselines: { [question]: { rules: flag } },
-        outcomeEvidence: { [question]: evidence[question] },
       });
       if (recorded.recorded > 0) out.recorded += 1; else out.failed += 1;
     } catch (err) {

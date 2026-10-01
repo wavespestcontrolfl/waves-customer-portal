@@ -1,10 +1,10 @@
 /**
  * Daily owner review item for typed decisions (dark behind GATE_TYPED_DECISIONS).
  *
- * 8:05 AM ET (scheduler.js): refresh the outcome evidence that was still
- * unknown, then raise ONE admin item listing the still-unreviewed shadow
- * decisions of the last 14 days worth a human look: up to 8 where Jev disagreed with a baseline
- * and up to 2 random spot checks, newest first. No rows = nothing raised.
+ * 8:05 AM ET (scheduler.js): raise ONE admin item listing the
+ * still-unreviewed shadow decisions of the last 14 days worth a human look: up
+ * to 8 where Jev disagreed with a baseline and up to 2 random spot checks,
+ * newest first. Nothing waiting = the standing item is closed instead.
  *
  * The item is a pointer, not a decision: it names each row's capability,
  * question, Jev answer and baselines (ids and yes/no only, never message text)
@@ -15,7 +15,6 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 const { raiseAdminAlert } = require('../admin-alert-compose');
-const { refreshOutcomeEvidence } = require('./outcome-evidence');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const CATEGORY = 'typed_decisions';
@@ -50,11 +49,7 @@ function describeRow(row) {
   const jev = parse(row.jev_answer);
   const baselines = Object.entries(parse(row.baseline_answers) || {})
     .map(([name, value]) => `${BASELINE_LABELS[name] || name} ${describeBaseline(value)}`);
-  const evidence = parse(row.outcome_evidence);
-  const proof = evidence && evidence.value !== null && evidence.value !== undefined
-    ? `; ${evidence.source} ${evidence.window}: ${evidence.value ? 'yes' : 'no'}`
-    : '';
-  return `${row.capability} ${row.question_id}: Jev ${describeAnswer(jev)} vs ${baselines.join(', ') || 'no baseline'}${proof}`;
+  return `${row.capability} ${row.question_id}: Jev ${describeAnswer(jev)} vs ${baselines.join(', ') || 'no baseline'}`;
 }
 
 // The item lists what is STILL waiting, not one calendar day: rows stay in
@@ -87,17 +82,12 @@ async function closeIfQueueEmpty({ now = new Date(), conn = db } = {}) {
 
 async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
   if (!typedDecisionsLive()) return { raised: false, reason: 'gate_off' };
-  try {
-    await refreshOutcomeEvidence({ now, conn });
-  } catch (err) {
-    logger.warn(`[typed-decisions] evidence refresh failed: ${err.message}`);
-  }
   const start = windowStart(now);
   const pick = (sampledFor, limit) => conn('decision_reviews')
     .where({ label_status: 'unreviewed', sampled_for: sampledFor })
     .where('created_at', '>=', start)
     .orderBy('created_at', 'desc').limit(limit)
-    .select('id', 'capability', 'question_id', 'jev_answer', 'baseline_answers', 'outcome_evidence', 'created_at');
+    .select('id', 'capability', 'question_id', 'jev_answer', 'baseline_answers', 'created_at');
   const disagreements = await pick('disagreement', MAX_DISAGREEMENTS);
   const spotChecks = await pick('random_audit', MAX_SPOT_CHECKS);
   const total = disagreements.length + spotChecks.length;

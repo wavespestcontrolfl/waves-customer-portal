@@ -97,22 +97,22 @@ function SubjectText({ subject }) {
 
 function AnswersBlock({ review }) {
   const baselines = Object.entries(review.baselineAnswers || {});
-  const evidence = review.outcomeEvidence;
-  const hasEvidence = evidence && evidence.value !== null && evidence.value !== undefined;
   return (
     <div className="space-y-1 text-ui-body">
       <div className="font-medium text-zinc-900">Jev: {formatAnswer(review.jevAnswer)}</div>
       {baselines.map(([name, value]) => (
         <div key={name} className="text-zinc-700">{name.replace(/_/g, " ")}: {formatAnswer(value)}</div>
       ))}
-      {hasEvidence && (
-        <div className="text-14 text-ink-secondary">
-          Outcome ({String(evidence.source || "unknown").replace(/_/g, " ")}{evidence.window ? `, ${evidence.window}` : ""}): {String(evidence.value)}
-          {evidence.observed_at ? ` · ${timeLabel(evidence.observed_at)}` : ""}
-        </div>
-      )}
     </div>
   );
+}
+
+// What a failed label POST means for the row (server 409 codes).
+function labelFailure(err) {
+  if (err?.status !== 409) return "error";
+  if (err.code === "subject_changed") return "moved";
+  if (err.code === "answer_changed") return "stale";
+  return "conflict";
 }
 
 function ReviewRow({ review, onLabeled, onStale }) {
@@ -120,6 +120,9 @@ function ReviewRow({ review, onLabeled, onStale }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(null);
+  // The call was reprocessed after Jev answered (server: subjectChanged, or a
+  // 409 subject_changed): the transcript shown is not the one Jev judged.
+  const [moved, setMoved] = useState(review.subjectChanged === true);
 
   const yesNo = isYesNo(review.jevAnswer);
 
@@ -138,14 +141,12 @@ function ReviewRow({ review, onLabeled, onStale }) {
       setConflict(null);
       onLabeled(review.id, result?.review || null);
     } catch (err) {
-      if (err?.status === 409 && err?.code === "answer_changed") {
-        setConflict(null);
-        onStale();
-      } else if (err?.status === 409) {
-        setConflict({ verdict, status: err.details?.labelStatus || review.labelStatus || "labeled" });
-      } else {
-        setError(err?.message || "Could not save the label.");
-      }
+      const kind = labelFailure(err);
+      if (kind === "conflict") setConflict({ verdict, status: err.details?.labelStatus || review.labelStatus || "labeled" });
+      else setConflict(null);
+      if (kind === "moved") setMoved(true);
+      if (kind === "stale") onStale();
+      if (kind === "error") setError(err?.message || "Could not save the label.");
     } finally {
       setBusy("");
     }
@@ -171,6 +172,12 @@ function ReviewRow({ review, onLabeled, onStale }) {
         </div>
       )}
 
+      {moved ? (
+        <div role="status" className="text-14 text-ink-secondary">
+          This call was reprocessed after Jev answered, so the transcript above is not the one Jev judged. It can't be labeled.
+        </div>
+      ) : (
+      <>
       <Input
         aria-label="Note (optional)"
         placeholder="Note (optional)"
@@ -186,6 +193,8 @@ function ReviewRow({ review, onLabeled, onStale }) {
         )}
         <Button variant="ghost" disabled={!!busy} loading={busy === "unclear" ? true : undefined} onClick={() => submit("unclear")}>Unclear</Button>
       </div>
+      </>
+      )}
 
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       {conflict && (

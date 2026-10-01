@@ -23,6 +23,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudi
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-typed-decisions');
+const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
@@ -90,7 +91,7 @@ describe('GET /reviews', () => {
     const log = installDb({
       decision_reviews: { list: [baseRow(), baseRow({ id: '22222222-2222-4222-8222-222222222222', capability: 'call_judge', package_id: 'call_judge.v2', subject_type: 'call_log', subject_id: 'call-1', question_id: 'is_spam' })] },
       sms_log: { list: [{ id: 'sms-1', from_phone: '+15550000001', to_phone: '+15550000002', direction: 'inbound', message_body: 'Thanks!', created_at: new Date('2026-09-30T11:59:00Z') }], first: { message_body: 'See you Tuesday.' } },
-      call_log: { list: [{ id: 'call-1', direction: 'inbound', created_at: new Date(), transcript_excerpt: 'Agent: Waves. Caller: hello.' }] },
+      call_log: { list: [{ id: 'call-1', direction: 'inbound', created_at: new Date(), transcription: 'Agent: Waves. Caller: hello.' }] },
     });
     const { status, body } = await get('/reviews?status=unreviewed&sampled_for=disagreement,random_audit&limit=50');
     expect(status).toBe(200);
@@ -112,7 +113,8 @@ describe('GET /reviews', () => {
     expect(called(log, 'decision_reviews', 'where')).toContainEqual(['label_status', 'unreviewed']);
     expect(called(log, 'decision_reviews', 'whereIn')).toContainEqual(['sampled_for', ['disagreement', 'random_audit']]);
     expect(called(log, 'decision_reviews', 'limit')).toContainEqual([50]);
-    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('LEFT('), [5000]); // the span call_judge was given
+    // the span call_judge was given, cut in JS exactly as call-self-audit cuts it; no digest leaves the server
+    expect(JSON.stringify(body.reviews)).not.toMatch(/"hash"/);
     // Reads only: nothing is written anywhere.
     expect(Object.keys(log).flatMap((t) => log[t]).filter(([m]) => ['insert', 'update', 'delete'].includes(m))).toEqual([]);
   });
@@ -123,6 +125,16 @@ describe('GET /reviews', () => {
     expect(called(log, 'decision_reviews', 'orderBy')).toContainEqual([[{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]]);
     expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['(created_at, id) < (SELECT created_at, id FROM decision_reviews WHERE id = ?)', [ID]]);
     expect((await get('/reviews?before_id=yesterday')).status).toBe(400);
+  });
+
+  test('a call whose live transcript no longer matches its stored digest is flagged subjectChanged', async () => {
+    const row = (id, hash) => baseRow({ id, capability: 'call_judge', package_id: 'call_judge.v2', subject_type: 'call_log', subject_id: 'call-1', question_id: 'is_spam', subject_hash: hash });
+    installDb({
+      decision_reviews: { list: [row('a1111111-1111-4111-8111-111111111111', callSubjectHash('Caller: old')), row('b1111111-1111-4111-8111-111111111111', callSubjectHash('Caller: now')), row('c1111111-1111-4111-8111-111111111111', null)] },
+      call_log: { list: [{ id: 'call-1', direction: 'inbound', created_at: new Date(), transcription: 'Caller: now' }] },
+    });
+    const { body } = await get('/reviews');
+    expect(body.reviews.map((r) => r.subjectChanged)).toEqual([true, false, false]);
   });
 
   test('rejects an unknown status or sampled_for, clamps the limit', async () => {
@@ -178,7 +190,7 @@ describe('POST /reviews/:id/label', () => {
   });
 
   test('refuses to re-label a confirmed row without force (409), and says which status it holds', async () => {
-    installDb({ decision_reviews: { returning: [undefined], first: [{ id: ID, label_status: 'confirmed_error' }] } });
+    installDb({ decision_reviews: { returning: [undefined], first: [baseRow(), { id: ID, label_status: 'confirmed_error' }] } });
     const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN });
     expect(status).toBe(409);
     expect(body.labelStatus).toBe('confirmed_error');
@@ -187,7 +199,7 @@ describe('POST /reviews/:id/label', () => {
   });
 
   test('force: true replaces a confirmed label and the audit row says so', async () => {
-    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })] } });
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })], first: [baseRow()] } });
     const { status } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', force: true, seen_answer: SEEN });
     expect(status).toBe(200);
     expect(called(log, 'decision_reviews', 'whereNotIn')).toEqual([]);
@@ -218,11 +230,28 @@ describe('POST /reviews/:id/label', () => {
   });
 
   test('an answer re-recorded since the page loaded is 409 answer_changed, not a label', async () => {
-    installDb({ decision_reviews: { returning: [undefined], first: [{ id: ID, label_status: 'unreviewed' }] } });
+    installDb({ decision_reviews: { returning: [undefined], first: [baseRow(), { id: ID, label_status: 'unreviewed' }] } });
     const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: { p: 0.2, yes: false, confident: false } });
     expect(status).toBe(409);
     expect(body.code).toBe('answer_changed');
     expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('a call reprocessed after Jev answered is 409 subject_changed, and nothing is written', async () => {
+    const callRow = baseRow({ subject_type: 'call_log', subject_id: 'call-1', capability: 'call_judge', package_id: 'call_judge.v2', question_id: 'is_spam', subject_hash: callSubjectHash('Caller: the original words') });
+    const log = installDb({ decision_reviews: { first: [callRow] }, call_log: { first: [{ transcription: 'Caller: new words after reprocessing' }] } });
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(status).toBe(409);
+    expect(body.code).toBe('subject_changed');
+    expect(called(log, 'decision_reviews', 'update')).toEqual([]);
+    expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('the same call transcript labels normally', async () => {
+    const words = 'Caller: the original words';
+    const callRow = baseRow({ subject_type: 'call_log', subject_id: 'call-1', capability: 'call_judge', package_id: 'call_judge.v2', question_id: 'is_spam', subject_hash: callSubjectHash(words) });
+    installDb({ decision_reviews: { first: [callRow], returning: [callRow] }, call_log: { first: [{ transcription: words }] } });
+    expect((await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(200);
   });
 
   test('jev_wrong on a missing review is 404 before any write', async () => {
@@ -232,7 +261,7 @@ describe('POST /reviews/:id/label', () => {
   });
 
   test('a note is trimmed to its cap and an absent correct_value is stored as null', async () => {
-    const log = installDb({ decision_reviews: { returning: [baseRow()] } });
+    const log = installDb({ decision_reviews: { returning: [baseRow()], first: [baseRow()] } });
     await post(`/reviews/${ID}/label`, { verdict: 'unclear', note: 'n'.repeat(5000), seen_answer: SEEN });
     const label = JSON.parse(called(log, 'decision_reviews', 'update')[0][0].label);
     expect(label.note).toHaveLength(2000);

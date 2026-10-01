@@ -7,8 +7,6 @@ const mockAsk = jest.fn();
 jest.mock('../services/typed-decisions/jev', () => ({ askPackage: (...a) => mockAsk(...a) }));
 const mockRecord = jest.fn();
 jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: (...a) => mockRecord(...a) }));
-const mockEvidence = jest.fn();
-jest.mock('../services/typed-decisions/outcome-evidence', () => ({ smsEvidence: (...a) => mockEvidence(...a) }));
 const mockEligible = jest.fn();
 jest.mock('../services/sms-operational-actions', () => ({ eligibleMessage: (...a) => mockEligible(...a) }));
 
@@ -22,7 +20,6 @@ beforeEach(() => {
   process.env.GATE_TYPED_DECISIONS = 'true';
   mockAsk.mockResolvedValue({ ok: true, answers: { x: {} }, packageHash: 'h' });
   mockRecord.mockResolvedValue({ recorded: 1 });
-  mockEvidence.mockResolvedValue({ is_courtesy_only: { source: 'sms_log', window: '24h', value: null, observed_at: 'now' } });
   mockEligible.mockReturnValue(true);
 });
 afterAll(() => { if (original === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = original; });
@@ -60,7 +57,7 @@ test('asks both packages with the same state and records each beside its rule fl
   expect(mockAsk).toHaveBeenCalledWith('sms_reschedule.v1', state);
   const byPackage = Object.fromEntries(mockRecord.mock.calls.map(([a]) => [a.pkg.id, a]));
   expect(byPackage['sms_courtesy.v1']).toMatchObject({ capability: 'sms_courtesy', subjectType: 'sms_log', subjectId: 'sms-1', baselines: { is_courtesy_only: { rules: true } } });
-  expect(byPackage['sms_courtesy.v1'].outcomeEvidence.is_courtesy_only.value).toBeNull();
+  expect(byPackage['sms_courtesy.v1']).not.toHaveProperty('outcomeEvidence');
   expect(byPackage['sms_reschedule.v1']).toMatchObject({ capability: 'sms_reschedule', baselines: { wants_visit_change: { rules: false } } });
 });
 
@@ -93,11 +90,6 @@ test('a provider throw or a recorder error is contained', async () => {
   mockAsk.mockResolvedValue({ ok: true, answers: {} });
   mockRecord.mockRejectedValue(new Error('db down'));
   expect(await shadowInboundSms(base)).toEqual({ asked: 2, recorded: 0, failed: 2 });
-});
-
-test('an evidence read failure does not stop the record', async () => {
-  mockEvidence.mockRejectedValue(new Error('evidence down'));
-  expect(await shadowInboundSms(base)).toEqual({ asked: 2, recorded: 2, failed: 0 });
 });
 
 describe('twilio-webhook wiring', () => {

@@ -19,7 +19,8 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
-const { packageFor, answerInDomain, CALL_TRANSCRIPT_CHARS } = require('../services/typed-decisions/packages');
+const { packageFor, answerInDomain } = require('../services/typed-decisions/packages');
+const { callSubjectHash, callTranscriptSpan } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -70,7 +71,6 @@ function mapReview(row, subject) {
     subjectId: row.subject_id,
     jevAnswer: parse(row.jev_answer),
     baselineAnswers: parse(row.baseline_answers),
-    outcomeEvidence: parse(row.outcome_evidence),
     sampledFor: row.sampled_for,
     servedModel: row.served_model,
     label: parse(row.label),
@@ -78,8 +78,21 @@ function mapReview(row, subject) {
     labeledBy: row.labeled_by,
     labeledAt: row.labeled_at,
     createdAt: row.created_at,
-    subject: subject || null,
+    subject: subject ? publicSubject(subject) : null,
+    // The call was reprocessed after Jev answered: the transcript shown is not
+    // the one Jev judged, and the label route refuses it (subject_changed).
+    subjectChanged: subjectChanged(row, subject),
   };
+}
+
+// A stored transcript digest that no longer matches the live transcript.
+// Rows without a digest (text subjects, older rows) are never "changed".
+function subjectChanged(row, subject) {
+  return Boolean(row.subject_hash && subject && subject.hash && subject.hash !== row.subject_hash);
+}
+// The subject as the client sees it: never the digest.
+function publicSubject({ hash: _hash, ...rest }) {
+  return rest;
 }
 
 // Display text for a page of rows, read live. Failures leave a row without
@@ -104,10 +117,13 @@ async function loadSubjects(rows) {
       }));
     }
     if (callIds.length) {
-      const calls = await db('call_log').whereIn('id', callIds)
-        .select('id', 'direction', 'created_at', db.raw('LEFT(COALESCE(transcription, \'\'), ?) AS transcript_excerpt', [CALL_TRANSCRIPT_CHARS]));
+      // The full transcript is read so the span shown, and its digest, are
+      // computed exactly as call-self-audit built Jev's state.
+      const calls = await db('call_log').whereIn('id', callIds).select('id', 'direction', 'created_at', 'transcription');
       for (const c of calls) {
-        subjects.set(`call_log:${c.id}`, { type: 'call_log', direction: c.direction || null, text: c.transcript_excerpt || null, at: c.created_at });
+        subjects.set(`call_log:${c.id}`, {
+          type: 'call_log', direction: c.direction || null, text: callTranscriptSpan(c.transcription) || null, at: c.created_at, hash: callSubjectHash(c.transcription),
+        });
       }
     }
   } catch (err) {
@@ -163,22 +179,29 @@ function readLabelRequest(body) {
 // (a boolean for a yes/no question) and different from what Jev said: a label
 // without one can never be scored, and "wrong, the answer is Jev's" would
 // export as a case Jev scores correct on. Other verdicts carry no
-// correct_value. Returns { status, error } or { correctValue }.
-async function correctValueFor(id, { verdict, seen }, value) {
+// correct_value. Returns { error } or { correctValue }.
+function correctValueFor(target, { verdict, seen }, value) {
   if (verdict !== 'jev_wrong') return { correctValue: null };
-  const target = await db(TABLE).where({ id }).first('package_id', 'question_id');
-  if (!target) return { status: 404, error: 'Review not found' };
   const question = packageFor(target.package_id)?.questions?.[target.question_id] || null;
   if (!answerInDomain(question, value)) {
-    return { status: 400, error: 'jev_wrong needs correct_value: the right answer for this question (true or false for a yes/no question)' };
+    return { error: 'jev_wrong needs correct_value: the right answer for this question (true or false for a yes/no question)' };
   }
   const shown = typeof seen.yes === 'boolean' ? seen.yes : (seen.choice ?? seen.score);
-  if (value === shown) return { status: 400, error: 'jev_wrong needs a correct_value different from Jev\'s answer' };
+  if (value === shown) return { error: 'jev_wrong needs a correct_value different from Jev\'s answer' };
   return { correctValue: value };
 }
 
 // Why a guarded update matched no row: gone (404), already confirmed without
 // force, or the Jev answer moved since the page loaded (409, by code).
+// A call reprocessed after Jev answered: the live transcript's digest no longer
+// matches the one stored with the decision, so a label would confirm an
+// answer against text Jev never saw.
+async function subjectMoved(target) {
+  if (target.subject_type !== CALL_SUBJECT || !target.subject_hash) return false;
+  const call = await db('call_log').where({ id: target.subject_id }).first('transcription');
+  return !call || callSubjectHash(call.transcription) !== target.subject_hash;
+}
+
 async function unwrittenLabel(id, force) {
   const existing = await db(TABLE).where({ id }).first('id', 'label_status');
   if (!existing) return [404, { error: 'Review not found' }];
@@ -195,8 +218,13 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     const body = req.body || {};
     const request = readLabelRequest(body);
     if (request.error) return res.status(400).json({ error: request.error });
-    const correct = await correctValueFor(id, request, body.correct_value);
-    if (correct.error) return res.status(correct.status).json({ error: correct.error });
+    const target = await db(TABLE).where({ id }).first('package_id', 'question_id', 'subject_type', 'subject_id', 'subject_hash');
+    if (!target) return res.status(404).json({ error: 'Review not found' });
+    const correct = correctValueFor(target, request, body.correct_value);
+    if (correct.error) return res.status(400).json({ error: correct.error });
+    if (await subjectMoved(target)) {
+      return res.status(409).json({ error: 'This call was reprocessed after Jev answered; its transcript is not the one Jev judged', code: 'subject_changed' });
+    }
     const { verdict, seen, note, force } = request;
     const labelStatus = VERDICT_STATUS[verdict];
 

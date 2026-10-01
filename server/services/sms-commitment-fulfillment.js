@@ -21,8 +21,11 @@ const LIMIT = 50;
 // email_reply reads this many raw candidates before resolving them to the
 // customer, then applies LIMIT to what survives.
 const EMAIL_REPLY_RAW_LIMIT = LIMIT * 4;
-// A logged move (date or window changed); shared with typed-decision evidence.
-const { LOGGED_MOVE_SQL } = require('../utils/reschedule-log-sql');
+// A logged move: both dates present and either the date or the window
+// changed. Windows are logged as "start-end" text; compare on HH:MM.
+const LOGGED_MOVE_SQL = (t) => `${t}.original_date IS NOT NULL AND ${t}.new_date IS NOT NULL
+  AND (${t}.new_date <> ${t}.original_date
+    OR (${t}.original_window IS NOT NULL AND ${t}.new_window IS NOT NULL AND LEFT(split_part(${t}.new_window, '-', 1), 5) IS DISTINCT FROM LEFT(split_part(COALESCE(${t}.original_window, ''), '-', 1), 5)))`;
 // Whether a logged (date, window) pair describes the visit row as it is now.
 const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
   AND (${t}.w IS NULL OR LEFT(split_part(${t}.w, '-', 1), 5) = LEFT(scheduled_services.window_start::text, 5))`;

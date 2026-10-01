@@ -92,24 +92,21 @@ function productionAnswers(call) {
 async function askAndRecord(call, prod, verdict) {
   try {
     const { askPackage } = require('./typed-decisions/jev');
-    const { packageFor, CALL_TRANSCRIPT_CHARS } = require('./typed-decisions/packages');
+    const { packageFor } = require('./typed-decisions/packages');
     const { recordDecisions } = require('./typed-decisions/shadow-recorder');
-    const { callEvidence } = require('./typed-decisions/outcome-evidence');
+    const { callSubjectHash, callTranscriptSpan } = require('./typed-decisions/subject-hash');
     const result = await askPackage('call_judge.v2', {
       call_direction: compactDirection(call.direction),
       duration_seconds: call.duration_seconds ?? null,
-      transcript: call.transcription.slice(0, CALL_TRANSCRIPT_CHARS),
+      transcript: callTranscriptSpan(call.transcription),
     });
     if (!result.ok) return 'failed';
     const bool = (v) => (typeof v === 'boolean' ? v : undefined);
     const baselines = { complaint: { deep_judge: bool(verdict.complaint) } };
     for (const f of JEV_SHARED_FIELDS) baselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
-    const outcomeEvidence = await callEvidence(call).catch((err) => {
-      logger.warn(`[self-audit] jev evidence read failed for ${call.id}: ${err.message}`);
-      return {};
-    });
     const recorded = await recordDecisions({
-      capability: 'call_judge', pkg: packageFor('call_judge.v2'), subjectType: 'call_log', subjectId: call.id, result, baselines, outcomeEvidence,
+      capability: 'call_judge', pkg: packageFor('call_judge.v2'), subjectType: 'call_log', subjectId: call.id, result, baselines,
+      subjectHash: callSubjectHash(call.transcription),
     });
     return recorded.recorded > 0 ? 'recorded' : 'failed';
   } catch (err) {
@@ -153,8 +150,8 @@ async function runSelfAudit(depsIn = {}) {
     .orderBy('created_at', 'desc')
     .limit(SAMPLE_SIZE)
     .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition',
-      // Jev shadow: the call's length, and the fields its outcome evidence reads.
-      'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'customer_id', 'from_phone', 'to_phone', 'metadata');
+      // Jev shadow: the call's length is part of call_judge's state.
+      'duration_seconds');
   const [inboundRows, outboundRows] = await Promise.all([
     sampleDirection(INBOUND_DIRECTION_SQL),
     sampleDirection(OUTBOUND_DIRECTION_SQL),

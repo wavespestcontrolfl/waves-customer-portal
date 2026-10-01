@@ -64,13 +64,13 @@ describe('sampleFor', () => {
 });
 
 describe('recordDecisions', () => {
-  test('writes one row per question with ids, answers, baselines and evidence only', async () => {
+  test('writes one row per question with ids, answers, baselines and the transcript digest only', async () => {
     const { conn, calls } = stubConn();
-    const evidence = { source: 'estimates', window: '48h', value: true, observed_at: '2026-10-01T12:00:00.000Z', transcript: 'must not survive' };
+    const digest = 'a'.repeat(64);
     const out = await recordDecisions({
       capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: '11111111-1111-4111-8111-111111111111', result: ok(0.9),
       baselines: { is_spam: { production: false, deep_judge: false, note: undefined }, quote_promised: { production: true } },
-      outcomeEvidence: { quote_promised: evidence },
+      subjectHash: digest,
       random: () => 0.99,
       conn,
     });
@@ -79,20 +79,24 @@ describe('recordDecisions', () => {
     expect(calls.inserted).toHaveLength(6);
     const row = calls.inserted.find((r) => r.question_id === 'is_spam');
     expect(Object.keys(row).sort()).toEqual([
-      'baseline_answers', 'capability', 'jev_answer', 'outcome_evidence', 'package_hash', 'package_id', 'question_id', 'sampled_for', 'served_model', 'subject_id', 'subject_type',
+      'baseline_answers', 'capability', 'jev_answer', 'package_hash', 'package_id', 'question_id', 'sampled_for', 'served_model', 'subject_hash', 'subject_id', 'subject_type',
     ]);
     expect(row).toMatchObject({ capability: 'call_judge', package_id: 'call_judge.v2', package_hash: packageHash(pkg), served_model: 'jev-1.13.0', subject_type: 'call_log', subject_id: '11111111-1111-4111-8111-111111111111' });
     expect(JSON.parse(row.jev_answer)).toEqual(noul(0.9));
     expect(JSON.parse(row.baseline_answers)).toEqual({ production: false, deep_judge: false });
     expect(row.sampled_for).toBe('disagreement'); // Jev yes vs production no
+    expect(row.subject_hash).toBe(digest);
     const quote = calls.inserted.find((r) => r.question_id === 'quote_promised');
-    expect(JSON.parse(quote.outcome_evidence)).toEqual({ source: 'estimates', window: '48h', value: true, observed_at: '2026-10-01T12:00:00.000Z' });
     expect(quote.sampled_for).toBeNull(); // agrees, draw 0.99
     const bare = calls.inserted.find((r) => r.question_id === 'complaint');
     expect(bare.baseline_answers).toBeNull();
-    expect(bare.outcome_evidence).toBeNull();
     expect(out.sampled).toEqual({ disagreement: 1 });
-    expect(JSON.stringify(calls.inserted)).not.toMatch(/must not survive/);
+  });
+
+  test('a subject hash that is not a sha256 hex digest is stored as null', async () => {
+    const { conn, calls } = stubConn();
+    await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), subjectHash: 'Caller: hi this is text', conn });
+    expect(calls.inserted.every((r) => r.subject_hash === null)).toBe(true);
   });
 
   test('upserts on the unique key and merges only answer columns, only onto unlabeled rows', async () => {
@@ -100,12 +104,9 @@ describe('recordDecisions', () => {
     await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
     expect(calls.conflict).toEqual(['capability', 'package_id', 'subject_type', 'subject_id', 'question_id']);
     expect(CONFLICT_KEY).toEqual(calls.conflict);
-    expect(Object.keys(calls.merge)).toEqual(['jev_answer', 'baseline_answers', 'outcome_evidence', 'served_model', 'package_hash', 'sampled_for']);
-    expect(MERGE_COLUMNS).toEqual(Object.keys(calls.merge));
-    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at']) expect(calls.merge).not.toHaveProperty(forbidden);
-    expect(calls.merge.jev_answer).toEqual({ sql: '??', bindings: ['excluded.jev_answer'] });
-    // a settled reading survives a later unknown or missing one
-    expect(calls.merge.outcome_evidence.sql).toMatch(/excluded\.outcome_evidence IS NULL\s+OR \(excluded\.outcome_evidence->>'value' IS NULL AND decision_reviews\.outcome_evidence->>'value' IS NOT NULL\)\s+THEN decision_reviews\.outcome_evidence ELSE excluded\.outcome_evidence/);
+    expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash']);
+    expect(MERGE_COLUMNS).toEqual(calls.merge);
+    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at', 'outcome_evidence']) expect(calls.merge).not.toContain(forbidden);
     expect(calls.whereRaw).toMatch(/sampled_for IS DISTINCT FROM 'heldout'/);
     expect(calls.where).toEqual(['decision_reviews.label_status', 'unreviewed']);
   });

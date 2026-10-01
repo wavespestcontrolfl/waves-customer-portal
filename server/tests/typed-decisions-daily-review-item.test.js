@@ -2,8 +2,6 @@
 // a per-day dedupe key, brevity-guard-safe copy, ids and answers only.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
-const mockRefresh = jest.fn();
-jest.mock('../services/typed-decisions/outcome-evidence', () => ({ refreshOutcomeEvidence: (...a) => mockRefresh(...a) }));
 const mockNotify = jest.fn();
 const mockOpenKeys = jest.fn(async () => []);
 const mockCloseKeys = jest.fn(async () => 1);
@@ -17,7 +15,6 @@ const original = process.env.GATE_TYPED_DECISIONS;
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_TYPED_DECISIONS = 'true';
-  mockRefresh.mockResolvedValue({ checked: 0, updated: 0 });
   mockNotify.mockResolvedValue({ id: 'n1' });
 });
 afterAll(() => { if (original === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = original; });
@@ -26,7 +23,6 @@ const review = (over = {}) => ({
   id: 'r', capability: 'call_judge', question_id: 'is_spam', created_at: new Date('2026-09-30T20:00:00Z'),
   jev_answer: JSON.stringify({ p: 0.93, yes: true, confident: true }),
   baseline_answers: JSON.stringify({ production: false, deep_judge: false }),
-  outcome_evidence: JSON.stringify({ source: 'estimates', window: '48h', value: false, observed_at: 'x' }),
   ...over,
 });
 
@@ -59,13 +55,11 @@ test('gate off: nothing read, nothing raised', async () => {
   const c = jest.fn();
   expect(await runDailyReviewItem({ conn: c })).toEqual({ raised: false, reason: 'gate_off' });
   expect(c).not.toHaveBeenCalled();
-  expect(mockRefresh).not.toHaveBeenCalled();
 });
 
-test('no rows: refreshes evidence, raises nothing', async () => {
+test('no rows: raises nothing', async () => {
   const out = await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: conn() });
   expect(out).toEqual({ raised: false, reason: 'no_rows' });
-  expect(mockRefresh).toHaveBeenCalledTimes(1);
   expect(mockNotify).not.toHaveBeenCalled();
 });
 
@@ -82,7 +76,7 @@ test('rows: ONE alert with the counts, the review link and per-row detail', asyn
   expect(opts.link).toBe(LINK);
   expect(LINK).toBe('/admin/agents?tab=typed');
   expect(opts.metadata).toMatchObject({ area: 'System', severity: 'needs-you', doneWhen: 'reviews_labeled', who: 'person', subject: { type: 'check', id: 'typed-decisions-review' } });
-  expect(opts.detail).toContain('call_judge is_spam: Jev yes (p 0.93) vs production no, deep judge no; estimates 48h: no');
+  expect(opts.detail).toContain('call_judge is_spam: Jev yes (p 0.93) vs production no, deep judge no');
   expect(opts.detail.split('\n').filter((l) => l.startsWith('Disagreement'))).toHaveLength(2);
   expect(opts.detail.split('\n').filter((l) => l.startsWith('Spot check'))).toHaveLength(1);
   expect(opts.detail).toContain(LINK);
@@ -136,13 +130,7 @@ test('a single decision reads in the singular and still passes the admin-alert r
   })).not.toThrow();
 });
 
-test('an evidence refresh failure does not stop the item', async () => {
-  mockRefresh.mockRejectedValue(new Error('down'));
-  const out = await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: conn({ disagreements: [review()] }) });
-  expect(out.raised).toBe(true);
-});
-
 test('describeRow carries ids and answers only', () => {
-  const line = describeRow(review({ outcome_evidence: null, baseline_answers: JSON.stringify({ rules: true }) }));
+  const line = describeRow(review({ baseline_answers: JSON.stringify({ rules: true }) }));
   expect(line).toBe('call_judge is_spam: Jev yes (p 0.93) vs rules yes');
 });
