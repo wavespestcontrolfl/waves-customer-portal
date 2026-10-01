@@ -104,20 +104,38 @@ function sentenceKey(s) {
 // ---------------------------------------------------------------------------
 // Numeric whitelist (G3)
 
+// Number words. A spelled quantity is tokenized as a WHOLE phrase and parsed
+// by parseNumberWords; a phrase the parser cannot read in full is an
+// "unparsed" token that is always rejected, never partially matched (so "two
+// hundred days" can never be licensed by "one hundred days", and "twenty-one"
+// is read as 21, not as the suffix "one").
 const ONES = {
-  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
-  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
-  eighteen: 18, nineteen: 19,
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+};
+const TEENS = {
+  ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16,
+  seventeen: 17, eighteen: 18, nineteen: 19,
 };
 const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const FRACTIONS = { half: 0.5, quarter: 0.25, quarters: 0.25 };
+const NUMBER_WORDS = new Set([
+  ...Object.keys(ONES), ...Object.keys(TEENS), ...Object.keys(TENS), ...Object.keys(FRACTIONS),
+  'hundred', 'thousand', 'dozen',
+]);
 
-const SPELLED_SRC = '(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s]?(?:one|two|three|four|five|six|seven|eight|nine))?'
-  + '|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen'
-  + '|hundred|dozen|half(?:\\s+an?)?|a\\s+half|a\\s+quarter|quarter|three[-\\s]quarters?|one[-\\s]quarter|one[-\\s]half)';
+const NUMWORD_SRC = `(?:${[...NUMBER_WORDS].sort((a, b) => b.length - a.length).join('|')})`;
 const DIGIT_SRC = '(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?)';
-const ATOM_SRC = `(?:${DIGIT_SRC}|${SPELLED_SRC})`;
-const RANGE_SEP_SRC = '(?:\\s*-\\s*|\\s+to\\s+|\\s+or\\s+|\\s+through\\s+|\\s+thru\\s+)';
+// One whole number phrase: digits, or a run of number words joined by space,
+// hyphen or "and" ("twenty-one", "two hundred and five"). Greedy, so the phrase
+// is never cut at its tail.
+const NUMRUN_SRC = `(?:${DIGIT_SRC}|${NUMWORD_SRC}(?![a-z])(?:(?:[-\\s]+(?:and\\s+)?)${NUMWORD_SRC}(?![a-z]))*)`;
 const VAGUE_SRC = '(?:a\\s+few|a\\s+couple(?:\\s+of)?|couple(?:\\s+of)?|several|a\\s+handful(?:\\s+of)?|a\\s+number\\s+of|few)';
+// A quantity: a vague word (optionally glued to number words, which is
+// unparsed), an article plus a number phrase ("a hundred"), a number phrase,
+// or a bare article ("a week").
+const QTY_SRC = `(?:${VAGUE_SRC}(?:[-\\s]+${NUMRUN_SRC})?|(?:an?[-\\s]+)?${NUMRUN_SRC}|an?(?![a-z]))`;
+const CADENCE_SRC = '(?:every\\s+other|every|each\\s+other|each|per)';
+const RANGE_SEP_SRC = '(?:\\s*-\\s*|\\s+to\\s+|\\s+or\\s+|\\s+through\\s+|\\s+thru\\s+)';
 const UNIT_SRC = '(days?|weeks?|hours?|hrs?|minutes?|mins?|months?|years?|inch(?:es)?|in\\.|"|%|percent|per\\s?cent|degrees?|°|feet|foot|ft)';
 
 function unitKey(raw) {
@@ -136,17 +154,65 @@ function unitKey(raw) {
 }
 const TIME_UNITS = new Set(['day', 'week', 'hour', 'minute', 'month', 'year']);
 
-function spelledValue(raw) {
-  const w = raw.toLowerCase().trim().replace(/\s+/g, ' ');
-  if (/^(?:half(?: an?)?|a half|one[- ]half)$/.test(w)) return 0.5;
-  if (/^(?:a quarter|quarter|one[- ]quarter)$/.test(w)) return 0.25;
-  if (/^three[- ]quarters?$/.test(w)) return 0.75;
-  if (w === 'hundred') return 100;
-  if (w === 'dozen') return 12;
-  if (w in ONES) return ONES[w];
-  const m = w.match(/^(\w+?)(?:[- ](\w+))?$/);
-  if (m && m[1] in TENS) return TENS[m[1]] + (m[2] && m[2] in ONES ? ONES[m[2]] : 0);
-  return NaN;
+// Whole-phrase parse of spelled numbers. Returns NaN for any phrase that is not
+// a complete, well-formed number ("one two", "twenty twenty", "twenty hundred",
+// "one and half").
+function parseNumberWords(phrase) {
+  const tokens = phrase.toLowerCase().split(/[-\s]+/).filter(Boolean);
+  if (!tokens.length) return NaN;
+  let total = 0;
+  let group = 0;
+  let last = 'start'; // start | O (1-9) | E (10-19) | T (20-90) | H (hundred) | K (thousand) | Z | END
+  let pendingAnd = false;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const w = tokens[i];
+    if (last === 'END' || last === 'Z') return NaN;
+    if (w === 'and') {
+      if (!(last === 'H' || last === 'K') || pendingAnd || i === tokens.length - 1) return NaN;
+      pendingAnd = true;
+      continue;
+    }
+    const startsGroup = last === 'start' || last === 'H' || last === 'K';
+    if (w === 'zero') {
+      if (last !== 'start' || tokens.length !== 1) return NaN;
+      last = 'Z';
+    } else if (w in ONES) {
+      if (!(startsGroup || last === 'T')) return NaN;
+      group += ONES[w];
+      last = 'O';
+    } else if (w in TEENS) {
+      if (!startsGroup) return NaN;
+      group += TEENS[w];
+      last = 'E';
+    } else if (w in TENS) {
+      if (!startsGroup) return NaN;
+      group += TENS[w];
+      last = 'T';
+    } else if (w === 'hundred') {
+      if (!(last === 'start' || last === 'O' || last === 'E')) return NaN;
+      group = (group || 1) * 100;
+      last = 'H';
+    } else if (w === 'thousand') {
+      if (last === 'K') return NaN;
+      total += (group || 1) * 1000;
+      group = 0;
+      last = 'K';
+    } else if (w === 'dozen') {
+      if (!(last === 'start' || last === 'O') || total) return NaN;
+      group = (group || 1) * 12;
+      last = 'END';
+    } else if (w in FRACTIONS) {
+      if (!(last === 'start' || last === 'O') || total) return NaN;
+      if (w === 'quarters' && last === 'start') return NaN;
+      group = (group || 1) * FRACTIONS[w];
+      last = 'END';
+    } else {
+      return NaN;
+    }
+    if (pendingAnd && last !== 'END') pendingAnd = false;
+  }
+  if (pendingAnd) return NaN;
+  return total + group;
 }
 
 function atomValue(raw) {
@@ -156,39 +222,88 @@ function atomValue(raw) {
   m = a.match(/^(\d+)\/(\d+)$/);
   if (m) return Number(m[1]) / Number(m[2]);
   if (/^\d/.test(a)) return Number(a);
-  return spelledValue(a);
+  return parseNumberWords(a);
 }
 
 const round = (n) => Math.round(n * 1000) / 1000;
 
+// Reads one quantity (no cadence, no unit) as
+//   { kind: 'num', value } | { kind: 'vague', phrase } | { kind: 'unparsed' }.
+// A vague word is its own exact phrase ("several", "a couple of", "a few" and
+// "few" are four distinct keys); a vague word glued to number words
+// ("a couple hundred") is unparsed.
+function readQuantity(raw) {
+  const q = raw.toLowerCase().trim().replace(/\s+/g, ' ');
+  if (/^an?$/.test(q)) return { kind: 'num', value: 1 };
+  const vague = q.match(new RegExp(`^(${VAGUE_SRC})(?:[-\\s]+(.+))?$`));
+  if (vague) return vague[2] ? { kind: 'unparsed' } : { kind: 'vague', phrase: vague[1].replace(/\s+/g, ' ') };
+  const art = q.match(/^an?[-\s]+(.+)$/);
+  if (art) {
+    // "a hundred", "a thousand", "a dozen", "a half", "a quarter" only
+    return /^(?:hundred|thousand|dozen|half|quarter)$/.test(art[1])
+      ? { kind: 'num', value: parseNumberWords(art[1]) }
+      : { kind: 'unparsed' };
+  }
+  const value = atomValue(q);
+  return Number.isNaN(value) ? { kind: 'unparsed' } : { kind: 'num', value };
+}
+
+// The word before a match. A match that starts right after a number word, a
+// digit, an article or "number and" means the regex caught only the tail of a
+// longer quantity ("one and a half hours" -> "half hours"): unparsed.
+function startsMidQuantity(src, start) {
+  const before = src.slice(0, start);
+  const m = before.match(/([a-z0-9./]+)[\s-]*$/);
+  if (!m) return false;
+  const w = m[1];
+  if (/^\d/.test(w) || NUMBER_WORDS.has(w) || /^(?:an?|few|couple|several|handful)$/.test(w)) return true;
+  if (w === 'and') {
+    const p = before.match(/([a-z0-9./]+)\s+and[\s-]*$/);
+    return Boolean(p && (/^\d/.test(p[1]) || NUMBER_WORDS.has(p[1])));
+  }
+  return false;
+}
+
 // Every number-ish claim in the text as { key, kind, unit, values[], match }.
+// The key is the FULL normalized timing phrase: cadence ("every", "every
+// other", "each"), the complete quantity (parsed number, range, or the exact
+// vague phrase) and the unit. Case, whitespace, dashes, "to" vs "-" in ranges
+// and digits vs spelled numbers are the only things normalized away.
 function extractNumericTokens(text) {
-  const src = normalizeCopy(text).toLowerCase();
+  // "half an hour" is the quantity "half" and the unit "hour"
+  const src = normalizeCopy(text).toLowerCase().replace(/\bhalf\s+an?\b/g, 'half');
   const tokens = [];
   const masked = src.split('');
   const mask = (start, end) => { for (let i = start; i < end; i += 1) masked[i] = ' '; };
 
-  // 1. quantity (+ optional range) + unit, vague + unit, article/cadence + unit
+  // 1. [cadence] [quantity [range end]] unit
   const quantRe = new RegExp(
-    `(?<![\\w.])(?:(${VAGUE_SRC})|(${ATOM_SRC})(?:${RANGE_SEP_SRC}(${ATOM_SRC}))?|(an?|every\\s+other|every|each|per))[-\\s]*${UNIT_SRC}(?![a-z])`,
+    `(?<![\\w.])(?:(?<cad>${CADENCE_SRC})[-\\s]+)?(?:(?<q1>${QTY_SRC})(?:${RANGE_SEP_SRC}(?<q2>${QTY_SRC}))?[-\\s]*)?${UNIT_SRC}(?![a-z])`,
     'g'
   );
   let m;
   while ((m = quantRe.exec(src)) !== null) {
-    const [full, vague, a1, a2, art, unitRaw] = m;
+    const { cad, q1, q2 } = m.groups;
+    const full = m[0];
+    const unitRaw = m[4];
+    if (!cad && !q1) { quantRe.lastIndex = m.index + 1; continue; }
     const unit = unitKey(unitRaw);
-    let token = null;
-    if (vague) {
-      token = { key: `vague:${unit}`, kind: 'vague', unit, values: [] };
-    } else if (art) {
-      if (/^an?$/.test(art)) token = { key: `1${unit}`, kind: 'num', unit, values: [1] };
-      else token = { key: `every:${unit}`, kind: 'cadence', unit, values: [] };
+    // cadence alone needs a time unit ("every 3 feet" is not a timing claim)
+    if (cad && !q1 && !TIME_UNITS.has(unit)) { quantRe.lastIndex = m.index + 1; continue; }
+    const cadence = cad ? cad.replace(/\s+/g, ' ') : '';
+    const a = q1 ? readQuantity(q1) : null;
+    const b = q2 ? readQuantity(q2) : null;
+    let token;
+    if (startsMidQuantity(src, m.index) || (a && a.kind === 'unparsed') || (b && b.kind === 'unparsed')
+      || (b && (a.kind !== 'num' || b.kind !== 'num'))) {
+      token = { key: `unparsed:${full.trim()}`, kind: 'unparsed', unit, values: [] };
+    } else if (a && a.kind === 'vague') {
+      token = { key: `${cadence}|v:${a.phrase}|${unit}`, kind: 'vague', unit, values: [] };
+    } else if (a) {
+      const vals = b ? [round(Math.min(a.value, b.value)), round(Math.max(a.value, b.value))] : [round(a.value)];
+      token = { key: `${cadence}|n:${vals.join('-')}|${unit}`, kind: cadence ? 'cadence' : 'num', unit, values: vals };
     } else {
-      const lo = atomValue(a1);
-      const hi = a2 ? atomValue(a2) : null;
-      if (Number.isNaN(lo) || (a2 && Number.isNaN(hi))) { quantRe.lastIndex = m.index + 1; continue; }
-      const vals = a2 ? [round(Math.min(lo, hi)), round(Math.max(lo, hi))] : [round(lo)];
-      token = { key: `${vals.join('-')}${unit}`, kind: 'num', unit, values: vals };
+      token = { key: `${cadence}||${unit}`, kind: 'cadence', unit, values: [] };
     }
     token.match = full.trim();
     tokens.push(token);
@@ -238,11 +353,15 @@ function toNumberSet(list) {
 function checkNumericWhitelist(text, facts = {}) {
   const allowedKeys = new Set();
   (Array.isArray(facts.allowedText) ? facts.allowedText : []).forEach((row) => {
-    extractNumericTokens(row).forEach((t) => { if (t.unit) allowedKeys.add(t.key); });
+    extractNumericTokens(row).forEach((t) => { if (t.unit && t.kind !== 'unparsed') allowedKeys.add(t.key); });
   });
   const allowedNumbers = toNumberSet(facts.allowedNumbers);
   const reasons = [];
   extractNumericTokens(text).forEach((t) => {
+    if (t.kind === 'unparsed') {
+      reasons.push({ rule: 'numeric', match: t.match, detail: 'quantity could not be read in full' });
+      return;
+    }
     if (allowedKeys.has(t.key)) return;
     // Scores and other supplied numbers license bare numbers and non-time
     // measures. They never license a duration: a score of 7 is not "7 days".

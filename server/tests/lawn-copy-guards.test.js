@@ -111,6 +111,95 @@ describe('numeric whitelist (G3)', () => {
     rejects('Expect a response in twenty-four hours.', 'numeric', ROW);
   });
 
+  // Pre-push audit regressions: the allowlist key is the WHOLE normalized
+  // timing phrase (cadence + complete quantity + unit).
+  describe('allowlist keys keep the whole timing phrase', () => {
+    const allow = (row) => ({ allowedText: [row] });
+
+    test('every distinct vague word is its own key', () => {
+      const vague = ['several', 'a couple of', 'couple of', 'a few', 'few', 'a handful of', 'a number of'];
+      vague.forEach((licensed) => {
+        vague.forEach((used) => {
+          const result = checkNumericWhitelist(`Expect a change in ${used} days.`, allow(`Color can return in ${licensed} days.`));
+          expect(result.length).toBe(used === licensed ? 0 : 1);
+        });
+      });
+    });
+
+    test("'several days' does not license 'a couple of days' (and the reverse)", () => {
+      rejects('Expect a change in a couple of days.', 'numeric', allow('Color can return in several days.'));
+      rejects('Expect a change in several days.', 'numeric', allow('Color can return in a couple of days.'));
+      accepts('Expect a change in several days.', allow('Color can return in several days.'));
+    });
+
+    test("'every other week' does not license 'every week' (and the reverse)", () => {
+      rejects('We check every week.', 'numeric', allow('We check every other week.'));
+      rejects('We check every other week.', 'numeric', allow('We check every week.'));
+      rejects('We check each week.', 'numeric', allow('We check every week.'));
+      accepts('We check every other week.', allow('We check every other week.'));
+      accepts('We check every week.', allow('We check every week.'));
+    });
+
+    test('a cadence key is not a plain-quantity key', () => {
+      rejects('Expect a change in 2 weeks.', 'numeric', allow('We check every 2 weeks.'));
+      rejects('We check every 2 weeks.', 'numeric', allow('Expect a change in 2 weeks.'));
+      accepts('We check every 2 weeks.', allow('We check every two weeks.'));
+    });
+
+    test("'two hundred days' is not licensed by 'one hundred days' (no suffix match)", () => {
+      rejects('Expect a change in two hundred days.', 'numeric', allow('A change shows in one hundred days.'));
+      rejects('Expect a change in 200 days.', 'numeric', allow('A change shows in one hundred days.'));
+      accepts('Expect a change in two hundred days.', allow('A change shows in 200 days.'));
+      accepts('Expect a change in 100 days.', allow('A change shows in one hundred days.'));
+      accepts('Expect a change in a hundred days.', allow('A change shows in 100 days.'));
+    });
+
+    test("compound spelled numbers are read in full: 'twenty-one days' is 21, not 'one'", () => {
+      rejects('Expect a change in twenty-one days.', 'numeric', allow('A change shows in 1 day.'));
+      rejects('Expect a change in twenty-one days.', 'numeric', allow('A change shows in one day.'));
+      rejects('Expect a change in twenty-one days.', 'numeric', allow('A change shows in 20 days.'));
+      accepts('Expect a change in twenty-one days.', allow('A change shows in 21 days.'));
+      accepts('Expect a change in twenty one days.', allow('A change shows in twenty-one days.'));
+      accepts('Expect a change in one thousand two hundred and five days.', allow('A change shows in 1205 days.'));
+      accepts('Expect a change in two dozen days.', allow('A change shows in 24 days.'));
+    });
+
+    test('a spelled quantity the parser cannot read in full is rejected, even when a row repeats it', () => {
+      const unreadable = [
+        'twenty twenty days',
+        'one two days',
+        'twenty hundred days',
+        'a couple hundred days',
+        'several hundred days',
+        'one and a half hours',
+        'one and half hours',
+        'a three days',
+        'two dozen and one days',
+      ];
+      unreadable.forEach((phrase) => {
+        const sentence = `Expect a change in ${phrase}.`;
+        const tokens = guards.extractNumericTokens(sentence);
+        expect(tokens.some((t) => t.kind === 'unparsed')).toBe(true);
+        rejects(sentence, 'numeric', {});
+        // a row that repeats the same unreadable phrase still never licenses it
+        rejects(sentence, 'numeric', { allowedText: [sentence] });
+      });
+    });
+
+    test('the tail of a longer quantity is never matched on its own', () => {
+      rejects('Expect a change in one and a half hours.', 'numeric', allow('Check again in a half hour.'));
+      rejects('Expect a change in one and a half hours.', 'numeric', allow('Check again in half an hour.'));
+      rejects('Expect a change in 3 hundred days.', 'numeric', allow('A change shows in 100 days.'));
+    });
+
+    test('digits and spelled numbers are the only values normalized together', () => {
+      accepts('Expect a change in 3 to 7 days.', allow('A change shows in three to seven days.'));
+      accepts('Expect a change in 3–7 days.', allow('A change shows in 3 - 7 days.'));
+      accepts('Expect a change in HALF AN HOUR.', allow('A change shows in half an hour.'));
+      rejects('Expect a change in 30 minutes.', 'numeric', allow('A change shows in half an hour.'));
+    });
+  });
+
   test('a bare spelled number with no unit is not checked', () => {
     accepts('Two spots near the fence look thin and one near the walk.', {});
   });
