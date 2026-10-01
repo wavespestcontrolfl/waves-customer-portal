@@ -1660,6 +1660,19 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           continue;
         }
       }
+      // Collections DISPUTE hold (owner ruling 2026-09-30): the fallback pay link
+      // is sent by the direct sender, which does not check the hold. A charge
+      // failure that never reached the hold-aware charge guard (a missing saved
+      // method, a refused enrollment, a stamped authentication_required) must not
+      // deliver a pay link during a dispute - or when the hold cannot be verified.
+      // Nothing terminal: the job stays claimed so the stale-claim lease retries it
+      // after the office releases the hold.
+      const fallbackHold = await require('./collections/collection-hold')
+        .messagingHeldByCollectionHold(invoice?.customer_id || row.customer_id);
+      if (fallbackHold.held) {
+        logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: ${fallbackHold.reason === 'lookup_failed' ? 'collections hold lookup failed' : 'collections dispute hold'} - no fallback pay link, retried after release`);
+        continue;
+      }
       let fallbackDelivered = false;
       // Codex round-8 audit P1 (#4131): same settled_zero_due /
       // covered_by_credit distinction as the payer branch above — a
@@ -1670,6 +1683,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         const fencedDelivery = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
         if (fencedDelivery.ceded) {
           logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
+          continue;
+        }
+        // The direct sender's own default-on hold check (backstop behind the
+        // pre-check above): a hold that landed in between is a wait - no alert,
+        // nothing resolved, the lease retries after the release.
+        if (fencedDelivery.result?.code === 'COLLECTION_HOLD_DEFER') {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: collections dispute hold at the sender - retried after release`);
           continue;
         }
         ({ settled: fallbackSettled, delivered: fallbackDelivered, creditCovered: fallbackCreditCovered } = classifyDeliveryOutcome(fencedDelivery.result));

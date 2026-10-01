@@ -782,8 +782,8 @@ export class ApiClient {
 
 
   // ---- Feed / Weather ----
-  getBlogPosts() {
-    return this.request('/feed/blog');
+  getBlogPosts(limit = 6) {
+    return this.request(`/feed/blog?limit=${limit}`);
   }
 
   getNewsletterPosts() {
