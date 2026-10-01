@@ -474,10 +474,10 @@ async function holdReservation(trx, id, now) {
   return { ok: true, reason: null, row };
 }
 
-function skipReservation(trx, id, reason) {
+function skipReservation(trx, id, reason, status = 'skipped') {
   return trx('marketing_email_ledger')
     .where({ id, status: 'reserved' })
-    .update({ status: 'skipped', reason, updated_at: trx.fn.now() });
+    .update({ status, reason, updated_at: trx.fn.now() });
 }
 
 async function judgeConsent(trx, row, now, expectedRecipientEmail = null, boundaryGuard = null) {
@@ -489,7 +489,11 @@ async function judgeConsent(trx, row, now, expectedRecipientEmail = null, bounda
   // take the marketing-email advisory lock.)
   const callerVerdict = boundaryGuard ? await boundaryGuard(trx) : null;
   if (callerVerdict) {
-    await skipReservation(trx, row.id, callerVerdict.reason);
+    // A RETRYABLE verdict (the caller will rebuild and try again under the same key)
+    // settles the reservation 'failed', which a same-key retry reopens through the
+    // normal eligibility checks and frees the customer's slot at once; every other
+    // verdict is a terminal skip.
+    await skipReservation(trx, row.id, callerVerdict.reason, callerVerdict.retryable ? 'failed' : 'skipped');
     return { ok: false, reason: callerVerdict.reason, row };
   }
   const verdict = await eligibleForEmail({

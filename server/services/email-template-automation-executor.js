@@ -13,7 +13,7 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
 const {
   hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
-  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, NEXT_VISIT_CHANGED, onceScopeFor, anyRivalAtSameProperty,
+  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, BUILDER_SKIPPED, PAYLOAD_CHANGED, isBoundaryRefusal, onceScopeFor, anyRivalAtSameProperty,
 } = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
@@ -1823,10 +1823,13 @@ function estimateChangedSkip(reason) {
     ESTIMATE_NOT_EXPIRED: 'the estimate is no longer expired; not sent',
     ESTIMATE_EXPIRY_SUPERSEDED: 'the estimate was extended and expired again since this run was created; a newer run owns the touch',
     ESTIMATE_FOLLOWUP_BLOCKED: 'the estimate was archived or opted out of automated follow-up since this run was created; not sent',
-    NEXT_VISIT_CHANGED: 'the next appointment this email names was cancelled, rescheduled or moved since it was written; not sent',
     VISIT_NOT_ELIGIBLE: 'the visit this run is about is no longer eligible (reassigned, suppressed, or renumbered since the run was created); not sent',
   }[reason] || 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient';
-  return { skipReason, skipGuard: { [VISIT_NOT_ELIGIBLE]: 'visit_not_eligible', [NEXT_VISIT_CHANGED]: 'next_visit_changed' }[reason] || 'estimate_recipient_changed' };
+  if (String(reason).startsWith(`${BUILDER_SKIPPED}:`)) {
+    // The generic boundary rebuild: the builder itself no longer passes, with its own code.
+    return { skipReason: `the email can no longer be built for this send (${String(reason).slice(BUILDER_SKIPPED.length + 1)}); not sent`, skipGuard: 'payload_builder' };
+  }
+  return { skipReason, skipGuard: { [VISIT_NOT_ELIGIBLE]: 'visit_not_eligible' }[reason] || 'estimate_recipient_changed' };
 }
 
 // Ledger-routed dispatch (the wiring PR). Everything the library's
@@ -1863,7 +1866,7 @@ async function confirmedLedgerDelivery(run) {
   return settled.result?.sent ? settled : null;
 }
 
-async function dispatchThroughLedger(run, automation, executionPayload, stream, onQueued) {
+async function dispatchThroughLedger(run, automation, executionPayload, stream, onQueued, payloadFingerprint = null) {
   const delivered = await confirmedLedgerDelivery(run);
   if (delivered) return delivered;
   const refusal = await ledgerRecipientRefusal(run);
@@ -1883,7 +1886,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
     expectedRecipientEmail: run.recipient_email,
     // Once per customer / estimate, decided inside the reservation under the
     // customer's advisory lock (null for a template with no such rule).
-    ...ledgerGuardsFor(run, executionPayload),
+    ...ledgerGuardsFor(run, executionPayload, payloadFingerprint),
     template: {
       templateKey: run.template_key,
       versionId: run.template_version_id || undefined,
@@ -1897,13 +1900,20 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   });
   if (out.sent) return { result: { sent: true, message: out.message } };
   if (out.duplicate) return settleLedgerDuplicate(run, out.row);
+  if (out.reason === PAYLOAD_CHANGED) {
+    // The provider-boundary rebuild passed but rendered different content than this
+    // attempt built: the evidence changed in between. The ledger settled the
+    // reservation retryable; the run is deferred (budget-neutral) so the next
+    // attempt rebuilds from fresh data.
+    throw Object.assign(new Error('the email\'s content changed between the build and the provider handoff'), { code: PAYLOAD_CHANGED });
+  }
   if (!out.row) {
     // Denied before any reservation (ineligible, a cap, a key conflict).
     if (out.reason === REASONS.LOOKUP_FAILED) {
       throw Object.assign(new Error('email division eligibility lookup failed'), { code: 'LEDGER_LOOKUP_FAILED' });
     }
     if (out.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-    if (ESTIMATE_VERDICT_REASONS.has(out.reason) || out.reason === VISIT_NOT_ELIGIBLE || out.reason === NEXT_VISIT_CHANGED) return estimateChangedSkip(out.reason);
+    if (isBoundaryRefusal(out.reason)) return estimateChangedSkip(out.reason);
     if (out.reason === ONCE_ALREADY_DELIVERED) {
       return { skipReason: 'this customer (or estimate) already has a sent email of this kind; not sent again', skipGuard: 'already_delivered' };
     }
@@ -1928,7 +1938,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   // dispatch takes.
   if (settled?.status === 'sent') throw out.error || deliveryUncertainError();
   if (settled?.status === 'skipped' && settled.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-  if (settled?.status === 'skipped' && (ESTIMATE_VERDICT_REASONS.has(settled.reason) || settled.reason === VISIT_NOT_ELIGIBLE || settled.reason === NEXT_VISIT_CHANGED)) {
+  if (settled?.status === 'skipped' && isBoundaryRefusal(settled.reason)) {
     return estimateChangedSkip(settled.reason);
   }
   if (settled?.status === 'skipped') {
@@ -1961,7 +1971,7 @@ async function withPrepSendLock(run, fn) {
 // on a conclusive no-delivery (prepUndelivered). Returns the finalized run
 // row, or { skipReason } when the page belongs to another guide; rethrows a
 // send failure for executeRun's retry / fail decision.
-async function dispatchRun(run, automation, executionPayload) {
+async function dispatchRun(run, automation, executionPayload, payloadFingerprint = null) {
   const prepClaim = await claimPrepPageForRun(run);
   if (!prepClaim.owned) return { skipReason: prepClaim.delivered ? 'prep guide already delivered for this visit' : 'prep page owned by another guide' };
   let prepDispatched = false;
@@ -1971,7 +1981,7 @@ async function dispatchRun(run, automation, executionPayload) {
     const ledgerStream = ledgerStreamFor(run.template_key);
     let result;
     if (ledgerStream) {
-      const routed = await dispatchThroughLedger(run, automation, executionPayload, ledgerStream, onQueued);
+      const routed = await dispatchThroughLedger(run, automation, executionPayload, ledgerStream, onQueued, payloadFingerprint);
       if (routed.skipReason) return { skipReason: routed.skipReason, skipGuard: routed.skipGuard };
       ({ result } = routed);
     } else {
@@ -2067,6 +2077,35 @@ async function deferForLedger(run, attemptNumber, now, err) {
   return deferRun(run, attemptNumber, now, { delayMs: LEDGER_DEFER_MS, lastError: err.message, message: LEDGER_DEFER_MESSAGE });
 }
 
+// The payload changed between the build and the provider handoff (the boundary
+// rebuild rendered different content): back to runnable a little later with the
+// attempt restored, so the next attempt rebuilds from fresh data. Bounded to a
+// small number of deferrals; past it the run is a terminal 'payload_changed' skip.
+const PAYLOAD_DEFER_MS = 30 * 1000;
+const PAYLOAD_DEFER_MESSAGE = 'Deferred: the email content changed before the send; rebuilding from fresh data';
+const PAYLOAD_MAX_DEFERRALS = 3;
+async function deferForPayloadChange(run, attemptNumber, now) {
+  const used = await db('email_template_automation_run_events')
+    .where({ run_id: run.id, event_type: 'retry_scheduled', message: PAYLOAD_DEFER_MESSAGE })
+    .count('* as n')
+    .first();
+  if (Number(used?.n || 0) >= PAYLOAD_MAX_DEFERRALS) return null;
+  return deferRun(run, attemptNumber, now, { delayMs: PAYLOAD_DEFER_MS, lastError: PAYLOAD_CHANGED, message: PAYLOAD_DEFER_MESSAGE });
+}
+
+// The fingerprint of the payload this attempt built, kept on the run (its context)
+// as the audit of what the boundary compares against. Best-effort: the comparison
+// itself runs on the in-memory value.
+async function recordPayloadFingerprint(run, fingerprint) {
+  try {
+    await db('email_template_automation_runs').where({ id: run.id }).update({
+      context: db.raw("COALESCE(context, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ payload_fingerprint: fingerprint })]),
+    });
+  } catch (err) {
+    logger.warn(`[email-template-automation] payload fingerprint not recorded for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
+  }
+}
+
 async function finalizeFailedRun(run, err, attemptNumber, retryPolicy) {
   const [failed] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'failed',
@@ -2116,7 +2155,7 @@ function dispatchModeFor(run) {
 async function applyPayloadBuilder(run, automation, payload, shadowRun, attemptNumber) {
   if (!hasPayloadBuilder(run.template_key)) return { payload };
   const built = await buildEmailDivisionPayload({ run, payload, mode: shadowRun ? 'shadow' : 'live' });
-  if (!built.skip) return { payload: built.payload };
+  if (!built.skip) return { payload: built.payload, fingerprint: built.fingerprint || null };
   if (shadowRun) {
     return { settled: await finalizeShadowRun(run, automation, payload, { ok: false, reason: built.reason, code: 'payload_builder' }) };
   }
@@ -2241,6 +2280,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     const built = await applyPayloadBuilder(claimedRun, resolvedAutomation, executionPayload, dispatchModeFor(claimedRun).shadowRun, attemptNumber);
     if (built.settled) return built.settled;
     executionPayload = built.payload;
+    const payloadFingerprint = built.fingerprint || null;
     // The mode is read AGAIN, immediately before the decision it governs: the
     // builder awaits database work, radar and consultation calls, and a gate flipped
     // to shadow or off during them must stop the send (a shadow-origin run still
@@ -2258,13 +2298,19 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     if (dispatchMode === 'off') {
       return markRunSkipped(claimedRun, GATE_OFF_REASON, { guard: 'gate_off', attempt: attemptNumber });
     }
-    const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
+    if (payloadFingerprint) await recordPayloadFingerprint(claimedRun, payloadFingerprint);
+    const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload, payloadFingerprint));
     if (outcome.skipReason) {
       return markRunSkipped(claimedRun, outcome.skipReason, { guard: outcome.skipGuard || 'prep_page_owned', attempt: attemptNumber });
     }
     return outcome.updated;
   } catch (err) {
     if (err.message === PREP_LOCK_HELD) return deferForPrepLock(claimedRun, attemptNumber, now);
+    if (err.code === PAYLOAD_CHANGED) {
+      const deferred = await deferForPayloadChange(claimedRun, attemptNumber, now);
+      if (deferred) return deferred;
+      return markRunSkipped(claimedRun, 'the content this email was built from kept changing before the send; not sent', { guard: 'payload_changed', attempt: attemptNumber });
+    }
     if (LEDGER_DEFER_CODES.has(err.code)) {
       const deferred = await deferForLedger(claimedRun, attemptNumber, now, err);
       if (deferred) return deferred;

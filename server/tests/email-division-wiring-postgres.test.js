@@ -764,76 +764,6 @@ describeOrSkip('email division wiring (Postgres)', () => {
     });
 
     test.each([
-      ['rescheduled', (id) => db('scheduled_services').where({ id }).update({ status: 'rescheduled' })],
-      ['cancelled', (id) => db('scheduled_services').where({ id }).update({ status: 'cancelled' })],
-      ['re-dated', (id) => db('scheduled_services').where({ id }).update({ scheduled_date: '2099-11-02' })],
-    ])('B1: the next appointment the email names is %s AFTER the build, before the provider handoff: refused at the boundary, nothing sent', async (_label, change) => {
-      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
-      const customer = await makeCustomer();
-      const techId = await makeTech();
-      const series = await makeDoneRecurring(customer.id);
-      const nextId = await makeNextVisit(customer.id);
-      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
-      const automation = await makeAutomation({
-        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
-        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
-      });
-      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => change(nextId) }));
-      const run = (await Executor.processTrigger({
-        triggerEventKey: 'visit.completed_first',
-        triggerEventId: `visit_completed_first:${recordId}`,
-        automationKey: automation.automation_key,
-        entityType: 'service_record',
-        entityId: recordId,
-        recipient: { type: 'customer', id: customer.id, email: customer.email },
-        payload: { service_record_id: recordId, customer_id: customer.id },
-        executeImmediately: true,
-      })).results[0].run;
-      expect(run.status).toBe('skipped');
-      expect(run.exit_reason).toContain('next appointment');
-      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
-      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'next_visit_changed' }));
-      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
-    });
-
-    test.each([
-      ['changed to a lawn appointment', (id) => db('scheduled_services').where({ id }).update({ service_type: 'Lawn Care Service' })],
-      ['moved to another property', (id) => db('scheduled_services').where({ id }).update({ service_address_line1: '999 Other Rd', service_address_city: 'Venice', service_address_zip: '34285' })],
-      ['reassigned to another customer', async (id) => {
-        const other = await makeCustomer();
-        await db('scheduled_services').where({ id }).update({ customer_id: other.id });
-      }],
-    ])('B1: the named next appointment is %s AFTER the build (same id, same date): refused at the boundary, nothing sent', async (_label, change) => {
-      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
-      const customer = await makeCustomer();
-      const techId = await makeTech();
-      const series = await makeDoneRecurring(customer.id);
-      const nextId = await makeNextVisit(customer.id);
-      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
-      const automation = await makeAutomation({
-        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
-        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
-      });
-      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => change(nextId) }));
-      const run = (await Executor.processTrigger({
-        triggerEventKey: 'visit.completed_first',
-        triggerEventId: `visit_completed_first:${recordId}`,
-        automationKey: automation.automation_key,
-        entityType: 'service_record',
-        entityId: recordId,
-        recipient: { type: 'customer', id: customer.id, email: customer.email },
-        payload: { service_record_id: recordId, customer_id: customer.id },
-        executeImmediately: true,
-      })).results[0].run;
-      expect(run.status).toBe('skipped');
-      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
-      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'next_visit_changed' }));
-      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
-    });
-
-    // The plan predicates read scheduled_services and customers: their rows are share-locked on
-    // the boundary transaction, so a change committed by another writer WAITS for the handoff.
-    test.each([
       ['the series is cancelled', (ids) => db('scheduled_services').where({ id: ids.series }).update({ status: 'cancelled', recurring_ongoing: false })],
       ['the account is reclassified commercial', (ids) => db('customers').where({ id: ids.customerId }).update({ property_type: 'commercial' })],
     ])('B1: %s in another transaction DURING the provider handoff: the write waits for the handoff (the locks the gate took), the send was judged on the state it locked', async (_label, change) => {
@@ -984,7 +914,137 @@ describeOrSkip('email division wiring (Postgres)', () => {
       };
     }
 
-    test('B5: a pest recap swaps Taurus for another non-repellent on the plan\'s visit AFTER the build, before the provider handoff: the product predicate is re-run at the boundary, nothing sent', async () => {
+    // ---- the generic boundary rebuild (fingerprint) ------------------------
+    // At the provider boundary the SAME builder is re-run on the locked rows and its payload
+    // fingerprint compared with the one the attempt built. Same -> send. Builder now skips ->
+    // terminal skip with the builder's own code. Passes but different -> the run is deferred
+    // (attempt restored) and the next attempt rebuilds from fresh data, bounded.
+    const visitAutomation = () => makeAutomation({
+      trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+      idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+    });
+    const fireVisit = (automation, recordId, customer) => Executor.processTrigger({
+      triggerEventKey: 'visit.completed_first',
+      triggerEventId: `visit_completed_first:${recordId}`,
+      automationKey: automation.automation_key,
+      entityType: 'service_record',
+      entityId: recordId,
+      recipient: { type: 'customer', id: customer.id, email: customer.email },
+      payload: { service_record_id: recordId, customer_id: customer.id },
+      executeImmediately: true,
+    }).then((out) => out.results[0].run);
+    const later = () => new Date(Date.now() + 10 * 60 * 1000);
+
+    test('unchanged evidence: the boundary rebuild matches the build fingerprint and sends once, no deferral', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      sendTemplate.mockImplementation(libraryLike());
+      const run = await fireVisit(await visitAutomation(), recordId, customer);
+      expect(run.status).toBe('sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      expect((await events(run.id)).filter((e) => e.event_type === 'retry_scheduled')).toHaveLength(0);
+      // The attempt's fingerprint is kept on the run.
+      expect((await db('email_template_automation_runs').where({ id: run.id }).first()).context.payload_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    test('B1: a recap swaps Taurus for Talak between the build and the handoff: the run is deferred, REBUILDS, and sends the corrected content', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      let swapped = false;
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: async () => {
+          if (swapped) return;
+          swapped = true;
+          await db('service_products').where({ service_record_id: recordId }).del();
+          await db('service_products').insert({ service_record_id: recordId, ...PRODUCTS.talak, targets: [] });
+        },
+      }));
+      const run = await fireVisit(await visitAutomation(), recordId, customer);
+      expect(run.status).toBe('retry_scheduled');
+      expect(run.attempts).toBe(0); // budget-neutral
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+      expect(sendTemplate.mock.calls[0][0].payload.primary_product_name).toBe('Taurus SC'); // built stale, vetoed at the boundary
+
+      const again = await Executor.executeRun(run.id, { now: later() });
+      expect(again.status).toBe('sent');
+      const sentPayload = sendTemplate.mock.calls[1][0].payload;
+      expect(sentPayload.primary_product_name).toBe('Talak 7.9% F');
+      expect(sentPayload.nonrepellent_band_note).toBe(''); // no Taurus claim on a Talak visit
+    });
+
+    test('B1: the next appointment is RE-DATED between the build and the handoff: deferred, rebuilt, and the corrected date is what is sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      const nextId = await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: () => db('scheduled_services').where({ id: nextId }).update({ scheduled_date: '2099-11-02' }),
+      }));
+      const run = await fireVisit(await visitAutomation(), recordId, customer);
+      expect(run.status).toBe('retry_scheduled');
+      expect(sendTemplate.mock.calls[0][0].payload.next_visit_date).toBe('December 24, 2099');
+      const again = await Executor.executeRun(run.id, { now: later() });
+      expect(again.status).toBe('sent');
+      expect(sendTemplate.mock.calls[1][0].payload.next_visit_date).toBe('November 2, 2099');
+    });
+
+    test.each([
+      ['rescheduled', (id) => db('scheduled_services').where({ id }).update({ status: 'rescheduled' })],
+      ['cancelled', (id) => db('scheduled_services').where({ id }).update({ status: 'cancelled' })],
+      ['changed to a lawn appointment', (id) => db('scheduled_services').where({ id }).update({ service_type: 'Lawn Care Service' })],
+      ['moved to another property', (id) => db('scheduled_services').where({ id }).update({ service_address_line1: '999 Other Rd', service_address_city: 'Venice', service_address_zip: '34285' })],
+      ['reassigned to another customer', async (id) => {
+        const other = await makeCustomer();
+        await db('scheduled_services').where({ id }).update({ customer_id: other.id });
+      }],
+    ])('B1: the named next appointment is %s AFTER the build: the boundary rebuild now skips (no upcoming pest visit): a terminal skip with the builder\'s own code, nothing sent', async (_label, change) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      const nextId = await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => change(nextId) }));
+      const run = await fireVisit(await visitAutomation(), recordId, customer);
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('no_upcoming_pest_visit');
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'payload_builder' }));
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
+    test('B1: evidence that keeps changing is bounded: after a small number of payload-changed deferrals the run is a terminal payload_changed skip', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      const nextId = await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      let day = 1;
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: () => db('scheduled_services').where({ id: nextId }).update({ scheduled_date: `2099-11-${String(day += 1).padStart(2, '0')}` }),
+      }));
+      let run = await fireVisit(await visitAutomation(), recordId, customer);
+      for (let i = 0; i < 6 && run.status === 'retry_scheduled'; i += 1) run = await Executor.executeRun(run.id, { now: new Date(Date.now() + (i + 1) * 10 * 60 * 1000) });
+      expect(run.status).toBe('skipped');
+      const deferrals = (await events(run.id)).filter((e) => e.event_type === 'retry_scheduled');
+      expect(deferrals).toHaveLength(3);
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'payload_changed' }));
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
+    test('B5: a pest recap swaps Taurus for another non-repellent on the plan visit AFTER the build: the boundary rebuild now skips (nonrepellent_not_taurus), nothing sent', async () => {
       const { visit2, report } = await whyScenario();
       sendTemplate.mockImplementation(libraryLike({
         beforeHandoff: async () => {
@@ -994,9 +1054,53 @@ describeOrSkip('email division wiring (Postgres)', () => {
       }));
       const run = await report(visit2);
       expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('nonrepellent_not_taurus');
       const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
-      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'visit_not_eligible' }));
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'payload_builder' }));
       expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
+    test('B5: the plan\'s contact product is replaced (still eligible) between the build and the handoff: deferred, rebuilt, the new contact product is what is sent', async () => {
+      const { visit2, report } = await whyScenario();
+      let swapped = false;
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: async () => {
+          if (swapped) return;
+          swapped = true;
+          await db('service_products').where({ service_record_id: visit2, product_name: PRODUCTS.talak.product_name }).update({ product_name: 'Demand CS', active_ingredient: 'lambda-cyhalothrin' });
+        },
+      }));
+      const run = await report(visit2);
+      expect(run.status).toBe('retry_scheduled');
+      const again = await Executor.executeRun(run.id, { now: later() });
+      expect(again.status).toBe('sent');
+      expect(sendTemplate.mock.calls[0][0].payload.contact_product).toBe('Talak 7.9% F');
+      expect(sendTemplate.mock.calls[1][0].payload.contact_product).toBe('Demand CS');
+    });
+
+    test('C1: the estimate\'s address changes between the build and the handoff: deferred, rebuilt, the corrected address is what is sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      let changed = false;
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: async () => {
+          if (changed) return;
+          changed = true;
+          await db('estimates').where({ id: estimateId }).update({ address: '77 Corrected Ave, Parrish, FL 34219' });
+        },
+      }));
+      const out = await fire(automation, { estimateId, customerId: customer.id, email: customer.email });
+      const run = out.results[0].run;
+      expect(run.status).toBe('retry_scheduled');
+      expect(sendTemplate.mock.calls[0][0].payload.address_short).toBe('123 Example St');
+      const again = await Executor.executeRun(run.id, { now: later() });
+      expect(again.status).toBe('sent');
+      expect(sendTemplate.mock.calls[1][0].payload.address_short).toBe('77 Corrected Ave');
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0].status).toBe('sent');
     });
 
     test('a reclaimed crashed run (REAL lc.why_91_days builder) is not skipped by its own reservation: an accepted delivery is recovered as sent, an abandoned reservation is settled and sent', async () => {

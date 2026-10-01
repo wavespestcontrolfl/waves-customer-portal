@@ -28,6 +28,7 @@
  * does use are read-only DB reads.
  */
 
+const crypto = require('node:crypto');
 const db = require('../../models/db');
 const { estimateFollowupBlockedReason } = require('../estimate-comms-eligibility');
 const { etDateString } = require('../../utils/datetime-et');
@@ -61,8 +62,11 @@ const QUARTERLY_INTERVAL_DAYS = '91';
 function skip(reason, code) {
   return { ok: false, skip: true, reason, code };
 }
-function built(payload) {
-  return { ok: true, payload };
+// `evidence`: stable identities the payload does not carry as text (an estimate's
+// link token, the record's own technician-chosen rating) that still belong in the
+// payload fingerprint.
+function built(payload, evidence = {}) {
+  return { ok: true, payload, evidence };
 }
 
 function clean(value) {
@@ -554,9 +558,11 @@ async function pestsRecorded({
 }
 
 async function buildFirstVisitPest({
-  run, conn = db, deps = defaultDeps(), mode = 'live',
+  run, conn = db, deps = defaultDeps(), mode = 'live', lock = false,
 }) {
-  const gate = await firstVisitGate({ run, conn, deps });
+  const gate = await firstVisitGate({
+    run, conn, deps, lock,
+  });
   if (gate.skip) return gate;
   const { record, customer } = gate;
   if ((await priorSends({
@@ -573,7 +579,7 @@ async function buildFirstVisitPest({
   const visitYmd = dateOnlyString(summary.visitDate || record.service_date);
   const { byVisit } = await deps.getActivityRatingAverages({ conn });
   const nextVisit = await nextPestVisit({
-    conn, deps, record, serviceYmd: visitYmd,
+    conn, deps, record, serviceYmd: visitYmd, lock,
   });
   if (nextVisit.ambiguous) return skip('the customer has pest appointments at more than one property and this visit\'s property cannot be established', 'next_visit_property_ambiguous');
   const payload = {
@@ -589,10 +595,6 @@ async function buildFirstVisitPest({
       products, record, deps, conn,
     })),
     next_visit_date: longDate(nextVisit.ymd || ''),
-    // The appointment the email names: carried so the provider-boundary check can
-    // re-read exactly it (cancelled, rescheduled or re-dated since = not sent).
-    next_visit_id: nextVisit.id || '',
-    next_visit_ymd: nextVisit.ymd || '',
     secondary_products_sentence: secondaryProductsSentence(secondary),
     nonrepellent_band_note: nonrepellentBandNote(primary, deps),
     activity_rating_sentence: activityRatingSentence(record, byVisit, 'pest'),
@@ -604,7 +606,9 @@ async function buildFirstVisitPest({
   if (!payload.next_visit_date) return skip('the customer has no upcoming pest appointment', 'no_upcoming_pest_visit');
   const missing = missingRequired('lc.first_visit_pest', payload);
   if (missing.length) return skip(`required payload missing: ${missing.join(', ')}`, 'missing_required');
-  return built(payload);
+  return built(payload, {
+    own_rating: [record.client_pest_rating ?? null, clean(record.client_pest_rating_source), record.client_pest_rating_defaulted ?? null],
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -717,7 +721,8 @@ const ESTIMATE_NOT_EXPIRED = 'ESTIMATE_NOT_EXPIRED';
 const ESTIMATE_EXPIRY_SUPERSEDED = 'ESTIMATE_EXPIRY_SUPERSEDED';
 const ESTIMATE_FOLLOWUP_BLOCKED = 'ESTIMATE_FOLLOWUP_BLOCKED';
 const VISIT_NOT_ELIGIBLE = 'VISIT_NOT_ELIGIBLE';
-const NEXT_VISIT_CHANGED = 'NEXT_VISIT_CHANGED';
+const BUILDER_SKIPPED = 'BUILDER_SKIPPED';
+const PAYLOAD_CHANGED = 'PAYLOAD_CHANGED';
 const ESTIMATE_VERDICT_REASONS = new Set([ESTIMATE_RECIPIENT_CHANGED, ESTIMATE_NOT_EXPIRED, ESTIMATE_EXPIRY_SUPERSEDED, ESTIMATE_FOLLOWUP_BLOCKED]);
 
 // The expiry date (ET, YYYY-MM-DD) the run was created for: the emitter's
@@ -756,40 +761,71 @@ async function anyRivalAtSameProperty(conn, run, rivals) {
   return false;
 }
 
-// The next appointment the first-visit email NAMES, re-read under a share lock at the
-// provider boundary: it must still exist, still be open (not cancelled, rescheduled,
-// skipped, no-show or completed) and still be on the date the email says.
-async function nextVisitStillValid(trx, deps, record, payload) {
-  const id = clean(payload.next_visit_id);
-  if (!id) return null; // nothing was named: no claim to keep true
-  const ymd = clean(payload.next_visit_ymd);
-  const row = await trx('scheduled_services').where({ id }).forShare().first('customer_id', 'status', 'scheduled_date');
-  if (!row || String(row.customer_id) !== String(record.customer_id)
-    || CLOSED_VISIT_STATUSES.includes(clean(row.status)) || dateOnlyString(row.scheduled_date) !== ymd) {
-    return { reason: NEXT_VISIT_CHANGED };
+// THE generic provider-boundary recheck for the three builder-backed templates.
+// At build, the executor fingerprints the payload (a stable hash of the builder's
+// variables, volatile inputs excluded) and keeps it on the run. At the boundary the
+// SAME builder is re-run against the locked rows (mode 'boundary': read-only, no
+// radar, no minted links, no consultation probe) and the fingerprint recomputed:
+//   - the builder now skips: a terminal refusal with the builder's own code;
+//   - it passes with a different fingerprint (the evidence changed since the
+//     build): PAYLOAD_CHANGED, retryable — the executor defers the run budget-
+//     neutrally so the next attempt rebuilds from fresh data;
+//   - it passes with the same fingerprint: send.
+// Excluded as volatile (they differ between two reads of identical evidence, or are
+// minted per call): rain_since_visit_sentence (radar read), the cohort statistics
+// activity_rating_sentence / activity_avg_first_visit / activity_avg_second_visit
+// (live aggregates over every customer's ratings; the record's OWN rating is
+// fingerprinted as evidence instead), estimate_link and consultation_url (minted
+// short links; the estimate's token is fingerprinted as evidence instead, and the
+// consultation offer is not fingerprinted).
+const VOLATILE_PAYLOAD_KEYS = new Set([
+  'rain_since_visit_sentence', 'activity_rating_sentence', 'activity_avg_first_visit', 'activity_avg_second_visit',
+  'estimate_link', 'consultation_url',
+]);
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
   }
-  // The builder's ORIGINAL selector, re-run under share locks: same customer, a
-  // pest appointment (detectServiceLine), at the visit's property, open, and still
-  // THE next one — the carried id and date must be what it resolves to now.
-  const current = await nextPestVisit({
-    conn: trx, deps, record, serviceYmd: dateOnlyString(record.service_date), lock: true,
-  });
-  if (current.ambiguous || String(current.id || '') !== id || current.ymd !== ymd) return { reason: NEXT_VISIT_CHANGED };
-  return null;
+  return JSON.stringify(value ?? null);
+}
+function payloadFingerprint(payload, evidence = {}) {
+  const stable = Object.fromEntries(Object.entries(payload || {}).filter(([key]) => !VOLATILE_PAYLOAD_KEYS.has(key)));
+  return crypto.createHash('sha256').update(stableStringify({ payload: stable, evidence })).digest('hex');
 }
 
-// B5's product predicate (the plan's non-repellent is Taurus SC only, a contact
-// product is recorded), re-run at the provider boundary on the plan's first two
-// visits' records and product rows, share-locked: a pest recap resubmission can
-// replace service_products after closeout, so a build-time read is not enough.
-async function planProductsStillValid(trx, deps, gate) {
-  const ids = gate.planRecordIds.slice(0, 2);
-  await trx('service_records').whereIn('id', ids).orderBy('id').forShare().select('id');
-  await trx('service_products').whereIn('service_record_id', ids).orderBy('id').forShare().select('id');
-  const plan = await whyPlanProducts({
-    record: gate.record, planRecordIds: gate.planRecordIds, conn: trx, deps,
+// The rows the builders read to render a visit email, share-locked for the rest of
+// the boundary transaction (the gates lock their own rows): the record's products
+// (a recap resubmission replaces them), the technician, the customer.
+async function lockVisitEvidence(trx, record, recordIds) {
+  await trx('service_records').whereIn('id', recordIds).orderBy('id').forShare().select('id');
+  await trx('service_products').whereIn('service_record_id', recordIds).orderBy('id').forShare().select('id');
+  if (record.technician_id) await trx('technicians').where({ id: record.technician_id }).forShare().select('id');
+  await trx('customers').where({ id: record.customer_id }).forShare().select('id');
+}
+async function lockEstimateEvidence(trx, run) {
+  const estimate = await trx('estimates').where({ id: run.entity_id }).first('id', 'property_id');
+  if (!estimate) return;
+  await trx('customers').where({ id: run.recipient_id }).forShare().select('id');
+  if (estimate.property_id) await trx('customer_properties').where({ id: estimate.property_id }).forShare().select('id');
+  await trx('leads').where({ estimate_id: estimate.id }).orderBy('id').forShare().select('id');
+}
+
+async function boundaryRebuildVerdict({
+  trx, run, payload, fingerprint,
+}) {
+  if (!fingerprint) return null; // no build fingerprint (shadow): nothing to compare
+  const result = await buildEmailDivisionPayload({
+    run, payload, mode: 'boundary', conn: trx, lock: true,
   });
-  return plan.skip ? { reason: VISIT_NOT_ELIGIBLE, detail: plan.reason } : null;
+  if (result.skip) return { reason: `${BUILDER_SKIPPED}:${result.code}` };
+  return result.fingerprint === fingerprint ? null : { reason: PAYLOAD_CHANGED, retryable: true };
+}
+
+// A boundary refusal the executor settles terminally with its own guard (the
+// estimate verdicts, the visit gate, or a builder that now skips).
+function isBoundaryRefusal(reason) {
+  return ESTIMATE_VERDICT_REASONS.has(reason) || reason === VISIT_NOT_ELIGIBLE || String(reason || '').startsWith(`${BUILDER_SKIPPED}:`);
 }
 
 // Which once-rule (if any) a template has: per customer (B5), per customer and
@@ -798,7 +834,7 @@ function onceScopeFor(run) {
   return { 'lc.why_91_days': 'customer', 'lc.first_visit_pest': 'property', 'nurture.expired_1': 'estimate' }[run.template_key] || null;
 }
 
-function ledgerGuardsFor(run, payload = {}) {
+function ledgerGuardsFor(run, payload = {}, fingerprint = null) {
   const scope = onceScopeFor(run);
   const visitGate = { 'lc.first_visit_pest': firstVisitGate, 'lc.why_91_days': whyPlanGate }[run.template_key];
   if (!scope && !visitGate) return { guard: null, boundaryGuard: null };
@@ -816,7 +852,14 @@ function ledgerGuardsFor(run, payload = {}) {
   if (scope === 'estimate') {
     return {
       guard: async (trx) => (await estimateAddressingVerdict(trx, run)) || once(trx),
-      boundaryGuard: (trx) => estimateAddressingVerdict(trx, run, { lock: true }),
+      boundaryGuard: async (trx) => {
+        const verdict = await estimateAddressingVerdict(trx, run, { lock: true });
+        if (verdict) return verdict;
+        await lockEstimateEvidence(trx, run);
+        return boundaryRebuildVerdict({
+          trx, run, payload, fingerprint,
+        });
+      },
     };
   }
   // B1 / B5: the builder's own visit gate (the same function), re-run on the
@@ -826,13 +869,15 @@ function ledgerGuardsFor(run, payload = {}) {
   return {
     guard: once || null,
     boundaryGuard: async (trx) => {
-      const deps = defaultDeps();
       const gate = await visitGate({
-        run, conn: trx, deps, lock: true,
+        run, conn: trx, deps: defaultDeps(), lock: true,
       });
       if (gate.skip) return { reason: VISIT_NOT_ELIGIBLE, detail: gate.reason };
-      if (run.template_key === 'lc.why_91_days') return planProductsStillValid(trx, deps, gate);
-      return nextVisitStillValid(trx, deps, gate.record, payload);
+      const recordIds = [gate.record.id, ...(gate.planRecordIds || []).slice(0, 2)];
+      await lockVisitEvidence(trx, gate.record, [...new Set(recordIds)]);
+      return boundaryRebuildVerdict({
+        trx, run, payload, fingerprint,
+      });
     },
   };
 }
@@ -929,9 +974,11 @@ async function whyPlanProducts({
 }
 
 async function buildWhy91Days({
-  run, conn = db, deps = defaultDeps(),
+  run, conn = db, deps = defaultDeps(), lock = false,
 }) {
-  const gate = await whyPlanGate({ run, conn, deps });
+  const gate = await whyPlanGate({
+    run, conn, deps, lock,
+  });
   if (gate.skip) return gate;
   const {
     record, customer, planName, city, planRecordIds,
@@ -1185,7 +1232,7 @@ async function buildExpiredNurture({
   };
   const missing = missingRequired(templateKey, payload);
   if (missing.length) return skip(`required payload missing: ${missing.join(', ')}`, 'missing_required');
-  return built(payload);
+  return built(payload, { estimate_token: clean(estimate.token) });
 }
 
 const BUILDERS = Object.freeze({
@@ -1201,15 +1248,21 @@ const BUILDERS = Object.freeze({
  * into a send.
  */
 async function buildEmailDivisionPayload({
-  run, payload = {}, mode = 'live', conn = db, deps = undefined,
+  run, payload = {}, mode = 'live', conn = db, deps = undefined, lock = false,
 }) {
   const builder = BUILDERS[run.template_key];
   if (!builder) return { handled: false };
   const result = await builder({
-    run, payload, conn, mode, deps: deps ? { ...defaultDeps(), ...deps } : defaultDeps(),
+    run, payload, conn, mode, lock, deps: deps ? { ...defaultDeps(), ...deps } : defaultDeps(),
   });
   if (result.skip) return { handled: true, ...result };
-  return { handled: true, ok: true, payload: { ...payload, ...result.payload } };
+  return {
+    handled: true,
+    ok: true,
+    payload: { ...payload, ...result.payload },
+    // Of the builder's OWN variables (a stored value never enters it).
+    fingerprint: payloadFingerprint(result.payload, result.evidence),
+  };
 }
 
 module.exports = {
@@ -1228,7 +1281,10 @@ module.exports = {
   ESTIMATE_EXPIRY_SUPERSEDED,
   ESTIMATE_FOLLOWUP_BLOCKED,
   VISIT_NOT_ELIGIBLE,
-  NEXT_VISIT_CHANGED,
+  BUILDER_SKIPPED,
+  PAYLOAD_CHANGED,
+  isBoundaryRefusal,
+  payloadFingerprint,
   ESTIMATE_VERDICT_REASONS,
   buildFirstVisitPest,
   buildWhy91Days,
