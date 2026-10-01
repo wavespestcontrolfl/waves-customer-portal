@@ -4,13 +4,17 @@
 // that stands between a bad draft and a customer gets a case, plus the
 // redraft-then-fallback contract.
 const mockDispatch = jest.fn();
+const mockFactCheck = jest.fn();
 const mockGates = { reviewAskTechVoice: true, reviewAskPersonalized: false };
 const mockGetRecentCalls = jest.fn(async () => []);
 const mockTables = {};
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...a) => mockDispatch(...a) }));
+// The writer and the fact check share the dispatcher; route by lane.
+jest.mock('../services/llm/call', () => ({
+  dispatchWithFallback: (...a) => (a[1]?.laneId === 'review_ask_fact_check' ? mockFactCheck(...a) : mockDispatch(...a)),
+}));
 jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => !!mockGates[g], gates: mockGates }));
 jest.mock('../services/messaging/review-ask-reservation', () => ({ excludeUnresolvedSendReservations: (q) => q }));
 jest.mock('../services/context-aggregator', () => {
@@ -49,6 +53,7 @@ function builder(table) {
 
 beforeEach(() => {
   mockDispatch.mockReset();
+  mockFactCheck.mockReset().mockImplementation(async (_p, req) => approveAll(req));
   mockGetRecentCalls.mockReset().mockResolvedValue([]);
   mockGates.reviewAskTechVoice = true;
   Object.keys(mockTables).forEach((k) => delete mockTables[k]);
@@ -78,6 +83,17 @@ const GOOD = {
   ],
 };
 const reply = (draft) => ({ ok: true, text: JSON.stringify(draft) });
+// What the fact check was given: the record and the sentences it judged.
+const factInput = (req) => JSON.parse(req.text.slice(req.text.indexOf('{"record"')));
+// Default checker: every sentence backed by a line that IS in the record.
+const approveAll = (req) => ({
+  ok: true,
+  json: {
+    sentences: factInput(req).sentences.map((sentence) => (/google review/i.test(sentence) && !/work|sink/i.test(sentence)
+      ? { sentence, ask_only: true, supported: false, quote: null }
+      : { sentence, ask_only: false, supported: true, quote: 'I need to go to work' })),
+  },
+});
 
 describe('draftTechVoice', () => {
   test('gate off: no model call, null (the fixed template sends)', async () => {
@@ -136,6 +152,63 @@ describe('draftTechVoice', () => {
     };
     mockDispatch.mockResolvedValueOnce(reply(email));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2, channel: 'email' })).toBe(email.body);
+  });
+});
+
+describe('fact check — every sentence backed by the record (owner ruling 2026-10-01)', () => {
+  const judge = (verdicts) => mockFactCheck.mockImplementation(async (_p, req) => ({
+    ok: true,
+    json: { sentences: factInput(req).sentences.map((sentence, i) => ({ sentence, ...verdicts[i] })) },
+  }));
+
+  test('runs on the fast verifier lane, sees the record but not what Waves already sent', async () => {
+    mockTables.review_requests = [{ sequence_step: 0, channel: 'sms', custom_body: 'Earlier touch about the sink', template_key: 'day0_ask_tech_voice' }];
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBe(GOOD.body);
+    const req = mockFactCheck.mock.calls[0][1];
+    expect(req.jsonSchema).toBeDefined();
+    const { record, sentences } = factInput(req);
+    expect(record).toContain('I need to go to work');
+    expect(record).not.toContain('Earlier touch about the sink');
+    expect(sentences).toHaveLength(3);
+  });
+
+  test('an invented personal detail is refused: redraft once, then the template', async () => {
+    const baby = { body: "It's Adam, I know you had to get to work. Congratulations on your new baby! A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
+    mockDispatch.mockResolvedValue(reply(baby));
+    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: false, quote: null }, { ask_only: true, supported: false, quote: null }]);
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    expect(mockDispatch).toHaveBeenCalledTimes(2);
+    expect(mockDispatch.mock.calls[1][1].text).toContain('REJECTED (unsupported sentence)');
+  });
+
+  test('the checker cannot vouch with a quote that is not in the record', async () => {
+    mockDispatch.mockResolvedValue(reply(GOOD));
+    judge([{ ask_only: false, supported: true, quote: 'she just had a baby' }, { ask_only: false, supported: true, quote: 'Moisture under the kitchen sink' }, { ask_only: true, supported: false, quote: null }]);
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+  });
+
+  test('a sentence with content can never pass as a bare review request', async () => {
+    const sneaky = { ...GOOD, body: "It's Adam, I know you had to get to work. Congrats on the baby, a Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
+    mockDispatch.mockResolvedValue(reply(sneaky));
+    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: true, supported: false, quote: null }]);
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    const { isAskOnlySentence } = Drafter.__private;
+    expect(isAskOnlySentence('Marta, a Google review would really help: {review_url}', new Set(['marta']))).toBe(true);
+    expect(isAskOnlySentence('A Google review would help us a lot.', new Set())).toBe(true);
+    expect(isAskOnlySentence('Congrats on the baby, a Google review would help: {review_url}', new Set())).toBe(false);
+  });
+
+  test('a wrong-length answer or an unavailable checker never sends the draft', async () => {
+    mockDispatch.mockResolvedValue(reply(GOOD));
+    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }]);
+    mockFactCheck.mockImplementation(async () => ({ ok: true, json: { sentences: [{ sentence: 'x', ask_only: false, supported: true, quote: 'I need to go to work' }] } }));
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    mockDispatch.mockReset().mockResolvedValue(reply(GOOD));
+    mockFactCheck.mockReset().mockResolvedValue({ ok: false });
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    // Unavailable is final: no redraft spent on it.
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 });
 
