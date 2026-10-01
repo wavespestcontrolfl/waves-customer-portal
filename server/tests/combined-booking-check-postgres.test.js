@@ -63,27 +63,15 @@ const rowsOf = (trx, estimateId) => trx('scheduled_services').where({ source_est
 const alertsOf = (trx, estimateId) => trx('notifications')
   .where({ recipient_type: 'admin', category: 'alert' }).whereRaw("metadata->>'estimateId' = ?", [estimateId]);
 
-const dayOf = (row) => String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10);
 
-// What the office does to a bad booking: a time and technician on every visit,
-// the accepted per-visit prices on later visits, one shared first-day invoice.
-async function repair(trx, { customerId, estimateId }) {
-  const rows = await rowsOf(trx, estimateId);
+// What the office does to a bad booking: a time and technician on every visit.
+async function repair(trx, { estimateId }) {
   const technicianId = randomUUID();
   await trx('technicians').insert({ id: technicianId, name: 'Synthetic Technician',
     email: `${technicianId}@example.invalid`, password_hash: 'synthetic-not-a-login-hash', role: 'technician',
     active: true, employment_status: 'active', field_dispatchable: true });
-  const invoice = await require('../services/invoice').create({ database: trx, customerId, title: 'First Service Application',
-    lineItems: [{ description: 'First service application', quantity: 1, unit_price: 250 }], dueDate: '2026-10-04' });
-  const day0 = rows.map(dayOf).sort()[0];
-  for (const row of rows) {
-    const firstDayParent = dayOf(row) === day0 && !row.recurring_parent_id;
-    await trx('scheduled_services').where({ id: row.id }).update({
-      window_start: '10:00', window_end: '11:00', technician_id: technicianId,
-      estimated_price: firstDayParent ? null : (/lawn/i.test(row.service_type) ? 100 : 150),
-      first_application_invoice_id: firstDayParent ? invoice.id : null,
-    });
-  }
+  await trx('scheduled_services').whereIn('id', (await rowsOf(trx, estimateId)).map((row) => row.id))
+    .update({ window_start: '10:00', window_end: '11:00', technician_id: technicianId });
 }
 
 postgres('combined-booking check through the real conversion', () => {
@@ -224,7 +212,7 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
-  test('every problem gets its own bell in the same run, with no per-run cap', async () => {
+  test('every problem gets its own bell in the same run while the ring budget has room', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
@@ -254,6 +242,8 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 1 })).toMatchObject({ problems: 1, overflow: 2 });
       const [overflow] = await overflowRows();
       expect(overflow.title).toBe('Schedule — fix 2 more combined bookings');
+      // The one ring was spent on the individual bell: the count bell is written quietly (Activity feed).
+      expect(overflow.metadata).toMatchObject({ quiet: true, feed: 'activity' });
       const owed = overflow.metadata.itemKeys;
       expect(owed).toHaveLength(2);
       // The owed bookings age past the 72h lookback: still judged, and with budget they get their own bells.
@@ -277,12 +267,16 @@ postgres('combined-booking check through the real conversion', () => {
       .whereRaw("metadata->>'dedupeKey' = 'combined-booking-check:overflow'").first('metadata'))?.metadata.itemKeys || []);
     try {
       const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      const childOf = (pattern) => rows.find((row) => row.recurring_parent_id && pattern.test(row.service_type));
+      await trx('scheduled_services').where({ id: childOf(/lawn/i).id }).update({ technician_id: null });
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
       const [before] = await alertsOf(trx, est.estimateId);
+      expect(before.metadata.itemKeys).toEqual(['missing_time_tech:lawn_care']);
       await trx('notifications').where({ id: before.id }).update({ read_at: new Date() });
-      // A new problem identity appears (a lawn visit priced off the quote) with no budget left.
-      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
-      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 1 });
+      // A new service family goes untimed (a pest visit) with no budget left.
+      await trx('scheduled_services').where({ id: childOf(/pest/i).id }).update({ technician_id: null });
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ overflow: 1 });
       expect(await owedIds()).toEqual([est.estimateId]);
       expect((await alertsOf(trx, est.estimateId))[0].read_at).not.toBeNull(); // not refreshed in silence
@@ -296,29 +290,7 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 1, overflow: 0 });
       const [after] = await alertsOf(trx, est.estimateId);
       expect(after.read_at).toBeNull();
-      expect(after.metadata.problemCodes).toContain('price_mismatch');
-    } finally {
-      mockPg = pool;
-      await trx.rollback();
-    }
-  });
-
-  test('a voided combined invoice replaced on its anchor governs the members, never reads as a split', async () => {
-    const pool = mockPg;
-    const trx = await pool.transaction();
-    mockPg = trx;
-    try {
-      const est = await acceptedEstimate(trx, lines);
-      await repair(trx, est);
-      const stamped = (await rowsOf(trx, est.estimateId)).filter((row) => row.first_application_invoice_id && !row.recurring_parent_id);
-      expect(stamped.length).toBeGreaterThanOrEqual(2);
-      const anchor = stamped[0];
-      await trx('invoices').where({ id: anchor.first_application_invoice_id }).update({ scheduled_service_id: anchor.id, status: 'void' });
-      const replacement = await require('../services/invoice').create({ database: trx, customerId: est.customerId,
-        title: 'First Service Application', lineItems: [{ description: 'First service application', quantity: 1, unit_price: 250 }],
-        dueDate: '2026-10-04' });
-      await trx('invoices').where({ id: replacement.id }).update({ scheduled_service_id: anchor.id });
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, ok: 1, problems: 0, failed: 0 });
+      expect(after.metadata.itemKeys).toEqual(['missing_time_tech:pest_control', 'missing_time_tech:lawn_care']);
     } finally {
       mockPg = pool;
       await trx.rollback();

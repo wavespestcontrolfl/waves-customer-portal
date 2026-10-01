@@ -1,59 +1,49 @@
 /**
- * Combined-booking check (owner request 2026-09-29).
+ * Combined-booking check (owner request 2026-09-29; narrowed to time and
+ * technician by owner ruling 2026-10-01).
  *
  * Every time a customer accepts an estimate with MORE THAN ONE recurring
  * service (pest + lawn, pest + lawn + tree & shrub, pest + rodent, ...), this
- * verifies the resulting schedule and pricing and posts ONE short admin note.
- * The 2026-09-28 defect it guards: companion services were booked with no
- * time and no technician.
+ * verifies that every visit the booking created has a time and a technician,
+ * and posts ONE admin bell when one does not. The 2026-09-28 defect it guards:
+ * companion services were booked with no time and no technician.
+ *
+ * NOT THIS CHECK'S (each has its own owner, and a second bell would conflict):
+ *   - prices and invoices (an unpriced visit is the watchdog's unpriced-series
+ *     alert's; split first-application invoices are the sibling-split
+ *     workflow's). Owner ruling 2026-10-01: price checks may come back later as
+ *     their own change, not here.
+ *   - whether the right number of visits exist: the shared accepted-plan
+ *     classifier (recurring-schedule-audit's acceptedScheduleFindings), the
+ *     source of the watchdog's `accepted-schedule:*` alerts. An estimate with
+ *     such a gap is never declared OK, and its schedule shape is left to that
+ *     alert.
+ *   - a former customer's leftover work: the churned-live-work alert's.
  *
  * WHERE IT RUNS: inside the schedule-integrity watchdog (its daily tick, under
  * that job's runExclusive and GATE_SCHEDULE_INTEGRITY_WATCHDOG), over accepted
  * estimates that settled at least SETTLE_MINUTES ago — not a hook in the
  * accept route (a money path: a hook could only add latency or a new way to
- * fail it, and is lost if the process dies right after the commit) and not a
- * second sweep beside the watchdog's own accepted-plan check. The sweep derives
- * everything from committed rows: a crash just means the next run checks the
- * estimate. No state is stored beyond a problem's bell; every accept inside
- * the lookback is judged again each run.
+ * fail it, and is lost if the process dies right after the commit). The sweep
+ * derives everything from committed rows: a crash just means the next run
+ * checks the estimate. No state is stored beyond the bells themselves.
  *
- * ONE CLASSIFIER FOR THE SCHEDULE SHAPE: whether the right number of visits
- * exist is decided by recurring-schedule-audit's acceptedScheduleFindings (via
- * findAcceptedRecurringScheduleGaps), the same function behind the watchdog's
- * `accepted-schedule:*` alerts. This check never re-derives it: an estimate
- * with such a gap is left to that alert (no second bell for the same problem)
- * and is not declared OK until the gap is gone.
+ * WHAT IS A COMBINED BOOKING: what the customer ACCEPTED, read through the
+ * converter's own scheduling units (combineRecurringServicesForScheduling, the
+ * same call the classifier makes; a legacy rodent supplement counts). A family
+ * the classifier did not judge (an active plan hold, a stopped series) or the
+ * duplicate-series guard kept on an older series leaves the check; the rest are
+ * still checked, and with none left a standing bell is left as it is.
  *
- * WHAT IT CHECKS (each live scheduled_services row from the estimate, its
- * series children included):
- *   1. time + technician: window_start AND technician_id on every row.
- *   2. price: every PRICED row after the first day (and every priced series
- *      child) carries that service's accepted per-visit price (+/- $0.02).
- *   3. first day: a combined first-application invoice (ONE shared
- *      first_application_invoice_id, or the governing replacement on its
- *      anchor) bills the first-day per-visit prices; a member split onto its
- *      own invoice bills its own; a priced first-day row bills its own.
- * An UNPRICED visit, and a first invoice that is missing / void / refunded,
- * are not this check's: the watchdog's unpriced-series alert owns that $0
- * defect, and a second bell would only conflict with it.
- * The accepted per-visit price comes from the same lines and rule the
- * converter's own split uses (acceptedRecurringBillingLines +
- * lineAnnualPerVisitAmount). When the lines do not reconcile to the accepted
- * annual total (manual discount, plan credit, cadence change) there is no
- * price to compare against (the converter itself declines to split such a
- * plan), so the estimate is never declared OK, and a standing price finding
- * it cannot re-judge stays on the bell. A family the shared classifier did
- * not judge (an active plan hold, a stopped series) is left out the same way
- * the duplicate-series guard's retained family is, the rest are still
- * checked, and an estimate it did not judge at all is never OK.
- *
- * ALERTS follow docs/admin-notifications.md through raiseAdminAlert: a problem
- * is one needs-you Schedule bell per estimate ("Schedule — fix <name>'s
- * combined booking", a one-sentence why, the customer link, subject = the
- * estimate, done when combined_booking_verified), the whole finding in
- * `detail`, ringing again only when a new problem joins. A fixed problem, a
- * cancelled plan, or a customer / estimate that left for good closes the bell
- * as DONE. An OK result is an `fyi` fact and writes no row.
+ * ALERTS follow docs/admin-notifications.md through raiseAdminAlert: one
+ * needs-you Schedule bell per estimate ("Schedule — fix <name>'s combined
+ * booking", a one-sentence why, the customer link, subject = the estimate,
+ * done when combined_booking_verified), ringing again only when a new service
+ * family joins it. A fixed problem, a cancelled plan, or a customer / estimate
+ * that left for good closes the bell as DONE. An OK result is an `fyi` fact and
+ * writes no row. Rings share the watchdog run's budget (at most 10 a day):
+ * past it a booking waits on ONE standing "fix N more combined bookings" bell,
+ * whose list the next run re-reads, so nothing ages out unreported.
  */
 
 const db = require('../models/db');
@@ -66,31 +56,23 @@ const CATEGORY = 'alert';
 const AREA = 'Schedule';
 const DONE_WHEN = 'combined_booking_verified';
 const RESOLVED_FIXED = 'Fixed: the combined booking now checks out';
+const RESOLVED_GONE = 'Closed: the plan was cancelled, or the estimate or customer is no longer active or current';
 // The standing count bell for problems past the ring budget (its itemKeys are
 // the estimates still owed their own bell).
 const OVERFLOW_ID = 'overflow';
 // Without a caller's budget (a direct run), the same 10 a day the watchdog
 // keeps (docs/admin-notifications.md, Budget).
 const DEFAULT_RING_BUDGET = 10;
-const RESOLVED_GONE = 'Closed: the plan was cancelled, or the estimate or customer is no longer active or current';
 
 // Let the accept transaction and its follow-on writes settle before judging.
 const SETTLE_MINUTES = 3;
-// Estimates accepted longer ago than this are never (re)checked: an old
-// problem the office has lived with is not news, and a first run after
-// deploy must not turn into a backlog scan.
+// Estimates accepted longer ago than this are not newly checked: an old
+// problem the office has lived with is not news, and a first run after deploy
+// must not turn into a backlog scan. (A booking the overflow bell owes stays.)
 const LOOKBACK_HOURS = 72;
 
-const PRICE_TOLERANCE = 0.02;
-// Problems that need an accepted price to compare against: when that price
-// cannot be verified (the verdict is deferred) they are not looked for, so a
-// standing bell carrying one is left open rather than closed as fixed.
-const COMPARISON_CODES = new Set(['price_mismatch', 'first_invoice_mismatch', 'split_invoice_mismatch', 'first_day_price_mismatch']);
 const CANCELLED = new Set(['cancelled', 'canceled']);
 const NOT_LIVE = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
-// A visit parked as `rescheduled` (the legacy customer reschedule path) is out
-// of the schedule checks but still billed on its original invoice.
-const OFF_INVOICE = new Set(['cancelled', 'canceled', 'skipped', 'no_show']);
 
 const FAMILY_LABELS = {
   pest_control: 'Pest',
@@ -112,8 +94,6 @@ function lowerLabel(family) {
   return label === 'Tree & Shrub' ? 'T&S' : label.toLowerCase();
 }
 
-const cents = (value) => Math.round(Number(value || 0) * 100);
-const money = (value) => `$${(cents(value) / 100).toFixed(2)}`;
 const dateOnly = (value) => {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -125,35 +105,20 @@ function parseJson(value, fallback = {}) {
   try { return JSON.parse(value) || fallback; } catch { return fallback; }
 }
 
-// The visit's own price exactly as completion bills it (billing-lane.js
-// completionInvoiceAmount's first rule): estimated_price, nothing else. A
-// primary_line_price with no estimated_price is never billed on its own.
-function rowPrice(row) {
-  const est = Number(row.estimated_price);
-  return est > 0 ? est : 0;
-}
-// An annual-prepay stamp that annualPrepayCoversVisit validated against a
-// live paid term (markPrepaidCoverage): the term, not the visit price, is what
-// bills it. A term id alone proves nothing.
-function isPrepaid(row) {
-  return row.prepaid_covered === true;
-}
-
 /**
- * The accepted recurring programs of an estimate: one unit per seeded service
- * family, with the accepted per-visit price and visits per year when they can
- * be derived. Returns null for a one-time accept or a plan the converter does
- * not auto-schedule. Pure.
+ * The service families an accepted estimate auto-schedules, from the
+ * converter's own scheduling units. null for a one-time accept or a plan the
+ * converter does not auto-schedule. Pure.
  */
-function acceptedPrograms(estimate) {
+function acceptedFamilies(estimate) {
   const converter = require('./estimate-converter');
   const { acceptedRecurringBillingLines } = require('./plan-rate-ledger');
   const { inferFrequencyKeyFromEstimateData, legacyRodentRowPredicateFor } = require('./billing-cadence');
   const data = parseJson(estimate.estimate_data);
   if (estimate.accepted_service_mode === 'one_time') return null;
-  // The converter's own service set: the termite station-rental rider is
-  // folded into the bait row's price, and legacy rodent rows are dropped,
-  // exactly as conversion does before it schedules and prices anything.
+  // The converter's own service set: the termite station-rental rider folds
+  // into the bait row, and legacy rodent rows leave the lines (they come back
+  // below as a supplement unit), exactly as conversion does.
   const isLegacyRodentRow = legacyRodentRowPredicateFor(data);
   const lines = converter.foldTermiteRentalIntoBait(acceptedRecurringBillingLines(data))
     .filter((line) => !isLegacyRodentRow(line));
@@ -163,58 +128,17 @@ function acceptedPrograms(estimate) {
   })) return null;
   const acceptedFrequency = data.customerSelection?.frequency || null;
   const fallback = acceptedFrequency || inferFrequencyKeyFromEstimateData(data);
-  // WHICH programs are scheduled comes from the converter's own scheduling
-  // units (combineRecurringServicesForScheduling, the same call the
-  // accepted-plan classifier makes): a legacy rodent program dropped from the
-  // lines above rides back in as a supplement unit, exactly as conversion
-  // schedules it. Their PRICES come from the accepted billing lines, never the
-  // units (a standalone unit is a scheduling-only rewrite with no price); a
-  // supplement counts only for a family no line already bills, the same
-  // de-duplication the combiner applies.
-  const family = (line) => converter.seedingFamilyKey(line);
-  const supplements = converter.supplementalCompanionLines(data);
   const { remaining, combos, standalone } = converter.combineRecurringServicesForScheduling(lines, {
-    acceptFrequency: acceptedFrequency, supplementalCompanions: supplements,
+    acceptFrequency: acceptedFrequency, supplementalCompanions: converter.supplementalCompanionLines(data),
   });
-  const scheduled = new Set([
+  return new Set([
     ...[...remaining, ...standalone.map((unit) => unit.service)].map((service) => [service, [service]]),
     ...combos.map((combo) => [combo.service, combo.combinedFrom]),
   ]
     // Commercial lines, billing riders and contradictory terms are scheduled
     // by the office; they have no auto-seeded cadence to verify here.
     .filter(([service]) => converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency))
-    .flatMap(([, sources]) => sources.map(family)));
-  const lineFamilies = new Set(lines.map(family));
-  // A supplement is the legacy rodent plan, billed as MONTHLY DUES that cover
-  // its visits (estimate-converter.js isPinnedLegacyRodentOnlyPlan): its
-  // visits carry no per-visit price of their own, so it is expected at $0.
-  const dues = new Set(supplements.map(family).filter((key) => !lineFamilies.has(key)));
-  const billed = [...lines, ...supplements.filter((line) => dues.has(family(line)))];
-
-  const programs = new Map();
-  for (const key of scheduled) {
-    if (dues.has(key)) { programs.set(key, { family: key, perVisit: 0, visits: null, dues: true }); continue; }
-    const sources = billed.filter((line) => family(line) === key);
-    const perVisits = sources.map((line) => converter.lineAnnualPerVisitAmount(line, acceptedFrequency));
-    const visits = Math.max(0, ...sources.map((line) => converter.acceptedPestSelectionVisits(line, acceptedFrequency)
-      ?? converter.visitsPerYearForRecurringService(line) ?? 0));
-    programs.set(key, {
-      family: key,
-      perVisit: perVisits.length && perVisits.every((amount) => amount > 0) ? perVisits.reduce((a, b) => a + b, 0) : null,
-      visits: visits || null,
-    });
-  }
-  // Dollar comparison only when the billed lines demonstrably add up to what
-  // the customer accepted (a manual discount / plan credit / cadence change
-  // breaks the equality, and a guessed price would page falsely).
-  const annualFromLines = billed.reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0);
-  const reconciles = Number(estimate.annual_total) > 0
-    && Math.abs(annualFromLines - Number(estimate.annual_total)) <= 1;
-  for (const program of programs.values()) {
-    if (program.dues) continue;
-    program.perVisit = reconciles && program.perVisit != null ? Math.round(program.perVisit * 100) / 100 : null;
-  }
-  return { programs, acceptedFrequency };
+    .flatMap(([, sources]) => sources.map((line) => converter.seedingFamilyKey(line))));
 }
 
 /** Service families a scheduled row performs (a combined route spans two). */
@@ -226,83 +150,13 @@ function rowFamilies(row) {
     : [converter.seedingFamilyKey({ service: identity, name: row.service_type })];
 }
 
-// The service dollars a combined first-application invoice bills: the base
-// application lines (the shared invoice.js identity — client_id
-// scheduled_<id>_primary, or the "First service application" line) plus the
-// price discounts riding beside them. Setup-fee lines, add-ons and payment
-// allocations (the deposit_credit line) are not service dollars. null when
-// the invoice carries no readable base-application line at all.
-function firstApplicationAmount(invoice) {
-  const InvoiceService = require('./invoice');
-  const items = InvoiceService._parseInvoiceLineItems(invoice.line_items);
-  const amountOf = (item) => {
-    const raw = item?.amount != null ? Number(item.amount) : Number(item?.unit_price) * Number(item?.quantity ?? 1);
-    return Number.isFinite(raw) ? raw : 0;
-  };
-  // An invoice-mode recurring accept (estimate-public.js
-  // buildEstimateInvoiceModeDraft, recognized by
-  // isInvoiceModeRecurringAcceptInvoice) bills the first visit as one
-  // "<services> (<cadence> recurring — first <visit>)" line with no
-  // _primary client id; that line is the service dollars, and anything the
-  // office added beside it is not.
-  const { isInvoiceModeRecurringAcceptInvoice } = require('./estimate-first-application-invoice');
-  const isBase = isInvoiceModeRecurringAcceptInvoice(invoice)
-    ? (item) => /\brecurring\s+[\u2014-]\s+first\b/i.test(String(item?.description || ''))
-    : (item) => InvoiceService.lineIsBaseApplication(item);
-  const base = items.filter((item) => isBase(item) && amountOf(item) > 0);
-  if (!base.length) return null;
-  // A discount scoped to one line (discount_for = that line's client_id)
-  // counts only when that line is a base application; an add-on's discount
-  // is the add-on's. Unscoped discounts ride the whole invoice.
-  const baseIds = new Set(base.map((item) => item?.client_id).filter(Boolean).map(String));
-  const discounts = items.filter((item) => item?.category !== 'deposit_credit' && amountOf(item) < 0
-    && (!item?.discount_for || baseIds.has(String(item.discount_for))));
-  return Math.round([...base, ...discounts].reduce((sum, item) => sum + amountOf(item), 0) * 100) / 100;
-}
-
-function listFamilies(counts, programs) {
-  return [...counts.entries()].map(([family, count]) => `${count} ${lowerLabel(family)}`).join(', ');
-}
-
-// Expected per-visit price of a row: the sum over the programs it performs,
-// null when any of them has no derivable price.
-function expectedFor(row, programs) {
-  let total = 0;
-  for (const family of rowFamilies(row).filter((f) => programs.has(f))) {
-    const perVisit = programs.get(family).perVisit;
-    if (perVisit == null) return null;
-    total += perVisit;
-  }
-  return Math.round(total * 100) / 100;
-}
-function toleranceFor(row, programs) {
-  if (row.recurring_parent_id) return PRICE_TOLERANCE;
-  // A series parent absorbs the annual's remainder cents (anchored split).
-  return PRICE_TOLERANCE + Math.max(...rowFamilies(row).map((f) => programs.get(f)?.visits || 1)) * 0.005;
-}
-const programRowFamilies = (row, programs) => rowFamilies(row).filter((f) => programs.has(f));
-// A row whose every program is billed as monthly dues has no visit price to check.
-const duesOnly = (row, programs) => programRowFamilies(row, programs).every((f) => programs.get(f).dues);
-function expectedTotal(list, programs) {
-  let total = 0;
-  for (const row of list) {
-    const expected = expectedFor(row, programs);
-    if (expected == null) return null;
-    total += expected;
-  }
-  return Math.round(total * 100) / 100;
-}
-function bump(map, families) {
-  for (const family of families) map.set(family, (map.get(family) || 0) + 1);
-}
-
-// 1. time + technician on every live row, except a SEASONAL mosquito series
+// Time + technician on every live row, except a SEASONAL mosquito series
 // (catalog mosquito_seasonal, the Feb–Oct program) whose first visit rolled
 // past the booking's first day: the converter books it unslotted on purpose
 // until the office routes that season (estimate-converter.js, the
 // seasonalMosquito promotion). A monthly mosquito series is checked like any
 // other.
-function checkTimeAndTech(dated, programs, { firstDay, byId }) {
+function checkTimeAndTech(dated, families, { firstDay, byId }) {
   const untimed = new Map();
   const seasonalUnslotted = (row) => {
     const root = byId.get(String(row.recurring_parent_id)) || row;
@@ -310,203 +164,53 @@ function checkTimeAndTech(dated, programs, { firstDay, byId }) {
       && dateOnly(root.scheduled_date) > firstDay;
   };
   for (const row of dated) {
-    if (!(row.window_start && row.technician_id) && !seasonalUnslotted(row)) bump(untimed, programRowFamilies(row, programs));
+    if (row.window_start && row.technician_id) continue;
+    if (seasonalUnslotted(row)) continue;
+    for (const family of rowFamilies(row).filter((f) => families.has(f))) untimed.set(family, (untimed.get(family) || 0) + 1);
   }
-  return untimed.size ? [{ code: 'missing_time_tech', families: [...untimed.keys()], text: `${listFamilies(untimed, programs)} visits missing time/tech` }] : [];
-}
-
-// 2. price on every priced series child (whatever its date: with the first
-// visits cancelled, a child can be the earliest live row) and every priced
-// top-level row after the first day. An UNPRICED visit is the watchdog's
-// unpriced-series alert's, with one exception that alert cannot see: it treats
-// a recurring child under a PRICED parent as inheriting the parent's price,
-// but a child copies that price only when the series is seeded and bills its
-// own estimated_price at completion, so such a child bills $0. That shape is
-// reported here (child_unpriced), never both places.
-function checkLaterPrices(dated, programs, { firstDay, byId }) {
-  const off = new Map();
-  const offDetail = [];
-  const bare = new Map();
-  for (const row of dated.filter((r) => r.recurring_parent_id || r.day > firstDay)) {
-    const price = rowPrice(row);
-    if (isPrepaid(row) || duesOnly(row, programs)) continue;
-    if (!(price > 0)) {
-      const parent = row.is_recurring !== false && byId.get(String(row.recurring_parent_id));
-      if (parent && rowPrice(parent) > 0) bump(bare, programRowFamilies(row, programs));
-      continue;
-    }
-    // A parent stamped into a combined first-application invoice is covered
-    // by it (the converter leaves such companions unpriced on purpose).
-    if (row.first_application_invoice_id && !row.recurring_parent_id) continue;
-    const families = programRowFamilies(row, programs);
-    const expected = expectedFor(row, programs);
-    if (expected != null && Math.abs(price - expected) > toleranceFor(row, programs)) {
-      bump(off, families);
-      offDetail.push(`${lowerLabel(families[0])} ${money(price)} vs ${money(expected)}`);
-    }
-  }
-  return [
-    ...(bare.size ? [{ code: 'child_unpriced', families: [...bare.keys()], text: `${listFamilies(bare, programs)} visits have no price while their series is priced` }] : []),
-    ...(off.size ? [{
-      code: 'price_mismatch',
-      families: [...off.keys()],
-      text: off.size === 1 ? `${offDetail[0]} on ${[...off.values()][0]} visits` : `visit prices off the quote: ${listFamilies(off, programs)}`,
-      detail: offDetail.slice(0, 6).join('; '),
-    }] : []),
-  ];
-}
-
-// 3a. first-day rows stamped into a combined first-application invoice.
-function checkStampedFirstDay(stamped, programs, invoices) {
-  const invoiceIds = new Set(stamped.map((row) => String(row.first_application_invoice_id)));
-  if (invoiceIds.size > 1) {
-    return [{ code: 'first_invoice_split', text: `covered services are on ${invoiceIds.size} different invoices` }];
-  }
-  const invoice = invoices.get([...invoiceIds][0]);
-  // A missing, void or refunded invoice leaves its members unpriced and
-  // uncovered: the unpriced-series alert's (coveredByFirstApplicationInvoice),
-  // not this check's. Nothing is left to compare.
-  if (!invoice || ['void', 'voided', 'cancelled', 'canceled', 'refunded'].includes(String(invoice.status || '').toLowerCase())) return [];
-  if (invoice.unbacked_discount) return [];
-  const billed = firstApplicationAmount(invoice);
-  if (billed == null) {
-    return [{ code: 'first_invoice_malformed', text: 'first invoice has no readable service lines' }];
-  }
-  const expected = expectedTotal(stamped, programs);
-  if (expected != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
-    return [{ code: 'first_invoice_mismatch', text: `first invoice ${money(billed)} \u2260 ${money(expected)}` }];
-  }
-  return [];
-}
-
-// 3c. members split off onto their own invoice: each bills its own accepted
-// first-application price, on exactly ONE live invoice.
-function checkSplitInvoices(split, programs) {
-  const off = [];
-  const doubled = [];
-  for (const row of split) {
-    const families = programRowFamilies(row, programs);
-    const label = lowerLabel(families[0]);
-    const own = row.own_first_invoices || [];
-    if (own.length > 1) { doubled.push({ families, text: `${label} first visit is on ${own.length} live invoices` }); continue; }
-    const expected = expectedFor(row, programs);
-    const billed = own[0] && !own[0].unbacked_discount ? firstApplicationAmount(own[0]) : null;
-    if (expected != null && billed != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
-      off.push({ families, text: `${label} ${money(billed)} vs ${money(expected)}` });
-    }
-  }
-  const fold = (code, list, lead) => (list.length ? [{
-    code, families: [...new Set(list.flatMap((item) => item.families))],
-    text: `${lead}${list[0].text}`, detail: list.map((item) => item.text).join('; '),
-  }] : []);
-  return [...fold('split_invoice_duplicate', doubled, ''), ...fold('split_invoice_mismatch', off, 'split first invoice ')];
-}
-
-// 3b. first-day rows with no invoice stamp. An unpriced one is the
-// unpriced-series alert's. Each priced one bills its own accepted price
-// (completion bills each row's own price, so a matching sum must not hide
-// offsetting errors), except the one shape the reserved accept writes: a
-// single priced row carrying the combined same-day total beside unpriced
-// siblings.
-function checkUnstampedFirstDay(unstamped, programs) {
-  const priced = unstamped.filter((row) => rowPrice(row) > 0);
-  const carriesTotal = (row) => priced.length === 1 && priced.length < unstamped.length
-    && Math.abs(rowPrice(row) - (expectedTotal(unstamped, programs) ?? -1)) <= PRICE_TOLERANCE + 0.005 * 12;
-  const offRows = priced.filter((row) => {
-    const rowExpected = expectedFor(row, programs);
-    return rowExpected != null && Math.abs(rowPrice(row) - rowExpected) > toleranceFor(row, programs) && !carriesTotal(row);
-  });
-  const off = offRows.map((row) => `${lowerLabel(programRowFamilies(row, programs)[0])} ${money(rowPrice(row))} vs ${money(expectedFor(row, programs))}`);
-  return off.length ? [{
-    code: 'first_day_price_mismatch', families: [...new Set(offRows.flatMap((row) => programRowFamilies(row, programs)))],
-    text: `first visit ${off[0]}`, detail: off.join('; '),
-  }] : [];
+  // In the booking's own service order, so the alert reads pest, lawn, T&S.
+  return [...families].filter((family) => untimed.has(family)).map((family) => ({
+    code: 'missing_time_tech', families: [family], text: `${untimed.get(family)} ${lowerLabel(family)} visits missing time/tech`,
+  }));
 }
 
 /**
  * Pure verdict for one accepted estimate.
- *   ctx: { estimate, rows, invoices: Map(id -> invoice), customerName,
- *          excludedFamilies: Set, scheduleGaps, scheduleSkippedFamilies: Set,
- *          scheduleUnjudged: bool }
- * Returns null when the accept is not a multi-service recurring accept (no
- * alert at all), else { ok, deferred, problems: [{ code, text }], labels }.
+ *   ctx: { estimate, rows, excludedFamilies: Set, scheduleGaps,
+ *          scheduleSkippedFamilies: Set, scheduleUnjudged: bool }
+ * Returns null when the accept is not a multi-service recurring accept, or
+ * every row of the plan was cancelled (no alert at all); else
+ * { ok, deferred, frozen, problems: [{ code, families, text }], labels }.
  */
 function evaluateCombinedBooking(ctx) {
   const {
-    estimate, rows: allRows = [], invoices = new Map(), excludedFamilies = new Set(),
+    estimate, rows: allRows = [], excludedFamilies = new Set(),
     scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleUnjudged = false,
   } = ctx;
-  const accepted = acceptedPrograms(estimate);
-  // Whether this is a combined booking at all is what the customer ACCEPTED.
-  if (!accepted || accepted.programs.size < 2) return null;
-  // Families the shared classifier skipped (active plan hold, stopped series)
-  // and the duplicate-series guard's retained family have no schedule
-  // evidence of this estimate behind them: they leave the check, and the
-  // remaining families are still checked. With none left there is nothing to
-  // judge, and a standing bell is left as it is (frozen) rather than closed.
-  const programs = new Map([...accepted.programs]
-    .filter(([family]) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
-  if (!programs.size) return { ok: false, deferred: true, frozen: true, pricesHidden: false, problems: [], labels: [] };
+  const accepted = acceptedFamilies(estimate);
+  if (!accepted || accepted.size < 2) return null;
+  const families = new Set([...accepted].filter((family) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
+  // Every family on hold / stopped / kept on an older series: nothing to judge.
+  if (!families.size) return { ok: false, deferred: true, frozen: true, problems: [], labels: [] };
 
-  const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
+  const planRows = allRows.filter((row) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
-    && rowFamilies(row).some((family) => scope.has(family));
-  const planRows = allRows.filter((row) => isPlanRow(row, programs));
+    && rowFamilies(row).some((family) => families.has(family)));
   const rows = planRows.filter((row) => !NOT_LIVE.has(row.status));
   // Rows were created and every one was cancelled: the customer or office
   // cancelled the plan. Nothing left to verify, so nothing to say.
   if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
-  const labels = [...programs.keys()].map(familyLabel);
+  const labels = [...families].map(familyLabel);
   // No live rows: the schedule shape is the accepted-schedule alert's.
-  if (!rows.length) return { ok: false, deferred: true, pricesHidden: false, problems: [], labels };
-
-  // A combined first-application invoice still bills a family left out above
-  // (a held tree program's first visit stays on it), so the invoice is judged
-  // against every accepted family it covers, not only the ones still checked.
-  // A member the office has since split off onto its own invoice (the
-  // sibling-split workflow's resolution evidence, has_own_live_invoice) is
-  // covered by that invoice, not the combined one.
-  const topLevel = allRows.filter((row) => !row.recurring_parent_id && !OFF_INVOICE.has(row.status));
-  const stamped = topLevel.filter((row) => isPlanRow(row, accepted.programs)
-    && row.first_application_invoice_id && !row.has_own_live_invoice);
-  const split = topLevel.filter((row) => isPlanRow(row, programs) && row.has_own_live_invoice && !NOT_LIVE.has(row.status));
-  // Prices are judged against the WHOLE accepted plan: a combined row (lawn +
-  // tree) still bills a left-out family's share, and so does the shared
-  // invoice. `programs` above scopes only which rows are checked.
-  const priced = accepted.programs;
-  const pricesUnverifiable = [...rows, ...stamped].flatMap(rowFamilies)
-    .some((family) => priced.has(family) && priced.get(family).perVisit == null);
-  // Whether the right visits exist at all is the shared accepted-plan
-  // classifier's call (scheduleGaps, from findAcceptedRecurringScheduleGaps —
-  // the source of the watchdog's accepted-schedule alerts). A gap there means
-  // this check says nothing about the schedule shape and never declares the
-  // booking OK. Neither does an estimate the classifier did not judge, nor one
-  // with no accepted per-visit price to compare against (its problems below
-  // are still reported).
-  const unbackedDiscount = [...stamped.map((row) => invoices.get(String(row.first_application_invoice_id))),
-    ...split.flatMap((row) => row.own_first_invoices || [])].some((invoice) => invoice?.unbacked_discount);
-  // pricesHidden: the price comparisons below were not looked for.
-  const pricesHidden = pricesUnverifiable || unbackedDiscount;
-  const deferred = scheduleGaps.length > 0 || scheduleUnjudged || pricesHidden;
+  if (!rows.length) return { ok: false, deferred: true, frozen: false, problems: [], labels };
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
     a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
-  const firstDay = dated[0].day;
-  // The converter stamps EVERY program a combined first-application invoice
-  // covers, even a seasonal companion whose first visit lands on a later date,
-  // so the invoice is judged against all live top-level rows carrying a stamp
-  // (`stamped`, above).
-  const unstamped = dated.filter((row) => row.day === firstDay && !row.recurring_parent_id
-    && !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row) && !duesOnly(row, priced));
   const byId = new Map(allRows.map((row) => [String(row.id), row]));
-  const problems = [
-    ...checkTimeAndTech(dated, programs, { firstDay, byId }),
-    ...checkLaterPrices(dated, priced, { firstDay, byId }),
-    ...(stamped.length ? checkStampedFirstDay(stamped, priced, invoices) : []),
-    ...(unstamped.length ? checkUnstampedFirstDay(unstamped, priced) : []),
-    ...checkSplitInvoices(split, priced),
-  ];
-  return { ok: problems.length === 0 && !deferred, deferred, pricesHidden, problems, labels };
+  const problems = checkTimeAndTech(dated, families, { firstDay: dated[0].day, byId });
+  // A schedule gap, or an estimate the classifier did not judge, is never OK.
+  const deferred = scheduleGaps.length > 0 || scheduleUnjudged;
+  return { ok: !problems.length && !deferred, deferred, frozen: false, problems, labels };
 }
 
 function shortName(customer) {
@@ -523,7 +227,7 @@ function shortName(customer) {
  */
 function composeAlert(verdict, { customerName, customerId, estimateId }) {
   const { cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
-  const texts = verdict.problems.map((problem) => `${problem.text}${problem.held ? ' (not yet re-checked)' : ''}`);
+  const texts = verdict.problems.map((problem) => problem.text);
   const why = `${texts.slice(0, 2).join('; ')}${texts.length > 2 ? ` (+${texts.length - 2} more)` : ''}`;
   return {
     area: AREA,
@@ -534,83 +238,12 @@ function composeAlert(verdict, { customerName, customerId, estimateId }) {
     subject: { type: 'estimate', id: String(estimateId) },
     doneWhen: DONE_WHEN,
     who: 'person',
-    detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a look.`,
-      ...verdict.problems.map((problem) => `- ${problem.text}${problem.held ? ' (not yet re-checked: its price cannot be verified right now)' : ''}${problem.detail ? ` (${problem.detail})` : ''}`)].join('\n'),
+    detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a time and technician on every visit.`,
+      ...verdict.problems.map((problem) => `- ${problem.text}`)].join('\n'),
   };
 }
 
 // --- database side ---------------------------------------------------------
-
-// Sets row.prepaid_covered for an annual-prepay stamp annualPrepayCoversVisit
-// validates against a live, paid term (fail-closed: an unverifiable stamp
-// reads as not covered). An out-of-band payment (cash/check/Zelle) covers
-// nothing here: a priced visit keeps its price check (completion bills the
-// rest of a partial payment), and an unpriced one is the unpriced-series
-// alert's.
-async function markPrepaidCoverage(conn, rows) {
-  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
-  const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
-  for (const row of rows) {
-    row.prepaid_covered = false;
-    if (hasOutOfBandPrepaidStamp(row)) continue;
-    if (!row.annual_prepay_term_id && !(Number(row.prepaid_amount) > 0)) continue;
-    try {
-      row.prepaid_covered = await annualPrepayCoversVisit(row, conn) === true;
-    } catch (err) {
-      logger.warn(`[combined-booking-check] prepay coverage unverifiable for a visit: ${err.message}`);
-    }
-  }
-}
-
-// Loads every stamped combined invoice and the live invoices on its members'
-// own rows, then classifies them the way first-application-sibling-split.js
-// does: the GOVERNING invoice (resolveGoverningInvoice — the stamped one, or a
-// live base-application replacement on its anchor once it went void/refunded)
-// is what the combined members are judged against, keyed by the stamped id;
-// any OTHER live base-application invoice on a member's own row is that
-// member's split-off invoice (flagOwnLiveInvoices' evidence:
-// row.has_own_live_invoice + row.own_first_invoices).
-async function loadFirstInvoices(conn, rows) {
-  const invoices = new Map();
-  const stamped = rows.filter((row) => row.first_application_invoice_id && !row.recurring_parent_id);
-  if (!stamped.length) return invoices;
-  const InvoiceService = require('./invoice');
-  const { invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
-  const { resolveGoverningInvoice } = require('./first-application-sibling-split');
-  const columns = ['id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'notes', 'scheduled_service_id', 'created_at'];
-  const stampedIds = [...new Set(stamped.map((row) => String(row.first_application_invoice_id)))];
-  const stampedInvoices = await conn('invoices').whereIn('id', stampedIds).select(columns);
-  const ownerIds = [...new Set([...stamped.map((row) => String(row.id)),
-    ...stampedInvoices.map((invoice) => invoice.scheduled_service_id).filter(Boolean).map(String)])];
-  const live = await conn('invoices').whereIn('scheduled_service_id', ownerIds)
-    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES).select(columns);
-  const governingIds = new Set(stampedIds);
-  for (const invoice of stampedInvoices) {
-    const onAnchor = live.filter((other) => String(other.id) !== String(invoice.id)
-      && String(other.scheduled_service_id) === String(invoice.scheduled_service_id));
-    const governing = resolveGoverningInvoice(invoice, onAnchor);
-    invoices.set(String(invoice.id), governing);
-    governingIds.add(String(governing.id));
-  }
-  // A document-level discount (create()'s discountIds picks) is stored in
-  // discount_amount with no negative line: the lines alone cannot give the
-  // net application amount, so such an invoice is never certified.
-  const { _invoiceHasUnbackedDocumentDiscount: unbacked } = InvoiceService;
-  for (const invoice of [...stampedInvoices, ...live]) {
-    invoice.unbacked_discount = await unbacked(invoice, invoice.line_items, conn);
-  }
-  const byRow = new Map(stamped.map((row) => [String(row.id), row]));
-  for (const invoice of live) {
-    const row = byRow.get(String(invoice.scheduled_service_id));
-    if (row && !governingIds.has(String(invoice.id)) && invoiceBillsBaseApplication(invoice)) {
-      row.has_own_live_invoice = true;
-      // Every one is kept: two live base-application invoices for one visit
-      // are two collectible charges (checkSplitInvoices).
-      row.own_first_invoices = [...(row.own_first_invoices || []), invoice];
-    }
-  }
-  return invoices;
-}
 
 async function loadContext(conn, estimate) {
   const estimateId = estimate.id;
@@ -637,16 +270,15 @@ async function loadContext(conn, estimate) {
         this.select('id').from('scheduled_services').where({ source_estimate_id: estimateId, customer_id: customerId });
       });
     })
-    // Whole row: annualPrepayCoversVisit validates coverage from the row itself.
-    .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
+    .select('s.id', 's.status', 's.recurring_parent_id', 's.is_recurring', 's.is_callback', 's.followup_included',
+      's.service_type', 's.service_key_snapshot', 's.window_start', 's.technician_id',
+      'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
-  await markPrepaidCoverage(conn, rows);
-  const invoices = await loadFirstInvoices(conn, rows);
   const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name');
   return {
     estimate,
     rows: rows.filter((row) => row.catalog_billing_type !== 'one_time'),
-    invoices, excludedFamilies, customerName: shortName(customer),
+    excludedFamilies, customerName: shortName(customer),
   };
 }
 
@@ -660,11 +292,10 @@ function dedupeKeyFor(estimateId) {
   return `${OPS_KEY}:${estimateId}`;
 }
 
-// A problem's stable identities: one per affected service family (a code
-// alone is too coarse: a fixed lawn mismatch replaced by a new pest one must
-// ring), or the code itself for an invoice-level finding.
+// A problem's stable identities: one per affected service family, so a fixed
+// lawn problem replaced by a new pest one rings.
 function problemKeys(problem) {
-  return problem.families?.length ? problem.families.map((family) => `${problem.code}:${family}`) : [problem.code];
+  return (problem.families || []).map((family) => `${problem.code}:${family}`);
 }
 
 // A refresh rings only when a problem is new: an identity the standing row
@@ -699,7 +330,6 @@ async function postAlert(estimate, verdict, ctx, { raise } = {}) {
   const { detail, ...spec } = composeAlert(verdict, {
     customerName: ctx.customerName, customerId: estimate.customer_id, estimateId: estimate.id,
   });
-  const codes = verdict.problems.map((problem) => problem.code);
   const keys = [...new Set(verdict.problems.flatMap(problemKeys))];
   return raiseAdminAlert(CATEGORY, spec, {
     // Under GATE_ADMIN_BELL_POLICY the 'alert' category is denied unless the
@@ -714,10 +344,7 @@ async function postAlert(estimate, verdict, ctx, { raise } = {}) {
       alertClass: OPS_KEY,
       estimateId: estimate.id,
       customerId: estimate.customer_id,
-      problemCodes: codes,
-      // The findings themselves, so a later run that cannot re-judge a price
-      // finding can keep it on the bell (heldProblems).
-      problems: verdict.problems.map(({ code, text, families }) => ({ code, text, families: families || [] })),
+      problemCodes: verdict.problems.map((problem) => problem.code),
       // count + itemKeys are the ring-stamps notifyAdmin compares on a
       // refresh, so a changed problem set is treated as a real change.
       count: keys.length,
@@ -727,9 +354,9 @@ async function postAlert(estimate, verdict, ctx, { raise } = {}) {
 }
 
 // Standing bells whose estimate has left the sweep for good (the customer was
-// deactivated or deleted, the estimate archived or no longer accepted): nothing
-// is left to act on, so they close. A bell that only aged past the lookback
-// stays open for a person.
+// deactivated, deleted or moved to a former-customer stage, the estimate
+// archived or no longer accepted): nothing is left to act on, so they close.
+// A bell that only aged past the lookback stays open for a person.
 async function retireAbandoned(conn) {
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const gone = await conn('notifications as n')
@@ -746,31 +373,17 @@ async function retireAbandoned(conn) {
   return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
 }
 
-// The standing bell's price findings this verdict could not re-judge (its
-// prices were not verifiable): they stay on the bell, visibly, until a
-// verdict that can see them says otherwise.
-function heldProblems(verdict, standingProblems = []) {
-  if (!verdict.pricesHidden) return [];
-  // Compared per identity (code + family): a new lawn mismatch must not
-  // stand in for a held pest one.
-  const now = new Set(verdict.problems.flatMap(problemKeys));
-  return standingProblems.filter((problem) => COMPARISON_CODES.has(problem?.code) && problemKeys(problem).some((key) => !now.has(key)))
-    .map((problem) => ({ code: problem.code, text: problem.text, families: problem.families || [], held: true }));
-}
-
-// What a sweep does with one verdict, given the standing bell's problems:
+// What a sweep does with one verdict:
 //   skipped  — not a combined booking any more (the plan was cancelled): close
-//   frozen   — every accepted family is on hold / stopped: nothing to judge,
-//              leave a standing bell as it is
-//   problems — post / refresh the bell (current problems plus held ones)
+//   frozen   — every accepted family is on hold / stopped: leave a bell as is
+//   problems — post / refresh the bell
 //   ok       — verified: close a standing bell as fixed
 //   deferred — nothing of this check's own to say: close
-function outcomeOf(verdict, standingProblems = []) {
-  if (!verdict) return { outcome: 'skipped', problems: [] };
-  if (verdict.frozen) return { outcome: 'frozen', problems: [] };
-  const problems = [...verdict.problems, ...heldProblems(verdict, standingProblems)];
-  if (problems.length) return { outcome: 'problems', problems };
-  return { outcome: verdict.ok ? 'ok' : 'deferred', problems };
+function outcomeOf(verdict) {
+  if (!verdict) return 'skipped';
+  if (verdict.frozen) return 'frozen';
+  if (verdict.problems.length) return 'problems';
+  return verdict.ok ? 'ok' : 'deferred';
 }
 
 // The estimates the standing overflow bell still owes their own bell.
@@ -808,11 +421,11 @@ function candidateQuery(conn, { now, owed }) {
     .orderBy('e.accepted_at', 'asc');
 }
 
-// The standing count bell for problems past the ring budget: one needs-you
-// row listing each booking (its itemKeys are what the next run re-reads),
-// ringing again only when a booking joins it, closed as done once nothing is
-// owed.
-async function postOverflow(conn, owed, { raise } = {}) {
+// The standing count bell for bookings past the ring budget: one needs-you
+// row listing each (its itemKeys are what the next run re-reads), closed as
+// done once nothing is owed. It rings only while the run's budget has room;
+// otherwise it is written or refreshed quietly.
+async function postOverflow(conn, owed, { raise, canRing } = {}) {
   if (!owed.length) return retireStanding(conn, [OVERFLOW_ID], RESOLVED_FIXED);
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const ids = owed.map((entry) => entry.id);
@@ -830,7 +443,8 @@ async function postOverflow(conn, owed, { raise } = {}) {
     detail: owed.map((entry) => `- ${entry.line}`).join('\n'),
     dedupeKey: dedupeKeyFor(OVERFLOW_ID),
     refreshOnDedupe: true,
-    ringOnRefresh: ringOnNewProblem(ids),
+    ringGate: async () => canRing,
+    ringOnRefresh: canRing ? ringOnNewProblem(ids) : () => false,
     metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids },
   });
   return 0;
@@ -843,8 +457,8 @@ const rang = (row) => !!row && !row.suppressed && (!row.deduped || row.rung === 
 /**
  * One sweep. Returns counts; never throws for a single bad estimate.
  * `conn` and `raise` are injectable for tests. `ringBudget` is what is left
- * of the run's shared budget (the watchdog passes its remainder); a problem
- * with no standing bell past it goes on the overflow bell instead.
+ * of the run's shared budget (the watchdog passes its remainder); anything
+ * that would ring past it goes on the overflow bell instead.
  */
 async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, ringBudget = DEFAULT_RING_BUDGET } = {}) {
   const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, overflow: 0 };
@@ -853,26 +467,24 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   const candidates = await candidateQuery(conn, { now, owed: [...owedBefore] });
   result.candidates = candidates.length;
 
-  // Multi-service accepts to judge. An OK verdict writes nothing (an `fyi`
-  // fact), so every candidate is judged each run.
+  // An OK verdict writes nothing (an `fyi` fact), so every candidate is judged
+  // each run. A standing bell's itemKeys say what it already rang for.
   const standing = new Map((await conn('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [candidates.map((estimate) => dedupeKeyFor(estimate.id))])
-    .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'problems' as problems")))
-    .map((row) => [String(row.estimate_id), Array.isArray(row.problems) ? row.problems : []]));
-  // A booking the overflow bell owes stays on it while it cannot be judged
-  // or its bell cannot be written.
+    .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'itemKeys' as item_keys")))
+    .map((row) => [String(row.estimate_id), new Set(Array.isArray(row.item_keys) ? row.item_keys : [])]));
+  // A booking that could not be judged, or whose bell could not be written,
+  // goes on the overflow bell: it stays a candidate until it is.
   const owed = [];
-  const keepOwed = (estimate, why = 'could not be re-checked this run') => {
-    if (owedBefore.has(String(estimate.id))) owed.push({ id: String(estimate.id), line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}` });
-  };
+  const owe = (estimate, why) => owed.push({ id: String(estimate.id), line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}` });
   const work = candidates.filter((estimate) => {
     try {
-      if ((acceptedPrograms(estimate)?.programs.size || 0) >= 2) return true;
+      if ((acceptedFamilies(estimate)?.size || 0) >= 2) return true;
       result.skipped += 1;
     } catch (err) {
       result.failed += 1;
-      keepOwed(estimate);
+      owe(estimate, 'could not be read this run');
       logger.warn(`[combined-booking-check] estimate ${estimate.id} could not be read: ${err.message}`);
     }
     return false;
@@ -886,10 +498,9 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     .acceptedRecurringScheduleGaps(conn, { now, cutoff: now, estimateIds: work.map((estimate) => estimate.id), coverage }) : [];
 
   let rings = 0;
-  const standingOf = (id) => standing.get(id) || [];
   for (const estimate of work) {
     const id = String(estimate.id);
-    const isNew = !standing.has(id);
+    const known = standing.get(id);
     try {
       const judged = coverage.get(id);
       const checked = await checkEstimate(conn, estimate, {
@@ -897,32 +508,34 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         scheduleSkippedFamilies: judged, // checkEstimate defaults it when unjudged
         scheduleUnjudged: !judged,
       });
-      const { outcome, problems } = outcomeOf(checked?.verdict, standingOf(id));
-      if (outcome !== 'problems') {
-        result[outcome === 'frozen' ? 'deferred' : outcome] += 1;
-        if (!isNew && outcome !== 'frozen') {
-          result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
-        }
+      const outcome = outcomeOf(checked?.verdict);
+      if (outcome === 'frozen') {
         // Every family on hold: nothing could be judged, so an owed booking
-        // stays owed until the hold ends.
-        if (outcome === 'frozen') keepOwed(estimate, 'every service is on hold; it is checked again when a hold ends');
+        // stays owed until a hold ends.
+        result.deferred += 1;
+        if (owedBefore.has(id)) owe(estimate, 'every service is on hold; it is checked again when a hold ends');
+        continue;
+      }
+      if (outcome !== 'problems') {
+        result[outcome] += 1;
+        if (known) result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
         continue;
       }
       result.checked += 1;
+      const { verdict, ctx } = checked;
       // Anything that would ring (a new bell, or a standing one gaining a
-      // problem identity it did not carry) spends the budget; past it the
-      // booking waits on the overflow bell and rings on a later run, never
-      // refreshed into a read bell in silence.
-      const known = new Set(standingOf(id).flatMap(problemKeys));
-      const wouldRing = isNew || problems.flatMap(problemKeys).some((key) => !known.has(key));
+      // family it did not carry) spends the budget; past it the booking waits
+      // on the overflow bell and rings on a later run, never refreshed into a
+      // read bell in silence.
+      const wouldRing = !known || verdict.problems.flatMap(problemKeys).some((key) => !known.has(key));
       if (wouldRing && rings >= ringBudget) {
-        owed.push({ id, line: `${checked.ctx.customerName} (customer ${estimate.customer_id}, estimate ${id}): ${problems.map((problem) => problem.text).join('; ')}` });
+        owe(estimate, `${ctx.customerName}: ${verdict.problems.map((problem) => problem.text).join('; ')}`);
         continue;
       }
-      const row = await postAlert(estimate, { ...checked.verdict, problems }, checked.ctx, { raise });
+      const row = await postAlert(estimate, verdict, ctx, { raise });
       if (!row) {
         result.failed += 1;
-        keepOwed(estimate, 'its alert could not be written this run');
+        owe(estimate, 'its alert could not be written this run');
         logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`);
         continue;
       }
@@ -930,13 +543,12 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       result.problems += 1;
     } catch (err) {
       result.failed += 1;
+      owe(estimate, 'could not be checked this run');
       logger.warn(`[combined-booking-check] estimate ${id} check failed: ${err.message}`);
-      // Still owed: a failed recheck never drops a booking off the overflow bell.
-      keepOwed(estimate);
     }
   }
   result.overflow = owed.length;
-  result.closed += await postOverflow(conn, owed, { raise });
+  result.closed += await postOverflow(conn, owed, { raise, canRing: rings < ringBudget });
   return result;
 }
 
@@ -946,13 +558,10 @@ module.exports = {
   evaluateCombinedBooking,
   composeAlert,
   postAlert,
-  markPrepaidCoverage,
   ringOnNewProblem,
   problemKeys,
   outcomeOf,
-  heldProblems,
-  acceptedPrograms,
-  firstApplicationAmount,
+  acceptedFamilies,
   shortName,
   OPS_KEY,
   DONE_WHEN,

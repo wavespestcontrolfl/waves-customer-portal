@@ -8657,7 +8657,6 @@ module.exports.explicitCadenceFieldForService = explicitCadenceFieldForService;
 module.exports.explicitlyOneTimeCadence = explicitlyOneTimeCadence;
 module.exports.estimateOneTimeItemsFromData = estimateOneTimeItemsFromData;
 module.exports.recurringLineAnnualAmount = recurringLineAnnualAmount;
-module.exports.lineAnnualPerVisitAmount = lineAnnualPerVisitAmount;
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
