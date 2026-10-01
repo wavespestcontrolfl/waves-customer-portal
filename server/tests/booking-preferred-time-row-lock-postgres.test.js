@@ -249,11 +249,11 @@ jest.setTimeout(60000);
       const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
       await database('scheduled_services').insert({ self_booking_id: sba[0].id });
       const closed = await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
-      expect(closed.closedLeadIds).toEqual([req.leadId]);
+      expect(closed.closed).toBe(1);
       const attributed = await attributeSelfBooking({
         customerId: cust, attribution, serviceInterest: 'Pest Control', customerCreated, selfBookedAppointmentId: sba[0].id, bookingSource, leadConverted: false, database,
       });
-      if (attributed?.attributed && closed.closedLeadIds.length) await dropSupersededPreferredFunnelRows(database, { leadIds: closed.closedLeadIds, booking: sba[0] });
+      if (attributed?.attributed) await dropSupersededPreferredFunnelRows(database, { booking: sba[0] });
       return { leadId: req.leadId, sbaId: sba[0].id, attributed };
     };
     const requestRow = (leadId) => database('ad_service_attribution').where({ lead_id: leadId });
@@ -296,12 +296,77 @@ jest.setTimeout(60000);
       const req = await recordPreferredTimeRequest(database, value(), { notify: false });
       await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
       const sba = await database('self_booked_appointments').insert({ customer_id: cust }).returning(['id']);
-      expect(await dropSupersededPreferredFunnelRows(database, { leadIds: [req.leadId], booking: sba[0] })).toBe(0);
+      // an audit row for THIS booking marks the request as closed by it
+      await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+      await closeBookedPreferredLeads(database, { customerId: cust, booking: { ...sba[0], created_at: new Date() } });
+      expect(await dropSupersededPreferredFunnelRows(database, { booking: sba[0] })).toBe(0);
       expect(await requestRow(req.leadId)).toHaveLength(1);
       await database('ad_service_attribution').insert({ lead_id: null, self_booked_appointment_id: sba[0].id, funnel_stage: 'booked' });
       await database('ad_service_attribution').where({ lead_id: req.leadId }).update({ funnel_stage: 'completed' });
-      expect(await dropSupersededPreferredFunnelRows(database, { leadIds: [req.leadId], booking: sba[0] })).toBe(0);
+      expect(await dropSupersededPreferredFunnelRows(database, { booking: sba[0] })).toBe(0);
       expect(await requestRow(req.leadId)).toHaveLength(1);
+    });
+
+    describe('either closer may run first: whichever runs SECOND deletes (reconcile vs the booking\'s own close + attribution)', () => {
+      const { reconcileBookingSince } = require('../services/booking-preferred-time');
+      const setup = async () => {
+        const cust = randomUUID();
+        await database('customers').insert({ id: cust, phone: '+19415550100' });
+        const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+        await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        return { cust, req, booking: sba[0] };
+      };
+      const attribute = (cust, booking) => attributeSelfBooking({
+        customerId: cust, attribution: captured, serviceInterest: 'Pest Control', customerCreated: false, selfBookedAppointmentId: booking.id, bookingSource: null, leadConverted: false, database,
+      });
+
+      test('reconcile closes the request FIRST (booking close finds nothing), then the booking row lands: the booking path drops the request row -> one row', async () => {
+        const { cust, req, booking } = await setup();
+        await reconcileBookingSince(database, { phone: '9415550100', since: new Date(Date.now() - 60000) });
+        expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
+        expect(await requestRow(req.leadId)).toHaveLength(1); // no booking row yet: kept
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(0); // reconcile won the close
+        const attributed = await attribute(cust, booking);
+        expect(attributed.attributed).toBe(true);
+        if (attributed.attributed) await dropSupersededPreferredFunnelRows(database, { booking });
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+        expect(await bookingRows(booking.id)).toHaveLength(1);
+        expect(await database('ad_service_attribution').count('* as n').first()).toMatchObject({ n: '1' });
+      });
+
+      test('the booking row lands FIRST, then reconcile closes the request: the reconcile drops the request row -> one row', async () => {
+        const { cust, req, booking } = await setup();
+        const attributed = await attribute(cust, booking);
+        expect(attributed.attributed).toBe(true);
+        // booking's own close did not run (it lost / has not run yet); nothing to drop and the request is still open
+        await dropSupersededPreferredFunnelRows(database, { booking });
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+        await reconcileBookingSince(database, { phone: '9415550100', since: new Date(Date.now() - 60000) });
+        expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+        expect(await bookingRows(booking.id)).toHaveLength(1);
+      });
+
+      test('a replay (first attempt attributed, then died before its close) closes and drops; running it twice changes nothing more', async () => {
+        const { cust, req, booking } = await setup();
+        await attribute(cust, booking);
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(1);
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(0);
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+        expect(await bookingRows(booking.id)).toHaveLength(1);
+      });
+
+      test('a request staff reopened (no longer handled) keeps its funnel row', async () => {
+        const { cust, req, booking } = await setup();
+        await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        await attribute(cust, booking);
+        await database('leads').where({ id: req.leadId }).update({ status: 'new' });
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(0);
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+      });
     });
 
     test('the close itself never touches the request\'s funnel row (the reconcile path, which has no attributeSelfBooking, leaves it)', async () => {

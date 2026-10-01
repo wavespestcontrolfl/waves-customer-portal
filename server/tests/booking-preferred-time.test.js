@@ -835,13 +835,6 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
-  test('the close reports the ids it closed (only those), for the booking path\'s funnel cleanup', async () => {
-    mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
-    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 2, closedLeadIds: ['lead-1', 'lead-2'] });
-    mockLockedLead = { ...mockLockedLead, status: 'lost' };
-    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toEqual({ live: true, closed: 0, closedLeadIds: [] });
-  });
-
   test('the ONLY notification is one admin FYI (Leads area, 60/110 limits, link to the lead, already_done), deduped per (lead, visit)', async () => {
     await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
@@ -961,12 +954,14 @@ describe('a completed booking closes the customer\'s open preferred-time request
     const replaySrc = src.slice(replayStart, replayEnd);
     expect(replaySrc).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing \}\);/);
     const normal = src.slice(replayEnd);
-    expect(normal).toMatch(/if \(!callbackVisit\) \{\s*closedPreferred = await closeBookedPreferredLeads\(db, \{ customerId: custId, booking \}\);/);
-    // The request's funnel row is dropped ONLY on the normal path, after attributeSelfBooking, and only when it attributed;
-    // the replay path (which never calls attributeSelfBooking) keeps the row.
-    expect(normal).toMatch(/selfAttribution\?\.attributed && closedPreferred\?\.closedLeadIds\?\.length\) \{\s*await dropSupersededPreferredFunnelRows\(db, \{ leadIds: closedPreferred\.closedLeadIds, booking \}\);/);
+    expect(normal).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking \}\);/);
+    // The request's funnel row is dropped by whichever closer runs SECOND: the normal path after attributeSelfBooking
+    // (only when it attributed), the replay path after its close, and the submit's reconcile after its close.
+    expect(normal).toMatch(/if \(selfAttribution\?\.attributed\) await dropSupersededPreferredFunnelRows\(db, \{ booking \}\);/);
     expect(normal.indexOf('await attributeSelfBooking(')).toBeLessThan(normal.indexOf('dropSupersededPreferredFunnelRows(db'));
-    expect(replaySrc).not.toContain('dropSupersededPreferredFunnelRows');
+    expect(replaySrc).toMatch(/closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing \}\);\s*[^\n]*\n[^\n]*\n\s*await dropSupersededPreferredFunnelRows\(db, \{ booking: txResult\.existing \}\);/);
+    const svc0 = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    expect(svc0).toMatch(/closeBookedPreferredLeads\(db, \{ customerId: candidate\.customer_id, booking: candidate \}\);[\s\S]*?await dropSupersededPreferredFunnelRows\(db, \{ booking: candidate \}\);/);
     // attribution runs exactly as on main: only the originating-lead conversion feeds it.
     expect(src).toMatch(/leadConverted: !!leadConversion\?\.converted,/);
     expect(src).not.toContain('convertPreferredTimeLeadsOnBooking');

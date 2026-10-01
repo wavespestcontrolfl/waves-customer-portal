@@ -227,6 +227,9 @@ async function reconcileBookingSince(db, { phone, since }) {
       .select('sba.id', 'sba.customer_id', 'sba.created_at');
     for (const candidate of bookings || []) {
       const out = await closeBookedPreferredLeads(db, { customerId: candidate.customer_id, booking: candidate });
+      // The booking's own funnel row may already exist (its attribution ran before
+      // this close): then this closer is the second and drops the request's row.
+      await dropSupersededPreferredFunnelRows(db, { booking: candidate });
       if (out.live) return true;
     }
     return false;
@@ -486,7 +489,6 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
     const service = clean(visit.service_type, 120) || 'a service';
     const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
     let closed = 0;
-    const closedLeadIds = [];
     for (const lead of open) {
       // Per-(lead, visit) advisory lock: the booking's own post-commit path and
       // the submit's reconcile can both arrive for the same visit.
@@ -535,10 +537,9 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
       });
       if (!result) continue;
       closed += 1;
-      closedLeadIds.push(lead.id);
       await notifyRequestClosed({ lead, customerName: result.name, service, day, visitId: visit.id });
     }
-    return { live: true, closed, closedLeadIds };
+    return { live: true, closed };
   } catch (err) {
     logger.warn(`[booking:preferred-time] booking close failed for customer=${customerId}: ${err.message}`);
     return none;
@@ -546,22 +547,37 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
 }
 
 /**
- * Once a booking's OWN attribution row exists, the closed request's funnel row is
- * a duplicate of the same journey (one lead + one booked row = two leads, one
- * booking in the dashboard / Ads funnels; codex #5477 r1 P1), so it is removed.
- * Only then: a booking that recorded no row (no attribution capture, an owned
- * recovery / estimate-originated link, a replay that never reached
- * attributeSelfBooking) leaves the request's row as the journey's only funnel
- * entry. The replacement is verified in the SAME statement as the delete (a row
- * keyed to this booking's id exists), and a row already at booked / completed
- * (revenue attached) is never removed. Best-effort: never throws into the
- * booking. Returns the number of rows removed.
+ * Once a booking's OWN attribution row exists, the funnel row of a request that
+ * booking closed is a duplicate of the same journey (one lead + one booked row =
+ * two leads, one booking in the dashboard / Ads funnels; codex #5477 r1 P1), so
+ * it is removed. Only then: a booking that recorded no row (no attribution
+ * capture, an owned recovery / estimate-originated link, a replay that never
+ * reached attributeSelfBooking) leaves the request's row as the journey's only
+ * funnel entry.
+ *
+ * The requests are resolved from the persisted audit rows THIS booking wrote when
+ * it closed them (status_change, reason booking_on_preferred_request, this
+ * booking_id; the lead still 'handled'), never from an in-memory result, so it
+ * does not matter which closer won the race (the booking's own post-commit close,
+ * the submit's reconcileBookingSince, or a replay): each calls this after its
+ * own step and whichever runs SECOND, once the booking's row exists, deletes.
+ * Idempotent. The replacement (a row keyed to this booking's id, belonging to
+ * another lead) is verified in the same statement as the delete, and a row
+ * already at booked / completed (revenue attached) is never removed.
+ * Best-effort: never throws into the booking. Returns the rows removed.
  */
-async function dropSupersededPreferredFunnelRows(db, { leadIds = [], booking = null } = {}) {
-  if (!booking || !booking.id || !Array.isArray(leadIds) || !leadIds.length) return 0;
+async function dropSupersededPreferredFunnelRows(db, { booking = null } = {}) {
+  if (!booking || !booking.id) return 0;
   try {
     return (await db('ad_service_attribution')
-      .whereIn('lead_id', leadIds)
+      .whereIn('lead_id', function closedByThisBooking() {
+        this.select('a.lead_id').from('lead_activities as a')
+          .join('leads as l', 'l.id', 'a.lead_id')
+          .where('a.activity_type', 'status_change')
+          .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
+          .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
+          .where('l.status', CLOSED_STATUS);
+      })
       .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
       .whereExists(function replacementRow() {
         this.select(1).from('ad_service_attribution as booked')
@@ -578,6 +594,7 @@ async function dropSupersededPreferredFunnelRows(db, { leadIds = [], booking = n
 module.exports = {
   closeBookedPreferredLeads,
   dropSupersededPreferredFunnelRows,
+  reconcileBookingSince,
   LEAD_TYPE,
   TIME_OF_DAY_LABELS,
   validatePreferredTimeRequest,

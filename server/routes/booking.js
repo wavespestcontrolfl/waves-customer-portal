@@ -6053,6 +6053,9 @@ async function createSelfBooking(payload = {}) {
       // (idempotent per lead + visit; closes as 'handled', never converts).
       if (!callbackVisit) {
         await closeBookedPreferredLeads(db, { customerId: custId, booking: txResult.existing });
+        // The first attempt's own attribution row may already exist: if so, the
+        // request this booking closed no longer needs its funnel row.
+        await dropSupersededPreferredFunnelRows(db, { booking: txResult.existing });
       }
       return { ok: true, body: {
         booking: txResult.existing,
@@ -6451,9 +6454,8 @@ async function createSelfBooking(payload = {}) {
     // status 'handled' with one audit row and one admin FYI. No lead is won or
     // lost, no funnel row touched. Best-effort; runs whatever the gate reads (a
     // request already filed still closes). The replay branch does the same.
-    let closedPreferred = { closedLeadIds: [] };
     if (!callbackVisit) {
-      closedPreferred = await closeBookedPreferredLeads(db, { customerId: custId, booking });
+      await closeBookedPreferredLeads(db, { customerId: custId, booking });
     }
 
     // Persist an ad-tracked self-booking's click id onto a won lead so the
@@ -6485,12 +6487,11 @@ async function createSelfBooking(payload = {}) {
           bookingSource: source || null,
           leadConverted: !!leadConversion?.converted,
         });
-        // The booking now has its own funnel row, so the closed request's row is a
-        // duplicate of the same journey: drop it (verified against the booking's
-        // row in the same statement; kept when the booking recorded none).
-        if (selfAttribution?.attributed && closedPreferred?.closedLeadIds?.length) {
-          await dropSupersededPreferredFunnelRows(db, { leadIds: closedPreferred.closedLeadIds, booking });
-        }
+        // The booking now has its own funnel row, so the funnel row of a request
+        // this booking closed (here or in the submit's reconcile) is a duplicate of
+        // the same journey: drop it (resolved from the close audit rows, verified
+        // against the booking's row in the same statement; kept when none).
+        if (selfAttribution?.attributed) await dropSupersededPreferredFunnelRows(db, { booking });
       } catch (err) {
         logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
       }
