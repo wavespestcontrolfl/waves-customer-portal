@@ -3324,3 +3324,38 @@ test('#5520 r4: names count again when an unknown lowercase word remains; effect
   }
   for (const t of ['Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill if it runs all night?']) expect([t, labelFactsLib.askedLabelKinds(t)]).toEqual([t, []]);
 });
+
+describe('follow-up 2 (#5520 r5 + the 2026-10-01 prod sweep): the inbound language check', () => {
+  const english = (t) => !labelFactsLib.isUnverifiedLanguageInbound(t) && labelFactsLib.isEnglishInbound(t);
+  test('English the sweep held: contractions, ordinals, units, address tails, names-only, media reactions, everyday words', () => {
+    for (const t of [
+      'How about soap? Dish soap', '1200 maple loop apt 3', 'Im home all day..', '1500 9th Ave east', 'Jane Example', "i'm impressed",
+      'Reacted \u2764\ufe0f to an image', '4400 Elm St., Oak Bluff?', 'Reimbursed from Sam not you lol', 'Gate code for the community is 5 digits. #0000',
+      'Please leave cert in the permit box for inspection', 'Rain or shine?', 'Pat Sample 100 Harbor Dr Oak Bluff FL 34000', 'Is everybody good?',
+      'Liked \u201cHello Alex! Payment received. Your report: portal.example...', 'the dogs Rex and Bo can go out now?',
+      'Reacted \u2764\ufe0f to "Hello Alex! Payment received, thank you. Invoice WPC-0000-0000...',
+    ]) expect([t, english(t)]).toEqual([t, true]);
+  });
+  // (#5520 r5 P1 "Can our Fido now mehet?" - 3 of 5 words English - still passes the 60% share: every word-list rule that held it held
+  // 48 more real English texts in the prod sweep, so it stays an accepted gap; see the PR.)
+  test('the earlier mixed-language leaks stay held', () => {
+    for (const t of ['Can Fido mehet?', 'Kutyak mehetnek outside?', 'Hi Fido kimehet most kerlek please?', 'Pot iesi?', '2godziny wystarczy?', 'Dlaczego nie']) {
+      expect([t, english(t)]).toEqual([t, false]);
+    }
+  });
+  test('effectiveness wording must share a sentence with the watering (r5 P2); "times" is not a visit (r5 P2)', () => {
+    expect(labelFactsLib.askedLabelKinds('My sprinkler is broken. Separately, is the ant bait less effective in winter?')).toEqual([]);
+    expect(labelFactsLib.askedLabelKinds('Will the sprinklers make it less effective?')).toEqual(['rain']);
+    expect(labelFactsLib.inboundRefersToOtherVisit("I asked two times before; for yesterday's treatment, when can the kids go out?", '2026-09-30', '2026-10-01')).toBe(false);
+    expect(labelFactsLib.inboundRefersToOtherVisit('two treatments back, can the kids go out?', '2026-09-30', '2026-10-01')).toBe(true);
+  });
+  test('"Is everybody good?" after a re-entry question inherits re-entry only (r5 P2)', () => {
+    expect(labelFactsLib.askedLabelKinds(['Is everybody good?', 'When can the dogs go out after the spray?'])).toEqual(['reentry']);
+  });
+});
+
+test('follow-up 2: a reaction with text typed after the quote is judged on that text, whatever quote marks it uses', () => {
+  for (const t of ['Liked \u201cThanks!\u201d kiedy psy moga wyjsc', "Liked 'Thanks!' kiedy psy moga wyjsc", 'Liked "Thanks!" kiedy psy moga wyjsc "ok"']) {
+    expect([t, labelFactsLib.isEnglishInbound(t)]).toEqual([t, false]);
+  }
+});
