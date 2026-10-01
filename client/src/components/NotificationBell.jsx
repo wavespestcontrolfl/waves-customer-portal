@@ -646,7 +646,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayTitle(n)}</div>
-                <div style={{ fontSize: 12, color: colors.muted }}>
+                <div style={{ fontSize: 14, color: colors.muted }}>
                   {n.resolution || 'Marked done'} · {timeAgo(n.done_at)}
                 </div>
               </div>
