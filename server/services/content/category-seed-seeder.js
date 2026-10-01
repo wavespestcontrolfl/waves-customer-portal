@@ -61,6 +61,7 @@ const { parseETDateTime } = require('../../utils/datetime-et');
 // resets exhausted counts against this exact number, never a private copy.
 const { _internals: { maxClaimAttempts } } = require('./opportunity-queue');
 const interceptSeeder = require('./intercept-brief-seeder');
+const { resolveRetiredLinks, resolveRetiredText } = require('./retired-blog-links');
 // Single source of truth for the FAQ-section policy: 'tree-shrub' (among
 // others) is FAQ-blocked, and category seeds must NEVER ride the narrow
 // operator-intercept FAQ exemption — a blocked service simply gets no FAQ.
@@ -463,7 +464,7 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
     .map((code) => `${code}: ${ctaCodes[code] || 'see manifest'}`);
   const hubLink = payload.hub_link || null;
   const payloadLinks = Array.isArray(payload.internal_links) ? payload.internal_links : [];
-  const internalLinks = hubLink && !payloadLinks.includes(hubLink) ? [hubLink, ...payloadLinks] : payloadLinks;
+  const internalLinks = resolveRetiredLinks(hubLink && !payloadLinks.includes(hubLink) ? [hubLink, ...payloadLinks] : payloadLinks);
 
   const operatorBrief = {
     id: payload.id,
@@ -483,7 +484,7 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
     secondary_kws: Array.isArray(payload.secondary_kws) ? payload.secondary_kws : [],
     required_sources: requiredSources,
     source_notes: sourceNotes,
-    verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
+    verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes.map(resolveRetiredText) : [],
     // The existing curated-hub gate contract makes this exact commercial
     // city-service route authoritative for the draft. Keep the field absent
     // on ordinary category seeds so their persisted overlay shape is unchanged.
@@ -540,7 +541,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, requiredSour
       ? `REQUIRED SOURCES (cite in-post with explicit attribution): ${requiredSources.join(', ')}.`
       : null,
     ...(sourceNotes || []).map((n) => `SOURCING (binding): ${n}`),
-    ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified, OMIT it.`) : []),
+    ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map(resolveRetiredText).map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified, OMIT it.`) : []),
     `AUTHOR (exact frontmatter author block): ${JSON.stringify(byline.frontmatter)}.`,
     byline.emphasis || null,
     ctaDirectives.length ? `CTAs (link each with its RELATIVE on-site path, e.g. [request a quote](/pest-control-quote/) — never an absolute URL; the conversion-CTA gate only recognizes relative hrefs): ${ctaDirectives.join(' || ')}` : null,

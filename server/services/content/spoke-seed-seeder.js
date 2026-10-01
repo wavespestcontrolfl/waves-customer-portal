@@ -49,6 +49,7 @@ const { parseETDateTime } = require('../../utils/datetime-et');
 // resets exhausted counts against this exact number, never a private copy.
 const { _internals: { maxClaimAttempts } } = require('./opportunity-queue');
 const interceptSeeder = require('./intercept-brief-seeder');
+const { resolveRetiredLinks, resolveRetiredText } = require('./retired-blog-links');
 const { normalizeSpokeSites } = require('../content-astro/spoke-sites');
 const { spokeBlogNetworkEnabled } = require('./spoke-blog-network');
 
@@ -347,10 +348,10 @@ function buildSpokeOverlay({ opportunity, pageType, requiredSections = [], schem
   // Required in-body links: the hub link leads (most-relevant hub city/service
   // page) so the supporting-blog hub_link_present hard check is satisfied by
   // the curated target rather than a writer guess.
-  const internalLinks = Array.from(new Set([
+  const internalLinks = resolveRetiredLinks([
     ...(hubLink ? [hubLink] : []),
     ...(Array.isArray(payload.internal_links) ? payload.internal_links : []),
-  ]));
+  ]);
 
   const operatorBrief = {
     id: payload.id,
@@ -370,7 +371,7 @@ function buildSpokeOverlay({ opportunity, pageType, requiredSections = [], schem
     hub_anchor: hubAnchor,
     internal_links_required: internalLinks,
     schema_types: Array.isArray(payload.schema_types) ? payload.schema_types : [],
-    verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
+    verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes.map(resolveRetiredText) : [],
     faq_required: (Array.isArray(payload.schema_types) && payload.schema_types.includes('FAQPage')) || outlineHasFaq,
     // The specific FAQ-blocked service id for a blocked pest topic (else null).
     // The runtime FAQ guards read this so an FAQ the writer adds anyway is
@@ -412,7 +413,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, city, target
     payload.internal_links?.length
       ? `ADDITIONAL HUB LINKS (optional, each a natural in-body anchor): ${payload.internal_links.join(', ')}.`
       : null,
-    ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified, OMIT it.`) : []),
+    ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map(resolveRetiredText).map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified, OMIT it.`) : []),
     `AUTHOR (exact frontmatter author block): ${JSON.stringify(byline.frontmatter)}.`,
     byline.emphasis || null,
     ctaDirectives.length ? `CTAs (link each with its RELATIVE on-site path, e.g. [request a quote](/pest-control-quote/) — never an absolute URL; the conversion-CTA gate only recognizes relative hrefs): ${ctaDirectives.join(' || ')}` : null,
