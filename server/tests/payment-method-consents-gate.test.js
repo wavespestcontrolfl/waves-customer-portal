@@ -213,3 +213,49 @@ describe('rendered consent version (codex #5434 r1 P1)', () => {
     });
   });
 });
+
+// Deferred prepay recovery (codex #5434 r1 P1): an authorization recorded
+// under an OLDER consent text version is looked up by that version (or any
+// version for an unstamped job), never by the current text it cannot match.
+describe('hasConsentSnapshotForVariant — version / anyVersion lookups', () => {
+  const { hasConsentSnapshotForVariant } = require('../services/payment-method-consents');
+  const text = require('../services/payment-method-consent-text');
+  function chain(row) {
+    const q = { wheres: [] };
+    q.where = jest.fn((arg, ...rest) => { q.wheres.push(rest.length ? [arg, ...rest] : arg); return q; });
+    q.first = jest.fn(async () => row);
+    return q;
+  }
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('default: matches the CURRENT text snapshot for the variant', async () => {
+    const q = chain({ id: 'c1' });
+    db.mockReturnValue(q);
+    await expect(hasConsentSnapshotForVariant('cust-1', 'pm_1', { methodType: 'card', variant: 'prepay_card' })).resolves.toBe(true);
+    expect(q.wheres[1]).toEqual({ consent_text_snapshot: text.getConsentText('card', { variant: 'prepay_card' }) });
+  });
+
+  test('version: matches the row recorded under THAT version, scoped by source and since', async () => {
+    const q = chain({ id: 'c1' });
+    db.mockReturnValue(q);
+    const since = new Date('2026-09-30T20:00:00.000Z');
+    await expect(hasConsentSnapshotForVariant('cust-1', 'pm_1', { version: 'v11_2026-08-25', source: 'estimate_accept', since })).resolves.toBe(true);
+    expect(q.wheres).toEqual([
+      { customer_id: 'cust-1', stripe_payment_method_id: 'pm_1' },
+      { consent_text_version: 'v11_2026-08-25' },
+      { source: 'estimate_accept' },
+      ['created_at', '>=', since],
+    ]);
+  });
+
+  test('anyVersion: no text or version filter at all (unstamped jobs)', async () => {
+    const q = chain(null);
+    db.mockReturnValue(q);
+    await expect(hasConsentSnapshotForVariant('cust-1', 'pm_1', { anyVersion: true, source: 'estimate_accept' })).resolves.toBe(false);
+    expect(q.wheres).toEqual([
+      { customer_id: 'cust-1', stripe_payment_method_id: 'pm_1' },
+      { source: 'estimate_accept' },
+    ]);
+  });
+});

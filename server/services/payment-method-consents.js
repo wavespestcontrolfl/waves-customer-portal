@@ -137,11 +137,18 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { d
 // immediate-charge authorization in the ledger even when an older
 // future-invoice consent exists, while webhook-backstop retries must not
 // stack duplicate rows).
-async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, since = null, source = null, dbh = db } = {}) {
+// `version` / `anyVersion` (codex #5434 r1 P1, deferred prepay recovery):
+// an authorization recorded under an OLDER consent text version cannot be
+// matched by the current text, and the older text is not re-derivable —
+// recovery therefore looks the row up by the version the capture attested
+// (`version`), or by any version at all (`anyVersion`, for jobs stamped
+// before versions were persisted), scoped by `source`/`since` as usual.
+async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, since = null, source = null, version = null, anyVersion = false, dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
-  const text = getConsentText(methodType, { variant });
   const q = dbh('payment_method_consents')
-    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId, consent_text_snapshot: text });
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId });
+  if (version) q.where({ consent_text_version: String(version) });
+  else if (!anyVersion) q.where({ consent_text_snapshot: getConsentText(methodType, { variant }) });
   // `source` scopes the idempotency to ONE capture surface: an identical
   // consent the customer gave elsewhere (portal, another link) is its own
   // ledger row and must not stand in for this surface's record.

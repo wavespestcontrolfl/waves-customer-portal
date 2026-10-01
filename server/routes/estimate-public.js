@@ -12712,6 +12712,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // Pay disable landing in the gap would otherwise read as
               // predating authorization and be re-enabled.
               authorized_at: acceptAuthorizedAt.toISOString(),
+              // The saved-payment-method consent text version this accept
+              // attested (validated current above — codex #5434 r1 P1):
+              // recovery records the prepay authorization only while this
+              // is still the current text, and otherwise looks the
+              // customer's own authorization row up by this version instead
+              // of manufacturing a current-version consent they never read.
+              consent_text_version: String(req.body?.consentTextVersion || ''),
               // First prepay visit — the recovery sweep re-runs the
               // promised inspection-credit redemption against THIS booking
               // before charging or delivering a pay link (Codex r9 P0: the
