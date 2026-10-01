@@ -2461,6 +2461,17 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 
+  test('r3 P0: an after-visit variant mismatch on a still-required policy also retires the dropped intent', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true, autopayDisabled: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+  });
+
   test('r3 P0: an attestation alone (no intent) retires nothing', async () => {
     seed();
     livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
@@ -2528,6 +2539,46 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     const res = await putAccept(TOKEN, {});
     expect(res.status).toBe(200);
     expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  describe('r3 P0: ACCEPT_BILLING_CHANGED drift under the customer lock orphans the verified capture', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType: 'card',
+      });
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(true);
+    });
+    afterEach(() => {
+      verifySpy.mockRestore();
+      bankSpy.mockRestore();
+      driftSpy.mockRestore();
+    });
+
+    test('drift -> the captured intent is retired before the reloadable 409', async () => {
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('a retire Stripe cannot confirm fails closed (503), nothing committed', async () => {
+      retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
   });
 
   test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {

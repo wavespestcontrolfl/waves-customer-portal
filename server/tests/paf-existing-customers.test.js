@@ -137,7 +137,7 @@ describe('accept route wiring (source pins)', () => {
 
   test('locked-customer drift aborts the accept with a reloadable 409 BEFORE any conversion / enrollment (inside the accept transaction)', () => {
     expect(src).toMatch(
-      /if \(recurringCardPolicy\.afterVisitCard === true\s*&& await RecurringCards\.pafExistingDriftUnderLock\(trx, \{ customerId, policy: recurringCardPolicy \}\)\) \{[\s\S]{0,300}err\.status = 409;[\s\S]{0,120}err\.code = 'ACCEPT_BILLING_CHANGED';\s*throw err;/,
+      /if \(recurringCardPolicy\.afterVisitCard === true\s*&& await RecurringCards\.pafExistingDriftUnderLock\(trx, \{ customerId, policy: recurringCardPolicy \}\)\) \{[\s\S]{0,1200}err\.status = 409;[\s\S]{0,120}err\.code = 'ACCEPT_BILLING_CHANGED';\s*throw err;/,
     );
     // ...and it sits before the intent re-read, i.e. before anything is committed or enrolled.
     expect(src.indexOf("err.code = 'ACCEPT_BILLING_CHANGED'")).toBeLessThan(src.indexOf('verifyRecurringCardIntentUnderLock({ setupIntentId: recurringCardVerification.setupIntentId })'));

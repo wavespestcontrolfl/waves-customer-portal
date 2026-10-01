@@ -9979,15 +9979,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         : attestedConsentVariant !== '';
     }
     if (consentMismatch) {
-      // r3 pre-push P0: the policy no longer expects a capture (rollout gate
-      // off, saved method from another tab, exemption), so the intent this
-      // tab captured is ORPHANED. The reload accepts on a no-capture path
-      // that may leave no marker (gate off), and the setup_intent.succeeded
-      // recovery would then read it as a legacy capture and enroll it —
-      // undoing an Auto Pay opt-out. Retire it in Stripe now (the recovery
-      // live-reads an unbound intent and skips a retired one). A retire that
-      // cannot be confirmed fails closed: the tab keeps its intent and retries.
-      if (recurringCardPolicy.required !== true && recurringCardSetupIntentId) {
+      // r3 pre-push P0: the client drops the intent it captured on this 409,
+      // so that SetupIntent is ORPHANED — succeeded in Stripe, bound to
+      // nothing. If the reload then accepts on a path that writes no marker
+      // (rollout gate off, exempt cohort), the setup_intent.succeeded recovery
+      // would read it as a legacy capture and enroll it — undoing an Auto Pay
+      // opt-out. Retire it in Stripe now (the recovery live-reads an unbound
+      // intent and skips a retired one). A retire that cannot be confirmed
+      // fails closed: the tab keeps its intent and retries.
+      if (recurringCardSetupIntentId) {
         const retired = await RecurringCards.retireOrphanedCaptureIntent({
           estimate,
           setupIntentId: recurringCardSetupIntentId,
@@ -11524,6 +11524,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // 409; the refreshed page resolves today's behavior for the new state.
       if (recurringCardPolicy.afterVisitCard === true
         && await RecurringCards.pafExistingDriftUnderLock(trx, { customerId, policy: recurringCardPolicy })) {
+        // The client drops its captured intent on this 409 (like
+        // CONSENT_VARIANT_STALE) — retire it so the reloaded accept, which may
+        // be exempt and write no marker, can never have it recovered as a
+        // legacy capture (r3 pre-push P0). Fail closed if Stripe cannot confirm.
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          const retired = await RecurringCards.retireOrphanedCaptureIntent({
+            estimate,
+            setupIntentId: recurringCardVerification.setupIntentId,
+          });
+          if (!retired.ok) {
+            const retireErr = new Error('We could not update your payment terms just now. Please try again in a moment.');
+            retireErr.status = 503;
+            retireErr.code = 'RECURRING_CARD_RETIRE_FAILED';
+            throw retireErr;
+          }
+        }
         const err = new Error('Your account just changed. Please reload the page and confirm again.');
         err.status = 409;
         err.isOperational = true;
@@ -14864,6 +14880,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
+    if (err && err.code === 'RECURRING_CARD_RETIRE_FAILED' && err.status === 503) {
+      return res.status(503).json({ error: err.message, code: err.code });
+    }
     if (err && err.status >= 400 && err.status < 500) {
       // A 404 is the token route's GENERIC answer and carries no code: a
       // raced hold (OFF_CUSTOMER_SURFACE) must read exactly like an unknown
