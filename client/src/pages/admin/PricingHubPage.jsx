@@ -22,6 +22,16 @@ export const PRICING_AREAS = [
   { key: "rate-review", label: "Rate review", Icon: ClipboardList, adminOnly: true, gated: true },
 ];
 
+// The page each area renders; Logic and Strategy hand their section tabs up.
+const AREA_PAGES = {
+  logic: (onSecondaryNav) => <PricingLogicPage embedded onSecondaryNav={onSecondaryNav} />,
+  strategy: (onSecondaryNav) => <PricingStrategyPage embedded onSecondaryNav={onSecondaryNav} />,
+  notices: () => <AdminPriceChangePage embedded />,
+  "rate-review": () => <RateReviewPage embedded />,
+};
+// The migrated (Tier 1) areas; the rest render at the legacy density.
+const COMFORTABLE_AREAS = new Set(["notices", "rate-review"]);
+
 export default function PricingHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const isAdmin = getAdminUser()?.role === "admin";
@@ -62,6 +72,7 @@ export default function PricingHubPage() {
   // Sub-tabs/actions registered by the embedded area page (null when the
   // active area has none).
   const [secondary, setSecondary] = useState(null);
+  const nav = secondary || {};
 
   // Only Price Notices is migrated, so the comfortable density has to stop at
   // it — the comfortable rule sets font-size and line-height on the surface
@@ -71,7 +82,7 @@ export default function PricingHubPage() {
   // remount this whole subtree, AdminCommandHeader included, on every area
   // switch, since a host element and a component never reconcile. `legacy` is
   // the context default, so those two areas render exactly as they do on main.
-  const density = activeArea === "notices" || activeArea === "rate-review" ? "comfortable" : "legacy";
+  const density = COMFORTABLE_AREAS.has(activeArea) ? "comfortable" : "legacy";
 
   return (
     <UiSurface density={density}>
@@ -88,25 +99,17 @@ export default function PricingHubPage() {
           activeKey={activeArea}
           onSectionChange={selectArea}
           ariaLabel="Pricing areas"
-          actions={secondary?.actions}
-          secondarySections={secondary?.sections || []}
-          secondaryActiveKey={secondary?.activeKey}
-          onSecondaryChange={secondary?.onChange}
-          secondaryAriaLabel={secondary?.ariaLabel}
-          secondaryNavGridClassName={secondary?.navGridClassName}
+          actions={nav.actions}
+          secondarySections={nav.sections || []}
+          secondaryActiveKey={nav.activeKey}
+          onSecondaryChange={nav.onChange}
+          secondaryAriaLabel={nav.ariaLabel}
+          secondaryNavGridClassName={nav.navGridClassName}
       />
 
-      {activeArea === "logic" && (
-        <PricingLogicPage embedded onSecondaryNav={setSecondary} />
-      )}
-      {activeArea === "strategy" && (
-        <PricingStrategyPage embedded onSecondaryNav={setSecondary} />
-      )}
-      {activeArea === "notices" && <AdminPriceChangePage embedded />}
-      {activeArea === "rate-review" && <RateReviewPage embedded />}
-      {activeArea === null && (
-        <div role="status" className="text-ui-body text-ink-secondary min-h-[240px] py-10 text-center">Loading pricing…</div>
-      )}
+      {activeArea === null
+        ? <div role="status" className="text-ui-body text-ink-secondary min-h-[240px] py-10 text-center">Loading pricing…</div>
+        : AREA_PAGES[activeArea](setSecondary)}
     </UiSurface>
   );
 }

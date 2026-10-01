@@ -34,7 +34,7 @@ function fixtureRows() {
   return [
     row(ROW_A, { rph_from_not_home: true, not_home_visits: 3 }),
     row(ROW_B, { customer_name: "Fixture Fournier", city: "Parrish", anniversary_date: "2027-01-20", current_rate_cents: 13000, gap_pct: -11.111, band: "A", proposed_rate_cents: 13000, delta_cents: 0, annual_delta_cents: 0, status: "no_change", revenue_per_hour_cents: 22100 }),
-    row(ROW_C, { customer_name: "Fixture Lima", city: "Sarasota", anniversary_date: "2027-01-14", current_rate_cents: 11700, gap_pct: 0, band: "B", proposed_rate_cents: 12100, delta_cents: 400, annual_delta_cents: 1600, status: "exception", flags: ["past_due", "list_from_cadence_mode"] }),
+    row(ROW_C, { customer_name: "Fixture Lima", city: "Sarasota", anniversary_date: "2027-01-14", current_rate_cents: 11700, gap_pct: 0, band: "B", proposed_rate_cents: 12100, delta_cents: 400, annual_delta_cents: 1600, status: "exception", flags: ["past_due", "list_from_cadence_mode", "list_low_confidence", "multi_program_line"] }),
     row(ROW_D, { customer_name: "Fixture Unpriced", city: "Venice", current_rate_cents: 0, list_rate_cents: null, gap_pct: null, band: null, proposed_rate_cents: 0, delta_cents: 0, annual_delta_cents: 0, status: "skipped", flags: ["no_current_rate"], revenue_per_hour_cents: null, usable_visits: 0 }),
     row(ROW_E, { customer_name: "Fixture Nguyen", city: "Lakewood Ranch", family_key: "lawn_care", cadence: "every_6_weeks", visits_per_year: 9, anniversary_date: "2027-01-15", current_rate_cents: 5600, list_rate_cents: 6800, list_rate_source: "cadence_mode", gap_pct: 17.647, usable_visits: 1, revenue_per_hour_cents: null, band: "D", proposed_rate_cents: 6300, delta_cents: 700, annual_delta_cents: 6300, flags: ["capped", "list_from_cadence_mode"] }),
     // Monthly dues on a quarterly line: the start date is 2026-01-28, the review date (the server's review_date) is its 2027 occurrence.
@@ -121,7 +121,7 @@ function installFetch() {
     }
     if (method === "POST" && path.endsWith("/digest")) {
       if (digestResponse) return jsonResponse(digestResponse.body, digestResponse.status);
-      return jsonResponse({ ok: true, batchKey: "2027-01", sent: true, stamped: true, skipped: null, subject: "ACT: Rate review — January 2027 batch" });
+      return jsonResponse({ ok: true, batchKey: "2027-01", sent: true, stamped: true, channel: "email", skipped: null, subject: "ACT: Rate review — January 2027 batch" });
     }
     if (method === "PUT" && path.endsWith("/admin/rate-review/config")) {
       return jsonResponse({ ok: true, config: { ...CONFIG, ...body, cost_block_set_at: "2026-10-28T14:00:00.000Z", cost_block_set_by_name: "Owner Fixture" }, changed: {} });
@@ -194,6 +194,10 @@ describe("RateReviewPage", () => {
 
     expect(screen.getByText("Exceptions · 1 · waiting for you")).toBeInTheDocument();
     expect(screen.getByText("Past due")).toBeInTheDocument();
+    // every hold the ranking emits has a chip — a pricing problem is never hidden behind "Held for review"
+    expect(screen.getByText("List price low confidence")).toBeInTheDocument();
+    expect(screen.getByText("Several programs on one line")).toBeInTheDocument();
+    expect(screen.queryByText("Held for review")).not.toBeInTheDocument();
     expect(screen.getByText("Sarasota · Pest · Quarterly · anniversary Jan 14, 2027")).toBeInTheDocument();
     // The Field label names the control; the status is its visible text.
     expect(screen.getByRole("button", { name: "Cost block" })).toHaveTextContent("Not written yet · Write it");
@@ -489,7 +493,10 @@ describe("RateReviewPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Email me this batch" }));
     await screen.findByText("Batch digest sent to contact@: ACT: Rate review — January 2027 batch");
     expect(calls.find((c) => c.method === "POST").path).toMatch(/\/batches\/2027-01\/digest$/);
-    digestResponse = { status: 200, body: { ok: true, batchKey: "2027-01", sent: false, stamped: false, skipped: "already_sent", subject: null } };
+    digestResponse = { status: 200, body: { ok: true, batchKey: "2027-01", sent: true, stamped: true, channel: "in_app", skipped: null, subject: "ACT: Rate review — January 2027 batch" } };
+    fireEvent.click(screen.getByRole("button", { name: "Email me this batch" }));
+    await screen.findByText("Batch digest posted to the admin bell (ops digests are in-app): ACT: Rate review — January 2027 batch");
+    digestResponse = { status: 200, body: { ok: true, batchKey: "2027-01", sent: false, stamped: false, channel: null, skipped: "already_sent", subject: null } };
     fireEvent.click(screen.getByRole("button", { name: "Email me this batch" }));
     await screen.findByText("This batch's digest already went out; a rebuild sends an updated one.");
     digestResponse = { status: 409, body: { error: "A rate review build is running — try again in a moment.", reason: "build_in_progress" } };

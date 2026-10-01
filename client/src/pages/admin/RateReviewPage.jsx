@@ -49,6 +49,10 @@ const EXCEPTION_REASONS = {
   termite_program: ["Termite program", "neutral"],
   multi_property: ["Multi-property", "neutral"],
   lane_cleanup: ["Billing lane needs cleanup", "neutral"],
+  list_low_confidence: ["List price low confidence", "neutral"],
+  list_bundle_incomplete: ["Bundle list price incomplete", "neutral"],
+  multi_program_line: ["Several programs on one line", "neutral"],
+  unsupported_family: ["Unsupported service line", "neutral"],
   cadence_conflict: ["Cadence conflict", "neutral"],
   rate_unattributed: ["Rate unattributed", "neutral"],
   facts_unavailable: ["Account facts unavailable", "neutral"],
@@ -65,6 +69,9 @@ const NOWRAP = "whitespace-nowrap";
 // cell is "label · value", so the value reads left like its neighbours.
 const NUM = `${NOWRAP} max-[1100px]:text-left`;
 const RELOAD_FAILED = "The batch could not be reloaded — use Try again.";
+// Where a sent owner digest went (the route's channel): the inbox, or the
+// admin bell when ops digests are in-app.
+const DIGEST_SENT = { email: "Batch digest sent to contact@", in_app: "Batch digest posted to the admin bell (ops digests are in-app)" };
 // What the owner digest route answers when it sends nothing.
 const DIGEST_SKIPPED = {
   already_sent: "This batch's digest already went out; a rebuild sends an updated one.",
@@ -871,7 +878,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
     try {
       const data = await adminFetch(`/admin/rate-review/batches/${key}/digest`, { method: "POST" });
       if (!stillSelected(key)) return;
-      if (data.sent) setFeedback({ ok: true, text: `Batch digest sent to contact@: ${data.subject}` });
+      if (data.sent) setFeedback({ ok: true, text: `${DIGEST_SENT[data.channel] || "Batch digest sent"}: ${data.subject}` });
       else setFeedback({ ok: false, text: DIGEST_SKIPPED[data.skipped] || "Not sent." });
     } catch (e) {
       if (!stillSelected(key)) return;

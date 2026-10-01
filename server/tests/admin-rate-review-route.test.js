@@ -193,12 +193,16 @@ describe('POST /batches/:key/build', () => {
     });
   });
   test('POST /batches/:key/digest delivers the owner digest on demand under the same lock', async () => {
-    mockSendBatchEmail.mockResolvedValue({ sent: true, stamped: true, subject: 'ACT: Rate review — …', rows: 6 });
+    mockSendBatchEmail.mockResolvedValue({ sent: true, stamped: true, channel: 'email', subject: 'ACT: Rate review — …', rows: 6 });
     await withServer(async (base) => {
       expect((await call(base, 'POST', '/api/admin/rate-review/batches/dec-2026/digest')).status).toBe(400);
       const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
       expect(out.status).toBe(200);
-      expect(out.body).toEqual({ ok: true, batchKey: '2026-12', sent: true, stamped: true, skipped: null, subject: 'ACT: Rate review — …' });
+      expect(out.body).toEqual({ ok: true, batchKey: '2026-12', sent: true, stamped: true, channel: 'email', skipped: null, subject: 'ACT: Rate review — …' });
+      // the in-app ops-digest posture (GATE_OPS_DIGESTS_IN_APP) is reported as such — the bell, not contact@
+      mockSendBatchEmail.mockResolvedValueOnce({ sent: true, stamped: true, channel: 'in_app', subject: 'ACT: Rate review — …', rows: 6 });
+      const bell = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
+      expect(bell.body).toMatchObject({ sent: true, channel: 'in_app' });
       expect(mockSendBatchEmail).toHaveBeenCalledWith({ batchKey: '2026-12' });
       expect(mockRunExclusive).toHaveBeenLastCalledWith('rate-review-monthly', expect.any(Function), { recordHealth: false, waitForSlot: false });
       // no such batch → 404; a fail-closed skip (recipient / unconfigured) is reported, not an error
@@ -207,14 +211,14 @@ describe('POST /batches/:key/build', () => {
       mockSendBatchEmail.mockResolvedValueOnce({ sent: false, skipped: 'recipient', subject: 'ACT: …' });
       const skipped = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
       expect(skipped.status).toBe(200);
-      expect(skipped.body).toMatchObject({ sent: false, skipped: 'recipient' });
+      expect(skipped.body).toMatchObject({ sent: false, channel: null, skipped: 'recipient' });
       // already delivered (the one-email marker, read under the lock) → nothing more is sent; a rebuild clears the marker
       mockBatchEmailed.mockResolvedValueOnce(true);
       const again = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
       expect(again.status).toBe(200);
       expect(again.body).toMatchObject({ ok: true, sent: false, skipped: 'already_sent' });
       expect(mockBatchEmailed).toHaveBeenLastCalledWith('2026-12');
-      expect(mockSendBatchEmail).toHaveBeenCalledTimes(3); // the three sends above, none for the retry
+      expect(mockSendBatchEmail).toHaveBeenCalledTimes(4); // the four sends above, none for the retry
       // a held lock → 409; a provider failure → 502 with the status only (the provider body can carry addresses)
       mockRunExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
       expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest')).status).toBe(409);
@@ -285,7 +289,7 @@ describe('PUT /batches/:key/rows/:id', () => {
     });
   });
   test.each([
-    ['batch_has_sent_rows', 409], ['row_locked', 409], ['row_is_exception', 409], ['row_not_found', 404],
+    ['batch_has_sent_rows', 409], ['row_locked', 409], ['row_is_exception', 409], ['no_visits_per_year', 409], ['row_not_found', 404],
     ['proposed_below_current', 400], ['proposed_not_whole_dollars', 400], ['status_required', 400],
   ])('refusal %s → %s with the reason', async (reason, status) => {
     mockUpdateRow.mockResolvedValue({ ok: false, reason, error: `refused: ${reason}` });

@@ -2083,12 +2083,19 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
     entry.anniversary = anniversary;
     entry.reviewDate = anniversaryInWindow(anniversary.date, from, to);
     entry.carriedFrom = null;
-    if (!anniversary.date || entry.reviewDate) { selected.push(entry); continue; }
     const latest = latestByLine.get(`${entry.customer.id}|${entry.familyKey}`);
     // An owner's skip (admin_skipped: Include unticked / Skip this cycle) is a
     // decision for that cycle, not a hold to carry — the line returns at its
     // next anniversary (or a catch-up build), as the screen says.
-    if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || (parseJson(latest.flags) || []).includes('admin_skipped')) continue;
+    const ownerSkipped = !!latest && (parseJson(latest.flags) || []).includes('admin_skipped');
+    if (!anniversary.date || entry.reviewDate) {
+      // Consecutive windows share their boundary day: the occurrence the owner
+      // skipped in the previous batch is not listed again by the next one.
+      if (ownerSkipped && entry.reviewDate && dateColumn(latest.review_date) === entry.reviewDate) continue;
+      selected.push(entry);
+      continue;
+    }
+    if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || ownerSkipped) continue;
     const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
     if (!anchor || anchor < carryFloor || anchor > to) continue;
     entry.reviewDate = anchor;
@@ -2103,14 +2110,22 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
 
 // Stage 5 — per-customer facts for the selected entries only (facts.js
 // fans out ~24 queries per customer; sequential on purpose).
+// The facts and signal reads recover from a failed statement (degraded
+// evidence holds the line), so they never run on the build transaction:
+// PostgreSQL aborts a transaction at its first failed statement and ignores
+// everything after it until the rollback, which would turn one degraded
+// read into a failed build. They read the committed state on the pool; the
+// batch lock, and the prior-review read (which does not recover), stay on
+// the transaction.
 async function loadReviewFacts(dbh, selected, { now, config, batchKey }) {
   const windowCustomerIds = [...new Set(selected.map((e) => e.customer.id))];
   const priorReviews = await loadPriorReviews(dbh, windowCustomerIds, { batchKey });
+  const recoverable = dbh.isTransaction ? db : dbh;
   const factsByCustomer = new Map();
   const signalsByCustomer = new Map();
   for (const customerId of windowCustomerIds) {
-    factsByCustomer.set(customerId, await loadFacts(dbh, customerId, { now }));
-    signalsByCustomer.set(customerId, await loadExceptionSignals(dbh, customerId, { now, config }));
+    factsByCustomer.set(customerId, await loadFacts(recoverable, customerId, { now }));
+    signalsByCustomer.set(customerId, await loadExceptionSignals(recoverable, customerId, { now, config }));
   }
   return { priorReviews, factsByCustomer, signalsByCustomer };
 }
@@ -2577,12 +2592,16 @@ function nextRowState(row, { proposed, status, config }) {
   // already-ranked boundary proposal (33¢ a month for $1 per application
   // on a quarterly line) stays green across an Include toggle.
   const minDelta = monthly && vpy > 0 ? Math.floor((config.min_delta_cents * vpy) / 12) : config.min_delta_cents;
-  const isChange = delta > 0 && delta >= minDelta;
+  // A per-application line with no visit count (a custom cadence) cannot
+  // price a change per year — the ranking's own no_visits_per_year hold.
+  const priceable = monthly || vpy > 0;
+  const isChange = priceable && delta > 0 && delta >= minDelta;
   // A status-less amount edit keeps the row in or out of the batch as it was.
   const out = status === 'skipped' || (status == null && row.status === 'skipped');
   const flags = new Set(parseJson(row.flags) || []);
   if (proposed !== Number(row.proposed_rate_cents)) flags.add('admin_edited');
   if (row.status === 'exception' && !out) flags.add('exception_included');
+  if (!priceable) flags.add('no_visits_per_year');
   // An owner's skip is a decision for this cycle, never a carry-forward hold
   // (selectReviewEntries leaves an admin_skipped line out of the next batch).
   if (out) flags.add('admin_skipped'); else flags.delete('admin_skipped');
@@ -2623,6 +2642,12 @@ async function updateRow({ batchKey, rowId, proposedRateCents, status, includeEx
       ? { cents: Number(row.proposed_rate_cents) }
       : validateProposedCents(proposedRateCents, Number(row.current_rate_cents), { wholeDollars: row.rate_unit !== 'month' });
     if (checked.error) return { ok: false, reason: checked.reason, error: checked.error };
+    // A line without a visit count cannot price a change per year (the
+    // ranking holds it at no change): an amount above the current rate is
+    // refused rather than approved as a green row worth $0 a year.
+    if (row.rate_unit !== 'month' && !(Number(row.visits_per_year) > 0) && checked.cents > Number(row.current_rate_cents)) {
+      return { ok: false, reason: 'no_visits_per_year', error: 'This line has no visit count, so a change cannot be priced per year — it stays at no change until its cadence is known.' };
+    }
     const next = nextRowState(row, { proposed: checked.cents, status, config: configForBatch(batchRow, liveConfig) });
 
     const now = new Date();
@@ -2952,6 +2977,7 @@ module.exports = {
   batchEmailed,
   composeBatchEmail,
   _private: {
+    loadReviewFacts,
     soldPosturePins,
     COMBINED_CATALOG_SQL,
     RETIRED_COMBINED_CATALOG_KEYS,

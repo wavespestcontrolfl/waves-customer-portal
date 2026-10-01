@@ -170,6 +170,19 @@ describe('batchDigest', () => {
 // ── row edits ───────────────────────────────────────────────────────────
 
 describe('updateRow', () => {
+  test('a line with no visit count refuses an amount above its current rate; an include lands at no change, never green', async () => {
+    const db = fakeDb(seed());
+    // the ranking holds such a line at its current rate (no_visits_per_year)
+    Object.assign(db.tables.rate_review_snapshots.find((r) => r.id === ROW_C), { cadence: 'other', visits_per_year: null, proposed_rate_cents: 10500, delta_cents: 0, annual_delta_cents: 0, flags: JSON.stringify(['past_due', 'no_visits_per_year']) });
+    const refused = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_C, proposedRateCents: 11000, status: 'green', includeException: true, actorId: ADMIN, dbh: db });
+    expect(refused).toMatchObject({ ok: false, reason: 'no_visits_per_year' });
+    expect(mockAudit).not.toHaveBeenCalled();
+    const included = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_C, status: 'green', includeException: true, actorId: ADMIN, dbh: db });
+    expect(included.ok).toBe(true);
+    expect(included.row).toMatchObject({ status: 'no_change', delta_cents: 0, annual_delta_cents: 0 });
+    expect(included.row.flags).toEqual(expect.arrayContaining(['exception_included', 'no_visits_per_year']));
+  });
+
   test('a new proposed amount recomputes delta, annual delta and status, flags the hand edit and audits it', async () => {
     const db = fakeDb(seed());
     const out = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_A, proposedRateCents: 11200, actorId: ADMIN, dbh: db });
@@ -438,6 +451,21 @@ describe('selectReviewEntries vs admin_skipped', () => {
     const owned = selectReviewEntries([entry()], { ...args, latestByLine: latest(['admin_skipped']) });
     expect(owned).toEqual([]);
   });
+
+  test('consecutive windows share their boundary day: the occurrence the owner skipped is not listed again, a new occurrence is', () => {
+    const { selectReviewEntries } = rateReview._private;
+    // first visit 2026-01-05 → anniversary 2027-01-05, in both the Dec 6–Jan 5 and the Jan 5–Feb 4 windows
+    const customer = { id: CUST(1), member_since: '2026-01-05', created_at: '2026-01-05T12:00:00Z' };
+    const entry = () => ({ customer, familyKey: 'pest_control', first: { completed_dates: ['2026-01-05'], first_visit: '2026-01-05' }, acceptedAt: null, visitsPerYear: 4 });
+    const latest = (reviewDate, flags) => new Map([[`${CUST(1)}|pest_control`, { status: 'skipped', review_date: reviewDate, batch_key: '2026-12', computed_at: '2026-11-01T11:20:00Z', flags: JSON.stringify(flags) }]]);
+    const args = { from: '2027-01-05', to: '2027-02-04', now: new Date('2026-12-01T11:20:00Z'), firstVisits: null };
+    // the same occurrence, skipped by the owner in the previous batch → not listed again
+    expect(selectReviewEntries([entry()], { ...args, latestByLine: latest('2027-01-05', ['admin_skipped']) })).toEqual([]);
+    // the same occurrence skipped by the ranking (no owner decision) → listed, as before
+    expect(selectReviewEntries([entry()], { ...args, latestByLine: latest('2027-01-05', []) }).map((e) => e.reviewDate)).toEqual(['2027-01-05']);
+    // an owner skip of an EARLIER occurrence never hides the new one
+    expect(selectReviewEntries([entry()], { ...args, latestByLine: latest('2026-01-05', ['admin_skipped']) }).map((e) => e.reviewDate)).toEqual(['2027-01-05']);
+  });
 });
 
 // ── a decided batch is never recomputed ─────────────────────────────────
@@ -512,5 +540,33 @@ describe('sendBatchEmail channel', () => {
     expect(out).toMatchObject({ sent: true, channel: 'in_app', rows: 4 });
     expect(deliverOpsDigest).toHaveBeenCalledWith(expect.objectContaining({ key: 'rate-review', link: '/admin/pricing-logic?area=rate-review&batch=2027-01' }));
     expect(db.tables.rate_review_batches[0].email_sent_at).toBeInstanceOf(Date);
+  });
+});
+
+// ── the build's recoverable reads ───────────────────────────────────────
+
+describe('loadReviewFacts', () => {
+  test('the facts and signal reads, which recover from a failed statement, run on the pool — never on the build transaction', async () => {
+    const trx = fakeDb(seed());
+    trx.isTransaction = true;
+    const pool = fakeDb(seed());
+    const dbModule = require('../models/db');
+    dbModule.mockImplementation((table) => pool(table));
+    dbModule.raw.mockImplementation((...args) => pool.raw(...args));
+    try {
+      const out = await rateReview._private.loadReviewFacts(trx, [{ customer: { id: CUST(1) } }], { now: new Date('2026-12-01T12:00:00Z'), config: { exception_callback_days: 90 }, batchKey: '2027-01' });
+      expect(out.priorReviews).toBeInstanceOf(Set);
+      expect(out.signalsByCustomer.get(CUST(1))).toBeDefined();
+      // The prior-review read (no recovery) stays on the transaction; nothing else runs there —
+      // a failed statement there would abort the whole build (PostgreSQL ignores the rest of the block).
+      expect(trx.reads.map((r) => r.table)).toEqual(['rate_review_snapshots']);
+      expect(trx.raw).not.toHaveBeenCalled();
+      // Every signal read — the raw callback count included — and the facts fan-out went to the pool.
+      expect(pool.reads.map((r) => r.table)).toEqual(expect.arrayContaining(['cancellation_cases', 'retention_offers', 'plan_holds']));
+      expect(pool.raw).toHaveBeenCalled();
+    } finally {
+      dbModule.mockImplementation(() => { throw new Error('inject a fake db'); });
+      dbModule.raw.mockReset();
+    }
   });
 });

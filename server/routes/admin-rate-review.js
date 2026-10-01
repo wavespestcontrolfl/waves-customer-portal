@@ -70,6 +70,7 @@ const REASON_STATUS = {
   batch_has_sent_rows: 409,
   row_locked: 409,
   row_is_exception: 409,
+  no_visits_per_year: 409,
   digest_mismatch: 409,
   row_not_found: 404,
   batch_not_found: 404,
@@ -216,7 +217,10 @@ router.post('/batches/:key/digest', async (req, res) => {
     if (wasLockSkipped(locked)) return lockBusy(res, locked);
     const sent = locked || {};
     if (sent.skipped === 'no_batch') return res.status(404).json({ error: 'No rate review batch has that key', reason: 'no_batch' });
-    return res.json({ ok: true, batchKey: key, sent: !!sent.sent, stamped: !!sent.stamped, skipped: sent.skipped || null, subject: sent.subject || null });
+    // channel: where a sent digest went — 'email' (contact@) or 'in_app' (the
+    // admin bell, GATE_OPS_DIGESTS_IN_APP) — so the screen never claims an inbox
+    // delivery the bell took.
+    return res.json({ ok: true, batchKey: key, sent: !!sent.sent, stamped: !!sent.stamped, channel: sent.sent ? sent.channel || null : null, skipped: sent.skipped || null, subject: sent.subject || null });
   } catch (err) {
     const status = Number.isInteger(err && err.status) ? err.status : 'network';
     logger.error(`[admin-rate-review] digest for ${key} could not be sent (status ${status})`);
