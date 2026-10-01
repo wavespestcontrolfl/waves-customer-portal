@@ -24,6 +24,7 @@ const {
   recordPreferredTimeRequest,
   hasRecentPreferredTimeRequest,
   closeBookedPreferredLeads,
+  dropSupersededPreferredFunnelRows,
 } = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -6450,8 +6451,9 @@ async function createSelfBooking(payload = {}) {
     // status 'handled' with one audit row and one admin FYI. No lead is won or
     // lost, no funnel row touched. Best-effort; runs whatever the gate reads (a
     // request already filed still closes). The replay branch does the same.
+    let closedPreferred = { closedLeadIds: [] };
     if (!callbackVisit) {
-      await closeBookedPreferredLeads(db, { customerId: custId, booking });
+      closedPreferred = await closeBookedPreferredLeads(db, { customerId: custId, booking });
     }
 
     // Persist an ad-tracked self-booking's click id onto a won lead so the
@@ -6472,7 +6474,7 @@ async function createSelfBooking(payload = {}) {
     if (!callbackVisit) {
       try {
         const { attributeSelfBooking } = require('../services/lead-estimate-link');
-        await attributeSelfBooking({
+        const selfAttribution = await attributeSelfBooking({
           customerId: custId,
           attribution,
           serviceInterest: resolvedServiceType,
@@ -6483,6 +6485,12 @@ async function createSelfBooking(payload = {}) {
           bookingSource: source || null,
           leadConverted: !!leadConversion?.converted,
         });
+        // The booking now has its own funnel row, so the closed request's row is a
+        // duplicate of the same journey: drop it (verified against the booking's
+        // row in the same statement; kept when the booking recorded none).
+        if (selfAttribution?.attributed && closedPreferred?.closedLeadIds?.length) {
+          await dropSupersededPreferredFunnelRows(db, { leadIds: closedPreferred.closedLeadIds, booking });
+        }
       } catch (err) {
         logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
       }

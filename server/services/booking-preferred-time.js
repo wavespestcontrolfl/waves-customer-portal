@@ -486,6 +486,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
     const service = clean(visit.service_type, 120) || 'a service';
     const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
     let closed = 0;
+    const closedLeadIds = [];
     for (const lead of open) {
       // Per-(lead, visit) advisory lock: the booking's own post-commit path and
       // the submit's reconcile can both arrive for the same visit.
@@ -516,18 +517,6 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
           && (!current.customer_id || String(current.customer_id) === String(customerId));
         if (!stillOurs) return null;
         await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
-        // The request's own funnel row goes with it, in this same transaction:
-        // the booking records its own attribution row (attributeSelfBooking), so
-        // leaving this one at 'lead' would count one journey as two leads and
-        // one booking in the dashboard / Ads funnels (codex #5477 r1 P1).
-        // Nothing references the row (no FKs in, readers key on lead_id /
-        // customer_id), and a row that already reached 'booked' or 'completed'
-        // (revenue attached) is never removed. 'handled' has no funnel mapping,
-        // so the row could not be reconciled any other way.
-        await trx('ad_service_attribution')
-          .where({ lead_id: lead.id })
-          .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
-          .del();
         await trx('lead_activities').insert({
           lead_id: lead.id,
           activity_type: 'status_change',
@@ -546,17 +535,49 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
       });
       if (!result) continue;
       closed += 1;
+      closedLeadIds.push(lead.id);
       await notifyRequestClosed({ lead, customerName: result.name, service, day, visitId: visit.id });
     }
-    return { live: true, closed };
+    return { live: true, closed, closedLeadIds };
   } catch (err) {
     logger.warn(`[booking:preferred-time] booking close failed for customer=${customerId}: ${err.message}`);
     return none;
   }
 }
 
+/**
+ * Once a booking's OWN attribution row exists, the closed request's funnel row is
+ * a duplicate of the same journey (one lead + one booked row = two leads, one
+ * booking in the dashboard / Ads funnels; codex #5477 r1 P1), so it is removed.
+ * Only then: a booking that recorded no row (no attribution capture, an owned
+ * recovery / estimate-originated link, a replay that never reached
+ * attributeSelfBooking) leaves the request's row as the journey's only funnel
+ * entry. The replacement is verified in the SAME statement as the delete (a row
+ * keyed to this booking's id exists), and a row already at booked / completed
+ * (revenue attached) is never removed. Best-effort: never throws into the
+ * booking. Returns the number of rows removed.
+ */
+async function dropSupersededPreferredFunnelRows(db, { leadIds = [], booking = null } = {}) {
+  if (!booking || !booking.id || !Array.isArray(leadIds) || !leadIds.length) return 0;
+  try {
+    return (await db('ad_service_attribution')
+      .whereIn('lead_id', leadIds)
+      .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
+      .whereExists(function replacementRow() {
+        this.select(1).from('ad_service_attribution as booked')
+          .whereRaw('booked.self_booked_appointment_id = ?', [booking.id])
+          .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id');
+      })
+      .del()) || 0;
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] superseded funnel row cleanup failed for booking=${booking.id}: ${err.message}`);
+    return 0;
+  }
+}
+
 module.exports = {
   closeBookedPreferredLeads,
+  dropSupersededPreferredFunnelRows,
   LEAD_TYPE,
   TIME_OF_DAY_LABELS,
   validatePreferredTimeRequest,
