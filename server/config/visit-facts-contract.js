@@ -1137,6 +1137,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
   invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',
+  completionSmsRecapMode: 'Completion-text claim marker (Fast Complete fixed re-service text, frozen at record insert): the one-text dedupe that pest-recap.js and recap-delivery.js honor; not a customer report fact.',
   backfill: 'Backfill-completion audit marker (quiet/backdated closeout posture).',
   backfillMintRequired: 'Backfill invoice-mint bookkeeping (required-mint posture frozen at commit).',
   backfillMintAmountCents: 'Backfill invoice-mint bookkeeping (frozen amount).',
