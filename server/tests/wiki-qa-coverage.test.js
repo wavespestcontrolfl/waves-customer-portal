@@ -67,6 +67,16 @@ test('no routed article logs coverage none', async () => {
   expect(mockInserts[0]).toMatchObject({ coverage: 'none', asked_by: 'brief_driven_agent' });
 });
 
+test('no model keys and no keyword match logs coverage none', async () => {
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const spy = jest.spyOn(WikiQA, 'search').mockResolvedValueOnce([]);
+  const result = await WikiQA.query('door sweeps', { source: 'tech_field' });
+  spy.mockRestore();
+  expect(result.answer).toMatch(/No matching articles/);
+  expect(mockInserts[0]).toMatchObject({ coverage: 'none', asked_by: 'tech_field' });
+});
+
 test('a missing coverage line logs no coverage', async () => {
   dispatchWithFallback
     .mockResolvedValueOnce({ ok: true, json: { paths: ['pests/ants.md'] } })

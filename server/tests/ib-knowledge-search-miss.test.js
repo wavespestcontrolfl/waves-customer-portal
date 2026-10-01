@@ -14,8 +14,11 @@ const empty = { fieldIntelligence: [], knowledgeBase: [] };
 
 beforeEach(() => WikiQA.logQuery.mockClear());
 
-test('an empty knowledge search is logged as a gap', () => {
-  expect(recordKnowledgeSearchMiss('search_field_intelligence', { query: ' door sweeps ' }, empty, false)).toBe(true);
+test('an empty knowledge search is logged as a gap, and the write is awaited', async () => {
+  let landed = false;
+  WikiQA.logQuery.mockImplementationOnce(async () => { await Promise.resolve(); landed = true; });
+  expect(await recordKnowledgeSearchMiss('search_field_intelligence', { query: ' door sweeps ' }, empty, false)).toBe(true);
+  expect(landed).toBe(true);
   expect(WikiQA.logQuery).toHaveBeenCalledWith('door sweeps', null, [], 'intelligence_bar', 'none');
 });
 
@@ -27,7 +30,7 @@ test.each([
   ['a knowledge-base hit', 'search_field_intelligence', { query: 'x' }, { ...empty, knowledgeBase: [{ slug: 'a' }] }, false],
   ['an operational hit', 'search_field_intelligence', { query: 'x' }, { ...empty, operationalKnowledge: [{ ref: 'a' }] }, false],
   ['a blank query', 'search_field_intelligence', { query: '  ' }, empty, false],
-])('%s logs nothing', (_label, tool, input, result, failed) => {
-  expect(recordKnowledgeSearchMiss(tool, input, result, failed)).toBe(false);
+])('%s logs nothing', async (_label, tool, input, result, failed) => {
+  expect(await recordKnowledgeSearchMiss(tool, input, result, failed)).toBe(false);
   expect(WikiQA.logQuery).not.toHaveBeenCalled();
 });
