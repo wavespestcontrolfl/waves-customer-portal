@@ -368,6 +368,26 @@ jest.setTimeout(60000);
         });
       });
 
+      test('two paid requests the same day: the earlier first contact wins, whatever the row ids say (terminal Codex pass 2)', async () => {
+        const cust = randomUUID();
+        await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
+        const later = await recordPreferredTimeRequest(database, value(), { notify: false });
+        await database('leads').where({ id: later.leadId }).update({ first_contact_at: '2026-09-20T16:00:00Z' });
+        // the earlier request: staff reopened it, so it is open alongside (inserted second: a higher row id)
+        const [{ id: earlierId }] = await database('leads').insert({
+          lead_type: 'book_preferred_time', status: 'new', phone: '+19415550100', first_name: 'Pat', last_name: 'Sample',
+          first_contact_at: '2026-09-20T09:00:00Z', extracted_data: JSON.stringify({ last_requested_at: '2026-09-20T09:00:00Z' }),
+        }).returning(['id']);
+        await database('ad_service_attribution').insert({ lead_id: later.leadId, funnel_stage: 'lead', lead_source: 'google_ads', lead_date: '2026-09-20', gclid: 'g-later', is_paid: true });
+        await database('ad_service_attribution').insert({ lead_id: earlierId, funnel_stage: 'lead', lead_source: 'facebook_ads', lead_date: '2026-09-20', fbclid: 'f-earlier', is_paid: true });
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })).closed).toBe(2);
+        await database('ad_service_attribution').insert({ lead_id: null, self_booked_appointment_id: sba[0].id, funnel_stage: 'booked', lead_source: 'website', is_paid: false });
+        expect(await dropSupersededPreferredFunnelRows(database, { booking: sba[0] })).toBe(2);
+        expect((await bookingRows(sba[0].id))[0]).toMatchObject({ lead_source: 'facebook_ads', fbclid: 'f-earlier', gclid: null });
+      });
+
       test('a booking with a paid click of its own keeps it', async () => {
         const { sbaId } = await setupPaid({ bookingTouch: { lead_source: 'facebook_ads', fbclid: 'f-own', is_paid: true } });
         expect((await bookingRows(sbaId))[0]).toMatchObject({ lead_source: 'facebook_ads', fbclid: 'f-own', gclid: null });

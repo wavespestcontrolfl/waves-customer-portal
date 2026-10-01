@@ -783,10 +783,14 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
         .first('booked.*');
       const hasPaidClick = (row) => PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
       if (target && !hasPaidClick(target)) {
-        const requestRows = (await trx('ad_service_attribution')
-          .whereIn('lead_id', closedIds)
-          .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
-          .orderBy([{ column: 'lead_date', order: 'asc', nulls: 'last' }, { column: 'id', order: 'asc' }])) || [];
+        // Earliest first contact wins: ordered by the requests' contact instants (the
+        // calendar lead_date ties same-day, and the row id is not contact order).
+        const requestRows = (await trx('ad_service_attribution as r')
+          .join('leads as rl', 'rl.id', 'r.lead_id')
+          .whereIn('r.lead_id', closedIds)
+          .where((q) => q.whereNull('r.funnel_stage').orWhereNotIn('r.funnel_stage', ['booked', 'completed']))
+          .orderByRaw('COALESCE(rl.first_contact_at, rl.created_at) ASC NULLS LAST, r.lead_date ASC NULLS LAST, r.id ASC')
+          .select('r.*')) || [];
         const firstPaid = requestRows.find((row) => row.is_paid === true);
         // A converted genuine lead keeps its own touch when it came first (codex
         // #5477 r12): judged on the leads' first-contact instants, not the
