@@ -123,6 +123,12 @@ export default function PaymentPreferenceButtons({
   // a BANK account, is charged directly with no save step, so the copy must
   // stay tender-neutral and not instruct a card save (Codex #3492 r10).
   prepayCardCapture = false,
+  // GATE_PAF_EXISTING_CUSTOMERS (server /data recurringCardPolicy
+  // .afterVisitExisting): an existing customer on the pay-after-first-visit
+  // card rail — the accept sends NO invoice or pay link, the card on file is
+  // billed after the first visit, so the "we send the invoice after you
+  // approve" copy below must not render.
+  payAfterFirstVisit = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -245,7 +251,9 @@ export default function PaymentPreferenceButtons({
         : heldRecurring
           ? 'No payment now — we confirm your exact price on a quick site visit, then bill each application after service.'
           : invoiceRows.length > 0
-            ? `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`
+            ? (payAfterFirstVisit
+              ? 'Choose pay per application. Nothing is charged today — your card on file is billed for your first visit after it is completed.'
+              : `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`)
             : 'Choose pay per application. Your first service visit will be billed after completion.';
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'

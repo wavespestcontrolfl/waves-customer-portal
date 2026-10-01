@@ -54,7 +54,7 @@ import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimat
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -3048,7 +3048,10 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
 // method" after a capture already succeeded — the parent retires the saved
 // intent and remounts this modal with a fresh one.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false }) {
+// afterVisit (GATE_PAF_EXISTING_CUSTOMERS): existing customer on the
+// pay-after-first-visit card rail — the checkbox renders the after_visit_card
+// (v12) authorization, the variant the accept records.
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3247,7 +3250,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {prepay
               ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
-              : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
+              : (bank ? ACH_CONSENT_TEXT : (afterVisit ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
           </span>
         </label>
         {error ? (
@@ -9034,6 +9037,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
+                payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
               />
             </>
           ) : null}
@@ -9207,6 +9211,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onStateChange={handleInlineCardState}
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
+                afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
@@ -9302,6 +9307,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               onCancel={handleRecurringCardCancel}
               onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
+              afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
             />
           ) : null}
           {websiteMode ? null : aiPanelBlock}
@@ -9373,6 +9379,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
+                payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
               />
             </div>
           ) : null

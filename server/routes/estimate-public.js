@@ -12903,8 +12903,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // off what the capture UI RENDERED (in-lane prepay accept), not
           // off whether the charge plan resolved — the snapshot must match
           // the checkbox the customer saw even when the quote step degraded.
+          // PR-B (GATE_PAF_EXISTING_CUSTOMERS): an existing customer the
+          // sub-gate moved onto the card rail saw the "charged after your
+          // first visit" authorization (/data recurringCardPolicy
+          // .afterVisitConsent), so that variant (v12) is what is recorded.
           consentVariant: annualPrepaySelected && recurringCardLaneActive
-            && RecurringCards.isPrepayCardAndChargeEnabled() ? 'prepay_card' : null,
+            && RecurringCards.isPrepayCardAndChargeEnabled()
+            ? 'prepay_card'
+            : (recurringCardPolicy.afterVisitCard === true ? 'after_visit_card' : null),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
@@ -14622,6 +14628,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           : null,
         prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
         invoiceKind,
+        afterVisitBilling: recurringCardPolicy.afterVisitCard === true
+          && recurringCardLaneActive
+          && require('../config/feature-gates').pafExistingCustomersLive(),
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -19979,6 +19988,13 @@ function buildAcceptNotificationPayload({
   // 'annual_prepay_deferred' = a termite annual-plan accept parked for the
   // customer's signature — nothing is billed, booked or approved yet.
   invoiceKind = null,
+  // PR-B (GATE_PAF_EXISTING_CUSTOMERS): an existing customer moved onto the
+  // pay-after-first-visit card rail. Their accept mints an invoice attached
+  // to the visit but sends NO pay link, so the final "our team will follow up
+  // with the invoice details" fall-through would promise an invoice that is
+  // not coming — say what actually happens instead. False/omitted = today's
+  // copy byte for byte.
+  afterVisitBilling = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -20235,6 +20251,16 @@ function buildAcceptNotificationPayload({
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
+    };
+  }
+
+  if (afterVisitBilling) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer on the card rail: no pay link sent, billed after the first visit.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your card on file is billed after your first visit.`,
+      customerLink: '/?tab=billing',
     };
   }
 
@@ -28066,6 +28092,15 @@ async function composeEstimateDataPayload(estimate, {
         // carries). PLUMBING ONLY: no client code reads it yet. Present only
         // when true so every gate-off response stays byte-identical.
         ...(RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData) ? { payAfterFirstVisit: true } : {}),
+        // PR-B (GATE_PAF_EXISTING_CUSTOMERS): this existing customer was moved
+        // onto the card rail by the sub-gate. The capture UI renders the
+        // after_visit_card authorization (v12) and the accept records that
+        // same variant. Present only when true — gate-off responses stay
+        // byte-identical.
+        ...(recurringCardPolicyForData.afterVisitCard === true && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
+          ? { afterVisitExisting: true } : {}),
+        ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.required === true
+          ? { afterVisitConsent: true } : {}),
       },
       estimate: {
         id: estimate.id,

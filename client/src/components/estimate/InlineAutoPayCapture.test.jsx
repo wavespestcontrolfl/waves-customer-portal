@@ -272,3 +272,34 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     expect(getByText(/remove your card anytime/)).toBeInTheDocument();
   });
 });
+
+// GATE_PAF_EXISTING_CUSTOMERS (PR-B): an existing customer on the
+// pay-after-first-visit card rail agrees to the after_visit_card (v12)
+// authorization — the same variant the accept records.
+describe('InlineAutoPayCapture afterVisit consent', () => {
+  const termsText = (container) => container.textContent;
+
+  it('renders the after_visit_card full terms when afterVisit is set (card)', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} afterVisit />,
+    );
+    await flush();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(/after my first service visit is completed/)).toBeInTheDocument();
+    expect(getByText(/Nothing is charged today\./)).toBeInTheDocument();
+  });
+
+  it('keeps the base card terms when afterVisit is not set (gate off byte-identical)', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText, container } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(queryByText(/after my first service visit is completed/)).toBeNull();
+    expect(termsText(container)).toContain('By checking this box');
+  });
+});

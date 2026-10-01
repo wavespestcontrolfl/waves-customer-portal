@@ -168,4 +168,41 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
     const p = await policyFor({ enforced: false, required: false, exemptReason: 'feature_disabled' });
     expect(p).not.toHaveProperty('payAfterFirstVisit');
   });
+
+  // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the resolver marks an existing customer
+  // it moved onto the rail with afterVisitCard; /data surfaces two client
+  // flags, each ABSENT otherwise so gate-off payloads stay byte-identical.
+  test('PR-B: afterVisitExisting for a moved customer on the rail, afterVisitConsent only when a card is captured', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    const captured = await policyFor({ enforced: true, required: true, exemptReason: null, afterVisitCard: true });
+    expect(captured.afterVisitExisting).toBe(true);
+    expect(captured.afterVisitConsent).toBe(true);
+    const saved = await policyFor({ enforced: true, required: false, exemptReason: 'saved_method_consented', afterVisitCard: true });
+    expect(saved.afterVisitExisting).toBe(true);
+    expect(saved).not.toHaveProperty('afterVisitConsent');
+    // The paused cohort rides the same flags (card kept, pay link after the visit).
+    const paused = await policyFor({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true });
+    expect(paused.afterVisitExisting).toBe(true);
+  });
+
+  test('PR-B: a new customer on the rail and every exempt customer carry neither flag', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    for (const policy of [
+      CAPTURE,
+      { enforced: true, required: false, exemptReason: 'saved_method_consented' },
+      { enforced: true, required: false, exemptReason: 'autopay_already_active' },
+      { enforced: true, required: false, exemptReason: 'existing_plan_customer' },
+      { enforced: true, required: false, exemptReason: 'autopay_paused' },
+      { enforced: true, required: false, exemptReason: 'payer_billed' },
+    ]) {
+      const p = await policyFor(policy);
+      expect(p).not.toHaveProperty('afterVisitExisting');
+      expect(p).not.toHaveProperty('afterVisitConsent');
+    }
+  });
+
+  test('PR-B: gate off (resolver returns today\'s policy) leaves the payload byte-identical', async () => {
+    const p = await policyFor({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+    expect(Object.keys(p).sort()).toEqual(['enforced', 'exemptReason', 'prepayInLane', 'required']);
+  });
 });

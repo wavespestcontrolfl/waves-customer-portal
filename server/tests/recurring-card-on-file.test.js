@@ -145,6 +145,7 @@ beforeEach(() => {
 afterAll(() => {
   delete process.env.RECURRING_CARD_ON_FILE;
   delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+  delete process.env.GATE_PAF_EXISTING_CUSTOMERS;
 });
 
 describe('feature flag', () => {
@@ -558,6 +559,165 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       expect(p.exemptReason).toBe('existing_plan_customer');
       expect(p.savedMethodRowId).toBeUndefined();
       expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    });
+  });
+
+  // PR-B (GATE_PAF_EXISTING_CUSTOMERS, owner ruling 2026-09-30/10-01): existing
+  // customers adding a service save/use a card and pay AFTER the visit. Live
+  // only when BOTH GATE_PAY_AFTER_FIRST_VISIT and GATE_PAF_EXISTING_CUSTOMERS
+  // are exactly 'true'; every other state is today's behavior.
+  describe('GATE_PAF_EXISTING_CUSTOMERS (existing customers join the pay-after-first-visit card rail)', () => {
+    const MEMBER = { isExistingCustomer: true };
+    const PER_APP_CUSTOMER = {
+      id: 'cust-1', pipeline_stage: 'active_customer', billing_mode: 'per_application', monthly_rate: 40, autopay_enabled: true,
+    };
+    const MONTHLY_CUSTOMER = {
+      id: 'cust-1', pipeline_stage: 'active_customer', billing_mode: 'monthly_membership', monthly_rate: 80, autopay_enabled: false,
+    };
+    const live = () => { process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true'; process.env.GATE_PAF_EXISTING_CUSTOMERS = 'true'; };
+    afterEach(() => {
+      delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+      delete process.env.GATE_PAF_EXISTING_CUSTOMERS;
+      mockIsPaused.mockReturnValue(false);
+    });
+
+    it('gate off (sub-gate unset, or master unset): a plan member and a paused customer stay exempt exactly as today', async () => {
+      mockDbFixtures.customers = PER_APP_CUSTOMER;
+      // sub-gate alone, master off
+      process.env.GATE_PAF_EXISTING_CUSTOMERS = 'true';
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('existing_plan_customer');
+      // master alone, sub-gate off
+      delete process.env.GATE_PAF_EXISTING_CUSTOMERS;
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('existing_plan_customer');
+      mockIsPaused.mockReturnValue(true);
+      const paused = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(paused.exemptReason).toBe('autopay_paused');
+      expect(paused).not.toHaveProperty('afterVisitCard');
+    });
+
+    it('gate on: an existing plan member with no saved card is REQUIRED to capture one (card-required lane, after_visit_card marker)', async () => {
+      live();
+      mockCustomerOnAutopay.mockResolvedValue(false);
+      mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true });
+      // The shared lane predicate (accept suppression, /data, renderer pick)
+      // and the copy rail both see this customer as on the rail.
+      expect(payAfterFirstVisitInvoiceRail(p)).toBe(true);
+      expect(payAfterFirstVisitCardRail(p)).toBe(true);
+    });
+
+    it('gate on: a member with a consented saved card auto-satisfies (no re-ask) and carries the marker + row id', async () => {
+      live();
+      mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-7', stripe_payment_method_id: 'pm_7' });
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(p).toEqual({ enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pmrow-7', afterVisitCard: true });
+      expect(payAfterFirstVisitInvoiceRail(p)).toBe(true);
+    });
+
+    it('gate on: a LIVE-rows plan member (no membership snapshot) moves too', async () => {
+      live();
+      mockQualifyingRows.mockResolvedValue([{ id: 'svc' }]);
+      mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+      expect(p.required).toBe(true);
+      expect(p.afterVisitCard).toBe(true);
+    });
+
+    it('gate on: a member ALREADY on Auto Pay is unchanged (autopay_already_active, no marker)', async () => {
+      live();
+      mockDbFixtures.customers = PER_APP_CUSTOMER;
+      mockCustomerOnAutopay.mockResolvedValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(p).toEqual({ enforced: true, required: false, exemptReason: 'autopay_already_active' });
+    });
+
+    it('gate on, owner R5 (paused Auto Pay): the card is captured/kept, NOT exempt, never un-paused, and Auto Pay eligibility is never consulted', async () => {
+      live();
+      mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_paused_until: '2099-01-01' };
+      mockIsPaused.mockReturnValue(true);
+      const noCard = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(noCard).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true });
+      expect(payAfterFirstVisitInvoiceRail(noCard)).toBe(true);
+      // A consented saved card is kept (auto-satisfy), still marked paused.
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-7', stripe_payment_method_id: 'pm_7' });
+      const withCard = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(withCard).toEqual({
+        enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pmrow-7', afterVisitCard: true, autopayPaused: true,
+      });
+      // The pause is never lifted by the policy: no autopay write happens in
+      // the resolver, and customerOnAutopay (which would be false anyway
+      // while paused) is skipped.
+      expect(mockCustomerOnAutopay).not.toHaveBeenCalled();
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    });
+
+    it('gate on: a paused NON-member (no plan rows) moves to the rail as well', async () => {
+      live();
+      mockDbFixtures.customers = { id: 'cust-1', pipeline_stage: 'lead', billing_mode: null, monthly_rate: null, autopay_paused_until: '2099-01-01' };
+      mockIsPaused.mockReturnValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+      expect(p.required).toBe(true);
+      expect(p.autopayPaused).toBe(true);
+    });
+
+    it('gate on: the monthly-membership lane is UNCHANGED (add-on joins monthly_rate; R4 not built) — member and paused member stay exempt', async () => {
+      live();
+      mockDbFixtures.customers = MONTHLY_CUSTOMER;
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('existing_plan_customer');
+      // NULL billing_mode with a real rate is the same legacy monthly lane.
+      mockDbFixtures.customers = { ...MONTHLY_CUSTOMER, billing_mode: null };
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('existing_plan_customer');
+      mockDbFixtures.customers = { ...MONTHLY_CUSTOMER, autopay_paused_until: '2099-01-01' };
+      mockIsPaused.mockReturnValue(true);
+      const paused = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(paused.exemptReason).toBe('autopay_paused');
+      expect(paused).not.toHaveProperty('afterVisitCard');
+    });
+
+    it('gate on: an annual-prepay-lane member stays exempt (term coverage, not per-application billing)', async () => {
+      live();
+      mockDbFixtures.customers = { ...PER_APP_CUSTOMER, billing_mode: 'annual_prepay', autopay_enabled: false };
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('existing_plan_customer');
+    });
+
+    it('gate on: no resolvable customer row keeps today\'s exemption (a lookup gap never moves anyone)', async () => {
+      live();
+      mockDbFixtures.customers = null;
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('existing_plan_customer');
+    });
+
+    it('gate on: payer-billed, payer_check_uncertain, invoice_mode, one-time and legacy-prepay stay exactly as today', async () => {
+      live();
+      mockDbFixtures.customers = PER_APP_CUSTOMER;
+      mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('payer_billed');
+      mockResolveForInvoice.mockRejectedValue(new Error('payer svc down'));
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER })).exemptReason).toBe('payer_check_uncertain');
+      mockResolveForInvoice.mockResolvedValue(null);
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER, billByInvoice: true })).exemptReason).toBe('invoice_mode');
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER, treatAsOneTime: true })).exemptReason).toBe('one_time_card_hold_lane');
+      expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER, paymentMethodPreference: 'prepay_annual' })).exemptReason).toBe('prepay_annual');
+    });
+
+    it('gate on: a payer-billed PAUSED customer is still payer_billed (payer check runs before the pause)', async () => {
+      live();
+      mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_paused_until: '2099-01-01' };
+      mockIsPaused.mockReturnValue(true);
+      mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(p.exemptReason).toBe('payer_billed');
+      expect(p).not.toHaveProperty('afterVisitCard');
+    });
+
+    it('gate on: a label-only (auto tier) customer is not a member and is unaffected (still the normal required lane, no marker)', async () => {
+      live();
+      mockTierLabelStatus.mockResolvedValueOnce('label');
+      mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
+      expect(p).toEqual({ enforced: true, required: true, exemptReason: null });
     });
   });
 
@@ -1282,6 +1442,16 @@ describe('completeRecurringCardEnrollment (save → consent → enroll)', () => 
     const r = await completeRecurringCardEnrollment({ ...ARGS, consentVariant: 'prepay_card' });
     expect(r.enrolled).toBe(true);
     expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'prepay_card' }));
+  });
+
+  it('threads the after_visit_card consent variant (v12) into the recorded snapshot (PR-B existing customers)', async () => {
+    mockDbFixtures.payment_methods = null;
+    mockSavePaymentMethod.mockResolvedValue({ id: 'pmrow-1', method_type: 'card' });
+    const r = await completeRecurringCardEnrollment({ ...ARGS, consentVariant: 'after_visit_card' });
+    expect(r.enrolled).toBe(true);
+    expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
+    // The variant, not the base text, is also the idempotency key.
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_1', expect.objectContaining({ variant: 'after_visit_card' }));
   });
 
   it('is idempotent: reuses an existing pm row and skips a duplicate consent', async () => {

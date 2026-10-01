@@ -226,6 +226,28 @@ async function resolveProspectiveAcceptCustomer(estimate, database = db) {
   return { customerId, lookupFailed };
 }
 
+// PR-B (GATE_PAF_EXISTING_CUSTOMERS): which existing customers the sub-gate may
+// move onto the pay-after-first-visit card rail. Deliberately narrow:
+//  - monthly-membership-lane customers (billing_mode monthly_membership, or
+//    NULL with a real rate — customerPreservesMonthlyMembership, the same
+//    predicate the converter uses) stay exempt: their add-on joins
+//    customers.monthly_rate and the monthly cron can bill it on the next
+//    billing_day, so a card-rail accept would neither delay that charge (owner
+//    R4, NOT built — see PR notes) nor be how those customers pay, and
+//    capturing + enrolling a card would switch the monthly cron ON for a
+//    member who pays dues another way;
+//  - annual_prepay-lane customers stay exempt: their visits are covered by the
+//    prepay term, not billed per application.
+// Everything else (per_application, per_visit, one_time, non-member profiles)
+// moves. A missing row never moves (caller passes null -> not eligible).
+function pafExistingCustomerEligible(customerRow) {
+  if (!customerRow) return false;
+  const { customerPreservesMonthlyMembership } = require('./billing-cadence');
+  if (customerPreservesMonthlyMembership(customerRow)) return false;
+  if (customerRow.billing_mode === 'annual_prepay') return false;
+  return true;
+}
+
 async function resolveRecurringCardPolicyForEstimate({
   estimate,
   membership = null,
@@ -301,6 +323,18 @@ async function resolveRecurringCardPolicyForEstimate({
   // non-members: a payer-billed invoice is never auto-charged at completion,
   // so it must not be held from delivery either.
 
+  // PR-B (GATE_PAF_EXISTING_CUSTOMERS, owner ruling 2026-09-30/10-01): an
+  // existing customer adding a service saves/uses a card and pays AFTER the
+  // visit, so the two exemptions that put them on the pay-link-at-accept path
+  // (`autopay_paused`, `existing_plan_customer`) are skipped below. Read at
+  // call time. `existingCustomerRow` is the live customers row the Auto Pay
+  // check loads; null (lookup failed / customer unresolved) keeps today's
+  // exemptions — the sub-gate only ever moves a customer we positively
+  // classified as eligible (see pafExistingCustomerEligible).
+  const pafExisting = require('../config/feature-gates').pafExistingCustomersLive();
+  let existingCustomerRow = null;
+
+  let pausedKept = false;
   if (resolvedCustomerId) {
     // Payer-billed: match the eventual invoice's payer precedence
     // (scheduled_services.payer_id ?? customers.payer_id), scoped to the
@@ -334,6 +368,7 @@ async function resolveRecurringCardPolicyForEstimate({
     try {
       const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
       const customer = await db('customers').where({ id: resolvedCustomerId }).first();
+      existingCustomerRow = customer || null;
       // An ACTIVE autopay pause is the customer's explicit "don't
       // auto-charge" (Codex #3492 r12): without this check the paused
       // cohort fell through to saved_method_consented, the UI promised a
@@ -344,10 +379,23 @@ async function resolveRecurringCardPolicyForEstimate({
       // no capture demanded (asking a paused customer to save a card for
       // auto-charging contradicts the pause), invoices stay on the normal
       // payable path.
+      // PR-B owner ruling R5 (paused Auto Pay): an eligible paused customer
+      // is NOT classified out of the lane — they fall through to the
+      // saved-method / capture checks below so the accept KEEPS a card on
+      // file, with the invoice attached to the visit and no pay link at
+      // accept. The pause itself is never lifted: enrollConsentedMethod does
+      // not touch autopay_paused_until, and customerOnAutopay() stays false
+      // while it stands, so the completion auto-charge rail
+      // (complete-scheduled-service.js `customerAutopayActive` + the
+      // charge-boundary re-check) does not charge and the completion SMS
+      // carries the normal pay link.
       if (customer && isPaused(customer)) {
-        return { enforced: true, required: false, exemptReason: 'autopay_paused' };
+        if (!(pafExisting && pafExistingCustomerEligible(customer))) {
+          return { enforced: true, required: false, exemptReason: 'autopay_paused' };
+        }
+        pausedKept = true;
       }
-      if (customer && await customerOnAutopay(customer)) {
+      if (!pausedKept && customer && await customerOnAutopay(customer)) {
         return { enforced: true, required: false, exemptReason: 'autopay_already_active' };
       }
     } catch (err) {
@@ -359,9 +407,20 @@ async function resolveRecurringCardPolicyForEstimate({
   // on the normal payable path. Deliberately ahead of the saved-method
   // auto-satisfy below — a member who saved a card without enrolling is not
   // enrolled into Auto Pay by a later accept.
-  if (isPlanMember) {
+  // PR-B: under the sub-gate an ELIGIBLE existing plan customer is not exempt
+  // — they fall into the card-required lane (saved-method auto-satisfy, else
+  // capture) exactly like a new self-pay accept: invoice attached to the
+  // visit, no pay link at accept, charged after the visit.
+  const convertedExisting = pafExisting && existingCustomerRow
+    && (isPlanMember || pausedKept) && pafExistingCustomerEligible(existingCustomerRow);
+  if (isPlanMember && !convertedExisting) {
     return { enforced: true, required: false, exemptReason: 'existing_plan_customer' };
   }
+  // Marker the accept / data route read: consent variant after_visit_card and
+  // the "billed after your first visit" copy apply to exactly this cohort.
+  const convertedMarker = convertedExisting
+    ? { afterVisitCard: true, ...(pausedKept ? { autopayPaused: true } : {}) }
+    : {};
 
   if (resolvedCustomerId) {
     // Auto-satisfy (spec §3.2: existing customers with a saved card are
@@ -378,6 +437,7 @@ async function resolveRecurringCardPolicyForEstimate({
           required: false,
           exemptReason: 'saved_method_consented',
           savedMethodRowId: savedCard.id,
+          ...convertedMarker,
         };
       }
     } catch (err) {
@@ -385,7 +445,7 @@ async function resolveRecurringCardPolicyForEstimate({
     }
   }
 
-  return { enforced: true, required: true, exemptReason: null };
+  return { enforced: true, required: true, exemptReason: null, ...convertedMarker };
 }
 
 // Mint the SetupIntent that captures the Auto Pay card for a recurring accept.

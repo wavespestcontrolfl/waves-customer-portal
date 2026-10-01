@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
-import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 /**
  * Inline Auto Pay capture for the single-screen booking review (owner ask
@@ -44,10 +44,15 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
   // method" after a capture already succeeded — the parent retires the
   // saved intent and remounts this capture (keyed) on a fresh one.
+  // afterVisit (GATE_PAF_EXISTING_CUSTOMERS, server /data recurringCardPolicy
+  // .afterVisitConsent): an existing customer on the pay-after-first-visit
+  // card rail — the full terms rendered here are the after_visit_card (v12)
+  // authorization, the same variant the accept records. Card only: a bank
+  // method has no bank-specific variant copy (base ACH text covers it).
   // savedFor: what the replayed saved method is "already saved for" —
   // "this plan" (estimate accept, default), "this visit" (one-time secure
   // appointment), "Auto Pay" (standalone link). Copy only.
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan' },
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan', afterVisit = false },
   ref,
 ) {
   const mountRef = useRef(null);
@@ -326,7 +331,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 8, marginLeft: 26 }}>
           {prepay
             ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
-            : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
+            : (bank ? ACH_CONSENT_TEXT : (afterVisit ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
         </div>
       ) : null}
       {error ? (

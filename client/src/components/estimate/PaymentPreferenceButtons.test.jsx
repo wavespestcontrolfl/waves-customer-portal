@@ -325,4 +325,32 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByRole('button', { name: 'Accept + send invoice' })).toBeInTheDocument();
     expect(screen.getByText(/send an invoice pay link due immediately/i)).toBeInTheDocument();
   });
+
+  // GATE_PAF_EXISTING_CUSTOMERS (PR-B): an existing customer on the
+  // pay-after-first-visit card rail gets no invoice and no pay link at accept,
+  // so the "we send the invoice after you approve" copy must not render.
+  describe('pay-after-first-visit (existing customer on the card rail)', () => {
+    const FREQ = { key: 'quarterly', billingFrequencyKey: 'quarterly', perVisit: 89, monthly: 30 };
+    const renderButtons = (extra = {}) => render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        selectedFrequency={FREQ}
+        {...extra}
+      />,
+    );
+
+    it('gate off (flag absent): today\'s invoice-after-approval copy, byte for byte', () => {
+      renderButtons();
+      expect(screen.getByText(/we will send the first application invoice after confirmation/)).toBeInTheDocument();
+    });
+
+    it('flag on: says nothing is charged today and the card on file is billed after the first visit', () => {
+      renderButtons({ payAfterFirstVisit: true });
+      expect(screen.getByText(/Nothing is charged today — your card on file is billed for your first visit after it is completed\./)).toBeInTheDocument();
+      expect(screen.queryByText(/we will send the/)).not.toBeInTheDocument();
+    });
+  });
 });
