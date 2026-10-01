@@ -591,7 +591,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const comms = body.indexOf('const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);');
     const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols })');
     const term = body.indexOf('await reseedTermShortfall(trx, { parent, parentId, cancelled, cols })');
-    const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor })');
+    const reconcile = body.indexOf('await addOneReseedVisit(trx, {\n    parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor, placementPicker,\n  })');
     expect(addFn()).toMatch(/reconcileRecurringSeriesVisitCount\(trx, \{/);
     expect(lock).toBeGreaterThan(-1);
     expect(comms).toBeGreaterThan(lock);
@@ -663,7 +663,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     // the cap counts the same plan-row population (Codex r7)
     expect(t).toMatch(/const upcomingPlanCount = countUpcomingPlanRows\(seriesRows, todayET\);/);
     expect(t).toMatch(/const reductionIds = await readPlanReductionIds\(trx, \{\s*customerId: parent\.customer_id, parentId, candidateIds: laterCancelledPlanRowIds\(seriesRows, cancelled\.id\),\s*\}\);/);
-    expect(t).toMatch(/return \{ window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor\(seriesRows, cancelled\.id, reductionIds\) \};/);
+    expect(t).toMatch(/return \{\n\s+window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor\(seriesRows, cancelled\.id, reductionIds\), seriesRows, todayET,\n\s+\};/);
     const add = addFn();
     expect(add).toMatch(/if \(upcomingPlanCount >= MAX_SERIES_VISIT_COUNT\) return \{ skipped: 'at_max_visit_count' \};/);
     expect(add.indexOf('upcomingPlanCount >= MAX_SERIES_VISIT_COUNT')).toBeLessThan(add.indexOf('reconcileRecurringSeriesVisitCount(trx'));
@@ -690,13 +690,13 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(body).toMatch(/extendByOne: true,/);
     // the cancelled row is the extend anchor's cadence floor (pre-push audit P1: cancelling the LAST visit re-booked its date)
     expect(body).toMatch(/cadenceFloorRow: anchorFloor,/);
-    expect(lockedBody()).toMatch(/addOneReseedVisit\(trx, \{ parent, parentId, cols, upcomingPlanCount: term\.upcomingPlanCount, anchorFloor: term\.anchorFloor \}\)/);
+    expect(lockedBody()).toMatch(/addOneReseedVisit\(trx, \{\n\s+parent, parentId, cols, upcomingPlanCount: term\.upcomingPlanCount, anchorFloor: term\.anchorFloor, placementPicker,\n\s+\}\)/);
     expect(body).not.toMatch(/targetCount:|baselineCount:/);
     expect(body).toMatch(/claimToken: null/);
     expect(body).toMatch(/if \(e\?\.statusCode === 409\) return \{ skipped: 'extension_unbillable', code: e\.code \|\| null \};/);
     // the reconciler: extendByOne reads live FIRST and skips the MAX_SERIES_VISIT_COUNT clamp (Codex r8 P1)
     const rec = schedule.slice(schedule.indexOf('async function reconcileRecurringSeriesVisitCount('));
-    expect(rec).toMatch(/extendByOne = false,[\s\S]*?cadenceFloorRow = null,\s*\}\) \{\s*const live = await liveUpcomingSeriesVisits\(trx, parentId\);\s*const target = extendByOne\s*\? live\.length \+ 1\s*: Math\.min\(Math\.max\(parseInt\(targetCount, 10\) \|\| 0, 1\), MAX_SERIES_VISIT_COUNT\);/);
+    expect(rec).toMatch(/extendByOne = false,[\s\S]*?cadenceFloorRow = null,[\s\S]*?placementPicker = null,\s*\}\) \{\s*const live = await liveUpcomingSeriesVisits\(trx, parentId\);\s*const target = extendByOne\s*\? live\.length \+ 1\s*: Math\.min\(Math\.max\(parseInt\(targetCount, 10\) \|\| 0, 1\), MAX_SERIES_VISIT_COUNT\);/);
     // the wrapper retries the WHOLE locked transaction on that transient refusal (Codex r3), bounded
     const wrapper = schedule.slice(schedule.indexOf('async function reseedRecurringSeriesAfterCancel('), schedule.indexOf('async function reseedRecurringSeriesAfterCancelBatch('));
     expect(schedule).toMatch(/const RESEED_STALE_READ_ATTEMPTS = 3;/);
