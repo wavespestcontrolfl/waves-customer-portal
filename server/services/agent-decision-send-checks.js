@@ -198,12 +198,17 @@ function markRepeatable(check) {
 // Open-loop commitments at the provider boundary, for a caller holding the ids in
 // memory (the auto-send executor's claim). Closed → refused; an unreadable recheck
 // → refused retryably (nothing is known to be stale). No ids → undefined (no check).
-function openLoopsProviderPreSendCheck({ commitmentIds, position = null, getBody = null }) {
+function openLoopsProviderPreSendCheck({ commitmentIds, status = null, factsGeneratedAt = null, getBody = null }) {
   const ids = Array.isArray(commitmentIds) ? commitmentIds.filter((id) => typeof id === 'string' && id) : [];
-  if (!ids.length && !position) return undefined;
+  if (!ids.length && !status) return undefined;
+  const generatedIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime()) ? factsGeneratedAt.toISOString() : factsGeneratedAt;
   const check = async ({ dbi } = {}) => {
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
-    const snapshot = { visit_loop_commitment_ids: ids, ...(position ? { visit_loop_position: position } : {}) };
+    const snapshot = {
+      visit_loop_commitment_ids: ids,
+      ...(status ? { visit_loop_status: status } : {}),
+      ...(generatedIso ? { facts_generated_at: generatedIso } : {}),
+    };
     const reason = await openLoopsBlockReason({ decision: { input_snapshot: snapshot }, outgoingBody, dbh: dbi });
     if (reason == null) return { ok: true };
     const retryable = reason === 'open_loops_recheck_failed';
@@ -270,16 +275,25 @@ async function reserviceBlock({ decision, outgoingBody }) {
 // fulfilled or dismissed elsewhere (a call, an email, an internal action). The
 // draft persisted the call_commitments ids it rendered; every one must still be
 // open at send time. Fails closed on a read error. No ids = nothing to check.
-// The same goes for the Tech position stop count (visit_loop_position): a reply
-// that mentions stops is recounted, and refused when the count moved or the
-// visit no longer qualifies (pre-push audit P1).
+// VISIT STATUS (visit_loop_status): a draft that showed tech position, a flagged
+// delay, a passed window or a missed visit is held to the LIVE ETA freshness window
+// (15 min from facts_generated_at; missing = stale) — one rule for every
+// time-sensitive line instead of a recheck per fact — and a fresh position's stop
+// count is recounted when the reply mentions stops (pre-push audit P1s).
 const MENTIONS_STOPS_RE = /\bstops?\b/i;
-async function openLoopsBlockReason({ decision, outgoingBody = null, dbh }) {
+function visitStatusExpired(snapshot, nowMs) {
+  const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness');
+  const at = Date.parse(snapshot?.facts_generated_at || '');
+  return !Number.isFinite(at) || nowMs - at > ETA_FRESHNESS_WINDOW_MS;
+}
+async function openLoopsBlockReason({ decision, outgoingBody = null, dbh, now = new Date() }) {
   const snapshot = parseInputSnapshot(decision && decision.input_snapshot);
   const ids = Array.isArray(snapshot?.visit_loop_commitment_ids)
     ? [...new Set(snapshot.visit_loop_commitment_ids.filter((id) => typeof id === 'string' && id))]
     : [];
-  const position = snapshot?.visit_loop_position && typeof snapshot.visit_loop_position === 'object' ? snapshot.visit_loop_position : null;
+  const status = snapshot?.visit_loop_status && typeof snapshot.visit_loop_status === 'object' ? snapshot.visit_loop_status : null;
+  if (status && visitStatusExpired(snapshot, now.getTime())) return 'visit_status_expired';
+  const position = status && status.position && typeof status.position === 'object' ? status.position : null;
   const recount = Boolean(position) && MENTIONS_STOPS_RE.test(String(outgoingBody || ''));
   if (!ids.length && !recount) return null;
   try {

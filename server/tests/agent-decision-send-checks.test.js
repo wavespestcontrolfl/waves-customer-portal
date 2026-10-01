@@ -19,6 +19,7 @@ jest.mock('../services/sms-followup-sla', () => ({
 jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
 jest.mock('../services/sms-eta-freshness', () => ({
   etaClaimBlockReason: jest.fn(async () => null),
+  ETA_FRESHNESS_WINDOW_MS: 15 * 60 * 1000,
   // The ONE shared infrastructure-failure set (round-42 P2) is consulted by the wrappers.
   isEtaInfrastructureFailure: (reason) => jest.requireActual('../services/sms-eta-freshness').isEtaInfrastructureFailure(reason),
 }));
@@ -478,13 +479,15 @@ describe('open-loop commitments recheck', () => {
       .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true });
   });
 
-  describe('stop-count recount (visit_loop_position)', () => {
+  describe('stop-count recount (visit_loop_status)', () => {
     const { etDateString } = require('../utils/datetime-et');
     const today = etDateString(new Date());
     const position = { visitId: 'v1', techId: 't1', stopsAhead: 2 };
-    const withPos = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_position: position }) });
-    const routeDb = ({ visit, ahead }) => (table) => {
-      const q = { where: () => q, whereNotIn: () => q, count: () => q, first: async (...cols) => (cols.includes('route_order') ? visit : { count: String(ahead) }) };
+    const fresh = () => new Date(Date.now() - 60000).toISOString();
+    const withPos = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: fresh(), visit_loop_status: { position } }) });
+    const routeDb = ({ visit, ahead, recorded = null }) => (table) => {
+      const q = { where: () => q, whereNotIn: () => q, whereNotExists: () => q, count: () => q, first: async (...cols) => (cols.includes('route_order') ? visit : { count: String(ahead) }) };
+      if (table === 'service_records') return { where: () => ({ first: async () => recorded }) };
       return table === 'scheduled_services' ? q : null;
     };
     const visit = (over = {}) => ({ id: 'v1', technician_id: 't1', route_order: 5, scheduled_date: today, status: 'confirmed', ...over });
@@ -502,11 +505,20 @@ describe('open-loop commitments recheck', () => {
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ status: 'on_site' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ technician_id: 't2' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: null, ahead: 2 }) })).resolves.toBe('stop_count_stale');
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2, recorded: { id: 'sr1' } }) })).resolves.toBe('stop_count_stale');
+    });
+
+    test('visit status is held to the 15-minute freshness window, whatever the body says; no stamp = expired', async () => {
+      const at = (msAgo) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - msAgo).toISOString(), visit_loop_status: { position: null } }) });
+      await expect(openLoopsBlockReason({ decision: at(14 * 60000), outgoingBody: 'Sorry for the delay.' })).resolves.toBeNull();
+      await expect(openLoopsBlockReason({ decision: at(16 * 60000), outgoingBody: 'Sorry for the delay.' })).resolves.toBe('visit_status_expired');
+      const noStamp = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { position: null } }) });
+      await expect(openLoopsBlockReason({ decision: noStamp, outgoingBody: 'ok' })).resolves.toBe('visit_status_expired');
     });
 
     test('the provider-boundary form recounts from the in-memory position', async () => {
       const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
-      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, position, getBody: () => 'Two stops before yours now.' });
+      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, status: { position }, factsGeneratedAt: new Date(), getBody: () => 'Two stops before yours now.' });
       await expect(check({ dbi: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toEqual({ ok: true });
       await expect(check({ dbi: routeDb({ visit: visit(), ahead: 1 }) }))
         .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (stop_count_stale)' });

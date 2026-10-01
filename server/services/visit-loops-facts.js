@@ -157,6 +157,12 @@ async function countStopsAhead(conn, visit, now) {
     .where({ technician_id: visit.technician_id, scheduled_date: etDateString(now) })
     .where('route_order', '<', routeOrder)
     .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
+    // performed-but-not-closed stops are not ahead of anyone (same completion
+    // evidence findPastWindow and loadMissedVisit honor)
+    .where((b) => b.whereNull('track_state').orWhereNot('track_state', 'complete'))
+    .whereNotExists(function serviceRecorded() {
+      this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
+    })
     .count('* as count').first();
   const n = Number(result?.count);
   return Number.isFinite(n) ? n : null;
@@ -167,9 +173,11 @@ async function countStopsAhead(conn, visit, now) {
 // today, or reassigned). Throws on a read error — the caller fails closed.
 async function currentStopsAhead({ conn = db, visitId, techId, now = new Date() }) {
   const visit = await conn('scheduled_services').where({ id: visitId })
-    .first('id', 'technician_id', 'route_order', 'scheduled_date', 'status');
-  if (!visit || !NOT_STARTED_STATUSES.includes(visit.status)) return null;
+    .first('id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state');
+  if (!visit || !NOT_STARTED_STATUSES.includes(visit.status) || visit.track_state === 'complete') return null;
   if (String(visit.technician_id) !== String(techId) || calendarDay(visit.scheduled_date) !== etDateString(now)) return null;
+  const recorded = await conn('service_records').where({ scheduled_service_id: visitId }).first('id');
+  if (recorded) return null;
   return countStopsAhead(conn, visit, now);
 }
 

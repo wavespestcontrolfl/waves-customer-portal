@@ -688,7 +688,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       techNames: drafter.techNamesFromContext(context),
       // PR #5499 r1: open call_commitments ids its VISIT STATUS & OPEN LOOPS lines named.
       visitLoopCommitmentIds: drafter.visitLoopCommitmentIds(context),
-      visitLoopPosition: drafter.visitLoopPosition(context),
+      visitLoopStatus: drafter.visitLoopStatus(context),
       reserviceLanesSnapshot,
       reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };
@@ -822,7 +822,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         ...(Array.isArray(llmDraft?.techNames) && llmDraft.techNames.length ? { tech_names: llmDraft.techNames } : {}),
         ...(Array.isArray(llmDraft?.visitLoopCommitmentIds) && llmDraft.visitLoopCommitmentIds.length
           ? { visit_loop_commitment_ids: llmDraft.visitLoopCommitmentIds } : {}),
-        ...(llmDraft?.visitLoopPosition ? { visit_loop_position: llmDraft.visitLoopPosition } : {}),
+        ...(llmDraft?.visitLoopStatus ? { visit_loop_status: llmDraft.visitLoopStatus } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),

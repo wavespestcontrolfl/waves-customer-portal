@@ -109,6 +109,9 @@ describe('techPosition', () => {
     const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'count'));
     expect(hasOp(count.ops, 'whereNotIn', (a) => a[0] === 'status' && ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].every((s) => a[1].includes(s)))).toBe(true);
     expect(hasOp(count.ops, 'where', (a) => a[0] === 'route_order' && a[1] === '<' && a[2] === 3)).toBe(true);
+    // finished-but-unclosed stops (tracker complete / service record) are not ahead
+    expect(hasOp(count.ops, 'where', (a) => typeof a[0] === 'function')).toBe(true);
+    expect(hasOp(count.ops, 'whereNotExists')).toBe(true);
   });
 
   test('atThisVisit when the tech status points at this visit', async () => {

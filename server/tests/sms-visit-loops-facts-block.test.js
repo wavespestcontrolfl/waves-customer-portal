@@ -10,7 +10,7 @@ const {
   currentPromptVersion,
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
-  visitLoopPosition,
+  visitLoopStatus,
   REAL_ANSWERS_PROMPT_VERSION,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
 } = require('../services/sms-shadow-drafter');
@@ -224,15 +224,18 @@ describe('visitLoopCommitmentIds', () => {
   });
 });
 
-describe('visitLoopPosition', () => {
-  test('gate on + fresh position with a count: the send-time snapshot; otherwise null', () => {
+describe('visitLoopStatus', () => {
+  test('gate on: marks any time-sensitive status line; carries a fresh position\'s count; otherwise null', () => {
     const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', techId: 't1' };
-    expect(visitLoopPosition({ visitLoops: { techPosition: tp } })).toBeNull();
+    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toBeNull();
     process.env[GATE] = 'true';
-    expect(visitLoopPosition({ visitLoops: { techPosition: tp } })).toEqual({ visitId: 'v1', techId: 't1', stopsAhead: 2 });
-    expect(visitLoopPosition({ visitLoops: { techPosition: { ...tp, status: 'stale' } } })).toBeNull();
-    expect(visitLoopPosition({ visitLoops: { techPosition: { ...tp, stopsAhead: null } } })).toBeNull();
-    expect(visitLoopPosition({})).toBeNull();
+    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toEqual({ position: { visitId: 'v1', techId: 't1', stopsAhead: 2 } });
+    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } })).toEqual({ position: null });
+    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, stopsAhead: null } } })).toEqual({ position: null });
+    expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn' } } })).toEqual({ position: null });
+    expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1' } } })).toEqual({ position: null });
+    expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBeNull(); // commitments have their own recheck
+    expect(visitLoopStatus({})).toBeNull();
   });
 });
 

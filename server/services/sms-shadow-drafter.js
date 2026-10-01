@@ -4492,16 +4492,22 @@ function visitLoopCommitmentIds(context) {
     .map((i) => (i && i.id != null ? String(i.id) : '')).filter(Boolean);
   return [...new Set(ids)];
 }
-// The stop count a fresh Tech position line showed ({ visitId, techId, stopsAhead }),
-// persisted so a send that mentions stops recounts them first. null gate-off, stale,
-// or with no count.
-function visitLoopPosition(context) {
+// Marks a draft whose section showed time-sensitive VISIT STATUS (tech position, a
+// flagged delay, a passed window, a missed visit): the send boundary holds it to the
+// LIVE ETA freshness window, and recounts a fresh position's stops when the reply
+// mentions stops. { position: { visitId, techId, stopsAhead } | null }; null when the
+// section showed none of these, or gate-off.
+function visitLoopStatus(context) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  const tp = context && context.visitLoops && context.visitLoops.techPosition;
-  if (!tp || typeof tp !== 'object' || tp.status === 'stale' || tp.visitId == null || tp.techId == null) return null;
-  const stops = Number(tp.stopsAhead);
-  if (tp.stopsAhead == null || !Number.isFinite(stops) || stops < 0) return null;
-  return { visitId: String(tp.visitId), techId: String(tp.techId), stopsAhead: Math.round(stops) };
+  const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
+  if (!v.techPosition && !v.lateAlert && !v.pastWindow && !v.missedVisit) return null;
+  const tp = v.techPosition;
+  const stops = Number(tp && tp.stopsAhead);
+  const position = tp && typeof tp === 'object' && tp.status !== 'stale' && tp.visitId != null && tp.techId != null
+    && tp.stopsAhead != null && Number.isFinite(stops) && stops >= 0
+    ? { visitId: String(tp.visitId), techId: String(tp.techId), stopsAhead: Math.round(stops) }
+    : null;
+  return { position };
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
@@ -5863,7 +5869,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           techNames,
           // PR #5499: open commitments the reply was grounded on — rechecked at the provider boundary.
           visitLoopCommitmentIds: visitLoopCommitmentIds(context),
-          visitLoopPosition: visitLoopPosition(context),
+          visitLoopStatus: visitLoopStatus(context),
           // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
           reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });
@@ -5908,7 +5914,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               liveEtaSnapshot,
               techNames,
               visitLoopCommitmentIds: visitLoopCommitmentIds(context),
-              visitLoopPosition: visitLoopPosition(context),
+              visitLoopStatus: visitLoopStatus(context),
               // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
               reserviceLanesSnapshot,
               reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -5967,7 +5973,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             liveEtaSnapshot,
             techNames,
             visitLoopCommitmentIds: visitLoopCommitmentIds(context),
-            visitLoopPosition: visitLoopPosition(context),
+            visitLoopStatus: visitLoopStatus(context),
             // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
             reserviceLanesSnapshot,
             reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -6018,7 +6024,7 @@ module.exports = {
   buildFactsBlock,
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
-  visitLoopPosition,
+  visitLoopStatus,
   VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,
