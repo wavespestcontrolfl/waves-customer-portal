@@ -621,6 +621,42 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/promises — the completion form's
+// promise check (owner "ok yes add these" 2026-10-01): the open promises
+// Waves made this visit's customer that a technician can keep at a visit,
+// from calls, texts and emails (visit-promises.js). Only while
+// GATE_REPORT_WRITER_RULES is live and only on visits the writer covers
+// (never lawn or tree, shrub & palm); otherwise a no-read
+// { available: false }. Read-only.
+router.get('/:serviceId/promises', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportWriterRulesLive()) {
+      return res.json({ available: false, promises: [] });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit (the customer's
+    // promises are customer data); admins keep office-wide reach.
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    const VisitPromises = require('../services/service-report/visit-promises');
+    let profileFailed = false;
+    const completionProfile = await resolveCompletionProfileForScheduledService(svc)
+      .catch(() => { profileFailed = true; return null; });
+    if (!VisitPromises.promiseCheckInScope(svc.service_type, completionProfile, { failed: profileFailed })) {
+      return res.json({ available: false, promises: [] });
+    }
+    const promises = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id });
+    res.json({ available: true, promises });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/completion-profile
 router.get('/:serviceId/completion-profile', async (req, res, next) => {
   try {

@@ -2679,6 +2679,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
       reportRulesConfirmed = false, // tech confirmed the edit heads-up ("send as is")
       reportDraftBase = null, // the installed generated draft the notes were edited from
+      promiseMarks = null, // the promise check: [{ id, mark, stillLeft? }] — OPTIONAL (visit-promises.js)
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
       // The visit identity the client's form was built against (customer,
@@ -14042,6 +14043,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
       } catch (commsGuardErr) {
         logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
+      }
+    }
+
+    // The promise check (owner "ok yes add these" 2026-10-01): the
+    // technician's Done and Partly marks reach the office's promise list.
+    // POST-COMMIT and best-effort: a failure leaves the promise open and
+    // never fails the completion, and nothing contacts the customer. Only
+    // while the writer rules are live, on a visit the writer covers, judged
+    // on the profile the completion transaction used (null skips).
+    // Backfills excluded, like the comms guard. Re-runnable on a resume.
+    if (!isBackfillCompletion && Array.isArray(promiseMarks) && promiseMarks.length
+      && require('../config/feature-gates').reportWriterRulesLive()) {
+      try {
+        const VisitPromises = require('../services/service-report/visit-promises');
+        if (effectiveCompletionProfile && VisitPromises.promiseCheckInScope(svc.service_type, effectiveCompletionProfile)) {
+          await VisitPromises.applyVisitPromiseMarks(db, {
+            customerId: svc.customer_id,
+            marks: promiseMarks,
+            visitDate: svc.scheduled_date,
+            reviewedBy: completionInput.actor?.technicianId || null,
+          });
+        }
+      } catch (promiseErr) {
+        logger.warn(`[dispatch] promise marks failed (non-blocking): ${promiseErr.message}`);
       }
     }
 

@@ -42,6 +42,7 @@ import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
+import PromiseCheck, { promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -13321,6 +13322,10 @@ export function CompletionPanel({
   // and the tech's picks. `techTips.available === false` (gate off) keeps
   // the observations/recommendations textareas above in place.
   const [techTips, setTechTips] = useState(null);
+  // The promise check (owner "ok yes add these" 2026-10-01): the open
+  // promises the tech can mark, and the marks by promise id.
+  const [promiseCheck, setPromiseCheck] = useState(null);
+  const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
@@ -14704,6 +14709,26 @@ export function CompletionPanel({
     return () => { cancelled = true; };
   }, [service.id]);
 
+  // The promise check: listed only while the writer rules are live on a
+  // visit the writer covers (the server decides). A failed load shows
+  // nothing; marking is optional.
+  useEffect(() => {
+    let cancelled = false;
+    setPromiseCheck(null);
+    if (!service.id) return () => { cancelled = true; };
+    adminFetch(`/admin/dispatch/${service.id}/promises`)
+      .then((data) => {
+        if (!cancelled) setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
+      })
+      .catch(() => {
+        if (!cancelled) setPromiseCheck(null);
+      });
+    return () => { cancelled = true; };
+  }, [service.id]);
+  const visitPromises = promiseCheck?.promises || [];
+  // Marked promises only; none while Quick complete hides the report.
+  const promiseMarksForRequest = quickComplete ? [] : promiseMarksPayload(promiseMarks, visitPromises);
+
   useEffect(() => {
     let cancelled = false;
     setProtocolActions([]);
@@ -15222,6 +15247,8 @@ export function CompletionPanel({
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
         installedReportDraft: installedReportDraftRef.current,
+        // The promise check's marks restore with the draft they shaped.
+        promiseMarks,
         // Whether that installed report was actually generated WITH photo
         // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
         // a reload/billing-detour doesn't forget a grounded draft is
@@ -15350,6 +15377,8 @@ export function CompletionPanel({
     service.address,
     service.serviceAddress,
     service.propertyAddress,
+    // A mark is operator input: a mark-only change must save the draft.
+    promiseMarks,
   ]);
 
   function restoreDraft() {
@@ -15635,6 +15664,9 @@ export function CompletionPanel({
     installedReportDraftRef.current = typeof savedDraft.installedReportDraft === "string" && savedDraft.installedReportDraft
       ? savedDraft.installedReportDraft
       : generatedReportTextRef.current;
+    setPromiseMarks(savedDraft.promiseMarks && typeof savedDraft.promiseMarks === "object" && !Array.isArray(savedDraft.promiseMarks)
+      ? savedDraft.promiseMarks
+      : {});
     // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
     // field, which defaults to false (byte-identical to this fix not
     // existing yet: nothing tracked, nothing invalidates).
@@ -16463,6 +16495,8 @@ export function CompletionPanel({
       // on the customer report" directly, with no separate opt-in step).
       ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
+      // The promise check: the report says only what the tech marked.
+      ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
       ...typedFindingsPayload,
     };
     const hasReportInput =
@@ -17836,6 +17870,9 @@ export function CompletionPanel({
         // edited from, and the tech's "send as is" on the resubmit.
         reportDraftBase: installedReportDraftRef.current || null,
         ...(rulesConfirmed ? { reportRulesConfirmed: true } : {}),
+        // The promise check: Done closes the promise in the office list,
+        // Partly adds the still-left note (applied after the save).
+        ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
         // customerRecap is intentionally NOT sent: the report summary is generated
         // server-side from the technician notes (there's no recap editor here).
         // Sending a hidden/restored stale draft would bypass that and become
@@ -18536,6 +18573,9 @@ export function CompletionPanel({
       // below invalidates an in-flight response on settle like any other
       // input
       aiReportIncludeComms,
+      // a promise marked (or re-marked) after generation changes what the
+      // report should say about it
+      promiseMarksSignature(promiseMarks),
     ]);
   }
   useEffect(() => {
@@ -18556,7 +18596,7 @@ export function CompletionPanel({
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
-    aiReportIncludeComms, selectedProducts, serviceTypeForArea]);
+    aiReportIncludeComms, selectedProducts, serviceTypeForArea, promiseMarks]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose
@@ -19809,6 +19849,15 @@ export function CompletionPanel({
                   style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
                 />{" "}
               </Field>
+            )}
+            {!quickComplete && promiseCheck && (
+              <PromiseCheck
+                promises={visitPromises}
+                marks={promiseMarks}
+                onChange={setPromiseMarks}
+                disabled={generating}
+                tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, onInk: M.actionFg, font }}
+              />
             )}
             {/* AI report — drafts customer-facing visit copy into the notes box
                 from the structured visit data (actions, observations, products,
@@ -22246,6 +22295,16 @@ export function CompletionPanel({
               </div>
             )}{" "}
           </div>
+          {!quickComplete && promiseCheck && (
+            <PromiseCheck
+              promises={visitPromises}
+              marks={promiseMarks}
+              onChange={setPromiseMarks}
+              disabled={generating}
+              compact
+              tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, onInk: D.white }}
+            />
+          )}
           {/* AI Service Report — drafts customer-facing visit copy into the
               notes box from the structured visit data, for the tech to
               review/edit before completing. */}

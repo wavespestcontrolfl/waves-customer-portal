@@ -566,6 +566,9 @@ async function buildReportCopyContext({
   findingsType = null,
   // 'one_time' | 're_service' | 'recurring' (null when unknown).
   serviceKind = null,
+  // The technician's promise marks, resolved by the route against the
+  // customer's open promises (visit-promises.js).
+  visitPromises = [],
   knex = db,
 } = {}) {
   const line = serviceLine || detectServiceLine(serviceType) || null;
@@ -789,6 +792,7 @@ async function buildReportCopyContext({
       findingsType,
       serviceKind,
       applications: productEvidence.writerApplications,
+      promises: visitPromises,
     });
     sections.push(...records.sections);
     writerAllowedPhrases = records.allowedPhrases;

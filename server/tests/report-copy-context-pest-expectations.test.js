@@ -256,6 +256,15 @@ describe('buildReportCopyContext — writer rules', () => {
     knex,
   });
 
+  it("carries the technician's promise marks to the writer, and only with the writer rules on", async () => {
+    const visitPromises = [{ id: 'p-1', mark: 'done', description: 'Check under the dishwasher', source: 'call' }];
+    const on = await buildReportCopyContext({ ...args(knexFor(), true), visitPromises });
+    expect(on.contextText).toContain('PROMISES (what we promised this customer before today');
+    expect(on.contextText).toContain('- Done today: Check under the dishwasher');
+    const off = await buildReportCopyContext({ ...args(knexFor(), false), visitPromises });
+    expect(off.contextText).not.toContain('PROMISES');
+  });
+
   it('drops footage, product safety, household notes and the automatic no-activity finding; gives the approved wording', async () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const { contextText, writerAllowedPhrases } = await buildReportCopyContext(args(knexFor(), true));

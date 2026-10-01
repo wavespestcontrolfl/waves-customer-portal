@@ -14,6 +14,11 @@ const mockProvider = jest.fn();
 const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
 const mockComms = jest.fn(async () => ({ text: '', promptHint: '' }));
 const mockCustomerWords = jest.fn(async () => ({ text: '', promptHint: '' }));
+const mockResolveMarks = jest.fn(async () => []);
+jest.mock('../services/service-report/visit-promises', () => ({
+  ...jest.requireActual('../services/service-report/visit-promises'),
+  resolveVisitPromiseMarks: (...args) => mockResolveMarks(...args),
+}));
 jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockProvider(...args), callAnthropic: (...args) => mockProvider(...args) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: async () => null }));
 jest.mock('../services/service-completion-profiles', () => ({
@@ -88,6 +93,8 @@ beforeEach(() => {
   mockComms.mockImplementation(async () => ({ text: '', promptHint: '' }));
   mockCustomerWords.mockReset();
   mockCustomerWords.mockImplementation(async () => ({ text: '', promptHint: '' }));
+  mockResolveMarks.mockReset();
+  mockResolveMarks.mockImplementation(async () => []);
   mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
   mockServiceType = 'Quarterly Pest Control Service';
   mockCatalogRows = [];
@@ -449,3 +456,40 @@ describe('four-section report (writer rules v2)', () => {
     expect(legacy).toContain('4/5 (high)');
   });
 });
+
+describe('the promise check reaches the writer', () => {
+  const MARKS = [{ id: '00000000-0000-4000-8000-000000000001', mark: 'done' }];
+  const RESOLVED = [{ id: MARKS[0].id, mark: 'done', description: 'Check under the dishwasher', source: 'call' }];
+
+  test("gate on: the technician's marks are resolved for the visit's customer and handed to the records", async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockResolveMarks.mockImplementation(async () => RESOLVED);
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (promise case).', promiseMarks: MARKS }), mkRes());
+    expect(mockResolveMarks).toHaveBeenCalledWith(expect.anything(), { customerId: 'customer-1', marks: MARKS });
+    expect(mockBuildContext.mock.calls[0][0]).toEqual(expect.objectContaining({ visitPromises: RESOLVED }));
+  });
+
+  test('gate off: marks are never read', async () => {
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (promise off case).', promiseMarks: MARKS }), mkRes());
+    expect(mockResolveMarks).not.toHaveBeenCalled();
+    expect(mockBuildContext.mock.calls[0][0]).toEqual(expect.objectContaining({ visitPromises: [] }));
+  });
+
+  test('gate on, lawn: outside the writer, marks are never read', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProfile = { serviceKey: 'lawn_care_6week', findingsType: null };
+    mockServiceType = 'Every 6 Weeks Lawn Care Service';
+    await handler(mkReq({ serviceNotes: 'Fed the front lawn (promise lawn case).', promiseMarks: MARKS }), mkRes());
+    expect(mockResolveMarks).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a failed promise read writes the report without them', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockResolveMarks.mockImplementation(async () => { throw new Error('ledger down'); });
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (promise failure case).', promiseMarks: MARKS }), res);
+    expect(res.statusCode).toBe(200);
+    expect(mockBuildContext.mock.calls[0][0]).toEqual(expect.objectContaining({ visitPromises: [] }));
+  });
+});
+

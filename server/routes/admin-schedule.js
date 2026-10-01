@@ -24397,6 +24397,8 @@ router.post('/generate-report', async (req, res) => {
       includeCustomerComms,
       structuredFindings, companionFindings, typedActivityScore,
       treeShrubReview,
+      // The promise check: [{ id, mark, stillLeft? }] (visit-promises.js).
+      promiseMarks,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -25137,6 +25139,18 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let deterministicApplications = [];
     let writerAllowedPhrases = [];
     let writerAllowedDates = [];
+    // The technician's promise marks, resolved against this customer's open
+    // promises (owner "ok yes add these" 2026-10-01): with the writer rules
+    // on a grounded visit only. Fail-soft: no record, no mention.
+    let visitPromises = [];
+    if (writerRulesOn && groundingCustomerId && Array.isArray(promiseMarks) && promiseMarks.length) {
+      try {
+        visitPromises = await require('../services/service-report/visit-promises')
+          .resolveVisitPromiseMarks(db, { customerId: groundingCustomerId, marks: promiseMarks });
+      } catch (promiseErr) {
+        logger.warn(`[generate-report] promise marks not loaded: ${promiseErr.message}`);
+      }
+    }
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -25158,6 +25172,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         writerRules: writerRulesOn,
         findingsType: reportPromptContext.findingsType || null,
         serviceKind: reportPromptContext.serviceKind || null,
+        visitPromises,
       });
       contextText = ctx.contextText || '';
       writerAllowedPhrases = Array.isArray(ctx.writerAllowedPhrases) ? ctx.writerAllowedPhrases : [];
