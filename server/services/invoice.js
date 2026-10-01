@@ -10759,9 +10759,6 @@ const InvoiceService = {
 
   async retireRodentSetupObligationForRevivedPrepay(conn, prepayInvoiceId) {
     if (!prepayInvoiceId) return null;
-    // The revived prepay waives a pay-after-first-visit setup fee its reversal
-    // had restored (any program, not only rodent): clear it again.
-    await require("./setup-fee-obligation").rewaiveDeferredSetupFeeForRevivedPrepay(conn, prepayInvoiceId);
     const invoiceRow = await conn("invoices")
       .where({ id: prepayInvoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");
@@ -11353,13 +11350,6 @@ const InvoiceService = {
    */
   async restoreSwitchSupersededInvoicesForPrepay(prepayInvoiceId, conn = db) {
     if (!prepayInvoiceId) return [];
-    // A pay-after-first-visit setup fee the switch WAIVED (no superseded
-    // invoice to re-mint: the accept deferred it as a stamp) is owed with
-    // the first visit again once this prepay is dead — re-stamp it once.
-    const restoredDeferredSetup = await require("./setup-fee-obligation").restoreWaivedDeferredSetupFeeForPrepay(conn, prepayInvoiceId);
-    for (const r of restoredDeferredSetup) {
-      logger.info(`[invoice] waived deferred setup fee restored on series ${r.scheduledServiceId} ($${r.amount.toFixed(2)}) — prepay ${prepayInvoiceId} is dead`);
-    }
     const marker = prepaySwitchSupersededByMarker(prepayInvoiceId);
     const candidates = await conn("invoices")
       .where({ status: "void" })

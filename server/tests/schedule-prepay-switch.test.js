@@ -195,8 +195,6 @@ function stubTables({
       return q;
     });
     q.whereNotIn = jest.fn(() => q);
-    // The deferred-setup waiver's adopted-child estimate lookup.
-    q.whereNotNull = jest.fn(() => q);
     q.whereIn = jest.fn((col, vals) => {
       stubTables.whereIns.push({ table, col, vals });
       return q;

@@ -23067,19 +23067,6 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
             amount: switchSetupFee,
           });
         }
-        // An estimate whose accept DEFERRED its WaveGuard setup fee to the
-        // first visit (GATE_PAF_SETUP_FEE: a stamp, no invoice) is not in the
-        // superseded set above. Annual prepay waives that setup, so retire the
-        // stamp here; the prepay carries a marker so its void/refund restores
-        // it (restoreSwitchSupersededInvoicesForPrepay).
-        // The owning estimate is resolved from the anchor's children too (an
-        // adopted appointment carries it while the fee sits on the parent).
-        await require('../services/setup-fee-obligation').waiveDeferredSetupFeesForSwitch(trx, {
-          anchorId: anchorRowId,
-          visit: target.visit,
-          estimateId: target.estimateId,
-          prepayInvoiceId: invoice.id,
-        });
 
         // Durable pointer FROM each retired row TO the prepay that replaced
         // it (Codex P0 r7): if this prepay is later voided/refunded through

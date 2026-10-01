@@ -211,145 +211,35 @@ async function estimateSetupSeries(conn, estimate) {
   return [...roots, ...adoptedParents].filter((r) => r && r.id != null);
 }
 
-const prepayWaivedMarker = (parentId, amount) => `[paf-setup-waived:${parentId}:${Number(amount).toFixed(2)}]`;
-const prepayRestoredMarker = (parentId) => `[paf-setup-restored:${parentId}]`;
-// Terminal: the fee was billed (a claim), handed to the office (parked) or is
-// carried by a stamp this history did not write — the waiver no longer owns it.
-const prepaySettledMarker = (parentId) => `[paf-setup-settled:${parentId}]`;
-
-// Annual prepay waives the WaveGuard setup fee. When the on-site / plan switch
-// replaces a pay-after-first-visit accept with a prepay, the setup fee that
-// accept DEFERRED to the first visit (a stamp, no invoice) must be retired too,
-// or the first prepaid completion parks it for a manual bill. Runs in the
-// switch's transaction: locks each stamped series row, refuses (switchConflict)
-// on a completion mid-mint (negative stamp), clears the stamp by exact value,
-// and records what it waived on the prepay invoice so a later void/refund of
-// that prepay can put it back (restoreWaivedDeferredSetupFeeForPrepay).
-async function waiveDeferredSetupFeeForPrepay(trx, { estimateId, prepayInvoiceId }) {
-  if (!estimateId || !prepayInvoiceId) return [];
-  const estimate = await trx('estimates').where({ id: estimateId }).first('id', 'customer_id', 'estimate_data');
-  if (!estimate || parseEstimateData(estimate.estimate_data).setupFeeDeferredToFirstVisit !== true) return [];
-  const waived = [];
-  for (const series of await estimateSetupSeries(trx, estimate)) {
-    const row = await trx('scheduled_services').where({ id: series.id }).forUpdate().first('id', 'pending_setup_fee');
-    const stamp = Number(row?.pending_setup_fee);
-    if (!stamp) continue;
-    if (stamp < 0) {
-      const err = new Error('The setup fee is being billed by a completion in progress — retry in a moment');
-      err.switchConflict = true;
-      throw err;
-    }
-    const cleared = await trx('scheduled_services')
-      .where({ id: row.id, pending_setup_fee: row.pending_setup_fee })
-      .update({ pending_setup_fee: null, updated_at: new Date() });
-    if (cleared === 1) waived.push({ parentId: row.id, amount: Math.round(stamp * 100) / 100 });
+// Owner ruling 2026-10-01 ("decide at the visit"): annual prepay waives the
+// WaveGuard setup fee. A setup fee a pay-after-first-visit accept DEFERRED to
+// the first visit (its estimate carries setupFeeDeferredToFirstVisit — on the
+// series root, or on an adopted appointment under it) is neither billed nor
+// parked while a live annual-prepay term covers the visit: the stamp simply
+// waits, and a performed visit bills it once no prepay covers it. No switch,
+// refund or revival bookkeeping, so the prepay lifecycle cannot drift from it.
+// Rodent (bait-station) setup is NOT waived by prepay and never matches here.
+async function prepayWaivesDeferredSetupFee(conn, { seriesId, customerId, date = null } = {}) {
+  if (!seriesId || !customerId) return false;
+  const series = await conn('scheduled_services').where({ id: seriesId }).first('source_estimate_id');
+  const estimateIds = new Set([series?.source_estimate_id].filter(Boolean).map(String));
+  for (const child of rows(await conn('scheduled_services').where({ recurring_parent_id: seriesId })
+    .whereNotNull('source_estimate_id').select('source_estimate_id'))) {
+    estimateIds.add(String(child.source_estimate_id));
   }
-  await appendPrepayMarkers(trx, prepayInvoiceId, waived.map((w) => prepayWaivedMarker(w.parentId, w.amount)));
-  return waived;
-}
-
-// The annual-prepay switch's entry point: every estimate that may have
-// DEFERRED a setup fee onto this series — the switch target's own estimate,
-// the switched visit's, and any child of the anchor that carries one (an
-// accept that adopted an existing appointment leaves its estimate on that
-// CHILD while the fee sits on the parent, which may belong to an older or
-// unlinked series). Runs in the switch's transaction, under its locks.
-async function waiveDeferredSetupFeesForSwitch(trx, { anchorId, visit = null, estimateId = null, prepayInvoiceId }) {
-  const estimateIds = new Set([estimateId, visit?.source_estimate_id].filter(Boolean).map(String));
-  if (anchorId) {
-    for (const child of rows(await trx('scheduled_services').where({ recurring_parent_id: anchorId })
-      .whereNotNull('source_estimate_id').select('source_estimate_id'))) {
-      estimateIds.add(String(child.source_estimate_id));
-    }
-  }
-  const waived = [];
+  let deferred = false;
   for (const id of estimateIds) {
-    waived.push(...await waiveDeferredSetupFeeForPrepay(trx, { estimateId: id, prepayInvoiceId }));
+    const estimate = await conn('estimates').where({ id }).first('estimate_data');
+    if (parseEstimateData(estimate?.estimate_data).setupFeeDeferredToFirstVisit === true) { deferred = true; break; }
   }
-  return waived;
-}
-
-// The waiver's history lives on the prepay invoice as an ordered marker list
-// per series: [paf-setup-waived:<series>:<amount>] then, on a reversal,
-// [paf-setup-restored:<series>] — the LAST marker for a series is its state.
-// Returns { parentId -> { amount, state: 'waived' | 'restored' } }.
-function prepayDeferredSetupState(notes) {
-  const state = new Map();
-  for (const m of String(notes || '').matchAll(/\[paf-setup-(waived|restored|settled):([^:\]]+)(?::([0-9.]+))?\]/g)) {
-    const [, kind, parentId, amount] = m;
-    const prior = state.get(parentId);
-    state.set(parentId, { state: kind, amount: amount != null ? Number(amount) : prior?.amount });
-  }
-  return state;
-}
-
-async function appendPrepayMarkers(conn, prepayInvoiceId, markers) {
-  if (!markers.length) return;
-  await conn('invoices').where({ id: prepayInvoiceId }).update({
-    notes: conn.raw('concat(coalesce(notes, ?::text), ?::text)', ['', markers.map((m) => `\n${m}`).join('')]),
-    updated_at: new Date(),
-  });
-}
-
-// The reversal: the prepay that waived a deferred setup fee was voided or
-// refunded (or lost a dispute), so the customer is back on pay-per-application
-// and owes the fee with the first visit again. Re-stamps each series whose
-// last state is 'waived' (CAS onto a NULL stamp) and records 'restored', so a
-// second sync is a no-op and a fee a later completion billed is never re-armed.
-async function restoreWaivedDeferredSetupFeeForPrepay(conn, prepayInvoiceId) {
-  if (!prepayInvoiceId) return [];
-  const prepay = await conn('invoices').where({ id: prepayInvoiceId }).first('id', 'notes');
-  const restored = [];
-  const markers = [];
-  for (const [parentId, { state, amount }] of prepayDeferredSetupState(prepay?.notes)) {
-    if (state !== 'waived' || !(amount > 0)) continue;
-    // Evidence the fee is no longer the waiver's to restore: a live claim on
-    // the series (a completion billed it while the prepay was reversed before)
-    // or a fee already handed to the office.
-    if (await seriesSetupFeeSettled(conn, parentId)) {
-      markers.push(prepaySettledMarker(parentId));
-      continue;
-    }
-    const stamped = await conn('scheduled_services').where({ id: parentId }).whereNull('pending_setup_fee')
-      .update({ pending_setup_fee: amount, updated_at: new Date() });
-    // A stamp this history did not write already carries a fee: leave it.
-    markers.push(stamped === 1 ? prepayRestoredMarker(parentId) : prepaySettledMarker(parentId));
-    if (stamped === 1) restored.push({ scheduledServiceId: parentId, amount });
-  }
-  await appendPrepayMarkers(conn, prepayInvoiceId, markers);
-  return restored;
-}
-
-// The prepay REVIVED (re-paid, or a dispute won back) after its reversal put
-// the deferred fee back: annual prepay waives it again. Clears each series
-// whose last state is 'restored' (CAS on the exact restored amount; a stamp a
-// completion is billing or already billed is left alone) and records 'waived'.
-async function rewaiveDeferredSetupFeeForRevivedPrepay(conn, prepayInvoiceId) {
-  if (!prepayInvoiceId) return [];
-  const prepay = await conn('invoices').where({ id: prepayInvoiceId }).first('id', 'notes');
-  const rewaived = [];
-  const markers = [];
-  for (const [parentId, { state, amount }] of prepayDeferredSetupState(prepay?.notes)) {
-    if (state !== 'restored' || !(amount > 0)) continue;
-    const cleared = await conn('scheduled_services').where({ id: parentId, pending_setup_fee: amount })
-      .update({ pending_setup_fee: null, updated_at: new Date() });
-    // Only a stamp actually cleared is waived again; one a completion already
-    // billed (or is billing) is settled, so a later reversal never re-arms it.
-    markers.push(cleared === 1 ? prepayWaivedMarker(parentId, amount) : prepaySettledMarker(parentId));
-    if (cleared === 1) rewaived.push({ scheduledServiceId: parentId, amount });
-  }
-  await appendPrepayMarkers(conn, prepayInvoiceId, markers);
-  return rewaived;
-}
-
-// The series' setup fee is already accounted for outside the waiver: a claim
-// on a live (not void / canceled) invoice, or a fee parked for the office.
-async function seriesSetupFeeSettled(conn, parentId) {
-  for (const claim of rows(await conn('setup_fee_claims').where({ scheduled_service_id: parentId }).select('invoice_id'))) {
-    const invoice = await conn('invoices').where({ id: claim.invoice_id }).first('status');
-    if (invoice && !UNCOLLECTED_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return true;
-  }
-  return officeParkedSetupFeeSeries(conn, [parentId]);
+  if (!deferred) return false;
+  const day = date || require('../utils/datetime-et').etDateString();
+  const { annualPrepayOverlapStatusClause } = require('./secure-appointment-plans');
+  const covering = await conn('annual_prepay_terms').where({ customer_id: customerId })
+    .where(annualPrepayOverlapStatusClause())
+    .where('term_start', '<=', day).where('term_end', '>=', day)
+    .first('id');
+  return !!covering;
 }
 
 async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null, completingParentId = null } = {}) {
@@ -372,8 +262,9 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
     // No stamp, an unreadable one or a zero carries no fee (Number(null) is 0).
     const stamp = Number(root.pending_setup_fee);
     if (!stamp) continue;
-    // A negative stamp is a completion mid-mint: deferred by definition.
-    if (stamp < 0) return covered;
+    // A negative stamp is a completion mid-mint: deferred by definition; a
+    // stamp an annual prepay waives right now is not owed either.
+    if (stamp < 0 || await prepayWaivesDeferredSetupFee(conn, { seriesId: root.id, customerId: estimate.customer_id })) return covered;
     if (lanePaysAtCompletion && (completingIds.has(String(root.id)) || await seriesCanStillConsume(conn, root))) return covered;
     unconsumableStamps.push({ parentId: root.id, rawAmount: root.pending_setup_fee, amount: Math.round(stamp * 100) / 100 });
   }
@@ -410,6 +301,8 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
 // propagate so the stamp clear and the alert commit or roll back together.
 async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId, estimateId = null, origin = '', alertContext = null, billToScheduledServiceId = null } = {}) {
   if (!parentId || !customerId || !(Number(rawAmount) > 0)) return null;
+  // Annual prepay waives this fee right now: it waits, it is not the office's.
+  if (await prepayWaivesDeferredSetupFee(trx, { seriesId: parentId, customerId })) return null;
   const amount = Math.round(Number(rawAmount) * 100) / 100;
   const updated = await trx('scheduled_services')
     .where({ id: parentId, pending_setup_fee: rawAmount })
@@ -730,11 +623,8 @@ async function findUnmintedSetupFeeObligation({
 }
 
 module.exports = {
+  prepayWaivesDeferredSetupFee,
   estimateSetupSeries,
-  waiveDeferredSetupFeeForPrepay,
-  waiveDeferredSetupFeesForSwitch,
-  restoreWaivedDeferredSetupFeeForPrepay,
-  rewaiveDeferredSetupFeeForRevivedPrepay,
   officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
   parkSetupFeeStampForOffice,

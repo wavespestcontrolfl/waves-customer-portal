@@ -10343,7 +10343,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           .where({ id: setupParentId })
           .first('pending_setup_fee', 'updated_at');
         const rawFee = parentRow?.pending_setup_fee != null ? Number(parentRow.pending_setup_fee) : null;
-        if (rawFee) {
+        // A deferred WaveGuard setup fee an annual prepay covering this visit
+        // waives (owner 2026-10-01, decide at the visit) is not claimed: the
+        // stamp waits for a visit no prepay covers.
+        const prepayWaived = rawFee > 0 && await require('../services/setup-fee-obligation')
+          .prepayWaivesDeferredSetupFee(db, { seriesId: setupParentId, customerId: svc.customer_id, date: svc.scheduled_date ? require('../services/estimate-first-application-invoice').dateOnly(svc.scheduled_date) : null });
+        if (rawFee && !prepayWaived) {
           const amount = Math.round(Math.abs(rawFee) * 100) / 100;
           if (rawFee < 0) {
             // Orphaned claim from a dead worker. The durable truth is the
