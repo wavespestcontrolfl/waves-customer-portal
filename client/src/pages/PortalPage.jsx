@@ -28,6 +28,7 @@ import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard'
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
+import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
@@ -9080,7 +9081,40 @@ const ARTICLES = [
   },
 ];
 
-function WeatherPestWidget({ customer, nextService }) {
+// Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
+// server answers {available:false} off the gate and the existing
+// WeatherPestWidget renders exactly as before; on, the yard-month card takes
+// its place. While the gate answer is pending the widget is already mounted
+// (its reads start at once) but held on its own loading panel, so gate-off
+// pays no extra round trip and gate-on never flashes the old widget.
+function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = null }) {
+  const yard = useYardMonth();
+  // A card the server resolved to another house than this tab shows (the
+  // selected house retired, a stale claim) is withheld: re-read the property
+  // list and show the customer-level widget until the label follows.
+  const scopeStale = !!(scope && yard.status === 'on' && yard.data?.propertyScope
+    && scopeEchoMismatch(yard.data.propertyScope, scope.currentEntry || null, !!scope.savedScope, scope.selectedPropertyId || null));
+  useEffect(() => {
+    if (scopeStale && scope?.onSavedScopeUnavailable) scope.onSavedScopeUnavailable();
+  }, [scopeStale, scope?.onSavedScopeUnavailable]);
+  // Capacitor shell: target=_blank strands the SPA (F-017), so the app opens
+  // the report in the same in-app overlay the Services tab uses.
+  const { preview, openPagePreview, closePreview } = useReportPreview(
+    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
+  );
+  const onOpenReport = isNativeApp()
+    ? (url) => openPagePreview({ id: 'yard-last-lawn-visit', title: 'Lawn service report' }, url)
+    : null;
+  if (yard.status === 'on' && !scopeStale) return <>
+    <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} externalLinks={!isNativeApp()} />
+    {preview && <DocumentPreviewOverlay key="report-preview"
+      preview={preview} onClose={closePreview}
+      onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />}
+  </>;
+  return <WeatherPestWidget customer={customer} nextService={nextService} hold={yard.status === 'loading'} />;
+}
+
+function WeatherPestWidget({ customer, nextService, hold = false }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   // Fungus / chinch / irrigation are lawn advisories — pest-only customers
@@ -9107,7 +9141,7 @@ function WeatherPestWidget({ customer, nextService }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
 
-  if (loading || lawnHealth.loading) return (
+  if (hold || loading || lawnHealth.loading) return (
     <PortalStatePanel
       icon="cloud"
       eyebrow="Local Conditions"
@@ -9490,7 +9524,7 @@ function ContentCard({ post, large, compact }) {
   );
 }
 
-function LearnTab({ customer }) {
+function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
@@ -9718,7 +9752,7 @@ function LearnTab({ customer }) {
         </div>
       </section>
 
-      <WeatherPestWidget customer={customer} nextService={nextService} />
+      <LocalConditionsSlot customer={customer} nextService={nextService} onOpenPhotoId={onOpenPhotoId} scope={scope} />
 
       {alerts.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -17349,7 +17383,7 @@ export default function PortalPage() {
             wateringPlanCustomerId={wateringPlanCustomerId}
             onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
           />)}
-        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} scope={{ currentEntry: activeProperty, savedScope: portalProperties.some((p) => p.key), selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable: refreshProperties }} />}
         </PortalRefreshArea>
       </main>
 
@@ -17423,4 +17457,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

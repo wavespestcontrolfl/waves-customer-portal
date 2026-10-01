@@ -69,6 +69,7 @@ router.post('/start-job/:jobId', async (req, res, next) => {
     res.json(entry);
   } catch (err) {
     if (err.message.includes('Must be clocked in')) return res.status(409).json({ error: err.message });
+    if (err.code === 'street_level_hold') return res.status(409).json({ error: err.message, code: 'street_level_hold' });
     next(err);
   }
 });

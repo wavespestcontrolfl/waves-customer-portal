@@ -255,6 +255,11 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
   const hayWords = wholeWord ? hay.split(/[^a-z0-9]+/).filter(Boolean) : null;
   const wordSet = wholeWord ? new Set(hayWords) : null;
   const normHay = wholeWord ? ` ${hayWords.join(' ')} ` : null;
+  // A short all-letter collapse is an ordinary word, not a brand: "I/T"
+  // (Bifen I/T) collapsed to "it" and matched nearly every report. A short
+  // collapse with a digit stays a designation ("G4" for Tree-Age G-4), and
+  // the spaced phrase (" i t ") and the long tokens still match.
+  const collapsedEcho = (word) => (word.length >= 4 || /\d/.test(word)) && wordSet.has(word);
   return safeProducts(products).some((p) => {
     const nameTokens = String(p.name || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     const isGeneric = (token) => GENERIC_NAME_TOKENS.has(token)
@@ -288,7 +293,7 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
       const phrase = ` ${nameTokens.join(' ')} `;
       // Punctuation-collapsed echoes match as a single word too —
       // "BoraCare" for "Bora-Care" (codex r82).
-      if (normHay.includes(phrase) || wordSet.has(nameTokens.join(''))) return true;
+      if (normHay.includes(phrase) || collapsedEcho(nameTokens.join(''))) return true;
       // Abbreviated echoes drop the formulation suffix ("T-Zone" for
       // "T-Zone SE") — adjacent token pairs match as phrases too, when the
       // pair carries at least one token that isn't generic vocabulary, a
@@ -303,7 +308,7 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
         // ... and the pair collapses to one word the same way ("TZone"
         // for "T-Zone SE", codex r82).
         if (hasIdentity && (normHay.includes(` ${pair[0]} ${pair[1]} `)
-          || wordSet.has(`${pair[0]}${pair[1]}`))) return true;
+          || collapsedEcho(`${pair[0]}${pair[1]}`))) return true;
       }
       // Brand-stem echoes for ALL-generic names ("Advance Termite Bait
       // Station" → "Advance bait stations"): the leading name token acts as
@@ -371,11 +376,11 @@ function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
 // reject (codex r21/r28/r32-r34 on #3420).
 const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
   'cockroach', 'cockroaches', 'roach', 'roaches', 'termite', 'termites',
-  'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ants',
+  'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ant', 'ants',
   'flea', 'fleas', 'tick', 'ticks', 'spider', 'spiders', 'wasp', 'wasps',
-  'hornet', 'hornets', 'bees', 'mice', 'rats', 'wildlife', 'station',
+  'hornet', 'hornets', 'bee', 'bees', 'mouse', 'mice', 'rat', 'rats', 'wildlife', 'station',
   'stations', 'trap', 'traps', 'perimeter', 'barrier', 'outdoor',
-  'indoor', 'yard', 'granular', 'granules',
+  'indoor', 'yard', 'granular', 'granules', 'gel',
   'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
   'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
   'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',

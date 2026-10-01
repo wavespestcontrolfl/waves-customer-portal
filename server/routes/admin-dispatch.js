@@ -2511,6 +2511,20 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // technician token confirming ANOTHER technician's office-review visit
     // would stamp it field-confirmed and skip the card funnel.
     const explicitFieldConfirm = isOfficeReviewConfirm && req.techRole === 'technician';
+    // A street-level address hold is released ONLY by the office: a technician token may neither
+    // confirm it nor run it day-of (the office must confirm the address with the customer first).
+    // For EVERY role the day-of advances (en route, on site, completed) are refused too: the
+    // office's path is confirm first (the hold card's "Confirm address & book"), then advance.
+    // Only an unconfirmed voice_agent row can be a hold, so nothing else pays for the lookup.
+    const heldAdvance = ['en_route', 'on_site', 'completed', 'no_show'].includes(toStatus)
+      && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true;
+    const holdGuardApplies = (req.techRole === 'technician' && (isOfficeReviewConfirm || takeoverCandidate)) || heldAdvance;
+    if (holdGuardApplies && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+      return res.status(409).json({
+        error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
+        code: 'street_level_hold',
+      });
+    }
     // Hoisted: the post-commit activation below must key skipCardRequest on
     // the SAME row-locked verification — a technician token alone is not
     // proof, and passing skipCardRequest for an unowned confirm permanently
@@ -2560,6 +2574,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // live-status resend bypass the 7-day window too.
           allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
+        // The same guard again UNDER the row lock: a concurrent call pass may promote this booking to a
+        // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
+        if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
+        // The office confirmed the address the dialog SHOWED (a hold card's "Confirm address & book"):
+        // under the row lock it must still be the visit's address. Absent field = today's behavior.
+        if (isOfficeReviewConfirm && typeof req.body?.expected_service_address === 'string') {
+          await require('../services/street-level-hold').assertExpectedServiceAddress(trx, svc.id, req.body.expected_service_address);
+        }
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked
@@ -2673,13 +2695,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // name a technician the write-time guard then drops, leaving the real
     // holder with no card at all.
     const confirmedRow = transition?.adminPayload || null;
-    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
-      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
-      void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
-        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
-      });
-    }
+    let officeConfirmActivated = false;
     if (isOfficeReviewConfirm) {
       const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
       // A technician token alone is NOT a field confirm — only the
@@ -2693,8 +2709,18 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // tech-track draw. (field_confirmed_at was stamped INSIDE the status
       // transaction above under the same verification — atomic with the
       // confirmation, never swallowed.)
-      await runOfficeConfirmActivation(db, svc, 'admin-dispatch', {
+      officeConfirmActivated = await runOfficeConfirmActivation(db, svc, 'admin-dispatch', {
         skipCardRequest: fieldConfirmVerified,
+      });
+    }
+    // The tech's "new visit" card keys on a real approval — the pending -> confirmed flip OR a
+    // successful activation — so an office approval of a MOVED hold (confirmed -> confirmed)
+    // tells the technician too.
+    if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
       });
     }
 

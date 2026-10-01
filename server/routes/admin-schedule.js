@@ -20875,12 +20875,28 @@ router.put('/:id/status', async (req, res, next) => {
       && svc.customer_confirmed !== true
       && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
+    // A street-level address hold is released ONLY by the office: a technician may neither
+    // confirm it nor run it day-of (the office must confirm the address with the customer first).
+    // For EVERY role the day-of advances are refused too (confirm first, then advance); only an
+    // unconfirmed voice_agent row can be a hold, so nothing else pays for the lookup.
+    const heldAdvance = DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
+      && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true;
+    const holdGuardApplies = (isTechnicianRequest(req) && (isOfficeReviewConfirm || isFieldLifecycleTakeover)) || heldAdvance;
+    if (holdGuardApplies && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+      return res.status(409).json({
+        error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
+        code: 'street_level_hold',
+      });
+    }
 
     // The transition's committed payload — the voice-confirm card below
     // must name the holder as WRITTEN, not as read.
     let transition = null;
     try {
       await db.transaction(async (trx) => {
+        // The hold guard again UNDER the row lock: a concurrent call pass may promote this booking to a
+        // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
+        if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
         // Re-validate technician ownership INSIDE the transaction, row-
         // locked: the predicate on the pre-transaction SELECT alone leaves
         // a window where dispatch reassigns the visit and the former
@@ -20979,13 +20995,7 @@ router.put('/:id/status', async (req, res, next) => {
     // name a technician the write-time guard then drops, leaving the real
     // holder with no card at all.
     const confirmedRow = transition?.adminPayload || null;
-    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
-      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
-      void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
-        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
-      });
-    }
+    let officeConfirmActivated = false;
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
@@ -21006,8 +21016,18 @@ router.put('/:id/status', async (req, res, next) => {
       // fire from a field status tap. Office confirms keep the full funnel.
       // (field_confirmed_at was stamped INSIDE the status transaction above —
       // atomic with the confirmation, never swallowed.)
-      await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
+      officeConfirmActivated = await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
         skipCardRequest: isTechnicianRequest(req),
+      });
+    }
+    // The tech's "new visit" card keys on a real approval — the pending -> confirmed flip OR a
+    // successful activation — so an office approval of a MOVED hold (confirmed -> confirmed)
+    // tells the technician too.
+    if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
       });
     }
 

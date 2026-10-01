@@ -832,10 +832,11 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
       // the audio changed; Codex r3 + r4 P1). Same list as the webhook's
       // replace path.
       if (n > 0) {
-        const { SUPERSEDE_KEPT_REASON_CODES } = require('../services/call-routing-gates');
+        const { SUPERSEDE_KEPT_REASON_CODES, SUPERSEDE_KEPT_CARD_SQL } = require('../services/call-routing-gates');
         await trx('triage_items')
           .where({ call_log_id: call.id })
           .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
+          .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', resolved_at: new Date(), resolution_note: supersededNote });
       }

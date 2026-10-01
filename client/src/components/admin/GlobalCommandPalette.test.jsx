@@ -98,15 +98,23 @@ it('sends the viewed record and isolates a late A response after query-only navi
   expect(await screen.findByText('Current Customer B result')).toBeInTheDocument();
 });
 
-it('keeps the visible reply when a persisted thread survives navigation', async () => {
+it('keeps the visible reply and its knowledge-gap prompt when a persisted thread survives navigation', async () => {
   await mount();
   submit('Summarize this customer');
   await waitFor(() => expect(queryResolvers).toHaveLength(1));
   await act(async () => queryResolvers[0](ok({ response: 'Retained thread reply', threadId: 'thread-1',
+    knowledgeMisses: ['chinch bugs on zoysia'],
     conversationHistory: [{ role: 'user', content: 'Summarize this customer' }, { role: 'assistant', content: 'Retained thread reply' }] })));
   expect(await screen.findByText('Retained thread reply')).toBeInTheDocument();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Knowledge gap' }), { target: { value: 'chinch bugs' } });
   act(() => navigate('/admin/customers?customerId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'));
   expect(screen.getByText('Retained thread reply')).toBeInTheDocument();
+  // The gap prompt belongs to the reply: kept with it, edit included.
+  expect(screen.getByRole('textbox', { name: 'Knowledge gap' })).toHaveValue('chinch bugs');
+  fireEvent.click(screen.getByRole('button', { name: 'Add to knowledge gaps' }));
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/knowledge-gap'))).toBe(true));
+  const save = JSON.parse(fetchMock.mock.calls.find(([url]) => url.endsWith('/knowledge-gap'))[1].body);
+  expect(save).toEqual({ question: 'chinch bugs', request_key: expect.stringMatching(/^[0-9a-f-]{36}$/) });
 });
 
 it('close/reopen retains the in-flight request, and double Enter starts only one query', async () => {
