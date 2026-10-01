@@ -690,7 +690,9 @@ async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLi
   // 'merged', astro_live_url) after its post was retired: republishing it
   // would recreate the deleted file at a URL that now 301s. The exact
   // retired URL is refused before the refresh exemption.
-  if (slug && !spokeOnly(post.target_sites)) {
+  // The legacy publisher writes hub-only frontmatter whatever the row's
+  // target_sites, so no spoke exemption applies on this path.
+  if (slug) {
     const leafWrite = normalizeSlug(slug).split('/').filter(Boolean).length === 1;
     const retiredUrl = retiredTopicFindings({ slug, category, leafOnly: leafWrite, urlOnly: true });
     if (retiredUrl.length) return { ok: false, applicable: true, findings: retiredUrl, skipped: null };
@@ -698,7 +700,7 @@ async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLi
   if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   // flatWrite: publishAstro commits src/content/blog/<leaf>.md for a
   // leaf-only slug whatever the category — the same-leaf collision applies.
-  const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, flatWrite: true, targetSites: post.target_sites, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
+  const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, flatWrite: true, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
   // Two stages (the runner's pattern): geo first WITHOUT the corpus — a
   // deterministic geo block never fetches the live corpus and still returns
   // its verdict during a GitHub outage; only a geo-clean row loads it.
@@ -1181,11 +1183,15 @@ function retiredIndex() {
     const url = normalizeSlug(post.url);
     byUrl.set(url, post);
     byLeaf.set(slugLeaf(url), post);
-    // A post made only of generic words (get-rid-of-pests) has an empty key:
-    // matching it would block every "pest control <city>" idea, so it keeps
-    // URL protection only.
-    const key = topicKey(slugWords(url));
-    if (key && !byTopic.has(key)) byTopic.set(key, post);
+    // Keys come from the row's canonical `topics` and its slug leaf (a
+    // decorative slug like skip-the-guesswork-… alone would miss "diy pest
+    // control vs pro"). A post made only of generic words (get-rid-of-pests)
+    // has no key: matching it would block every "pest control <city>" idea,
+    // so it keeps URL protection only.
+    for (const phrase of [...(post.topics || []), slugWords(url)]) {
+      const key = topicKey(phrase);
+      if (key && !byTopic.has(key)) byTopic.set(key, post);
+    }
   }
   retiredIndexCache = { byUrl, byLeaf, byTopic };
   return retiredIndexCache;
@@ -1234,4 +1240,4 @@ module.exports = {
   OWNER_MIN_OCCURRENCES,
   PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { topicKey, retiredTopicFindings, RETIRED_POSTS, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };

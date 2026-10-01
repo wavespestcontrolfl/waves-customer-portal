@@ -1174,8 +1174,10 @@ describe('retired topics', () => {
 
   test('only the deliberately generic retirements have no topic (URL protection only)', () => {
     const { topicKey, RETIRED_POSTS } = gate._internals;
-    const empty = RETIRED_POSTS.filter((p) => !topicKey(p.url.split('/').filter(Boolean).pop().replace(/-/g, ' '))).map((p) => p.url).sort();
-    expect(empty).toEqual(['/lawn-care/get-rid-of-lawn-pest/', '/pest-control/get-rid-of-pests/', '/pest-control/pest-control-in-lakewood-ranch/']);
+    const urlOnly = RETIRED_POSTS
+      .filter((p) => ![...(p.topics || []), p.url.split('/').filter(Boolean).pop().replace(/-/g, ' ')].some((t) => topicKey(t)))
+      .map((p) => p.url).sort();
+    expect(urlOnly).toEqual(['/lawn-care/get-rid-of-lawn-pest/', '/pest-control/get-rid-of-pests/', '/pest-control/pest-control-in-lakewood-ranch/']);
   });
 
   test('"getting rid of" / "eliminating" phrasing is framing too, pre- and post-draft (local codex pass 2)', () => {
@@ -1248,6 +1250,22 @@ describe('retired topics', () => {
     const codesFor = (opts) => gate.evaluateDraftTargeting(draft, { index: gate.indexCorpus(CORPUS), ...opts }).findings.map((f) => f.code);
     expect(codesFor({ targetSites: ['sarasotaflpestcontrol.com'] })).not.toContain(gate.CODES.RETIRED_TOPIC);
     expect(codesFor({})).toContain(gate.CODES.RETIRED_TOPIC);
+  });
+
+  test('canonical topics catch phrasings a decorative slug misses (codex r5)', () => {
+    for (const [query, url] of [
+      ['DIY pest control vs pro', '/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/'],
+      ['diy vs professional pest control', '/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/'],
+      ['how long to water lawn', '/lawn-care/lawn-watering-tips/'],
+      ['blind mosquitoes', '/pest-control/midge-fly-parrish-fl/'],
+    ]) {
+      expect(gate.evaluate(blog({ query }), { requireCorpus: false }).findings.find((f) => f.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url });
+    }
+  });
+
+  test('a legacy row targeting only a spoke is still checked (the legacy publisher writes hub frontmatter)', async () => {
+    const r = await gate.evaluateBlogPostRow({ slug: 'get-rid-of-earwigs', status: 'published', target_sites: ['sarasotaflpestcontrol.com'] }, { loadIndex: async () => { throw new Error('unused'); } });
+    expect(r.findings[0].code).toBe(gate.CODES.RETIRED_TOPIC);
   });
 
   test('registry size is deliberate (46: 51 proposed minus 5 kept live)', () => {
