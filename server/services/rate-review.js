@@ -311,8 +311,14 @@ function monthsAgoYmd(now, months) {
   return addMonthsSameDay(etDateString(now), -months);
 }
 
-function reviewWindowFor(now) {
-  return { from: etDateString(addETDays(now, REVIEW_WINDOW_FROM_DAYS)), to: etDateString(addETDays(now, REVIEW_WINDOW_TO_DAYS)) };
+// `anchor` = the build date the window counts from. The monthly job anchors
+// on the FIRST of the build month whatever day its tick runs (a day-2
+// retry after a failed day-1 build must cover the same Dec 6 – Jan 5, not
+// Dec 7 – Jan 6 — anniversaries would otherwise fall through, and carry-
+// forward only reads earlier batches); an ad-hoc build anchors on today.
+function reviewWindowFor(now, { anchor = null } = {}) {
+  const base = anchor ? new Date(`${anchor}T12:00:00Z`) : now;
+  return { from: etDateString(addETDays(base, REVIEW_WINDOW_FROM_DAYS)), to: etDateString(addETDays(base, REVIEW_WINDOW_TO_DAYS)) };
 }
 
 // N ET calendar days before `now` — addETDays walks the ET calendar, so a
@@ -1646,6 +1652,9 @@ function computeLineReferences(book) {
   const modeByGroup = new Map();
   const rphByFamily = new Map();
   for (const entry of book) {
+    // Commercial accounts (contract pricing, their own exception) are no
+    // reference for residential lines — out of both cohorts.
+    if (isCommercialCustomer(entry.customer, entry.serviceKeys)) continue;
     // Only a lane that represents ORDINARY list pricing feeds the mode: a
     // per_application account priced off its visits / fee. Prepaid lines
     // (discounted term pricing), per_visit / one_time / NULL lanes (cleanup)
@@ -1803,7 +1812,7 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
     return computeSnapshot(line, config);
 }
 
-async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null, now = new Date(), deps = {} } = {}) {
+async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor = null, trx = null, now = new Date(), deps = {} } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
   if (anniversaryFrom) assertYmd(anniversaryFrom, 'anniversaryFrom');
@@ -1815,12 +1824,13 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
 
   // No explicit window → an EXISTING batch keeps the window it was built
   // with (a recompute must never drop rows by sliding the window to today);
-  // a new batch takes the standing review window relative to the build
-  // date (35–65 days out), the same one the monthly job uses.
+  // a new batch takes the standing review window (35–65 days out) counted
+  // from `windowAnchor` when the caller names one (the monthly job: the
+  // first of the build month) or from the build date.
   const existing = anniversaryFrom && anniversaryTo ? null : await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to');
   const defaults = existing && dateColumn(existing.window_from) && dateColumn(existing.window_to)
     ? { from: dateColumn(existing.window_from), to: dateColumn(existing.window_to) }
-    : reviewWindowFor(now);
+    : reviewWindowFor(now, { anchor: windowAnchor });
   const from = anniversaryFrom || defaults.from;
   const to = anniversaryTo || defaults.to;
   if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
@@ -2073,10 +2083,11 @@ async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null,
   // the month — a retried tick must not rebuild it (and slide its window).
   const batchKey = etMonthStart(now, 0).slice(0, 7);
   if (await alreadyEmailed(dbh, batchKey)) return { skipped: 'already_emailed', batchKey, emailed: false };
-  // No explicit window: buildBatch keeps an EXISTING batch's stored window
-  // and gives a new batch the rolling one (anniversaries 35–65 days out,
-  // reviewWindowFor), so a retry of an unsent digest never drops rows.
-  const built = await buildBatch({ batchKey, now, deps });
+  // No explicit window: buildBatch keeps an EXISTING batch's stored window;
+  // a NEW batch (a day-1 build, or a retry after a day-1 build that failed
+  // before persisting) is anchored on the first of the build month, so every
+  // tick of the month covers the same anniversaries.
+  const built = await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps });
   if (!built.ok) {
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
     return { skipped: built.reason, batchKey };

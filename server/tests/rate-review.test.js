@@ -707,6 +707,21 @@ describe('the review window: anniversaries 35–65 days out from the build date'
     expect(P.reviewWindowFor(new Date('2026-11-01T11:20:00Z'))).toEqual({ from: '2026-12-06', to: '2027-01-05' });
     // a late-evening ET build still counts from the ET calendar day
     expect(P.reviewWindowFor(new Date('2026-12-01T03:30:00Z'))).toEqual({ from: '2027-01-04', to: '2027-02-03' }); // 2026-11-30 22:30 ET
+    // the monthly job anchors on the FIRST of the build month: a day-2 retry covers the same window as day 1
+    expect(P.reviewWindowFor(new Date('2026-11-02T11:20:00Z'), { anchor: '2026-11-01' })).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    expect(P.reviewWindowFor(new Date('2026-11-07T11:20:00Z'), { anchor: '2026-11-01' })).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+  });
+  test('a retry after a day-1 build that never persisted still anchors on the first of the month — no anniversary falls through', async () => {
+    const scripted = fixture.scriptedDb({ planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, batchRow: null });
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    const retry = await rateReview.runMonthlyRateReview({ now: new Date('2026-11-02T11:20:00Z'), deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(retry.batchKey).toBe('2026-11');
+    expect(retry.window).toEqual({ from: '2026-12-06', to: '2027-01-05' }); // not Dec 7 – Jan 6
+    // an ad-hoc admin build with no window still anchors on the build date
+    const adhoc = await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-02T11:20:00Z') });
+    expect(adhoc.window).toEqual({ from: '2026-12-07', to: '2027-01-06' });
   });
   test('buildBatch defaults to that window when no explicit from/to is given, and an explicit window wins', async () => {
     const scripted = fixture.scriptedDb({ planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0 });
@@ -919,6 +934,26 @@ describe('engine replay guards', () => {
     expect(row.list_rate_source).toBe('none');
     expect(row.status).toBe('skipped');
     expect(JSON.parse(row.flags)).toContain('no_list_rate');
+  });
+  test('commercial accounts are no pricing reference: out of the cadence mode and the $/hr quartiles', async () => {
+    const commercial = [24, 25, 26].map((n) => fixture.customer(n, { member_since: '2024-11-1' + (n - 24), property_type: 'commercial', last_name: 'Commercial ' + n }));
+    const clean = fixture.customer(27, { member_since: '2024-12-09', last_name: 'Residential No Estimate' });
+    const scenario = {
+      planLines: [...commercial.map((c) => fixture.planLine(c.id, 'pest_control', 'bimonthly', 250)), fixture.planLine(clean.id, 'pest_control', 'bimonthly', 90)],
+      customers: [...commercial, clean], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async () => fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: [] }));
+    const out = await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === clean.id);
+    expect(row.list_rate_source).toBe('none'); // three commercial $250 contracts never became the residential list rate
+    expect(row.status).toBe('skipped');
+    expect(out.lineRph.pest_control).toBeUndefined();
+    for (const c of commercial) expect(JSON.parse(scripted.writes.snapshotInserts.find((r) => r.customer_id === c.id).flags)).toContain('commercial');
   });
   test('a config read that FAILS fails the batch; a missing row still defaults', async () => {
     const failing = fixture.scriptedDb({ planLines: [], customers: [], configError: new Error('relation unavailable') });
