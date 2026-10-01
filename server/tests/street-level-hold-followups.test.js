@@ -210,7 +210,8 @@ describe('finding 6: the office approval is bound to the address it was given fo
     test('an approved hold is activated lock + verify + STAMP first, then the legs; every other row keeps hook-first (Codex #5506 r3)', () => {
       const s = read('../services/outbound-review-confirm.js');
       // Both rails route an office-approved hold through the one fenced function.
-      expect(s).toContain("return activateHoldFencedByAddress(dbh, svc, routeTag, {});");
+      expect(s).toContain("return activateHoldFencedByAddress(dbh, svc.source_call_log_id ? svc : { ...svc, source_call_log_id: callLogId }, routeTag, {});");
+      expect(s).toContain("findStreetLevelHoldCard(dbh, { callLogId, visitId: svc.id })");
       expect(s).toContain('return await activateHoldFencedByAddress(db, row, routeTag, { evidenceBookedAt: opts.evidenceBookedAt || null });');
       const fence = s.slice(s.indexOf('async function activateHoldFencedByAddress'), s.indexOf('async function runOfficeConfirmActivation'));
       // Order inside it: the locked, address-checked stamp, then the hook legs, then (on failure) the un-stamp.

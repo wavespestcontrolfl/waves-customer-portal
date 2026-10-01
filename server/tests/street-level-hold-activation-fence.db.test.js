@@ -149,6 +149,16 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).not.toBeNull();
   });
 
+  test('an office confirm overlapping an activation that already stamped the visit stays on the fenced path: it runs NO legs (not hook-first, no address check skipped)', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: true });   // the other activation, mid-legs
+    await knex('scheduled_services').where({ id: visitId }).update({ service_address_line1: '1240 Sample Newbuild Trl' });   // and the address changed
+    expect(await runOfficeConfirmActivation(knex, svc, 'admin-dispatch')).toBe(true);   // activated by the other one
+    expect(reminders.registerAppointment).not.toHaveBeenCalled();
+    expect(cardRequest.requestCardForAppointment).not.toHaveBeenCalled();
+    expect(await state(visitId, callId)).toMatchObject({ confirmed: true });
+  });
+
   test('a rollback by one attempt cannot un-stamp another activation: a re-stamped visit, or one recovery already finished, stays activated', async () => {
     // (a) another activation re-stamped the visit (a different confirmed_at) while this one's leg failed
     const a = await seedApprovedHold();

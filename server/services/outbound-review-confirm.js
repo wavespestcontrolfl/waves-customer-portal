@@ -1216,8 +1216,16 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
   // stamp, then the legs: activateHoldFencedByAddress). A technician's own field confirm (skipCardRequest)
   // is confirmed on site and not bound; every other voice booking keeps hook-first below.
   const bindAddress = svc.source_action === 'voice_agent' && !opts.skipCardRequest;
-  if (bindAddress && await isStreetLevelHoldVisit(svc.id, dbh)) {
-    return activateHoldFencedByAddress(dbh, svc, routeTag, {});
+  // Routed by the hold CARD (the durable "this booking was a street-level hold" signal), not the live-hold
+  // predicate: a concurrent activation that already stamped the visit makes it no longer a LIVE hold, and an
+  // overlapping office confirm must still take the fenced path (it loses the stamp and runs no legs) instead of
+  // running the legs hook-first with no address check.
+  if (bindAddress) {
+    const callLogId = svc.source_call_log_id
+      || (await dbh('scheduled_services').where({ id: svc.id }).first('source_call_log_id').catch(() => null))?.source_call_log_id;
+    if (callLogId && await findStreetLevelHoldCard(dbh, { callLogId, visitId: svc.id }).catch(() => null)) {
+      return activateHoldFencedByAddress(dbh, svc.source_call_log_id ? svc : { ...svc, source_call_log_id: callLogId }, routeTag, {});
+    }
   }
   try {
     coreLegsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag, opts);
