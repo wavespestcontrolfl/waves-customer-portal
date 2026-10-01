@@ -1,27 +1,48 @@
 /**
- * hybridKnowledgeSearch `sources` allowlist: a customer-facing reader must
- * never get chunks from corpora outside its list.
+ * hybridKnowledgeSearch: the `sources` allowlist (a customer-facing reader
+ * must never get chunks from corpora outside its list) and the catalog-first
+ * pin (the named entry leads, fetched by key when no list surfaced it).
  */
-const calls = [];
-const rows = [
-  // ops_rule ranks first in both chunk lists; only the catalog pin lifts species.
-  { source: 'ops_rule', source_id: 'r1', title: 'Ops rule', content: 'internal', metadata: {} },
-  { source: 'species', source_id: 'ghost-ant', title: 'Ghost Ant', content: 'customer copy', metadata: {} },
-];
+const mockCalls = [];
+let mockChunkRows = [];
+let mockPinnedRows = [];
+
 jest.mock('../models/db', () => {
-  const fn = jest.fn(() => {
+  const chain = () => {
     const qb = {
       filter: null,
-      whereIn(col, vals) { calls.push(['whereIn', col, vals]); qb.filter = vals; return qb; },
+      pinLookups: [],
+      inner: null,
+      whereIn(col, vals) { mockCalls.push(['whereIn', col, vals]); qb.filter = vals; return qb; },
+      where(arg, ...rest) {
+        if (typeof arg === 'function') {
+          const sub = { orWhere(o) { qb.pinLookups.push(o); return sub; } };
+          arg(sub);
+        } else if (arg === 'chunk_index') qb.pinRead = true;
+        return qb;
+      },
+      from(inner) { qb.inner = inner; return qb; },
+      as() { return qb; },
       whereNotNull() { return qb; },
       whereRaw() { return qb; },
       select() { return qb; },
       orderBy() { return qb; },
-      orderByRaw() { return qb; },
-      limit() { return Promise.resolve(qb.filter ? rows.filter((r) => qb.filter.includes(r.source)) : rows); },
+      limit() { return qb; },
+      then(resolve, reject) {
+        let rows;
+        if (qb.pinRead) {
+          rows = mockPinnedRows.filter((r) => qb.pinLookups.some((o) => o.source === r.source && o.source_id === r.source_id));
+        } else {
+          const filter = qb.inner ? qb.inner.filter : qb.filter;
+          rows = filter ? mockChunkRows.filter((r) => filter.includes(r.source)) : mockChunkRows;
+        }
+        return Promise.resolve(rows).then(resolve, reject);
+      },
     };
     return qb;
-  });
+  };
+  const fn = jest.fn(() => chain());
+  fn.select = jest.fn(() => chain());
   fn.raw = jest.fn(() => 'raw');
   return fn;
 });
@@ -33,18 +54,26 @@ jest.mock('../services/knowledge-bridge', () => ({
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const { hybridKnowledgeSearch } = require('../services/knowledge-index/hybrid-search');
 
-beforeEach(() => { calls.length = 0; KnowledgeBridge.unifiedSearch.mockClear(); });
+const row = (source, sourceId) => ({ source, source_id: sourceId, title: sourceId, content: `${source} text`, metadata: {} });
+
+beforeEach(() => {
+  mockCalls.length = 0;
+  KnowledgeBridge.unifiedSearch.mockClear();
+  // ops_rule ranks first in the chunk list; only the catalog pin lifts species.
+  mockChunkRows = [row('ops_rule', 'r1'), row('species', 'ghost-ant')];
+  mockPinnedRows = [row('species', 'large-patch'), row('species_tech', 'large-patch')];
+});
 
 test('no allowlist searches every source', async () => {
   const { results } = await hybridKnowledgeSearch('ghost ants in kitchen');
   expect(results.map((r) => r.source).sort()).toEqual(['kb', 'ops_rule', 'species', 'wiki']);
-  expect(calls).toEqual([]);
+  expect(mockCalls).toEqual([]);
 });
 
 test('allowlist filters chunk lists and drops unlisted kb/wiki', async () => {
   const { results } = await hybridKnowledgeSearch('ghost ants in kitchen', { sources: ['species'] });
   expect(results.map((r) => r.source)).toEqual(['species']);
-  expect(calls).toContainEqual(['whereIn', 'source', ['species']]);
+  expect(mockCalls).toContainEqual(['whereIn', 'source', ['species']]);
   expect(KnowledgeBridge.unifiedSearch).not.toHaveBeenCalled();
 });
 
@@ -61,4 +90,14 @@ test('an empty allowlist returns nothing instead of everything', async () => {
 test('the named catalog entry is pinned first', async () => {
   const { results } = await hybridKnowledgeSearch('ghost ants in kitchen');
   expect(results[0]).toMatchObject({ source: 'species', sourceId: 'ghost-ant' });
+});
+
+test('a named entry no list surfaced is fetched by key and leads', async () => {
+  const { results } = await hybridKnowledgeSearch('what do I spray for large patch in October');
+  expect(results.slice(0, 2).map((r) => `${r.source}:${r.sourceId}`)).toEqual(['species:large-patch', 'species_tech:large-patch']);
+});
+
+test('the pin fetch honours the allowlist', async () => {
+  const { results } = await hybridKnowledgeSearch('large patch in October', { sources: ['species'] });
+  expect(results.map((r) => `${r.source}:${r.sourceId}`)).toEqual(['species:large-patch', 'species:ghost-ant']);
 });

@@ -320,12 +320,15 @@ function speciesMetadata(e) {
 
 function renderSpeciesCustomer(e) {
   const catalog = require('../species-catalog');
+  const { isApproved } = require('../species-catalog-approval');
   const names = [...new Set([...(e.aliases || []), ...(e.aka || [])].map(clean).filter(Boolean))];
   const flags = Object.entries(e.safety || {}).filter(([, v]) => v === true).map(([k]) => k.replace(/_/g, ' '));
   const lookAlikes = (e.look_alikes || [])
     .map((l) => {
+      // The target's own fields count only while IT is approved: this
+      // entry's hash covers the slug and difference, not the target's name.
       const other = catalog.getEntry(l.slug);
-      return l.difference ? `${other ? other.common_name : l.slug}: ${l.difference}` : '';
+      return l.difference && other && isApproved(other) ? `${other.common_name}: ${l.difference}` : '';
     })
     .filter(Boolean);
   const service = e.service && e.service.label

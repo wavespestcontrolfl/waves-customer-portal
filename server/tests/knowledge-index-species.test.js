@@ -26,11 +26,27 @@ describe('species connectors', () => {
 
   test('only approved entries are indexed', () => {
     const approved = new Set(catalog.listEntries().filter(isApproved).map((e) => e.slug));
-    const drafts = catalog.listEntries().filter((e) => !isApproved(e));
-    expect(drafts.length).toBeGreaterThan(0); // the gate is exercised
     expect(customer.length).toBe(approved.size);
     for (const doc of [...customer, ...staff]) expect(approved.has(doc.sourceId)).toBe(true);
-    for (const draft of drafts) expect(customer.some((d) => d.sourceId === draft.slug)).toBe(false);
+  });
+
+  test('an entry that fails the approval check is left out', async () => {
+    const target = 'spiraling-whitefly';
+    let docs;
+    await jest.isolateModulesAsync(async () => {
+      jest.doMock('../services/species-catalog-approval', () => {
+        const actual = jest.requireActual('../services/species-catalog-approval');
+        return { ...actual, isApproved: (e) => e.slug !== target && actual.isApproved(e) };
+      });
+      const isolated = require('../services/knowledge-index/connectors');
+      docs = await isolated.loadCorpus(isolated.CONNECTORS.find((c) => c.source === 'species'));
+    });
+    expect(docs.some((d) => d.sourceId === target)).toBe(false);
+    expect(docs.length).toBe(customer.length - 1);
+    // ficus-whitefly's look-alike points at the target: named while the
+    // target is approved, dropped once it is not.
+    expect(customer.find((d) => d.sourceId === 'ficus-whitefly').content).toMatch(/Rugose Spiraling Whitefly:/);
+    expect(docs.find((d) => d.sourceId === 'ficus-whitefly').content).not.toMatch(/Rugose Spiraling Whitefly:/);
   });
 
   test('customer docs never carry tech notes', () => {
