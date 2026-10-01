@@ -177,3 +177,13 @@ describe('mowing recommendation in lead mode', () => {
     expect(withGate(undefined, () => build(5.5, 'above')).mowing.recommendation).toMatch(/kept a bit tall/);
   });
 });
+
+describe('coverage card tag', () => {
+  const localized = { water: { status: 'balanced', localizedDry: true, localizedDryConfidence: 'area_estimated' } };
+  test('lead mode tags the sprinkler-coverage card; gate off adds no key', () => {
+    const on = withGate('true', () => buildLawnInsightCards(localized));
+    expect(on.find((c) => c.headline === 'Water coverage is the main thing to watch').kind).toBe('coverage_watch');
+    const off = withGate(undefined, () => buildLawnInsightCards(localized));
+    expect(off.find((c) => c.headline === 'Water coverage is the main thing to watch')).not.toHaveProperty('kind');
+  });
+});

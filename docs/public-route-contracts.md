@@ -1719,7 +1719,9 @@ past-tense `insights[].wavesAction` lines and four stock `whyItMatters` lines
 become null (product-grounded `wavesAction` and every watering
 `customerAction` / `nextVisitPlan` are unchanged), and `mowing.recommendation`
 is null for a too-short / too-tall reading when the mowing finding is among the
-three findings the web card shows. The web report folds secondary finding,
+three findings the web card shows. The sprinkler-coverage water finding
+carries `kind: 'coverage_watch'` (lead mode only) so the water card knows the
+finding owns that guidance even after a narrative headline rewrite. The web report folds secondary finding,
 water and photo-note detail into expanders that print open. The lawn PDF, when
 `lead` is present, prints `lead.why` as the status detail, finding bullets as
 headline + what we saw (+ why it matters only for needs_attention) with no

@@ -144,7 +144,7 @@ describe('water card in lead mode', () => {
   });
 
   it('the section passes whether the sprinkler-coverage card is on the page', () => {
-    const coverageCard = { category: 'water', status: 'watch', priority: 1, headline: 'Water coverage is the main thing to watch', whatWeSaw: 'One area reads drier than the rest.' };
+    const coverageCard = { category: 'water', kind: 'coverage_watch', status: 'watch', priority: 1, headline: 'A narrative-rewritten headline', whatWeSaw: 'One area reads drier than the rest.' };
     const base = { snapshot: { overallScore: 70, status: 'watch' }, lead: LEAD, water: WATER, aftercare: AFTERCARE };
     const { unmount } = render(<LawnReportV2Section data={{ ...base, insights: [coverageCard] }} />);
     expect(screen.queryByText(/Coverage watch:/)).toBeNull();

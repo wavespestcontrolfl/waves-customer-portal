@@ -120,6 +120,10 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
     // snapshot) with a non-deficit total — coverage, NOT "water more".
     cards.push({
       category: 'water', status: 'watch', confidence: water.localizedDryConfidence,
+      // Lead mode tags the card structurally: the narrative overlay may
+      // rewrite the headline, and the water card keys its "Coverage watch"
+      // callout on whether this card is on the page (codex P2 #5517 r2).
+      ...(lawnReportLeadLive() ? { kind: 'coverage_watch' } : {}),
       headline: 'Water coverage is the main thing to watch',
       // "on target" is a measurement claim — only when the week actually
       // measured balanced; unknown-rain weeks describe the photo read only.

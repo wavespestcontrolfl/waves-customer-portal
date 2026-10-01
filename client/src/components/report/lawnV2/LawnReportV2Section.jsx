@@ -47,7 +47,7 @@ function LawnReportV2LeadSection({ data, print }) {
           (codex P2 #5496 r7). */}
       {data.followUp?.scheduled && data.followUp.reason && !data.lead.next ? <LawnFollowUpCard followUp={data.followUp} showYourPart={false} /> : null}
       {data.insights?.length ? <LawnInsightCards insights={data.insights} lead={data.lead} /> : null}
-      {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} lead coverageCardShown={(data.insights || []).some((card) => card && card.category === 'water' && /coverage/i.test(card.headline || ''))} /> : null}
+      {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} lead coverageCardShown={(data.insights || []).some((card) => card && card.kind === 'coverage_watch')} /> : null}
       {data.progression?.length >= 2 ? <LawnProgressionSlider frames={data.progression} note={data.progressionNote} /> : null}
       {data.diagnosis?.length ? <VisualDiagnosisCards categories={data.diagnosis} lead scoreExplanation={data.snapshot?.scoreExplanation && data.snapshot.scoreExplanation !== data.lead.why ? data.snapshot.scoreExplanation : null} /> : null}
       {data.rain7d?.length ? <RainLast7DaysChart days={data.rain7d} confidence={data.rain7dConfidence} source={data.rain7dSource} /> : null}
