@@ -176,3 +176,15 @@ it('labeling the whole loaded page fetches the next page instead of dead-ending'
   expect(await screen.findByText('Next page question')).toBeInTheDocument();
   expect(adminFetch.mock.calls.at(-1)[0]).toContain('before_id=p49');
 }, 30000);
+
+it('shows the call direction, and the swapped-speaker warning on outbound calls', async () => {
+  mockList([
+    yesNoRow({ id: 'c1', question: 'Outbound question', subjectType: 'call_log', subject: { type: 'call_log', direction: 'outbound-api', text: 'Agent: hi', at: '2026-10-01T12:00:00Z' } }),
+    yesNoRow({ id: 'c2', question: 'Inbound question', subjectType: 'call_log', subject: { type: 'call_log', direction: 'inbound', text: 'Caller: hi', at: '2026-10-01T12:00:00Z' } }),
+  ]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Outbound question');
+  expect(screen.getByText(/^Outbound call/)).toBeInTheDocument();
+  expect(screen.getByText(/^Inbound call/)).toBeInTheDocument();
+  expect(screen.getAllByText(/Speaker labels can be swapped/)).toHaveLength(1);
+});

@@ -55,11 +55,18 @@ function SubjectText({ subject }) {
     return <div className="text-14 text-ink-secondary">Subject text unavailable.</div>;
   }
   if (subject.type === "call_log") {
+    const outbound = String(subject.direction || "").startsWith("outbound");
     const long = subject.text.length > 280;
     const shown = open || !long ? subject.text : `${subject.text.slice(0, 280)}…`;
     return (
       <div className="min-w-0 space-y-1">
-        <div className="text-12 font-medium uppercase text-ink-secondary">Call transcript{subject.at ? ` · ${timeLabel(subject.at)}` : ""}</div>
+        <div className="text-12 font-medium uppercase text-ink-secondary">
+          {outbound ? "Outbound call" : "Inbound call"}{subject.at ? ` · ${timeLabel(subject.at)}` : ""}
+        </div>
+        {outbound && (
+          // The same warning Jev's call_direction line carries (call-self-audit.js).
+          <div className="text-14 text-ink-secondary">Waves placed this call. Speaker labels can be swapped on outbound calls; judge who is staff by what each person says.</div>
+        )}
         <div className="whitespace-pre-wrap break-words text-ui-body text-zinc-800">{shown}</div>
         {long && (
           <button type="button" className="inline-flex min-h-11 items-center gap-1 text-14 text-zinc-700 underline sm:min-h-0" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
