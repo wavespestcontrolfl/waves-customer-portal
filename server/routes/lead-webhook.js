@@ -1125,12 +1125,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               // extra-property ask, the "Wants service" line or the sign host.
               // The form's stage and normalized address ride along too: the call
               // pipeline reads them to tell a web-form address from a call's.
+              // The submission's page URLs ride along as well (TRIAGE_REPLACE_EXTRACTED_SQL).
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
-                : db.raw(
-                  "jsonb_strip_nulls(jsonb_build_object('stage', COALESCE(extracted_data, '{}'::jsonb)->'stage', 'address', COALESCE(extracted_data, '{}'::jsonb)->'address', 'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
-                  [JSON.stringify(triageResult.extractedData)]
-                );
+                : db.raw(TRIAGE_REPLACE_EXTRACTED_SQL, [JSON.stringify(triageResult.extractedData)]);
             }
             if (Object.keys(updates).length > 0) {
               updates.updated_at = new Date();
@@ -1670,6 +1668,25 @@ function sanitizeHeardAboutPrompt(value, heardAbout) {
   return text ? text.slice(0, HEARD_ABOUT_PROMPT_MAX).trim() : null;
 }
 
+// The AI triage's extracted_data REPLACES the intake snapshot on a fresh form
+// lead. These keys from intake are carried forward (jsonb_strip_nulls drops a
+// key the row never had); the triage snapshot's own keys win on overlap.
+// attribution keeps ONLY the submission's page URLs (pageUrl / landingUrl):
+// the lead funnel's landing-page view reads them, and the Lead Response Agent
+// is already given the page URL directly, so it sees nothing new. The rest of
+// intake attribution (UTMs, click ids, lead source) is not carried; it lives
+// on the funnel row and the customer.
+const TRIAGE_REPLACE_EXTRACTED_SQL = "jsonb_strip_nulls(jsonb_build_object("
+  + "'stage', COALESCE(extracted_data, '{}'::jsonb)->'stage', "
+  + "'address', COALESCE(extracted_data, '{}'::jsonb)->'address', "
+  + "'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', "
+  + "'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', "
+  + "'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host', "
+  + "'attribution', NULLIF(jsonb_strip_nulls(jsonb_build_object("
+  + "'pageUrl', COALESCE(extracted_data, '{}'::jsonb)->'attribution'->'pageUrl', "
+  + "'landingUrl', COALESCE(extracted_data, '{}'::jsonb)->'attribution'->'landingUrl')), '{}'::jsonb)"
+  + ")) || ?::jsonb";
+
 function buildLeadWebhookIntake(body = {}) {
   // Map raw form field names (garbled -> clean)
   const email = cleanEmail(body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '');
@@ -2110,6 +2127,7 @@ module.exports._test = {
   buildLeadWebhookIntake,
   normalizeSignHost,
   SIGN_HOST_MAX_LENGTH,
+  TRIAGE_REPLACE_EXTRACTED_SQL,
   getLeadWebhookAttribution,
   normalizeLeadServiceInterest,
   normalizeLeadServiceKey,
