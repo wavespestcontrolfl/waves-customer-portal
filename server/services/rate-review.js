@@ -461,15 +461,21 @@ function allowanceFor(allowances, line) {
   return entry ? finite(entry.allowance_minutes) || 0 : 0;
 }
 
+// Settled revenue for one visit: its paid invoice (net of refunds), else —
+// for a prepay-covered visit — the covering term's SETTLED amount (its
+// prepay invoice paid and collectible, net of refunds on the linked
+// payments) spread over the covered visits. A term whose invoice is unpaid,
+// reversed, or missing (settlement unknown) yields no revenue: the stamped
+// prepaid_amount / original prepay_amount are what was CHARGED, not what
+// settled (clearPrepaidStampsForTerm keeps completed visits' stamps after a
+// refund), so they are never used here.
 function visitRevenueCents(row) {
   const paid = positive(row.paid_revenue);
   if (paid != null) return Math.round(paid * 100);
   if (row.annual_prepay_term_id) {
-    const prepaid = positive(row.prepaid_amount);
-    if (prepaid != null) return Math.round(prepaid * 100);
-    const term = positive(row.term_prepay_amount);
+    const settled = positive(row.term_settled_amount);
     const visits = positive(row.term_visit_count);
-    if (term != null && visits != null) return Math.round((term / visits) * 100);
+    if (settled != null && visits != null) return Math.round((settled / visits) * 100);
   }
   return null;
 }
@@ -1175,8 +1181,20 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
     SELECT s.id, s.customer_id, s.scheduled_date, ${LINE_SQL} AS line, ${CADENCE_SQL} AS cadence,
       s.service_time_minutes, s.actual_duration_minutes, s.actual_start_time, s.actual_end_time,
       s.check_in_time, s.check_out_time, s.arrived_at, s.completed_at,
-      s.annual_prepay_term_id, s.prepaid_amount,
-      apt.prepay_amount AS term_prepay_amount, apt.coverage_visit_count AS term_visit_count,
+      s.annual_prepay_term_id,
+      apt.coverage_visit_count AS term_visit_count,
+      (SELECT pi.total - COALESCE((
+          SELECT sum(COALESCE(p.refund_amount, 0)) FROM payments p
+          WHERE COALESCE(p.refund_amount, 0) > 0
+            AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pi.stripe_payment_intent_id)
+              OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = pi.stripe_charge_id)
+              OR p.metadata::jsonb ->> 'invoice_id' = pi.id::text)
+        ), 0)
+        FROM invoices pi
+        WHERE pi.id = apt.prepay_invoice_id AND pi.archived_at IS NULL
+          AND (pi.paid_at IS NOT NULL OR pi.status IN ('paid', 'prepaid'))
+          AND pi.status NOT IN (${notSettled.map(() => '?').join(', ')})
+      ) AS term_settled_amount,
       te.time_entry_minutes, te.time_entry_clock_in, te.time_entry_clock_out,
       sr.service_record_started_at, sr.service_record_ended_at, sr.service_record_structured_notes, sr.customer_interaction,
       (SELECT sum(i.total) - COALESCE(sum((
@@ -1201,7 +1219,7 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       AND s.status = 'completed'
       AND ${PLAN_ROW_SQL}
       AND s.scheduled_date >= ?
-  `, [...notSettled, customerIds, sinceYmd]);
+  `, [...notSettled, ...notSettled, customerIds, sinceYmd]);
   return rows;
 }
 

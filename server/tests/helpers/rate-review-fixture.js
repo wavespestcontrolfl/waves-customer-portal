@@ -128,14 +128,15 @@ function customer(n, overrides = {}) {
 }
 
 // A completed visit: wall minutes via arrived_at → completed_at, the
-// interaction flag, and a paid invoice total.
+// interaction flag, a paid invoice total, or a prepay term's settled share.
 function visit(customerId, line, { minutes, interaction = null, revenue = null, date = '2026-06-15', prepay = null } = {}) {
   const arrived = new Date(`${date}T14:00:00Z`);
   return {
     id: `${customerId}-${date}-${line}`, customer_id: customerId, scheduled_date: date, line, cadence: 'quarterly',
     service_time_minutes: null, actual_duration_minutes: null, actual_start_time: null, actual_end_time: null, check_in_time: null, check_out_time: null,
     arrived_at: arrived.toISOString(), completed_at: new Date(arrived.getTime() + minutes * 60000).toISOString(),
-    annual_prepay_term_id: prepay ? prepay.id : null, prepaid_amount: null, term_prepay_amount: prepay ? prepay.amount : null, term_visit_count: prepay ? prepay.visits : null,
+    // prepay: { id, settled, visits } — `settled` is the term's prepay invoice net of refunds (null = unpaid / reversed / no invoice)
+    annual_prepay_term_id: prepay ? prepay.id : null, term_settled_amount: prepay && prepay.settled != null ? prepay.settled : null, term_visit_count: prepay ? prepay.visits : null,
     time_entry_minutes: null, time_entry_clock_in: null, time_entry_clock_out: null,
     service_record_started_at: null, service_record_ended_at: null, service_record_structured_notes: null,
     customer_interaction: interaction, paid_revenue: revenue,

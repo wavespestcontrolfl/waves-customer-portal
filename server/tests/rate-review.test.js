@@ -154,6 +154,30 @@ describe('trimmed median and the usable-visit floor', () => {
     expect(P.lineDurationStats(unpaid).usableVisits).toBe(3);
     expect(P.lineDurationStats(unpaid).revenuePerHourCents).toBeNull();
   });
+  test('a prepay-covered visit earns the term\'s SETTLED share; a refunded, unpaid or invoice-less term earns nothing', () => {
+    // $404 term, 4 covered visits, fully settled → $101 per visit
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: 404, visits: 4 } }))).toBe(10100);
+    // $100 refunded off the same term → $76 per visit
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: 304, visits: 4 } }))).toBe(7600);
+    // reversed / unpaid / no prepay invoice → settlement unknown → no revenue, never the charged amount
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: null, visits: 4 } }))).toBeNull();
+    expect(P.visitRevenueCents(fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't1', settled: 0, visits: 4 } }))).toBeNull();
+    // a paid visit invoice still wins over the term share
+    const both = fixture.visit('c', 'pest_control', { minutes: 40, revenue: 117, prepay: { id: 't1', settled: 404, visits: 4 } });
+    expect(P.visitRevenueCents(both)).toBe(11700);
+    // the SQL never reads the charged stamps
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(q).toMatch(/AS term_settled_amount/);
+    expect(q).toMatch(/pi\.id = apt\.prepay_invoice_id/);
+    expect(q).not.toMatch(/prepaid_amount|term_prepay_amount/);
+    // and $/hr follows: three settled prepay visits rank, three refunded ones leave $/hr unavailable
+    const settled = [40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', prepay: { id: 't1', settled: 404, visits: 4 } }));
+    expect(P.lineDurationStats(settled).revenuePerHourCents).toBe(Math.round((303 * 100) / (126 / 60)));
+    const refunded = settled.map((v) => ({ ...v, term_settled_amount: null }));
+    expect(P.lineDurationStats(refunded).revenuePerHourCents).toBeNull();
+    expect(P.lineDurationStats(refunded).usableVisits).toBe(3);
+  });
   test('the longest paired visit is dropped from $/hr once ≥ 4 are usable', () => {
     const rows = [40, 45, 50, 200].map((m) => fixture.visit('c', 'pest_control', { minutes: m, revenue: 100 }));
     const stats = P.lineDurationStats(rows);
