@@ -179,8 +179,10 @@ const WHAT_WE_FOUND_HEADER = /^\s*WHAT WE FOUND:?\s*$/;
 
 // The four-section report the writer produces under GATE_REPORT_WRITER_RULES
 // (owner "ok go" 2026-10-01): these titles, once each, in this order, each
-// with one to four paragraphs. Longer than the two-section paragraph, so it
-// carries its own cap.
+// followed by exactly ONE line (the same boundary the two-section shape
+// keeps: a note typed on a line under the report rejects the parse instead
+// of publishing). Longer than the two-section paragraph, so it carries its
+// own cap.
 const FOUR_SECTION_HEADERS = Object.freeze([
   ['whatWeFound', 'What we found', /^\s*WHAT WE FOUND:?\s*$/],
   ['whatWeDid', 'What we did and why', /^\s*WHAT WE DID AND WHY:?\s*$/],
@@ -188,7 +190,6 @@ const FOUR_SECTION_HEADERS = Object.freeze([
   ['whatsNext', 'What’s next', /^\s*WHAT['’]S NEXT:?\s*$/],
 ]);
 const MAX_FOUR_SECTION_CHARS = 3200;
-const MAX_SECTION_PARAGRAPHS = 4;
 const ANY_REPORT_HEADER_RE = /^\s*WHAT (?:WE DID(?: AND WHY)?|WE FOUND|TO EXPECT|['’]S NEXT):?\s*$/;
 
 function parseFourSections(text) {
@@ -203,11 +204,11 @@ function parseFourSections(text) {
     title,
     paragraphs: contentLines(lines.slice(starts[i] + 1, i + 1 < starts.length ? starts[i + 1] : lines.length)),
   }));
-  // Every section says something, within the paragraph cap, and a repeated
-  // or two-section title inside a section rejects the parse.
-  if (sections.some((section) => !section.paragraphs.length
-    || section.paragraphs.length > MAX_SECTION_PARAGRAPHS
-    || section.paragraphs.some((paragraph) => ANY_REPORT_HEADER_RE.test(paragraph)))) return null;
+  // Exactly one line per section: any second line (an internal note typed
+  // under the report, a stray title) is unreviewed free text and rejects
+  // the whole parse.
+  if (sections.some((section) => section.paragraphs.length !== 1
+    || ANY_REPORT_HEADER_RE.test(section.paragraphs[0]))) return null;
   return sections;
 }
 

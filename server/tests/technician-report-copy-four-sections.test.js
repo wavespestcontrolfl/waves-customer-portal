@@ -4,7 +4,7 @@ const { technicianReportCustomerCopy } = require('../services/service-report/tec
 
 const REPORT = [
   'WHAT WE FOUND', '', 'You mentioned ants by the dishwasher. Ghost ants were trailing along the counter.', '',
-  'WHAT WE DID AND WHY', '', 'We placed bait along the counter, because ants carry it back to the colony.', '', 'Outside, we treated the foundation.', '',
+  'WHAT WE DID AND WHY', '', 'We placed bait along the counter, because ants carry it back to the colony. Outside, we treated the foundation.', '',
   'WHAT TO EXPECT', '', 'You may see a few more ants for a few days.', '',
   "WHAT'S NEXT", '', 'If the ants are still trailing after about 1–2 weeks, let us know.',
 ].join('\n');
@@ -14,7 +14,7 @@ describe('four-section report', () => {
     const parsed = technicianReportCustomerCopy(REPORT);
     expect(parsed.sections.map((section) => [section.key, section.title, section.paragraphs.length])).toEqual([
       ['whatWeFound', 'What we found', 1],
-      ['whatWeDid', 'What we did and why', 2],
+      ['whatWeDid', 'What we did and why', 1],
       ['whatToExpect', 'What to expect', 1],
       ['whatsNext', 'What’s next', 1],
     ]);
@@ -32,8 +32,9 @@ describe('four-section report', () => {
     ['a section missing', REPORT.replace('WHAT TO EXPECT\n\nYou may see a few more ants for a few days.\n\n', '')],
     ['an empty section', REPORT.replace('You may see a few more ants for a few days.', '')],
     ['free text above the report', `Note to self: call the office.\n${REPORT}`],
-    ['five paragraphs in a section', REPORT.replace('Outside, we treated the foundation.', 'One.\nTwo.\nThree.\nFour.')],
-    ['a repeated title inside a section', REPORT.replace('Outside, we treated the foundation.', 'WHAT WE FOUND')],
+    ['a second line in a section', REPORT.replace(' Outside, we treated the foundation.', '\nOutside, we treated the foundation.')],
+    ['an internal note under the report', `${REPORT}\nOffice: customer disputed the previous invoice.`],
+    ['a repeated title inside a section', REPORT.replace(' Outside, we treated the foundation.', '\nWHAT WE FOUND')],
     ['a report over the cap', REPORT.replace('Outside, we treated the foundation.', 'Outside, we treated the foundation. '.repeat(100))],
   ])('rejects %s', (label, text) => {
     expect(technicianReportCustomerCopy(text)).toBeNull();

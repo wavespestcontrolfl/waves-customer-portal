@@ -114,7 +114,7 @@ describe('prompt rewrites', () => {
       expect(prompt).not.toMatch(/Use active ingredient names/);
       expect(prompt).not.toMatch(/use a supplied active ingredient/);
       expect(prompt).not.toContain('other labeled crawling pests');
-      expect(prompt).not.toContain('exactly ONE line');
+      expect(prompt).not.toContain('Under each of the two section titles');
       expect(prompt).not.toContain('80–140 words');
       expect(prompt).not.toContain('Never state a recovery or response timeframe of any kind');
       expect(prompt).toContain('WHAT WE DID AND WHY');
