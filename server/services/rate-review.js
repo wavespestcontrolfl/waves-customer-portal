@@ -531,8 +531,8 @@ function classifyBand({ currentCents, listCents, rph = null, lineRph = null, usa
 const EXCEPTION_FLAGS = Object.freeze([
   'tenure_under_lock', 'prepay_mid_term', 'prepay_term_missing', 'reviewed_within_12mo', 'manual_rate_edit_recent',
   'retention_offer_active', 'plan_hold_active', 'callback_recent', 'cancellation_case_recent', 'complaint_open',
-  'past_due', 'hand_picked_tier', 'commercial', 'termite_program', 'multi_property', 'lane_cleanup',
-  'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
+  'past_due', 'hand_picked_tier', 'commercial', 'termite_program', 'multi_property', 'lane_cleanup', 'cadence_conflict',
+  'prepay_term_ambiguous', 'rate_unattributed', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
 ]);
 
 function evaluateExceptions(line, config = DEFAULT_CONFIG) {
@@ -542,6 +542,9 @@ function evaluateExceptions(line, config = DEFAULT_CONFIG) {
   else if (line.tenureMonths != null && line.tenureMonths < config.lock_months) flags.push('tenure_under_lock');
   if (line.prepayMidTerm) flags.push('prepay_mid_term');
   if (line.prepayTermMissing) flags.push('prepay_term_missing');
+  if (line.prepayTermAmbiguous) flags.push('prepay_term_ambiguous');
+  if (line.rateUnattributed) flags.push('rate_unattributed');
+  if (line.cadenceConflict) flags.push('cadence_conflict');
   if (line.reviewedWithin12mo) flags.push('reviewed_within_12mo');
   if (line.manualRateEditRecent) flags.push('manual_rate_edit_recent');
   if (line.retentionOfferActive) flags.push('retention_offer_active');
@@ -672,11 +675,23 @@ function hasSizeInput(inputs, line) {
   return false;
 }
 
+const PEST_FREQUENCY_FOR_CADENCE = Object.freeze({ quarterly: 'quarterly', bimonthly: 'bimonthly', monthly: 'monthly' });
+const LAWN_TIER_FOR_CADENCE = Object.freeze({ every_6_weeks: 'enhanced', monthly: 'premium', bimonthly: 'standard' });
+
 // Quote-time concessions come off so the replay prices TODAY'S LIST for the
-// same property, services and (engine-derived) tier.
-function listReplayInputs(inputs) {
+// same property, services and (engine-derived) tier — at the cadence the
+// line actually runs on (pest frequency / lawn tier), which can differ from
+// the cadence the estimate was sold at.
+function listReplayInputs(inputs, { familyKey = null, cadence = null } = {}) {
   const clean = JSON.parse(JSON.stringify(inputs));
   for (const key of ['manualDiscount', 'serviceSpecificDiscounts', 'serviceSpecificCredits']) delete clean[key];
+  if (familyKey === 'pest_control' && clean.services && clean.services.pest && PEST_FREQUENCY_FOR_CADENCE[cadence]) {
+    clean.services.pest = { ...clean.services.pest, frequency: PEST_FREQUENCY_FOR_CADENCE[cadence] };
+  }
+  if (familyKey === 'lawn_care' && clean.services && clean.services.lawn && LAWN_TIER_FOR_CADENCE[cadence]) {
+    clean.services.lawn = { ...clean.services.lawn, tier: LAWN_TIER_FOR_CADENCE[cadence], lawnFreq: CADENCE_VISITS[cadence] };
+    delete clean.lawnFreq;
+  }
   return clean;
 }
 
@@ -697,7 +712,7 @@ function listRateFromEngineResult(result, line, cadence) {
   };
 }
 
-async function replayEstimate(estimate, deps) {
+async function replayEstimate(estimate, { familyKey, cadence }, deps) {
   const inputs = engineInputsFromEstimate(estimate);
   if (!inputs) return null;
   const engine = deps.pricingEngine || require('./pricing-engine');
@@ -705,7 +720,7 @@ async function replayEstimate(estimate, deps) {
     if (typeof engine.needsSync === 'function' && engine.needsSync() && typeof engine.syncConstantsFromDB === 'function') {
       await engine.syncConstantsFromDB();
     }
-    return { inputs, result: engine.generateEstimate(listReplayInputs(inputs)) };
+    return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence })) };
   } catch (err) {
     logger.warn(`[rate-review] engine replay failed for estimate ${estimate.id}: ${err.message}`);
     return null;
@@ -779,6 +794,7 @@ async function loadActivePlanLines(dbh, { today }) {
       percentile_cont(0.5) WITHIN GROUP (ORDER BY estimated_price) FILTER (WHERE estimated_price > 0) AS median_price,
       count(estimated_price) FILTER (WHERE estimated_price > 0)::int AS priced_visits,
       bool_or(annual_prepay_term_id IS NOT NULL) AS prepay_linked,
+      array_remove(array_agg(DISTINCT annual_prepay_term_id), NULL) AS prepay_term_ids,
       max(cat_vpy)::int AS catalog_vpy,
       array_remove(array_agg(DISTINCT source_estimate_id), NULL) AS source_estimate_ids,
       array_remove(array_agg(DISTINCT skey), NULL) AS service_keys
@@ -959,10 +975,40 @@ function isCommercialCustomer(customer, serviceKeys = []) {
 
 // ── current rate per lane ───────────────────────────────────────────────
 
+// The plan family a prepay term's coverage_service_type text names.
+function familyOfCoverage(text) {
+  const t = String(text || '').toLowerCase();
+  if (!t) return null;
+  if (/mosquito/.test(t)) return 'mosquito';
+  if (/termite|wdo/.test(t)) return 'termite';
+  if (/rodent|trap/.test(t)) return 'rodent';
+  if (/lawn/.test(t)) return 'lawn_care';
+  if (/tree|shrub|palm/.test(t)) return 'tree_shrub';
+  if (/pest/.test(t)) return 'pest_control';
+  return null;
+}
+
+// The live prepay term that covers THIS line: the term the line's own
+// visits link, else the one live term whose coverage names the family.
+// Two candidates = ambiguous (held, never guessed).
+function matchPrepayTerm(terms, planLine, familyKey) {
+  const live = (terms || []).filter((t) => positive(t.prepay_amount));
+  const linkedIds = new Set((planLine.prepay_term_ids || []).map(String));
+  const linked = live.filter((t) => linkedIds.has(String(t.id)));
+  if (linked.length === 1) return { term: linked[0], ambiguous: false };
+  if (linked.length > 1) return { term: null, ambiguous: true };
+  const byFamily = live.filter((t) => familyOfCoverage(t.coverage_service_type) === familyKey);
+  if (byFamily.length === 1) return { term: byFamily[0], ambiguous: false };
+  if (byFamily.length > 1) return { term: null, ambiguous: true };
+  // One live term and nothing says which family it covers: a single-line
+  // account can only mean this line; anything else stays unresolved.
+  if (live.length === 1 && !familyOfCoverage(live[0].coverage_service_type) && planLine.account_lines === 1) return { term: live[0], ambiguous: false };
+  return { term: null, ambiguous: live.length > 0 };
+}
+
 function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
   const lane = customer.billing_mode || null;
   const prepayLinked = !!planLine.prepay_linked;
-  const terms = Array.isArray(liveTerms) ? liveTerms : [];
   const visitMedianCents = toCents(planLine.median_price);
   const feeCents = toCents(customer.per_application_fee);
   const fromVisits = () => {
@@ -974,21 +1020,26 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
   if (lane === 'annual_prepay' || prepayLinked) {
     // The term authority wins over the scalar (facts.js posture): a live
     // term means the line is prepaid mid-term and reprices at renewal only.
-    const term = terms.find((t) => positive(t.prepay_amount)) || null;
+    const { term, ambiguous } = matchPrepayTerm(liveTerms, planLine, planLine.family_key);
     if (term) {
       const visits = positive(term.coverage_visit_count) || visitsPerYearFor(planLine.cadence, planLine.catalog_vpy);
       const cents = visits ? Math.round((Number(term.prepay_amount) / visits) * 100) : null;
-      if (cents) return { cents, source: 'prepay_term', unit: 'application', prepayMidTerm: true };
+      if (cents) return { cents, source: 'prepay_term', unit: 'application', prepayMidTerm: true, prepayTermId: term.id };
     }
     const fallback = fromVisits();
-    return { ...fallback, prepayTermMissing: lane === 'annual_prepay' };
+    return { ...fallback, prepayTermMissing: lane === 'annual_prepay' || prepayLinked, prepayTermAmbiguous: ambiguous };
   }
   if (lane === 'monthly_membership') {
     if (isEnabled('planRateLedger') && ledgerSlice && positive(ledgerSlice.monthly_rate)) {
       return { cents: toCents(ledgerSlice.monthly_rate), source: 'ledger_slice', unit: 'month' };
     }
-    if (positive(customer.monthly_rate)) return { cents: toCents(customer.monthly_rate), source: 'monthly_rate', unit: 'month' };
-    return { cents: 0, source: 'none', unit: 'month' };
+    // customers.monthly_rate is the WHOLE account's dues. It can stand in for
+    // a family slice only when the account has exactly one plan line; a
+    // multi-line account without attribution cannot be priced per line.
+    if (positive(customer.monthly_rate) && (planLine.account_lines || 1) === 1) {
+      return { cents: toCents(customer.monthly_rate), source: 'monthly_rate', unit: 'month' };
+    }
+    return { cents: 0, source: 'none', unit: 'month', rateUnattributed: positive(customer.monthly_rate) != null };
   }
   // per_application, per_visit and the legacy NULL lane all bill the visit's
   // own stamp first (completionInvoiceAmount precedence); per_visit / NULL
@@ -997,6 +1048,39 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
 }
 
 // ── batch build ─────────────────────────────────────────────────────────
+
+// Snapshot identity is (batch, customer, family): a family with open visits
+// at TWO cadences (a cadence change that left old-cadence visits open) keeps
+// the cadence carrying the most open visits (tie → the sooner next visit)
+// and is flagged cadence_conflict — a hold-out, never a guess. Every line
+// also learns how many plan lines its account has (monthly fallback and
+// prepay matching need it).
+function consolidatePlanLines(rows) {
+  const byKey = new Map();
+  for (const row of rows || []) {
+    const key = `${row.customer_id}|${row.family_key}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(row);
+  }
+  const lines = [];
+  for (const group of byKey.values()) {
+    const sorted = [...group].sort((a, b) => (b.open_visits - a.open_visits) || String(dateColumn(a.next_visit) || '').localeCompare(String(dateColumn(b.next_visit) || '')));
+    const [primary, ...others] = sorted;
+    lines.push({
+      ...primary,
+      cadence_conflict: others.length > 0,
+      other_cadences: others.map((o) => o.cadence),
+      source_estimate_ids: [...new Set(sorted.flatMap((r) => r.source_estimate_ids || []))],
+      prepay_term_ids: [...new Set(sorted.flatMap((r) => r.prepay_term_ids || []))],
+      service_keys: [...new Set(sorted.flatMap((r) => r.service_keys || []))],
+      prepay_linked: sorted.some((r) => r.prepay_linked),
+    });
+  }
+  const linesPerCustomer = new Map();
+  for (const line of lines) linesPerCustomer.set(line.customer_id, (linesPerCustomer.get(line.customer_id) || 0) + 1);
+  for (const line of lines) line.account_lines = linesPerCustomer.get(line.customer_id);
+  return lines;
+}
 
 function assertBatchKey(batchKey) {
   if (!BATCH_KEY_RE.test(String(batchKey || ''))) {
@@ -1033,7 +1117,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
 
   const today = etDateString(now);
   const config = await loadConfig(dbh);
-  const planLines = await loadActivePlanLines(dbh, { today });
+  const planLines = consolidatePlanLines(await loadActivePlanLines(dbh, { today }));
   const customerIds = [...new Set(planLines.map((p) => p.customer_id))];
   const [customers, firstVisits, completedRows, liveTerms, ledger] = await Promise.all([
     loadCustomers(dbh, customerIds),
@@ -1071,21 +1155,25 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       .sort((a, b) => new Date(a.accepted_at || 0) - new Date(b.accepted_at || 0));
     const acceptedAt = linkedEstimates.length ? linkedEstimates[0].accepted_at : null;
 
+    // Engine replay at the line's own cadence. A result whose cadence still
+    // does not match the line (a family the replay cannot re-cadence) is NOT
+    // a list rate — it is discarded (list_cadence_mismatch), and the row
+    // falls to the cadence mode or is skipped.
     let list = { cents: null, source: 'none', cadenceMismatch: false, engineTier: null };
     for (const estimate of linkedEstimates) {
       const inputs = engineInputsFromEstimate(estimate);
       if (!hasSizeInput(inputs, familyKey)) continue;
-      if (!replayCache.has(estimate.id)) replayCache.set(estimate.id, await replayEstimate(estimate, deps));
-      const replay = replayCache.get(estimate.id);
+      const cacheKey = `${estimate.id}|${familyKey}|${cadence}`;
+      if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence }, deps));
+      const replay = replayCache.get(cacheKey);
       const rate = replay ? listRateFromEngineResult(replay.result, familyKey, cadence) : null;
       if (!rate) continue;
-      list = {
-        cents: current.unit === 'month' ? rate.monthlyCents : rate.perAppCents,
-        source: 'engine',
-        cadenceMismatch: rate.cadenceMismatch,
-        engineTier: rate.tier,
-        estimateTier: estimate.waveguard_tier ? String(estimate.waveguard_tier).toLowerCase() : null,
-      };
+      const estimateTier = estimate.waveguard_tier ? String(estimate.waveguard_tier).toLowerCase() : null;
+      if (rate.cadenceMismatch) {
+        list = { cents: null, source: 'none', cadenceMismatch: true, engineTier: rate.tier, estimateTier };
+        continue;
+      }
+      list = { cents: current.unit === 'month' ? rate.monthlyCents : rate.perAppCents, source: 'engine', cadenceMismatch: false, engineTier: rate.tier, estimateTier };
       break;
     }
 
@@ -1153,10 +1241,11 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     const signals = signalsByCustomer.get(customer.id) || null;
     let listCents = list.cents;
     let listSource = list.source;
-    if ((listCents == null || list.cadenceMismatch) && current.unit === 'application') {
+    if (listCents == null && current.unit === 'application') {
       const mode = cadenceModes.get(`${familyKey}|${cadence}`);
-      if (mode) { listCents = mode; listSource = 'cadence_mode'; } else if (listCents == null) { listSource = 'none'; }
+      if (mode) { listCents = mode; listSource = 'cadence_mode'; }
     }
+    if (listCents == null) listSource = 'none';
     // Hand-picked tier (owner ruling 2026-09-01: call-the-office, permanent):
     // the provenance column says manual, or the accepted estimate carries a
     // tier the engine does not derive from its own inputs. The customer's
@@ -1203,6 +1292,9 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       lineRph: lineRphStats.get(familyKey) || null,
       prepayMidTerm: !!current.prepayMidTerm,
       prepayTermMissing: !!current.prepayTermMissing,
+      prepayTermAmbiguous: !!current.prepayTermAmbiguous,
+      rateUnattributed: !!current.rateUnattributed,
+      cadenceConflict: !!entry.planLine.cadence_conflict,
       reviewedWithin12mo: priorReviews.has(`${customer.id}|${familyKey}`),
       manualRateEditRecent: !!(manualAt && manualAt >= manualEditCutoff),
       retentionOfferActive: !signals || signals.retentionOfferActive,
@@ -1461,7 +1553,7 @@ module.exports = {
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,
-    resolveAnniversary, resolveCurrentRate, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer,
+    resolveAnniversary, resolveCurrentRate, matchPrepayTerm, familyOfCoverage, consolidatePlanLines, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer,
     loadActivePlanLines, loadFirstCompletedVisits, loadCompletedVisitRows, loadExceptionSignals, loadPriorReviews, loadLedgerSlices, loadEstimates, loadCustomers,
     MAX_USABLE_MINUTES, MIN_TREATMENT_MINUTES, MAX_ALLOWANCE_MINUTES, MIN_LINE_RPH_SAMPLE, CADENCE_VISITS, CONVERSATION_MINUTES_KEYS, INTERACTION_HOME, INTERACTION_NOT_HOME,
   },

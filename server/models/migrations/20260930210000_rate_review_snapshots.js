@@ -84,6 +84,9 @@ exports.up = async function up(knex) {
       t.timestamp('computed_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
       t.timestamps(true, true);
 
+      // One row per customer × family per batch: the builder consolidates a
+      // family with open visits at two cadences onto the dominant cadence and
+      // flags it cadence_conflict (rate-review.js consolidatePlanLines).
       t.unique(['batch_key', 'customer_id', 'family_key'], SNAPSHOT_UNIQUE);
       t.index(['batch_key', 'status'], SNAPSHOT_BATCH_STATUS_IDX);
       t.index(['customer_id', 'family_key'], SNAPSHOT_CUSTOMER_IDX);

@@ -265,6 +265,9 @@ describe('exception rules', () => {
     ['multi-property account', { facts: fixture.facts({ multiProperty: true }) }, 'multi_property'],
     ['per_visit lane', { billingLane: 'per_visit' }, 'lane_cleanup'],
     ['NULL lane', { billingLane: null }, 'lane_cleanup'],
+    ['two cadences open in one family', { cadenceConflict: true }, 'cadence_conflict'],
+    ['two live prepay terms could cover the line', { prepayTermAmbiguous: true }, 'prepay_term_ambiguous'],
+    ['monthly dues with no per-family attribution', { rateUnattributed: true }, 'rate_unattributed'],
     ['facts loader failed (fail closed)', { facts: null }, 'facts_unavailable'],
     ['money facts degraded (fail closed)', { facts: fixture.facts({ moneyFactsDegraded: true }) }, 'facts_degraded'],
   ];
@@ -339,9 +342,90 @@ describe('current rate per billing lane', () => {
     // annual_prepay scalar with no live term → visit fallback, flagged for cleanup
     expect(P.resolveCurrentRate({ customer, planLine, liveTerms: [] })).toMatchObject({ cents: 10530, source: 'visit_median', prepayTermMissing: true });
   });
+  test('monthly_membership: the whole-account scalar never stands in for a slice on a multi-line account', () => {
+    const customer = fixture.customer(1, { billing_mode: 'monthly_membership', monthly_rate: 95 });
+    const multi = fixture.planLine('c', 'pest_control', 'quarterly', null, { account_lines: 2 });
+    const out = P.resolveCurrentRate({ customer, planLine: multi });
+    expect(out).toMatchObject({ cents: 0, source: 'none', unit: 'month', rateUnattributed: true });
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', billingLane: 'monthly_membership', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 0, rateUnit: 'month', rateUnattributed: true, facts: fixture.facts() });
+    expect(row.status).toBe('skipped');
+    expect(row.flags).toEqual(expect.arrayContaining(['rate_unattributed', 'no_current_rate']));
+    // a ledger slice prices the line even on a multi-line account
+    const { isEnabled } = require('../config/feature-gates');
+    if (isEnabled('planRateLedger')) {
+      expect(P.resolveCurrentRate({ customer, planLine: multi, ledgerSlice: { monthly_rate: 40 } })).toMatchObject({ cents: 4000, source: 'ledger_slice' });
+    }
+  });
+  test('annual_prepay: the term is matched to the line — linked visits first, then coverage family; two candidates are ambiguous', () => {
+    const pest = { id: 't-pest', prepay_amount: 404, coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control' };
+    const lawn = { id: 't-lawn', prepay_amount: 780, coverage_visit_count: 12, coverage_service_type: 'Lawn Care Monthly' };
+    const lawnLine = fixture.planLine('c', 'lawn_care', 'monthly', null, { prepay_linked: true, prepay_term_ids: ['t-lawn'], account_lines: 2 });
+    expect(P.matchPrepayTerm([pest, lawn], lawnLine, 'lawn_care')).toMatchObject({ term: { id: 't-lawn' }, ambiguous: false });
+    const unlinkedPest = fixture.planLine('c', 'pest_control', 'quarterly', null, { prepay_linked: true, prepay_term_ids: [], account_lines: 2 });
+    expect(P.matchPrepayTerm([pest, lawn], unlinkedPest, 'pest_control')).toMatchObject({ term: { id: 't-pest' } });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'annual_prepay' }), planLine: unlinkedPest, liveTerms: [pest, lawn] })).toMatchObject({ cents: 10100, source: 'prepay_term', prepayTermId: 't-pest' });
+    // two pest terms, neither linked → ambiguous → held, priced off the visits
+    const pest2 = { ...pest, id: 't-pest-2', prepay_amount: 440 };
+    expect(P.matchPrepayTerm([pest, pest2], unlinkedPest, 'pest_control')).toEqual({ term: null, ambiguous: true });
+    const held = P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'annual_prepay', per_application_fee: 100 }), planLine: unlinkedPest, liveTerms: [pest, pest2] });
+    expect(held).toMatchObject({ cents: 10000, source: 'per_application_fee', prepayTermMissing: true, prepayTermAmbiguous: true });
+    expect(P.evaluateExceptions({ familyKey: 'pest_control', billingLane: 'annual_prepay', anniversaryDate: '2025-01-10', tenureMonths: 21, facts: fixture.facts(), prepayTermMissing: true, prepayTermAmbiguous: true })).toEqual(expect.arrayContaining(['prepay_term_missing', 'prepay_term_ambiguous']));
+    // a lone unlabeled term on a single-line account is that line's; on a multi-line account it is not
+    const blank = { id: 't-blank', prepay_amount: 404, coverage_visit_count: 4, coverage_service_type: null };
+    expect(P.matchPrepayTerm([blank], fixture.planLine('c', 'pest_control', 'quarterly', null, { account_lines: 1 }), 'pest_control').term).toEqual(blank);
+    expect(P.matchPrepayTerm([blank], fixture.planLine('c', 'pest_control', 'quarterly', null, { account_lines: 2 }), 'pest_control')).toEqual({ term: null, ambiguous: true });
+    expect(P.familyOfCoverage('Tree & Shrub Program')).toBe('tree_shrub');
+    expect(P.familyOfCoverage(null)).toBeNull();
+  });
   test('per_visit and NULL lanes read the visit stamp (the exception rule flags lane_cleanup)', () => {
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_visit' }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: null }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
+  });
+});
+
+// ── plan-line consolidation + engine cadence ────────────────────────────
+
+describe('one snapshot per customer × family', () => {
+  test('a family with open visits at two cadences keeps the dominant cadence and is flagged cadence_conflict', () => {
+    const rows = [
+      fixture.planLine('c1', 'pest_control', 'quarterly', 117, { open_visits: 3, next_visit: '2026-12-10', source_estimate_ids: ['e1'] }),
+      fixture.planLine('c1', 'pest_control', 'bimonthly', 95, { open_visits: 1, next_visit: '2026-11-20', source_estimate_ids: ['e2'] }),
+      fixture.planLine('c1', 'lawn_care', 'every_6_weeks', 61, { open_visits: 2 }),
+      fixture.planLine('c2', 'pest_control', 'quarterly', 117, { open_visits: 2 }),
+    ];
+    const lines = P.consolidatePlanLines(rows);
+    expect(lines).toHaveLength(3);
+    const pest = lines.find((l) => l.customer_id === 'c1' && l.family_key === 'pest_control');
+    expect(pest).toMatchObject({ cadence: 'quarterly', median_price: 117, cadence_conflict: true, other_cadences: ['bimonthly'], account_lines: 2 });
+    expect(pest.source_estimate_ids).toEqual(['e1', 'e2']);
+    expect(lines.find((l) => l.customer_id === 'c2')).toMatchObject({ cadence_conflict: false, account_lines: 1 });
+    // ties on open visits go to the sooner next visit
+    const tied = P.consolidatePlanLines([
+      fixture.planLine('c3', 'pest_control', 'quarterly', 117, { open_visits: 2, next_visit: '2026-12-10' }),
+      fixture.planLine('c3', 'pest_control', 'monthly', 90, { open_visits: 2, next_visit: '2026-11-02' }),
+    ]);
+    expect(tied[0].cadence).toBe('monthly');
+    expect(P.evaluateExceptions({ familyKey: 'pest_control', billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, facts: fixture.facts(), cadenceConflict: true })).toContain('cadence_conflict');
+  });
+});
+
+describe('engine replay runs at the line\'s own cadence', () => {
+  test('pest frequency and lawn tier follow the schedule, quote-time concessions come off', () => {
+    const inputs = { homeSqFt: 2100, manualDiscount: { type: 'PERCENT', value: 10 }, services: { pest: { frequency: 'quarterly', roachType: 'none' }, lawn: { track: 'st_augustine', tier: 'enhanced' } }, lawnFreq: 9 };
+    const pest = P.listReplayInputs(inputs, { familyKey: 'pest_control', cadence: 'bimonthly' });
+    expect(pest.services.pest).toEqual({ frequency: 'bimonthly', roachType: 'none' });
+    expect(pest.manualDiscount).toBeUndefined();
+    expect(pest.services.lawn.tier).toBe('enhanced');
+    const lawn = P.listReplayInputs(inputs, { familyKey: 'lawn_care', cadence: 'monthly' });
+    expect(lawn.services.lawn).toMatchObject({ tier: 'premium', lawnFreq: 12 });
+    expect(lawn.lawnFreq).toBeUndefined();
+    expect(P.listReplayInputs(inputs, { familyKey: 'mosquito', cadence: 'monthly' }).services.pest.frequency).toBe('quarterly');
+    expect(inputs.services.pest.frequency).toBe('quarterly'); // never mutates the stored inputs
+  });
+  test('a replay whose cadence still does not match the line is not a list rate', () => {
+    const result = { lineItems: [{ service: 'pest_control', annualAfterDiscount: 468, visitsPerYear: 4 }], waveGuard: { tier: 'bronze' } };
+    expect(P.listRateFromEngineResult(result, 'pest_control', 'quarterly')).toMatchObject({ perAppCents: 11700, cadenceMismatch: false });
+    expect(P.listRateFromEngineResult(result, 'pest_control', 'bimonthly')).toMatchObject({ cadenceMismatch: true });
   });
 });
 
@@ -556,6 +640,30 @@ describe('buildBatch over the synthetic December book', () => {
     expect(result.summary.exception).toBe(inserted.filter((r) => r.status === 'exception').length);
     expect(result.summary.green_annual_delta_cents).toBe(green.reduce((s, r) => s + r.annual_delta_cents, 0));
     expect(P.summarizeRows(inserted)).toEqual(result.summary);
+  });
+
+  test('a line sold quarterly but now running bimonthly is listed at the bimonthly engine price', async () => {
+    const bimonthly = fixture.customer(11, { member_since: '2025-02-01', last_name: 'Bimonthly' });
+    const lines = [...book.planLines, fixture.planLine(bimonthly.id, 'pest_control', 'bimonthly', 100, { source_estimate_ids: [fixture.ESTIMATE(6)] })];
+    const scenario = {
+      planLines: lines, customers: [...book.customerRows, bimonthly], firstVisits: [...book.firstVisits, { customer_id: bimonthly.id, line: 'pest_control', first_visit: '2025-12-02', completed_visits: 5 }],
+      completedVisits: book.completedVisits, estimates: [...book.estimates, fixture.estimate(6, bimonthly.id, { acceptedAt: '2025-11-25T16:00:00Z' })],
+      terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const db2 = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => db2(table));
+    db.raw.mockImplementation((...args) => db2.raw(...args));
+    db.transaction.mockImplementation((fn) => db2.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    const engine = fixture.fakePricingEngine();
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: engine } });
+    const row = db2.writes.snapshotInserts.find((r) => r.customer_id === bimonthly.id);
+    // the engine was asked for bimonthly (6 visits × $117) and the line compares against $117/application, not the quarterly quote
+    expect(engine.generateEstimate.mock.calls.some(([inputs]) => inputs.services.pest.frequency === 'bimonthly')).toBe(true);
+    expect(row).toMatchObject({ cadence: 'bimonthly', visits_per_year: 6, list_rate_cents: 11700, list_rate_source: 'engine', band: 'D', annual_delta_cents: 7200 });
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
   });
 
   test('a year-long catch-up window holds everyone and the 12-month lock holds the young lines out', async () => {

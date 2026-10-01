@@ -111,8 +111,8 @@ const NOW = new Date('2026-11-01T11:20:00Z'); // 2026-11-01 06:20 ET — the cro
 function planLine(customerId, familyKey, cadence, medianPrice, extra = {}) {
   return {
     customer_id: customerId, family_key: familyKey, cadence, open_visits: 3, next_visit: '2026-12-10',
-    median_price: medianPrice, priced_visits: medianPrice ? 3 : 0, prepay_linked: false, catalog_vpy: null,
-    source_estimate_ids: [], service_keys: [familyKey], ...extra,
+    median_price: medianPrice, priced_visits: medianPrice ? 3 : 0, prepay_linked: false, prepay_term_ids: [], catalog_vpy: null,
+    source_estimate_ids: [], service_keys: [familyKey], account_lines: 1, ...extra,
   };
 }
 
@@ -146,19 +146,29 @@ function facts(overrides = {}) {
   };
 }
 
-// Engine stand-in: prices every replay at $117/application quarterly pest
-// (annual 468, 4 visits) and $65/application lawn (9 visits), bronze tier.
-function fakePricingEngine() {
+// Engine stand-in: prices every replay at $117/application pest at the
+// requested frequency (quarterly 4 / bimonthly 6 / monthly 12 visits) and
+// $65/application lawn at the requested tier (standard 6 / enhanced 9 /
+// premium 12), bronze tier unless `tier` is given.
+function fakePricingEngine({ tier = 'bronze' } = {}) {
+  const PEST_VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
+  const LAWN_VISITS = { standard: 6, enhanced: 9, premium: 12 };
   return {
     needsSync: () => false,
     syncConstantsFromDB: async () => true,
-    generateEstimate: jest.fn((inputs) => ({
-      lineItems: [
-        ...(inputs.services && inputs.services.pest ? [{ service: 'pest_control', annual: 468, annualAfterDiscount: 468, visitsPerYear: 4 }] : []),
-        ...(inputs.services && inputs.services.lawn ? [{ service: 'lawn_care', annual: 585, annualAfterDiscount: 585, frequency: 9 }] : []),
-      ],
-      waveGuard: { tier: 'bronze' },
-    })),
+    generateEstimate: jest.fn((inputs) => {
+      const pest = inputs.services && inputs.services.pest;
+      const lawn = inputs.services && inputs.services.lawn;
+      const pestVisits = pest ? (PEST_VISITS[pest.frequency] || 4) : 0;
+      const lawnVisits = lawn ? (LAWN_VISITS[lawn.tier] || 9) : 0;
+      return {
+        lineItems: [
+          ...(pest ? [{ service: 'pest_control', annual: 117 * pestVisits, annualAfterDiscount: 117 * pestVisits, visitsPerYear: pestVisits }] : []),
+          ...(lawn ? [{ service: 'lawn_care', annual: 65 * lawnVisits, annualAfterDiscount: 65 * lawnVisits, frequency: lawnVisits }] : []),
+        ],
+        waveGuard: { tier },
+      };
+    }),
   };
 }
 
@@ -194,7 +204,7 @@ function decemberBook() {
     planLine(c.wellPriced.id, 'pest_control', 'quarterly', 125, { source_estimate_ids: [ESTIMATE(3)] }),
     planLine(c.offWindow.id, 'pest_control', 'quarterly', 117, { source_estimate_ids: [ESTIMATE(4)] }),
     planLine(c.locked.id, 'pest_control', 'quarterly', 117, { source_estimate_ids: [ESTIMATE(5)] }),
-    planLine(c.prepaid.id, 'pest_control', 'quarterly', null, { prepay_linked: true, priced_visits: 0 }),
+    planLine(c.prepaid.id, 'pest_control', 'quarterly', null, { prepay_linked: true, prepay_term_ids: [TERM(1)], priced_visits: 0 }),
     planLine(c.perVisit.id, 'pest_control', 'quarterly', 95),
     planLine(c.lawnUnder.id, 'lawn_care', 'every_6_weeks', 55),
     planLine(c.lawnAt1.id, 'lawn_care', 'every_6_weeks', 61),
