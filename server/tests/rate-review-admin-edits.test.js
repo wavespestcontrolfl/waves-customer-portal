@@ -492,6 +492,21 @@ describe('selectReviewEntries vs admin_skipped', () => {
     expect(owned).toEqual([]);
   });
 
+  test('a line with no anniversary yet is listed (held) batch after batch — unless the owner skipped it, until it has an anniversary', () => {
+    const { selectReviewEntries } = rateReview._private;
+    const customer = { id: CUST(1), member_since: '2026-11-20', created_at: '2026-11-20T12:00:00Z' };
+    // admin-booked: no accepted estimate, no completed visit → no anniversary (held as no_anniversary)
+    const entry = () => ({ customer, familyKey: 'pest_control', first: null, acceptedAt: null, visitsPerYear: 4 });
+    const latest = (flags) => new Map([[`${CUST(1)}|pest_control`, { status: 'skipped', review_date: null, batch_key: '2027-01', computed_at: '2026-12-01T11:20:00Z', flags: JSON.stringify(flags) }]]);
+    const args = { from: '2027-02-05', to: '2027-03-07', now: new Date('2027-01-31T11:20:00Z'), firstVisits: null };
+    expect(selectReviewEntries([entry()], { ...args, latestByLine: new Map() }).map((e) => e.reviewDate)).toEqual([null]);
+    expect(selectReviewEntries([entry()], { ...args, latestByLine: latest([]) }).map((e) => e.reviewDate)).toEqual([null]); // a ranking skip never hides it
+    expect(selectReviewEntries([entry()], { ...args, latestByLine: latest(['admin_skipped']) })).toEqual([]); // the owner's does
+    // once it has an anniversary the regular rules apply: an in-window occurrence the owner never skipped is listed
+    const dated = () => ({ ...entry(), first: { completed_dates: ['2026-02-10'], first_visit: '2026-02-10' }, customer: { ...customer, member_since: '2026-02-10', created_at: '2026-02-10T12:00:00Z' } });
+    expect(selectReviewEntries([dated()], { ...args, latestByLine: latest(['admin_skipped']) }).map((e) => e.reviewDate)).toEqual(['2027-02-10']);
+  });
+
   test('consecutive windows share their boundary day: the occurrence the owner skipped is not listed again, a new occurrence is', () => {
     const { selectReviewEntries } = rateReview._private;
     // first visit 2026-01-05 → anniversary 2027-01-05, in both the Dec 6–Jan 5 and the Jan 5–Feb 4 windows

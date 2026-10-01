@@ -2123,16 +2123,17 @@ function accountFirstVisits(firstVisits, book) {
 // The occurrence of a line's anniversary this batch reviews: the one inside
 // the window, or — for a line an earlier batch (within 90 days) held or
 // skipped — that batch's review date, carried forward. A line with no
-// anniversary at all is listed (it is held as no_anniversary). Null = not
-// in this batch.
+// anniversary at all is listed (it is held as no_anniversary) unless the
+// owner skipped it: that skip holds until the line has an anniversary, when
+// the rules below take over. Null = not in this batch.
 function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
-  if (!entry.anniversary.date) return { reviewDate: null, carriedFrom: null };
   // An owner's skip (admin_skipped: Include unticked / Skip this cycle) is a
   // decision for that cycle, not a hold to carry — the line returns at its
   // next anniversary (or a catch-up build), as the screen says. Consecutive
   // windows share their boundary day, so the occurrence the owner skipped is
   // not listed again by the next window either.
   const ownerSkipped = !!latest && (parseJson(latest.flags) || []).includes('admin_skipped');
+  if (!entry.anniversary.date) return ownerSkipped ? null : { reviewDate: null, carriedFrom: null };
   const inWindow = anniversaryInWindow(entry.anniversary.date, from, to);
   if (inWindow) return ownerSkipped && dateColumn(latest.review_date) === inWindow ? null : { reviewDate: inWindow, carriedFrom: null };
   if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || ownerSkipped) return null;
