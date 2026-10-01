@@ -241,12 +241,13 @@ function canonicalV2Secondary(extraction) {
   const nameOf = (c) => [c.first_name, c.last_name].filter(Boolean).join(' ').trim().toLowerCase();
   const sparseSameName = !single.phone && !single.email && !!nameOf(single) && nameOf(single) === nameOf(mirror);
   if (!sparseSameName && !sameV2Person(extraction.secondary_contact, first)) return single;
-  // Same person: the mirror fills any field the singleton left empty (a
-  // name-only singleton with the phone on the mirror keeps the phone), and the
+  // Same person: the mirror fills any field the singleton left empty or
+  // 'unknown' (a name-only singleton with the phone on the mirror keeps the
+  // phone; an 'unknown' role takes the mirror's tenant / home_buyer), and the
   // flags OR together.
   const filled = { ...single };
   for (const [k, v] of Object.entries(mirror)) {
-    if ([null, undefined, ''].includes(filled[k])) filled[k] = v;
+    if ([null, undefined, '', 'unknown'].includes(filled[k])) filled[k] = v;
   }
   return {
     ...filled,

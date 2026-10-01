@@ -958,6 +958,7 @@ app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
+app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
@@ -1613,11 +1614,8 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
         cron.schedule('*/15 * * * *', async () => {
           try {
             await runExclusive('recipient-optin-sweep', async () => {
-              const { sweepUndispatchedOptins, sweepPendingConfirmationReplays } = require('./services/recipient-optin');
+              const { sweepUndispatchedOptins } = require('./services/recipient-optin');
               await sweepUndispatchedOptins();
-              // Booking-confirmation replays to on-site recipients that were
-              // held or failed after their YES (#5467).
-              await sweepPendingConfirmationReplays();
             });
           } catch (err) {
             logger.error(`[cron] recipient opt-in sweep failed: ${err.message}`);

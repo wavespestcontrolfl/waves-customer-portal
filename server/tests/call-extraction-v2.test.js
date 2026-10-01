@@ -1385,6 +1385,11 @@ describe('extraction compat adapter', () => {
     firstOnly.secondary_contact = entry('spouse_partner', false, false, 'John', null);
     firstOnly.secondary_contacts = [entry('spouse_partner', true, true, 'John', '+15550100123')];
     expect(flatView(firstOnly).secondary_contact).toMatchObject({ phone: '+15550100123', on_site: true });
+    // An 'unknown' singleton role takes the same-person mirror's specific role.
+    const roleless = validPersisted();
+    roleless.secondary_contact = entry('unknown', false, false, 'Sample Spouse', '+15550100123');
+    roleless.secondary_contacts = [entry('tenant', false, true, 'Sample Spouse', '+15550100123')];
+    expect(flatView(roleless).secondary_contact).toMatchObject({ role: 'tenant', on_site: true });
     expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
     // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
     const flat = flatView(single('+15550100123'));

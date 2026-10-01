@@ -1,11 +1,8 @@
 // customers.service_preferences is a jsonb blob that two customer-facing
 // writers rebuild wholesale (PUT /api/service-preferences, estimate accept).
 // These keys are written only by the server (call pipeline / recipient opt-in,
-// #5467) and must survive those rebuilds: booking-confirmation replay
-// obligations, applied caller demotions, and the per-phone consent boundary.
+// #5467) and must survive those rebuilds: the per-phone consent boundary.
 const SERVER_OWNED_PREF_KEYS = [
-  'demote_primary_on_optin',
-  'demote_primary_applied',
   'consent_covered_phone_keys',
   'unconsented_slot_phone_keys',
 ];

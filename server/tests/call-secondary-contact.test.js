@@ -838,7 +838,7 @@ describe('on-site contact opt-in ask', () => {
   test('the loop only QUEUES the on-site ask (awaiting_booking); explicit consent keeps its own claim path', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result })');
-    expect(src).toContain('pendingOnSiteAsks.push({ entry: secondaryEntry, demote: !otherSlotPhone });');
+    expect(src).toContain('pendingOnSiteAsks.push({ entry: secondaryEntry });');
     expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");
     expect(src).toContain('JSON.stringify({ optin_ask: value })');
     // The save only admits an on-site-only contact when the ask can go out.
@@ -863,7 +863,7 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain("for (const { entry } of pendingOnSiteAsks) await markOptinAsk(entry, 'not_sent:no_booking');");
   });
 
-  test('the booking site sends the on-site ask only once a visit landed: marker first (deep-merged), claim with the VISIT address, dispatch outcome on the card, reconcile', () => {
+  test('the booking site sends the on-site ask only once a confirmed visit landed: claim with the VISIT address and id, dispatch outcome on the card', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const landed = src.indexOf('scheduledServiceId = svc.id;');
     // Runs AFTER any reuse activation, never for a street-level hold or an
@@ -875,20 +875,22 @@ describe('on-site contact opt-in ask', () => {
     const gate = src.slice(src.lastIndexOf('const onSiteAskVisitLive', site), site);
     expect(gate).toContain('!disputeHeldReuse && houseNumberDisputed !== true');
     expect(gate).toContain('!(await isStreetLevelHoldRow(db, svc))');
-    expect(gate).toContain("String(v.status || '').toLowerCase() !== 'confirmed' || v.customer_confirmed === false");
-    expect(gate).toContain('at.getTime() > Date.now()');
+    expect(gate).toContain(".where({ id: svc.id, status: 'confirmed' })");
+    expect(gate).toContain("q.whereNull('customer_confirmed').orWhere('customer_confirmed', true)");
+    // The canonical customer-promised arrival, still ahead.
+    expect(gate).toContain("scheduledServiceApptTime(svc.id, { throwOnError: true })");
+    expect(gate).toContain('return at?.getTime() > Date.now();');
     const block = src.slice(site, site + 6000);
-    // Marker before the ask; an existing visit entry's fields win (demoted_at / claim kept).
-    expect(block.indexOf("'{demote_primary_on_optin}'")).toBeLessThan(block.indexOf('claimRecipientOptins({'));
-    expect(block).toContain('?::jsonb || COALESCE(service_preferences #> ARRAY');
     // The ask quotes the booked visit's address.
     expect(block).toContain("const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');");
     expect(block).toContain('propertyAddress: visitAddress ||');
+    // The visit rides the claim (a send-window-deferred ask is re-checked against it).
+    expect(block).toContain('visitId: svc.id,');
     expect(block).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
     expect(block).toContain("return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');");
-    expect(block).toContain('await reconcileDemoteMarker(customerId, phoneKey);');
-    // The booking site writes no pref at all.
+    // No caller demotion and no booking marker in this PR (owner split 10-01).
     expect(src).not.toContain('appointment_notify_primary: false');
+    expect(src).not.toContain('demote_primary_on_optin');
     // The persistence loop no longer claims for the on-site path.
     expect(src).not.toContain('(askedViaOnSite && secondaryEntry?.phone)');
   });
