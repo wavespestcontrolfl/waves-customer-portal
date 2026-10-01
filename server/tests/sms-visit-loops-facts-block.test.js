@@ -243,15 +243,27 @@ describe('visitLoopsNeedAnswer', () => {
   });
 });
 
-describe('validateOpenLoopAnswer', () => {
-  test('gate on: an empty reply fails while something is owed; any text, no loop, or gate off passes', () => {
-    const owed = { visitLoops: { weOwe: [{ id: 'cc-1', kind: 'callback' }] } };
-    expect(validateOpenLoopAnswer({ reply: '', context: owed }).ok).toBe(true); // gate off
+describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed eval behaves like live)', () => {
+  const facts = (lines) => `UPCOMING SERVICES:\n- none\n${HEADER}\n${lines.join('\n')}\nOPEN TIMES:\n- Tue 9-11\nBILLING:\n`;
+  test('an empty reply fails while a must-answer line is listed; any text, none listed, or a position only passes', () => {
+    const owed = facts(['- WE OWE THEM: callback — Call back (since Wednesday, Jun 10)']);
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: owed })).toMatchObject({ ok: false, violations: [expect.stringContaining('empty reply is not allowed')] });
+    expect(validateOpenLoopAnswer({ reply: '   ', factsBlock: owed }).ok).toBe(false);
+    expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', factsBlock: owed }).ok).toBe(true);
+    for (const line of ['- DELAY FLAGGED: x', '- WINDOW PASSED: x', '- MISSED VISIT: x', '- THEY ARE WAITING ON US FOR: x']) {
+      expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts([line]) }).ok).toBe(false);
+    }
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- none']) }).ok).toBe(true);
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- Tech position: Sam is en route']) }).ok).toBe(true);
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- Tracking gap: x']) }).ok).toBe(true);
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: 'UPCOMING SERVICES:\n- none\nBILLING:\n' }).ok).toBe(true); // gate-off facts
+  });
+
+  test('a real gate-on facts block with an owed promise trips it (frozen-facts eval path)', () => {
     process.env[GATE] = 'true';
-    expect(validateOpenLoopAnswer({ reply: '', context: owed })).toMatchObject({ ok: false, violations: [expect.stringContaining('empty reply is not allowed')] });
-    expect(validateOpenLoopAnswer({ reply: '   ', context: owed }).ok).toBe(false);
-    expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', context: owed }).ok).toBe(true);
-    expect(validateOpenLoopAnswer({ reply: '', context: { visitLoops: { techPosition: { status: 'en_route' } } } }).ok).toBe(true);
+    const block = buildFactsBlock({ ...baseContext, visitLoops: { weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back', since: '2026-06-09', source: 'call' }] } }, { now: NOW });
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: block }).ok).toBe(false);
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: buildFactsBlock(baseContext, { now: NOW }) }).ok).toBe(true);
   });
 });
 

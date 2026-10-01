@@ -4513,8 +4513,19 @@ function visitLoopsNeedAnswer(context) {
 // Deterministic draft check (same loop as validateReserviceOffer): with an open loop
 // listed, an empty reply breaks the "never go silent" rule — it is revised, or stays
 // unconverged, instead of passing as "no reply warranted".
-function validateOpenLoopAnswer({ reply, context }) {
-  if (!visitLoopsNeedAnswer(context) || String(reply || '').trim()) return { ok: true, violations: [] };
+// Read from the RENDERED facts block (live drafting and the sealed eval's frozen
+// facts alike): one of the lines the rule says must be answered is listed.
+const MUST_ANSWER_LINE_RE = /^- (?:DELAY FLAGGED|WINDOW PASSED|MISSED VISIT|WE OWE THEM|THEY ARE WAITING ON US FOR)\b/;
+function factsListOpenLoop(factsBlock) {
+  const text = String(factsBlock || '');
+  const at = text.indexOf(`\n${VISIT_LOOPS_HEADER}\n`);
+  if (at < 0) return false;
+  const lines = text.slice(at + VISIT_LOOPS_HEADER.length + 2).split('\n');
+  const end = lines.findIndex((l) => !l.startsWith('- '));
+  return lines.slice(0, end < 0 ? lines.length : end).some((line) => MUST_ANSWER_LINE_RE.test(line));
+}
+function validateOpenLoopAnswer({ reply, factsBlock }) {
+  if (!factsListOpenLoop(factsBlock) || String(reply || '').trim()) return { ok: true, violations: [] };
   return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
 }
 // Marks a draft whose section showed time-sensitive VISIT STATUS (a fresh tech
@@ -5426,7 +5437,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassLiveEta.violations);
     }
-    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, context });
+    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock });
     if (!singlePassOpenLoop.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassOpenLoop.violations);
@@ -5457,7 +5468,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // empty reply is checked like any other and revised.
     if (!parsed.reply) {
       const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
-      if (owed.ok && validateOpenLoopAnswer({ reply: '', context }).ok) { converged = true; break; }
+      if (owed.ok && validateOpenLoopAnswer({ reply: '', factsBlock }).ok) { converged = true; break; }
     }
 
     // Owner-directed structural fix: check the model's own offered_times
@@ -5469,7 +5480,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
-    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, context });
+    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock });
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
@@ -5736,7 +5747,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       // Any draft whose facts list something owed goes to a person: no check can
       // prove a non-empty reply actually addressed it (openLoopThanks is the
       // demoted-gratitude case of the same rule).
-      requireReview: openLoopThanks || (factsCarryVisitLoops(factsForDraft) && visitLoopsNeedAnswer(context)),
+      requireReview: openLoopThanks || factsListOpenLoop(factsForDraft),
     });
 
     // Deterministic comms-lint verdict for this draft, computed once and
@@ -6071,6 +6082,7 @@ module.exports = {
   visitLoopStatus,
   visitLoopsNeedAnswer,
   validateOpenLoopAnswer,
+  factsListOpenLoop,
   VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,

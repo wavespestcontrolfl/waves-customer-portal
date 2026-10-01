@@ -75,6 +75,9 @@ describe('live-webhook gratitude drafter boundary', () => {
         throw new Error('phone lookup must not run for a matched webhook customer');
       }),
       authorizedDuesCents: jest.fn(() => []),
+      // the VISIT STATUS & OPEN LOOPS renderer redacts through this and fails
+      // closed (drops the line) without it
+      redactAccessCodes: (text) => String(text || ''),
     }));
     jest.doMock('../services/llm/call', () => ({ dispatchWithFallback }));
     jest.doMock('../services/llm/deep', () => ({ createDeepMessage }));
