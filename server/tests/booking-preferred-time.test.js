@@ -804,6 +804,7 @@ describe('a completed booking closes the customer\'s open preferred-time request
     ['it was deleted', { deleted_at: new Date() }],
     ['it is no longer a preferred-time lead', { lead_type: 'phone_call' }],
     ['the customer refreshed the request after the booking (newer than the booking + 60 s slack)', { requested_in_time: false }],
+    ['staff attached an estimate to it since the lookup (codex #5477 r6: it is that estimate\'s sale)', { estimate_id: 'est-1' }],
   ])('revalidated under the row lock (codex #5399 r14): %s -> not closed, no notice', async (_label, change) => {
     mockLockedLead = { ...mockLockedLead, ...change };
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 0 });
@@ -1052,6 +1053,12 @@ describe('a completed booking closes the customer\'s open preferred-time request
     // estimate tier, on both paths, BEFORE the close (so the close finds it no longer open).
     expect(replaySrc).toMatch(/verifyPreferredHandoff\(pricing_estimate_id, estimate_token\)\s*\?\s*await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id, \{ customerId: custId \}\)/);
     expect(replaySrc).toMatch(/estimateId: replayPreferredEstimateId,/);
+    // codex #5477 r6: resolved ONCE before any replay conversion; the series conversion carries it, and the
+    // standalone estimate conversion runs only when the series conversion did not.
+    expect(replaySrc.indexOf('replayPreferredEstimateId = verifyPreferredHandoff(')).toBeLessThan(replaySrc.indexOf("source: 'recurring_service_booked'"));
+    expect(replaySrc).toMatch(/source: 'recurring_service_booked',[\s\S]*?\.\.\.\(replayPreferredEstimateId \? \{ estimateId: replayPreferredEstimateId \} : \{\}\),/);
+    expect(replaySrc).toMatch(/if \(replaySeriesActivated\) \{\s*replayConversionRan = true;/);
+    expect(replaySrc).toMatch(/if \(replayPreferredEstimateId && !replayConversionRan\) \{/);
     expect(replaySrc.indexOf('estimateId: replayPreferredEstimateId')).toBeLessThan(replaySrc.indexOf('await closeBookedPreferredLeads('));
     const normal = src.slice(replayEnd);
     // both conversions carry the booking id: the lineage is persisted on the won lead AT the conversion

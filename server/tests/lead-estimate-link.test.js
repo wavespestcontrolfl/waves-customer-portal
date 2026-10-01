@@ -1061,8 +1061,10 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
 
     test('both /book conversion calls (primary and replay) pass the flag', () => {
       const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
-      const calls = src.match(/convertLeadFromEvent\(\{[^}]*\}\)/g) || [];
-      expect(calls).toHaveLength(2);
+      // Each call's argument object runs to the first line that closes it ("});"),
+      // so a spread like ...(x ? { estimateId } : {}) inside the call is kept.
+      const calls = src.match(/convertLeadFromEvent\(\{[\s\S]*?\n\s*\}\);/g) || [];
+      expect(calls).toHaveLength(3); // primary, replay series, replay estimate-linked (codex #5477 r6)
       for (const c of calls) expect(c).toMatch(/excludeCallbackRequests: true/);
     });
   });

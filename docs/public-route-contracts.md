@@ -943,9 +943,21 @@ public lead. A booking closes a preferred-time request on its own (owner ruling
 2026-10-01, replacing the 2026-09-30 note-only rule): a completed self-booking
 (`createSelfBooking`, every service type, on both the first commit and the
 `txResult.existing` replay; a free re-service callback visit is skipped) moves
-each of the booked customer's open preferred-time leads (phone match) whose
+each of the booked customer's open preferred-time leads whose
 `last_requested_at` is at or before the booking (60 s of clock slack) to the
-terminal status `handled` — closed, neither won nor lost — through
+terminal status `handled`. A lead qualifies only when its phone matches (last
+10 digits), its `customer_id` is null or the booked customer, AND its identity
+corroborates the booked customer (`corroboratesBookedCustomer`): it is linked
+to that customer, or its email matches the customer's non-blank email, or its
+first AND last name both match. A phone match alone never closes a request (a
+shared household or reassigned number). A request staff attached an estimate
+to (`leads.estimate_id` set) is never closed: when the booking came from that
+estimate's verified handoff and the estimate belongs to the booking customer's
+account, the booking's conversion passes the estimate id so the request
+converts as won through the estimate tier (one conversion call per attempt,
+on the primary and replay paths alike); otherwise, or if that conversion
+fails, the request stays open for the office. `handled` means closed, neither
+won nor lost, and is set through
 `closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel row
 (`handled` has no funnel mapping, so the `ad_service_attribution` stage stays
 as it is and nothing is uploaded to Google or Meta); the booking's own
@@ -954,8 +966,10 @@ treats `handled` as closed: it is out of the open set, out of every prospect
 denominator (conversion, win and lost rates), and never re-attached by a later
 form, call, estimate or email fan-out. The close runs inside the per-(lead,
 visit) transaction that re-reads the lead `FOR UPDATE` (still
-`book_preferred_time`, open, not converted or deleted, phone still matching,
-`customer_id` null or the booker's), writes ONE `status_change` activity row
+`book_preferred_time`, open, not converted or deleted, no estimate attached,
+phone still matching, `customer_id` null or the booker's, identity still
+corroborated), and locks and re-reads the booked visit (still live and not a
+callback), then writes ONE `status_change` activity row
 ("Closed automatically — customer booked <service> for <date> (visit <id>) on
 /book"), deduped per (lead, visit) through `lead_activities.metadata`, so a
 replay never closes twice; a newer request is new work and stays open. The office

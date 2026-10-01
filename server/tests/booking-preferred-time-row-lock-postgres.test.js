@@ -74,7 +74,7 @@ jest.setTimeout(60000);
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), first_name text, last_name text, phone text, email text, address text, city text, zip text,
       lead_type text, service_interest text, first_contact_at timestamptz, first_contact_channel text, status text, is_residential boolean,
       transcript_summary text, extracted_data jsonb, lead_source_id uuid, gclid text, wbraid text, gbraid text, fbclid text, fbc text, fbp text,
-      converted_at timestamptz, deleted_at timestamptz, customer_id uuid, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`, [schema]);
+      converted_at timestamptz, deleted_at timestamptz, customer_id uuid, estimate_id uuid, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`, [schema]);
     await database.raw('CREATE TABLE ??.funnel_rows (lead_id uuid PRIMARY KEY)', [schema]);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text, first_name text, last_name text, email text)', [schema]);
     await database.raw(`CREATE TABLE ??.self_booked_appointments (
@@ -587,6 +587,15 @@ jest.setTimeout(60000);
         await closeBookedPreferredLeads(database, { customerId: cust, booking });
         await reconcileBookingSince(database, { phone: '9415550100', since: new Date(Date.now() - 60000) });
         expect(delivered.size).toBe(1);
+      });
+
+      test('a request staff attached an estimate to is never closed as handled (codex #5477 r6): it stays open for the estimate tier or the office', async () => {
+        const { cust, req, booking } = await setupRequestAndBooking();
+        await database('leads').where({ id: req.leadId }).update({ estimate_id: randomUUID() });
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(0);
+        expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'new', converted_at: null });
+        expect(await database('lead_activities').where({ lead_id: req.leadId })).toHaveLength(0);
+        expect(delivered.size).toBe(0);
       });
 
       test('a request staff reopened is not announced again by a retry', async () => {

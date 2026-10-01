@@ -563,6 +563,10 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         .whereNull('deleted_at')
         .whereIn('status', OPEN_LEAD_STATUSES)
         .whereNull('converted_at')
+        // A request staff worked into an estimate is that estimate's sale, never
+        // 'handled' (codex #5477 r6): the booking's estimate-tier conversion wins
+        // it, and if that conversion fails it stays open for the office.
+        .whereNull('estimate_id')
         .whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [new Date(bookedMs + BOOKING_SLACK_MS)]),
       ten,
     ).select('id')) || [];
@@ -592,7 +596,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         // to close). The advisory lock only orders closers, so the lead's own
         // state, phone identity and request recency are re-proven right here.
         const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
-          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email',
+          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id',
           trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
         );
         const stillOurs = current
@@ -600,6 +604,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
           && OPEN_LEAD_STATUSES.includes(current.status)
           && !current.converted_at
           && !current.deleted_at
+          && !current.estimate_id // staff may have attached an estimate since the query above
           && current.requested_in_time === true
           && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
           && (!current.customer_id || String(current.customer_id) === String(customerId))
