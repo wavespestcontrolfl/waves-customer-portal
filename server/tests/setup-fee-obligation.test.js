@@ -540,6 +540,15 @@ describe('fee deferred to the first performed visit (series claim)', () => {
     expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
   });
 
+  test('a REFUNDED claim-backed invoice still resolves the obligation (deliberate refund — never instruct a re-bill, matching the refunded-fee doctrine above)', async () => {
+    mockTables = baseTables({
+      scheduled_services: [ROOT({ pending_setup_fee: null })],
+      setup_fee_claims: [{ invoice_id: 'inv-9', amount: '99.00' }],
+      invoices: { id: 'inv-9', status: 'refunded', line_items: APP_ONLY_LINE },
+    });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
   test('a claim record whose invoice was voided is NOT proof of billing — the obligation survives', async () => {
     mockTables = baseTables({
       scheduled_services: [ROOT({ pending_setup_fee: null })],

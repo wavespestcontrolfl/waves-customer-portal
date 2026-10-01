@@ -306,6 +306,22 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('refund-then-next-completion: a deliberately REFUNDED first invoice does not make the next visit read the fee as never invoiced (no park, no second setup line)', async () => {
+    const f = await seed();
+    try {
+      await complete(f, f.parentId);
+      const [first] = await mockPg('invoices').where({ customer_id: f.customerId });
+      await mockPg('invoices').where({ id: first.id }).update({ status: 'refunded' });
+      await makeDue(f.childIds[0]);
+      const next = await complete(f, f.childIds[0]);
+      expect(next).toMatchObject({ status: 200 });
+      const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoices).toHaveLength(2);
+      expect(invoices.flatMap(setupLines)).toHaveLength(1);
+      expect(await parkAlerts(f)).toHaveLength(0);
+    } finally { await cleanup(f); }
+  });
+
   test('concurrent completions of two visits of the same series bill the fee exactly once', async () => {
     const f = await seed();
     try {

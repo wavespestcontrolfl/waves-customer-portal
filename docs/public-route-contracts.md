@@ -1335,6 +1335,33 @@ the after-first-visit promise on the annual-prepay option on the strength of thi
 Informational only for now: no client reads it, and it moves no money and sends no
 message.
 
+Setup fee billed with the first visit (pay-after-first-visit PR-C,
+`GATE_PAF_SETUP_FEE`, dark; needs `GATE_PAY_AFTER_FIRST_VISIT`). Three public payload
+additions, each OMITTED (never `false`) unless true, so every gate-off response is
+byte-identical to before. (1) GET `/api/estimates/:token/data`
+`recurringCardPolicy.setupFeeAfterFirstVisit: true` only when BOTH gates are exactly
+`'true'` and the policy the accept would resolve puts this customer on the card rail
+(the same predicate as `payAfterFirstVisit`, plus the sub-gate). The React page applies
+its "setup fee billed with your first visit" copy and the `after_visit_card` consent text
+only when this is true AND its own selection resolves to the setup-only shape (monthly
+tier: a WaveGuard setup row, no first-visit amount, no bait-station setup row). A boolean
+about the viewer's own estimate: no customer, payer or payment-method data. (2) PUT
+`/api/estimates/:token/accept` success payload `setupFeeAfterFirstVisit: true` when this
+accept actually STAMPED the setup fee on the first visit's series parent
+(`scheduled_services.pending_setup_fee`) instead of minting a payable unattached invoice:
+the payload then carries `invoiceId: null`, `invoiceMode: false`, no `invoicePayUrl` and
+`nextStep: 'confirmed'`. An accept that could not defer (no series parent, a different
+claim already on the series, not on the card rail, a bait-station setup in the quote)
+keeps today's payload and pay link and omits the field. (3) Durable retry: the accept
+persists `estimates.estimate_data.setupFeeDeferredToFirstVisit: true` in the same
+transaction as the lane stamp (`recurringCardLaneAccepted`), and a retry of that
+already-accepted estimate (`alreadyAccepted: true`) rebuilds the same
+`setupFeeAfterFirstVisit: true`, never a pay link. The setup fee is billed on the first
+PERFORMED visit's own invoice and charged once to the saved method; a no-show or
+cancelled series bills nothing. The accept notification (customer account feed) says
+nothing is charged today and the fee bills with the first visit. No message is sent
+because of these fields.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the

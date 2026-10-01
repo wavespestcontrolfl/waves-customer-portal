@@ -173,7 +173,12 @@ async function deferredSetupFeeCovers(conn, estimate, expectedFeeCents, { comple
     if (!claim || Math.round(Number(claim.amount) * 100) < expectedFeeCents) continue;
     const invoice = await conn('invoices').where({ id: claim.invoice_id }).first('status');
     const status = String(invoice?.status || '').toLowerCase();
-    if (invoice && !require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.includes(status) && status !== 'void') return true;
+    // A REFUNDED claim-backed invoice still resolves the obligation: the fee
+    // was collected then deliberately refunded — the same no-rebill doctrine
+    // the stamped-notes check applies to refunded fee lines below (a bounced
+    // refund restores 'paid'; a manual re-bill instruction risks a double
+    // collection). Only a voided / canceled invoice collected nothing.
+    if (invoice && !['void', 'canceled', 'cancelled'].includes(status)) return true;
   }
   return false;
 }
